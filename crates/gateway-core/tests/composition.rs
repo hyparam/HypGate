@@ -29,3 +29,22 @@ fn stream_creation_binds_live_capacity_and_authority_once() {
     let authority = identity.authorize(7, replacement.owner()).unwrap();
     assert!(registry.authorized_stream(&mut replacement, &authority, false).is_some());
 }
+
+#[test]
+fn usage_counts_live_slots_including_holes_and_replacements() {
+    let mut registry = ResourceAdmission::new(3, 4);
+    assert_eq!(registry.usage(), (0, 3));
+    let first = registry.acquire().unwrap();
+    let middle = registry.acquire().unwrap();
+    let last = registry.acquire().unwrap();
+    assert_eq!(registry.usage(), (3, 3));
+    assert!(registry.release(&middle));
+    assert_eq!(registry.usage(), (2, 3));
+    let replacement = registry.acquire().unwrap();
+    assert_eq!(registry.usage(), (3, 3));
+    assert!(!registry.release(&middle));
+    assert_eq!(registry.usage(), (3, 3));
+    for key in [first, replacement, last] { assert!(registry.release(&key)); }
+    assert_eq!(registry.usage(), (0, 3));
+    assert_eq!(ResourceAdmission::new(0, 4).usage(), (0, 0));
+}

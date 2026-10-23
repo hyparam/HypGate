@@ -106,6 +106,12 @@ async fn exercise(availability: bool, failed_log: bool, truncated: bool, stop: S
         let (busy, busy_connection) = send(port, "/routes/7", "gateway", "POST").await;
         assert_eq!(busy.status(), StatusCode::SERVICE_UNAVAILABLE);
         busy.collect().await.unwrap(); busy_connection.await.unwrap();
+        let (metrics, metrics_connection) = send(port, "/metrics", "", "GET").await;
+        let metrics = metrics.collect().await.unwrap().to_bytes(); metrics_connection.await.unwrap();
+        let metrics = std::str::from_utf8(&metrics).unwrap();
+        assert!(metrics.contains("soundgate_admission_healthy 1\n"));
+        assert!(metrics.contains("soundgate_requests_active 1\n"));
+        assert!(metrics.contains("soundgate_requests_limit 1\n"));
         if matches!(stop, Stop::Drain | Stop::Abort) {
             let started = tokio::time::Instant::now();
             shutdown.send(()).unwrap();
@@ -163,6 +169,7 @@ async fn exercise(availability: bool, failed_log: bool, truncated: bool, stop: S
         let (metrics, metrics_connection) = send(port, "/metrics", "", "GET").await;
         let metrics = metrics.collect().await.unwrap().to_bytes(); metrics_connection.await.unwrap();
         let metrics = std::str::from_utf8(&metrics).unwrap();
+        assert!(metrics.contains("soundgate_requests_active 0\n"));
         assert!(metrics.contains(&format!("soundgate_audit_gap_requests_total {}\n", u8::from(failed_log && availability))));
         assert!(metrics.contains(&format!("soundgate_failed_exchanges_total {}\n", u8::from(truncated))));
         assert!(metrics.contains(&format!("soundgate_audit_healthy {}\n", u8::from(!failed_log))));

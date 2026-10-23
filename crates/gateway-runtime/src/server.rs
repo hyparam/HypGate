@@ -31,8 +31,12 @@ impl Gateway {
 
     async fn handle(self: Arc<Self>, request: Request<Incoming>) -> Result<Response<GatewayBody>, Infallible> {
         if request.method() == http::Method::GET && request.uri().path() == "/metrics" {
-            let text = format!("soundgate_audit_gap_requests_total {}\nsoundgate_failed_exchanges_total {}\nsoundgate_audit_healthy {}\n",
+            let mut text = format!("soundgate_audit_gap_requests_total {}\nsoundgate_failed_exchanges_total {}\nsoundgate_audit_healthy {}\n",
                 self.audit_gaps(), self.failed_exchanges(), u8::from(self.log.healthy()));
+            match self.config.usage() {
+                Some((active, limit)) => text.push_str(&format!("soundgate_admission_healthy 1\nsoundgate_requests_active {active}\nsoundgate_requests_limit {limit}\n")),
+                None => text.push_str("soundgate_admission_healthy 0\n"),
+            }
             let mut response = Response::new(GatewayBody::Fixed(Full::new(Bytes::from(text))));
             response.headers_mut().insert("content-type", http::HeaderValue::from_static("text/plain; version=0.0.4"));
             return Ok(response);

@@ -45,6 +45,9 @@ pub struct Request<'a> {
 }
 
 impl Admission {
+    pub fn usage(&self) -> Result<(usize, usize), AdmissionError> {
+        self.registry.lock().map(|registry| registry.usage()).map_err(|_| AdmissionError::Unavailable)
+    }
     pub(crate) fn requires_audit(&self) -> bool { self.strict }
     pub fn new(policy: Policy, requests: usize, chunk_bytes: usize, strict: bool) -> Self {
         Self { registry: Mutex::new(ResourceAdmission::new(requests, chunk_bytes)), policy, strict }

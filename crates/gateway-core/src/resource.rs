@@ -4,6 +4,15 @@ use crate::stream::StreamChunk;
 
 verus! {
 
+pub open spec fn occupied(slots: Seq<u64>) -> nat
+    decreases slots.len(),
+{
+    if slots.len() == 0 { 0 } else {
+        occupied(slots.subrange(0, slots.len() as int - 1))
+            + if slots[slots.len() as int - 1] == 0 { 0nat } else { 1nat }
+    }
+}
+
 // Keys are scoped to one ResourceAdmission instance. Production will use one registry.
 pub struct RequestKey { slot: usize, id: u64, stream_claimed: bool }
 pub struct ResourceAdmission {
@@ -49,6 +58,27 @@ impl ResourceAdmission {
             decreases request_limit - slots.len(),
         { slots.push(0u64); }
         ResourceAdmission { slots, next: 1, per_request }
+    }
+
+    pub fn usage(&self) -> (out: (usize, usize))
+        ensures out.0 == occupied(self.entries()), out.1 == self.limit(), out.0 <= out.1,
+    {
+        let mut i: usize = 0;
+        let mut active: usize = 0;
+        while i < self.slots.len()
+            invariant i <= self.slots.len(), active <= i,
+                active == occupied(self.slots@.subrange(0, i as int)),
+            decreases self.slots.len() - i,
+        {
+            if self.slots[i] != 0 { active = active + 1; }
+            proof {
+                assert(self.slots@.subrange(0, i as int + 1).subrange(0, i as int)
+                    =~= self.slots@.subrange(0, i as int));
+            }
+            i = i + 1;
+        }
+        proof { assert(self.slots@.subrange(0, i as int) =~= self.slots@); }
+        (active, self.slots.len())
     }
 
     pub fn acquire(&mut self) -> (out: Option<RequestKey>)

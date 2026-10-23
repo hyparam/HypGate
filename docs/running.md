@@ -64,7 +64,11 @@ upstream connection if logger health is already failed; later failures are handl
 by the stream durability gate.
 GET `/metrics` exposes `soundgate_failed_exchanges_total`,
 `soundgate_audit_gap_requests_total`, and `soundgate_audit_healthy` without payloads
-or credentials. Counters live in memory and crashes reset them. Failed exchanges
+or credentials. It also exposes `soundgate_requests_active`,
+`soundgate_requests_limit`, and `soundgate_admission_healthy`; occupancy is a
+verified count of live registry slots, sampled under the runtime lock. Poisoned
+admission omits the occupancy gauges and reports health zero. These gauges are
+not process memory or connection counts. Counters live in memory and crashes reset them. Failed exchanges
 count transport errors returned to the worker, not all externally canceled tasks.
 The gap counter increments once per availability-mode request at its first failed
 log append, even if the generation later fails or is canceled. It reports potential

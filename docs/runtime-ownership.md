@@ -60,6 +60,22 @@ Identifier exhaustion intentionally disables further admissions rather than reus
 IDs. Runtime cleanup must still reach `release`; the theorem cannot force a caller
 to drop a forgotten or indefinitely retained request.
 
+## Verified occupancy snapshot
+
+`ResourceAdmission::usage` scans the slot vector and proves its returned active
+count equals the recursively specified number of nonzero slots and never exceeds
+the returned slot limit. Its loop records the exact occupied count for the visited
+prefix and terminates after the finite registry length. This is a read-only
+snapshot; it neither reserves slots nor predicts whether a later request succeeds.
+
+The runtime takes this snapshot under the admission mutex. `/metrics` reports
+`soundgate_requests_active`, `soundgate_requests_limit`, and
+`soundgate_admission_healthy`. If the mutex is poisoned, it reports admission health
+zero and omits occupancy gauges instead of inventing zero utilization. Snapshot
+cost is linear in configured slots (configuration caps them at 65,536). The counts
+exclude unauthenticated connections, disk jobs, and dependency allocations, so they
+must not be presented as a whole-process memory measurement or liveness guarantee.
+
 ## Evidence and remaining gaps
 
 Seven runtime integration tests cover authentication/route failures, slot exhaustion,
