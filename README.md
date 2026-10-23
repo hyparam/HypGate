@@ -18,8 +18,10 @@ turn a shared gateway into a path across tenant boundaries.
 
 These risks are concrete. LiteLLM documented a
 [March 2026 supply-chain compromise](https://docs.litellm.ai/blog/security-townhall-updates)
-affecting its published Python packages, following compromise of a dependency in
-its release pipeline. That incident highlights the trust placed in gateway
+affecting its published Python packages, and a
+[second compromise on October 21, 2026](https://docs.litellm.ai/blog/security-incident-oct-21-2026)
+that distributed credential-stealing malware in version 1.107.0 through PyPI and
+official container registries. These incidents highlight the trust placed in gateway
 software and the importance of securing how it is built and delivered.
 
 Formal verification can help make this critical infrastructure more trustworthy:
