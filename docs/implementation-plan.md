@@ -3,7 +3,7 @@
 | Milestone | Complete | Progress |
 | --- | :---: | --- |
 | 1. Verified streaming core | ☐ | ✓ Streaming and resource proofs; ✓ authorization/configuration proofs; ✓ tested request ownership. Composed resource proofs and full buffer accounting remain. |
-| 2. Minimal working gateway | ☐ | ✓ Static configuration and endpoint/credential binding; ✓ tested HTTP authentication/header boundary; ✓ async body driver. Network and HTTP-body integration remain. |
+| 2. Minimal working gateway | ☐ | ✓ Configuration and authorization boundary; ✓ async body driver; ✓ HTTPS upstream transport and HTTP-body bridges. Inbound server, executable, and end-to-end disk integration remain. |
 | 3. Crash-safe logging | ☐ | ✓ Core logging gates; ✓ bounded disk writer, framed records, and recovery scanner. Recovery proofs and process-crash tests remain. |
 | 4. Availability hardening | ☐ | ✓ Admission limits, request cleanup, bounded logger queue and acknowledgment timeout. Network deadlines, health/readiness, shutdown, and full fault/load tests remain. |
 | 5. Auditable first release | ☐ | ✓ Pinned core toolchain, proof/mutation checks, and security notes; ✓ GitHub Actions test/proof workflow. Reproducible deployment, benchmarks, and end-to-end audit remain. |
@@ -18,11 +18,12 @@ The [runtime ownership layer](runtime-ownership.md) now ties authorization, a si
 stream, and slot release together in tested safe Rust. Composed resource proofs
 and accounting for adapter allocations remain open.
 Static JSON policy loading and immutable endpoint/credential mapping are implemented
-and tested; see [configuration](configuration.md). HTTP dispatch remains unimplemented.
+and tested; see [configuration](configuration.md).
 The [HTTP metadata boundary](http-boundary.md) now authenticates and prepares fixed
-upstream requests; network/body processing is the next step.
+upstream requests.
 The [async body driver](async-transfer.md) now exercises the core with Tokio I/O;
-connecting it to HTTP and TLS remains open.
+the [HTTPS transport](https-transport.md) now connects it to upstream HTTP/TLS.
+The inbound server and executable remain open.
 Scope: forward opaque HTTP request bodies and streaming responses, and log to disk.
 No provider translation, automatic generation replay, billing, or plugin system.
 Operators choose strict durable logging or forwarding with degraded audit coverage.

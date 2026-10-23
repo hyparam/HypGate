@@ -29,8 +29,8 @@ impl HttpError {
 /// Owns admission until the transport is finished, including response streaming.
 /// No public constructor, cloning, mutable headers, or raw-request extraction.
 pub struct PreparedRequest<'a> {
-    routed: RoutedRequest<'a>,
-    upstream: Request<()>,
+    pub(crate) routed: RoutedRequest<'a>,
+    pub(crate) upstream: Request<()>,
 }
 impl PreparedRequest<'_> {
     pub fn request_id(&self) -> u64 { self.routed.request_id() }

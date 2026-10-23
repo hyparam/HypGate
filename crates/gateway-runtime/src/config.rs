@@ -159,7 +159,8 @@ impl GatewayConfig {
     }
 }
 
-impl RoutedRequest<'_> {
+impl<'a> RoutedRequest<'a> {
+    pub(crate) fn stream(&mut self) -> &mut Request<'a> { &mut self.request }
     pub fn request_id(&self) -> u64 { self.request.request_id() }
     pub fn tenant_id(&self) -> u64 { self.request.tenant_id() }
     pub fn destination(&self) -> &Uri { self.destination }

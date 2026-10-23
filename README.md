@@ -18,11 +18,13 @@ to capacity leases; this composition is tested Rust, not yet a Verus theorem.
 The [configuration boundary](docs/configuration.md) now parses root policy and
 candidate routes, loads credentials, and binds admitted requests to fixed endpoints.
 The [HTTP metadata boundary](docs/http-boundary.md) validates gateway authentication
-and prepares fixed upstream requests with filtered headers; no network dispatch yet.
+and prepares fixed upstream requests with filtered headers.
 The [async transfer driver](docs/async-transfer.md) connects the stream core to Tokio
 reads/writes and an explicit durable-log contract, with cancellation tests.
 The [disk logger](docs/disk-logging.md) now implements that contract with a bounded
 worker, sync acknowledgments, and an incremental recovery scanner; crash proofs remain open.
+The [HTTPS upstream transport](docs/https-transport.md) now forwards opaque bodies
+over real TLS through the stream core. An inbound server/executable is still missing.
 
 See [language and verification research](docs/verification-research.md) for the
 candidate comparison, agreed scope, proposed proof obligations, and next experiment.
@@ -49,7 +51,7 @@ cargo verus verify -p gateway-core --locked -- --triggers-mode silent
 VERUS=/path/to/verus python3 scripts/check_mutations.py
 ```
 
-Validation on 2026-10-23: 36 core verification checks passed, 37 workspace tests
+Validation on 2026-10-23: 36 core verification checks passed, 45 workspace tests
 passed, and all 21 deliberate mutations failed their proof obligations.
 These counts are checks, not a count of independent security guarantees.
 
