@@ -97,3 +97,29 @@ fn tickets_from_independent_registries_are_rejected() {
     assert_eq!(two.pending_bytes(&own), Some(&[2][..]));
     assert!(two.complete(&own, 1));
 }
+
+
+#[test]
+fn spare_vector_capacity_cannot_escape_the_retained_chunk_budget() {
+    let a = admission(1, false);
+    let mut r = a.admit(&[11; 32], 7).unwrap();
+    let mut oversized = Vec::with_capacity(4096);
+    oversized.extend_from_slice(&[1, 2]);
+    assert!(r.advance(oversized).is_none());
+    assert_eq!(r.advance(vec![3, 4]), Some(1));
+    let ticket = r.prepare(2).unwrap();
+    let mut oversized = Vec::with_capacity(4096);
+    oversized.push(9);
+    assert!(r.advance(oversized).is_none());
+    assert_eq!(r.pending_bytes(&ticket), Some(&[3, 4][..]));
+    assert!(r.complete(&ticket, 2));
+    assert!(r.advance(Vec::with_capacity(4096)).is_none());
+    let mut bounded = Vec::with_capacity(4);
+    bounded.push(5);
+    assert_eq!(r.advance(bounded), Some(2));
+    let ticket = r.prepare(1).unwrap();
+    assert_eq!(r.pending_bytes(&ticket), Some(&[5][..]));
+    assert!(r.complete(&ticket, 1));
+    drop(r);
+    assert!(a.admit(&[11; 32], 7).is_ok());
+}

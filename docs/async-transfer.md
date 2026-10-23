@@ -36,8 +36,9 @@ driver calls the verified `discard_completed` transition. It drops the previous
 payload only when fully completed, without a pending write and while open. Thus
 the driver no longer retains an old chunk allocation while allocating its next
 chunk. The admission allowance is still not a bound on allocator overhead or
-total HTTP/TLS/logger memory. General callers of `Request::advance` can supply
-vectors with excess capacity; the production driver creates its own bounded buffers.
+total HTTP/TLS/logger memory. The runtime `Request::advance` boundary rejects vectors with capacity above the
+request budget; the production driver creates its own bounded buffers. That
+capacity check is tested Rust, outside the current Verus allocation model.
 
 Six driver tests exercise multi-chunk partial writes, strict log-before-write
 ordering, both logging failure modes, persistent audit gaps, write/read/flush errors,

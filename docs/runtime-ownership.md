@@ -23,15 +23,21 @@ can outlive the request but cannot expose bytes or advance a replacement request
 
 ## Evidence and remaining gaps
 
-Six runtime integration tests cover authentication/route failures, slot exhaustion,
+Seven runtime integration tests cover authentication/route failures, slot exhaustion,
 drop and panic cleanup, cancellation with a pending write, strict durability gating,
 oversized chunks, stale completions, concurrent admission, and cross-registry tickets.
-All twelve workspace integration tests pass on 2026-10-23.
+The tests also reject short or empty vectors whose spare allocation exceeds the
+chunk budget, without changing the live chunk or its pending ticket.
 
 This wrapper bounds the number of retained streams and each stream's logical payload
-length. It does not bound supplied Vec capacity, replacement allocations, HTTP/TLS
-buffers, logger queues, or total process memory. Its mutex protects only admission
-and release; no I/O occurs under that mutex.
+length. Before passing a new vector to the core, it also checks `Vec::capacity`
+against the request budget. Rejected vectors are dropped without changing stream
+state. This is a trusted Rust check: the current Verus model describes lengths,
+not allocated capacities. It bounds retained vector capacity, not memory allocated
+by the caller before admission or physical allocator overhead. The production
+transfer driver releases completed storage before allocating the next buffer.
+HTTP/TLS buffers, logger queues, and total process memory remain separate obligations.
+The admission mutex protects only admission and release; no I/O occurs under it.
 
 The eventual transport must own the request for the lifetime of every effect and
 must not detach work that survives its lease. Repeated borrowed views still do not
@@ -41,7 +47,7 @@ Numeric request IDs are local to one admission instance and process lifetime;
 persistent log identities need a boot/session namespace. Network dispatch must
 consume the owned request and use the same immutable origin/secret snapshot as its
 authorization policy. The [configuration layer](configuration.md) now supplies those
-immutable mappings and owns the request in a routed wrapper. HTTP transport remains open.
+immutable mappings and owns the request in a routed wrapper. The HTTP transport consumes this routed wrapper through response completion.
 
 One stream currently serializes chunks. Concurrent upload/download would require
 separately owned directional streams and explicit shared budget accounting; it

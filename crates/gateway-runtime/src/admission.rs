@@ -85,7 +85,12 @@ impl<'a> Request<'a> {
 
     pub(crate) fn discard_completed(&mut self) -> bool { self.stream.discard_completed() }
 
-    pub fn advance(&mut self, bytes: Vec<u8>) -> Option<u64> { self.stream.advance(bytes) }
+    pub fn advance(&mut self, bytes: Vec<u8>) -> Option<u64> {
+        // Verus models payload length, not Vec backing capacity. Reject excess
+        // spare allocation at the trusted ownership boundary before retaining it.
+        if bytes.capacity() > self.capacity { return None; }
+        self.stream.advance(bytes)
+    }
     pub fn acknowledge(&mut self, chunk: u64, end: usize) -> bool {
         self.stream.acknowledge(self.lease.key.owner(), chunk, end)
     }
