@@ -166,3 +166,57 @@ async fn truncated_response_is_never_reported_as_success() {
     assert!(matches!(result, Err(TransportError::Http | TransportError::Download)));
     assert!(config.admit(b"gateway", 7).is_ok());
 }
+
+#[tokio::test]
+async fn unsolicited_protocol_switch_is_rejected_before_client_headers() {
+    let (listener, acceptor, roots) = tls().await;
+    let config = config(listener.local_addr().unwrap().port());
+    let upstream = async {
+        use tokio::io::AsyncReadExt;
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut socket = acceptor.accept(socket).await.unwrap();
+        let mut request = Vec::new(); let mut buf = [0; 256];
+        while !request.ends_with(b"0\r\n\r\n") {
+            let n = socket.read(&mut buf).await.unwrap(); assert_ne!(n, 0);
+            request.extend_from_slice(&buf[..n]); assert!(request.len() < 8192);
+        }
+        socket.write_all(b"HTTP/1.1 101 Switching Protocols\r\nConnection: upgrade\r\nUpgrade: websocket\r\n\r\nupgraded-data").await.unwrap();
+        let mut tail = Vec::new(); let _ = socket.read_to_end(&mut tail).await;
+        assert!(tail.is_empty(), "gateway must not speak the upgraded protocol");
+        assert!(tokio::time::timeout(Duration::from_millis(20), listener.accept()).await.is_err());
+    };
+    let transport = HttpsTransport::with_roots(roots, Duration::from_secs(2)).unwrap();
+    let mut output = Output::new(); let mut log = Log::default(); let mut input = &b"{}"[..];
+    let (result, ()) = tokio::join!(transport.exchange(prepare(&config), &mut input, &mut output, &mut log), upstream);
+    assert!(output.status.is_none(), "unexpected client status: {:?}", output.status);
+    assert!(matches!(result, Err(TransportError::Metadata)));
+    assert!(output.bytes.is_empty());
+    assert_eq!(log.upload, b"{}"); assert!(log.download.is_empty());
+    assert!(config.admit(b"gateway", 7).is_ok());
+}
+
+#[tokio::test]
+async fn interim_response_does_not_replace_final_status_or_payload() {
+    let (listener, acceptor, roots) = tls().await;
+    let config = config(listener.local_addr().unwrap().port());
+    let upstream = async {
+        use tokio::io::AsyncReadExt;
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut socket = acceptor.accept(socket).await.unwrap();
+        let mut request = Vec::new(); let mut buf = [0; 256];
+        while !request.ends_with(b"0\r\n\r\n") {
+            let n = socket.read(&mut buf).await.unwrap(); assert_ne!(n, 0);
+            request.extend_from_slice(&buf[..n]); assert!(request.len() < 8192);
+        }
+        socket.write_all(b"HTTP/1.1 103 Early Hints\r\nLink: </ignored>\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Type: application/json\r\n\r\n{}").await.unwrap();
+        let mut tail = Vec::new(); let _ = socket.read_to_end(&mut tail).await;
+    };
+    let transport = HttpsTransport::with_roots(roots, Duration::from_secs(2)).unwrap();
+    let mut output = Output::new(); let mut log = Log::default(); let mut input = &b"{}"[..];
+    let (result, ()) = tokio::join!(transport.exchange(prepare(&config), &mut input, &mut output, &mut log), upstream);
+    assert_eq!(result.unwrap().download.accepted_bytes, 2);
+    assert_eq!(output.status, Some(StatusCode::OK)); assert_eq!(output.bytes, b"{}");
+    assert!(!output.headers.contains_key("link"));
+    assert_eq!(log.upload, b"{}"); assert_eq!(log.download, b"{}");
+    assert!(config.admit(b"gateway", 7).is_ok());
+}

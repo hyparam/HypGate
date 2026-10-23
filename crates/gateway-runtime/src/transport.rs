@@ -65,6 +65,10 @@ impl HttpsTransport {
             let response = async { sender.send_request(request).await.map_err(|_| TransportError::Http) };
             let (upload, response) = tokio::try_join!(upload, response)?;
             let (parts, body) = response.into_parts();
+            // Hyper consumes ordinary interim responses, but exposes 101 as an
+            // upgrade. This gateway has no tunnel/upgrade path: fail before any
+            // client headers instead of treating it as a completed generation.
+            if parts.status.is_informational() { return Err(TransportError::Metadata); }
             let headers = response_headers(&parts.headers).map_err(|_| TransportError::Metadata)?;
             output.start(parts.status, headers).await.map_err(|_| TransportError::Client)?;
             let download = transfer::copy_body(prepared.routed.stream(), &mut http_body::Reader::new(body), output, log, Direction::Download)

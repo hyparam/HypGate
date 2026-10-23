@@ -29,7 +29,11 @@ Truncated bodies remain errors, not successful EOF. No JSON/SSE parsing or
 compression/decompression is performed.
 
 Status and filtered response headers reach a `ResponseSink` before body bytes.
-Redirects are returned as status/body without following Location. After a response
+Redirects are returned as status/body without following Location. Unsolicited 101
+protocol switches are rejected before calling the client response sink; no upgraded
+protocol bytes are forwarded or logged as a response body. Hyper consumes ordinary
+interim responses such as 103 and continues to the final response. Local TLS tests
+cover rejection without replay, slot release, and a 103 followed by a normal 200. After a response
 starts, any later error must cause the eventual server adapter to abort framing,
 not emit a successful final chunk. After successful body transfer, the transport invokes the sink completion hook
 while it still owns admission. The server hook sends a clean end marker and waits
@@ -41,10 +45,10 @@ error or total timeout instead of having their error body relayed. Full duplex a
 early-response handling require separate directional stream ownership; they must
 not bypass the current cancellation invariants.
 
-Five local TLS tests cover exact opaque payload forwarding, fixed destination and
+Local TLS tests cover exact opaque payload forwarding, fixed destination and
 credential headers, certificate rejection, redirects without another connection,
-deadline cleanup, and truncated responses. Three body-bridge tests cover explicit
-EOF, canceled uploads, and trailer rejection. All 45 workspace tests pass. The
+deadline cleanup, and truncated responses. Body-bridge tests cover explicit
+EOF, canceled uploads, trailer rejection, and input-frame limits. The
 test logger records events in memory; real-disk integration is separately tested
 through the same transfer driver. No live model provider was contacted.
 
