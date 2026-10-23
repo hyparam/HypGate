@@ -6,14 +6,18 @@ AuditLog callback, and performs ticketed writes of the core's exact borrowed sli
 Each completion uses the writer's reported partial count. Zero-progress writes,
 read/write/flush failures, and invalid core transitions close the stream; nothing
 automatically retries an uncertain effect. Each chunk is flushed for streaming
-latency. HTTP framing and TLS remain unimplemented. The [disk logger](disk-logging.md)
+latency. The HTTP body and TLS adapters supply the production I/O. The [disk logger](disk-logging.md)
 now supplies the production logging callback.
 
 The logger receives tenant, request, chunk, direction, and exact payload. Success
-must mean that record is durable under its documented crash model. The new
-Verus-checked `log_bytes` accessor preserves payload identity; `is_closed` exposes
-the verified closure state. These accessors add two verification checks. They do
-not establish the disk or async library contracts.
+must mean that record is durable under its documented crash model.
+`Request::audit_current` exclusively borrows the request across the awaited append,
+derives the identity, chunk, and length internally, and acknowledges only after
+success. The runtime request API no longer accepts caller-supplied numeric durable
+acknowledgments. Its own drop guard closes a canceled audit even when called outside
+the transfer driver. The Verus-checked `log_bytes`, `chunk_id`, and `is_closed`
+accessors expose exact core state. The async binding and logger implementation
+remain trusted/tested Rust, not a journal-to-stream composition theorem.
 
 Strict mode stops before submitting a chunk whose log append fails. Availability
 mode marks an audit gap and continues forwarding, suppressing subsequent append

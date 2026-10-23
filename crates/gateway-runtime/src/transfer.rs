@@ -63,14 +63,11 @@ where R: AsyncRead + Unpin, W: AsyncWrite + Unpin, L: AuditLog {
         }
         buffer.truncate(length);
         let next_total = total.checked_add(length as u64).ok_or(TransferError::CounterExhausted)?;
-        let chunk = guard.request.advance(buffer).ok_or(TransferError::InvalidState)?;
+        guard.request.advance(buffer).ok_or(TransferError::InvalidState)?;
         if !guard.request.log_failed() {
-            let record = LogRecord { tenant: guard.request.tenant_id(), request: guard.request.request_id(),
-                chunk, direction, bytes: guard.request.log_bytes() };
-            if log.append(record).await.is_err() {
-                guard.request.fail_log();
-            } else if !guard.request.acknowledge(chunk, length) {
-                return Err(TransferError::InvalidState);
+            match guard.request.audit_current(log, direction).await {
+                Ok(()) | Err(TransferError::Log) => {},
+                Err(error) => return Err(error),
             }
         }
         if guard.request.log_failed() && guard.request.strict() { return Err(TransferError::Log); }

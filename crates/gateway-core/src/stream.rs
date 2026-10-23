@@ -34,6 +34,10 @@ impl StreamChunk {
         ensures out@ == self.body(),
     { self.bytes.as_slice() }
 
+    pub fn chunk_id(&self) -> (out: u64)
+        ensures out == self.chunk(),
+    { self.chunk }
+
     pub fn is_closed(&self) -> (out: bool)
         ensures out == self.closed(),
     { self.closed }

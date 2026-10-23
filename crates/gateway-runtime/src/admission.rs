@@ -1,5 +1,6 @@
 //! This module is trusted Rust, not Verus-verified. It owns registry keys and
 //! stream storage so callers cannot return a credit while retaining its stream.
+use crate::transfer::{AuditLog, Direction, LogRecord, TransferError};
 use gateway_core::policy::{AuthorizedRequest, Policy};
 use gateway_core::resource::{RequestKey, ResourceAdmission};
 use gateway_core::stream::{StreamChunk, Ticket};
@@ -105,8 +106,34 @@ impl<'a> Request<'a> {
         if bytes.capacity() > self.capacity { return None; }
         self.stream.advance(bytes)
     }
-    pub fn acknowledge(&mut self, chunk: u64, end: usize) -> bool {
-        self.stream.acknowledge(self.lease.key.owner(), chunk, end)
+    /// Bind the awaited logger result to this request's current immutable chunk.
+    /// The logger remains trusted to report actual durability. Cancellation closes
+    /// the stream, since an append may already have had an unknown effect.
+    pub async fn audit_current<L: AuditLog>(&mut self, log: &mut L, direction: Direction)
+        -> Result<(), TransferError>
+    {
+        struct Pending<'r, 'a> { request: &'r mut Request<'a>, armed: bool }
+        impl Drop for Pending<'_, '_> {
+            fn drop(&mut self) { if self.armed { self.request.cancel(); } }
+        }
+        let mut pending = Pending { request: self, armed: true };
+        if pending.request.is_closed() || pending.request.log_failed() {
+            return Err(TransferError::InvalidState);
+        }
+        let chunk = pending.request.stream.chunk_id();
+        let length = pending.request.log_bytes().len();
+        let record = LogRecord { tenant: pending.request.tenant_id(), request: pending.request.request_id(),
+            chunk, direction, bytes: pending.request.log_bytes() };
+        if log.append(record).await.is_err() {
+            pending.request.fail_log();
+            pending.armed = false;
+            return Err(TransferError::Log);
+        }
+        if !pending.request.stream.acknowledge(pending.request.lease.key.owner(), chunk, length) {
+            return Err(TransferError::InvalidState);
+        }
+        pending.armed = false;
+        Ok(())
     }
     pub fn prepare(&mut self, max: usize) -> Option<WriteTicket<'a>> {
         self.stream.prepare(max).map(|core| WriteTicket { admission: self.lease.admission, core })

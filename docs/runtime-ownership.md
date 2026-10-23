@@ -82,7 +82,7 @@ must not be presented as a whole-process memory measurement or liveness guarante
 
 ## Evidence and remaining gaps
 
-Seven runtime integration tests cover authentication/route failures, slot exhaustion,
+Eight runtime integration tests cover authentication/route failures, slot exhaustion,
 drop and panic cleanup, cancellation with a pending write, strict durability gating,
 oversized chunks, stale completions, concurrent admission, and cross-registry tickets.
 The tests also reject short or empty vectors whose spare allocation exceeds the
@@ -101,7 +101,11 @@ The admission mutex protects only admission and release; no I/O occurs under it.
 The eventual transport must own the request for the lifetime of every effect and
 must not detach work that survives its lease. Repeated borrowed views still do not
 authorize repeated submissions. Logging acknowledgments remain trusted events:
-the disk adapter must correlate request and chunk identity before invoking them.
+`audit_current` binds the awaited logger result to the exclusively borrowed current
+chunk and is the runtime request's only acknowledgment path. A direct cancellation
+test covers both logging modes, rejects further writes/chunks, and retains the
+lease until request drop. A custom `AuditLog` implementation must still truthfully
+report durability; the type boundary cannot prove a syscall or an external callback.
 Numeric request IDs are local to one admission instance and process lifetime;
 persistent log identities need a boot/session namespace. Network dispatch must
 consume the owned request and use the same immutable origin/secret snapshot as its

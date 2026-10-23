@@ -39,14 +39,22 @@ fn outstanding_ticket_cannot_advance_replacement_request() {
     assert_eq!(second.pending_bytes(&tail), Some(&[4][..]));
 }
 
-#[test]
-fn strict_logging_and_cancellation_keep_the_lease_until_drop() {
+#[tokio::test]
+async fn strict_logging_and_cancellation_keep_the_lease_until_drop() {
     let a = admission(1, true);
     let mut r = a.admit(&[11; 32], 7).unwrap();
     assert!(r.advance(vec![0; 5]).is_none());
-    let chunk = r.advance(vec![1, 2]).unwrap();
+    r.advance(vec![1, 2]).unwrap();
     assert!(r.prepare(2).is_none());
-    assert!(r.acknowledge(chunk, 2));
+    struct Log;
+    impl gateway_runtime::transfer::AuditLog for Log {
+        async fn append(&mut self, record: gateway_runtime::transfer::LogRecord<'_>) -> std::io::Result<()> {
+            assert_eq!((record.tenant, record.request, record.chunk), (1, 1, 1));
+            assert_eq!(record.bytes, &[1, 2]);
+            Ok(())
+        }
+    }
+    r.audit_current(&mut Log, gateway_runtime::transfer::Direction::Upload).await.unwrap();
     let ticket = r.prepare(2).unwrap();
     r.cancel();
     assert!(r.pending_bytes(&ticket).is_none());
@@ -122,4 +130,27 @@ fn spare_vector_capacity_cannot_escape_the_retained_chunk_budget() {
     assert!(r.complete(&ticket, 1));
     drop(r);
     assert!(a.admit(&[11; 32], 7).is_ok());
+}
+
+#[tokio::test]
+async fn canceled_audit_cannot_authorize_or_reuse_the_chunk() {
+    struct PendingLog;
+    impl gateway_runtime::transfer::AuditLog for PendingLog {
+        async fn append(&mut self, record: gateway_runtime::transfer::LogRecord<'_>) -> std::io::Result<()> {
+            assert_eq!(record.bytes, &[7, 8]);
+            std::future::pending().await
+        }
+    }
+    for strict in [true, false] {
+        let a = admission(1, strict);
+        let mut r = a.admit(&[11; 32], 7).unwrap();
+        r.advance(vec![7, 8]).unwrap();
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(10),
+            r.audit_current(&mut PendingLog, gateway_runtime::transfer::Direction::Download)).await.is_err());
+        assert!(r.prepare(2).is_none());
+        assert!(r.advance(vec![9]).is_none());
+        assert!(matches!(a.admit(&[11; 32], 7), Err(AdmissionError::AtCapacity)));
+        drop(r);
+        assert!(a.admit(&[11; 32], 7).is_ok());
+    }
 }
