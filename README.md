@@ -61,6 +61,8 @@ over real TLS through the stream core. The [runnable gateway](docs/running.md)
 connects the inbound server, authorization, streaming, and disk logging.
 The [deployment example](docs/deployment.md) adds TLS termination and readiness-based
 standby routing with proxy retries disabled.
+The [local benchmark](docs/benchmarks.md) measures both logging modes through TLS
+and real disk logging, with explicit workload and memory-accounting limits.
 The [adapter audit](docs/adapter-audit.md) maps runtime trust obligations to effect
 paths and tests, including concurrent tenants and client disconnects.
 

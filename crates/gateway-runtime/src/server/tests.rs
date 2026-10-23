@@ -309,3 +309,5 @@ async fn shutdown_drains_active_response_without_truncation() {
 async fn shutdown_aborts_stalled_response_after_drain_and_releases_request() {
     exercise(false, false, false, Stop::Abort).await;
 }
+
+mod benchmark;
