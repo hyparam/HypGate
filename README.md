@@ -39,6 +39,8 @@ The [implementation milestones](docs/implementation-plan.md) are the active plan
 starting with a bounded chunk interface and verified partial-write accounting.
 The [first streaming-core increment](docs/streaming-core-progress.md) records the
 current interface, checked behavior, and remaining milestone-one work.
+The [proof index](docs/proof-index.md) maps advertised guarantees to exact source
+contracts and the assumptions still required for composition.
 The [security contract](docs/security-contract.md) separates proved core properties
 from remaining adapter obligations. The [authorization notes](docs/authorization-core.md)
 describe digest authentication, tenant-scoped tokens, and configuration confinement.

@@ -106,7 +106,7 @@ assumptions and tests; state-machine safety does not imply availability.
 For each theorem, publish its exact scope and preconditions. The current trust
 boundary includes Verus and its translation/solver, vstd specifications, rustc/LLVM,
 standard-library implementations, allocation behavior, and platform execution.
-Future dependencies include the adapter, Tokio, Hyper, rustls, OS sockets/filesystem,
+Runtime dependencies include the adapter, Tokio, Hyper, rustls, OS sockets/filesystem,
 DNS/PKI, secret provisioning, and authentication bindings. None is automatically
 verified by adding Verus contracts to the core.
 
