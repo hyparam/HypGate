@@ -32,7 +32,24 @@ Retained log frames are bounded by queue capacity plus one active worker frame,
 each with 65 bytes of framing. This excludes caller buffers, allocator overhead,
 and filesystem caches. The acknowledgment deadline must be positive and no more
 than 300 seconds. Dropping all logger handles closes the queue; a responsive worker
-drains and exits. Explicit coordinated shutdown and worker joining remain open.
+drains and exits. `shutdown` closes admission atomically across all clones, drains
+already-admitted jobs, and joins the worker only after its thread has finished.
+It polls completion asynchronously with a caller-selected deadline; it never
+blocks the executor in a join of a running thread. Server shutdown invokes it
+with a two-second deadline after request workers stop. A timeout marks logging
+unhealthy and returns an error; the existing worker can remain blocked until the
+syscall returns or the process exits. A later shutdown call can join that same
+worker. Successful shutdown means the worker exited, not that every previous
+append succeeded; append results and audit health retain that distinction.
+
+Admission and closure share a short mutex-protected section containing bounded
+record encoding and enqueueing, with no await or filesystem operations. This
+prevents a retained sender/permit from keeping admission alive after closure.
+The thread handle and queue are shared across clones; shutdown is irreversible.
+Tests block sync, queue a second record, close admission, reject later records,
+then release sync and check both frames and worker joining. A separate test
+expires shutdown while sync is blocked and checks eventual joining without a
+replacement worker. These are runtime tests, not formal shutdown proofs.
 
 ## Format and scanner
 

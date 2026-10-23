@@ -186,7 +186,8 @@ pub async fn serve(listener: TcpListener, app: Arc<Gateway>, connections: usize,
         tasks.abort_all(); while tasks.join_next().await.is_some() {}
     }
     app.workers.close(); app.workers.wait().await;
-    result
+    let log_result = app.log.shutdown(Duration::from_secs(2)).await;
+    result.and(log_result)
 }
 
 #[cfg(test)]

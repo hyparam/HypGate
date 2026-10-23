@@ -55,8 +55,8 @@ rather than clean EOF, an empty worker tracker, and restored admission capacity.
 
 These exercise the production drain duration without changing runtime behavior.
 They do not prove scheduler fairness, bound an uninterruptible filesystem syscall,
-or establish a formal shutdown/resource theorem. The disk worker still has no
-explicit join protocol.
+or establish a formal shutdown/resource theorem. The disk logger now closes shared admission, drains, and joins with a separate
+two-second server shutdown deadline; a stuck syscall can outlive that deadline.
 
 ## Remaining limits
 
@@ -72,5 +72,5 @@ power-loss validation, formal scanner refinement, performance benchmarks, deploy
 failover experiments, and independent review remain open. Live-provider compatibility
 and full duplex/early-response behavior are not certified by the local fixtures.
 
-Validation at this checkpoint: 63 workspace tests pass; the unchanged core retains
+Validation at this checkpoint: 65 workspace tests pass; the unchanged core retains
 48 verified checks and 29 proof-rejected mutations. GitHub CI reruns all three gates.

@@ -173,11 +173,62 @@ async fn queue_capacity_rejects_excess_work_before_allocation() {
     started.await.unwrap();
     let second = tokio::spawn(async move { second_log.append(record(b"second", 2)).await });
     tokio::time::timeout(Duration::from_secs(1), async {
-        while log.sender.capacity() != 0 { tokio::task::yield_now().await; }
+        while log.worker.lock().unwrap().sender.as_ref().unwrap().capacity() != 0 { tokio::task::yield_now().await; }
     }).await.unwrap();
     assert_eq!(log.append(record(b"third", 3)).await.unwrap_err().kind(), io::ErrorKind::WouldBlock);
     assert!(log.healthy());
     release.send(()).unwrap();
     first.await.unwrap().unwrap(); second.await.unwrap().unwrap();
     assert_eq!(syncs.load(Ordering::Relaxed), 2);
+}
+
+
+#[tokio::test]
+async fn shutdown_closes_all_clones_drains_admitted_jobs_and_joins() {
+    let mut file = sink();
+    let bytes = file.bytes.clone();
+    let (entered, inside) = oneshot::channel();
+    let (release, wait) = blocking::channel();
+    file.gate = Some((entered, wait));
+    let log = DiskLog::start(file, 2, Duration::from_secs(5), [0; 16]).unwrap();
+    let mut first = log.clone();
+    let first = tokio::spawn(async move { first.append(record(b"first", 1)).await });
+    inside.await.unwrap();
+    let mut second = log.clone();
+    let second = tokio::spawn(async move { second.append(record(b"second", 2)).await });
+    while log.worker.lock().unwrap().sender.as_ref().unwrap().capacity() != 1 {
+        tokio::task::yield_now().await;
+    }
+    let closing = log.clone();
+    let closing = tokio::spawn(async move { closing.shutdown(Duration::from_secs(2)).await });
+    while log.healthy() { tokio::task::yield_now().await; }
+    assert!(!closing.is_finished());
+    assert!(log.clone().append(record(b"late", 3)).await.is_err());
+    release.send(()).unwrap();
+    first.await.unwrap().unwrap(); second.await.unwrap().unwrap(); closing.await.unwrap().unwrap();
+    assert!(log.worker.lock().unwrap().thread.is_none());
+    let mut expected = encode(record(b"first", 1)); expected.extend(encode(record(b"second", 2)));
+    assert_eq!(*bytes.lock().unwrap(), expected);
+    log.shutdown(Duration::from_secs(1)).await.unwrap();
+}
+
+#[tokio::test]
+async fn shutdown_deadline_does_not_wait_for_stuck_sync_or_replace_worker() {
+    let mut file = sink();
+    let (entered, inside) = oneshot::channel();
+    let (release, wait) = blocking::channel();
+    file.gate = Some((entered, wait));
+    let log = DiskLog::start(file, 1, Duration::from_secs(5), [0; 16]).unwrap();
+    let mut pending = log.clone();
+    let pending = tokio::spawn(async move { pending.append(record(b"pending", 1)).await });
+    inside.await.unwrap();
+    assert_eq!(log.shutdown(Duration::from_millis(20)).await.unwrap_err().kind(), io::ErrorKind::TimedOut);
+    assert!(!log.healthy());
+    assert!(log.worker.lock().unwrap().thread.is_some());
+    assert!(log.clone().append(record(b"late", 2)).await.is_err());
+    release.send(()).unwrap();
+    // The already-running sync may still finish durably after timeout.
+    pending.await.unwrap().unwrap();
+    log.shutdown(Duration::from_secs(1)).await.unwrap();
+    assert!(log.worker.lock().unwrap().thread.is_none());
 }

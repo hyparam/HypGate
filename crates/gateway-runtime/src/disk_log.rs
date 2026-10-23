@@ -5,7 +5,7 @@ use gateway_core::journal::Journal;
 use gateway_core::framing::{self, Header};
 use sha2::{Digest, Sha256};
 use std::{fs::{File, OpenOptions}, io::{self, Read, Write}, path::Path,
-    sync::{Arc, atomic::{AtomicBool, Ordering}}, time::Duration};
+    sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}}, time::Duration};
 use tokio::sync::{mpsc, oneshot};
 
 const FILE_MAGIC: &[u8; 8] = b"SGLOG001";
@@ -19,11 +19,13 @@ struct Job { frame: Vec<u8>, done: oneshot::Sender<bool> }
 /// to escape a stuck filesystem call. A timeout closes logging health permanently.
 #[derive(Clone)]
 pub struct DiskLog {
-    sender: mpsc::Sender<Job>,
+    worker: Arc<Mutex<Worker>>,
     healthy: Arc<AtomicBool>,
     deadline: Duration,
     session: [u8; 16],
 }
+
+struct Worker { sender: Option<mpsc::Sender<Job>>, thread: Option<std::thread::JoinHandle<()>> }
 
 trait DurableWrite: Write + Send + 'static { fn sync(&mut self) -> io::Result<()>; }
 impl DurableWrite for File { fn sync(&mut self) -> io::Result<()> { self.sync_all() } }
@@ -60,7 +62,7 @@ impl DiskLog {
         let (sender, mut receiver) = mpsc::channel::<Job>(capacity);
         let healthy = Arc::new(AtomicBool::new(true));
         let worker_health = healthy.clone();
-        std::thread::Builder::new().name("soundgate-audit".into()).spawn(move || {
+        let thread = std::thread::Builder::new().name("soundgate-audit".into()).spawn(move || {
             let mut journal = Journal::new();
             while let Some(job) = receiver.blocking_recv() {
                 let ok = worker_health.load(Ordering::Acquire) && match journal.begin(job.frame.len() as u64) {
@@ -77,10 +79,44 @@ impl DiskLog {
                 let _ = job.done.send(ok);
             }
         })?;
-        Ok(Self { sender, healthy, deadline, session })
+        Ok(Self { worker: Arc::new(Mutex::new(Worker { sender: Some(sender), thread: Some(thread) })),
+            healthy, deadline, session })
     }
 
-    pub fn healthy(&self) -> bool { self.healthy.load(Ordering::Acquire) }
+    pub fn healthy(&self) -> bool {
+        self.healthy.load(Ordering::Acquire) && self.worker.lock().unwrap().sender.is_some()
+    }
+
+    /// Close admission across all clones, drain queued jobs, and join the worker.
+    /// A stuck syscall cannot be canceled; timeout never spawns a replacement.
+    pub async fn shutdown(&self, deadline: Duration) -> io::Result<()> {
+        if deadline.is_zero() || deadline > Duration::from_secs(300) {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        self.worker.lock().unwrap().sender.take();
+        let joined = tokio::time::timeout(deadline, async {
+            loop {
+                {
+                    let mut worker = self.worker.lock().unwrap();
+                    if worker.thread.as_ref().is_none_or(|thread| thread.is_finished()) {
+                        if let Some(thread) = worker.thread.take() {
+                            if thread.join().is_err() {
+                                self.healthy.store(false, Ordering::Release);
+                                return Err(io::ErrorKind::Other.into());
+                            }
+                        }
+                        return Ok(());
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }).await;
+        if joined.is_err() {
+            self.healthy.store(false, Ordering::Release);
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        joined.unwrap()
+    }
     #[cfg(test)]
     pub(crate) fn inject_failure(&self) { self.healthy.store(false, Ordering::Release); }
     pub fn session(&self) -> [u8; 16] { self.session }
@@ -94,13 +130,20 @@ impl AuditLog for DiskLog {
         }
         // Reserve queue space before allocating/copying a payload. Queued frames
         // plus the worker's one active frame bound retained log payloads.
-        let permit = self.sender.try_reserve().map_err(|e| match e {
-            mpsc::error::TrySendError::Full(_) => io::ErrorKind::WouldBlock,
-            mpsc::error::TrySendError::Closed(_) => io::ErrorKind::BrokenPipe,
-        })?;
-        let frame = encode(record);
-        let (done, completion) = oneshot::channel();
-        permit.send(Job { frame, done });
+        let completion = {
+            // Serialize admission with shutdown. No sender or permit can escape
+            // this section and keep the receiver open after shutdown closes it.
+            let worker = self.worker.lock().unwrap();
+            let sender = worker.sender.as_ref().ok_or(io::ErrorKind::BrokenPipe)?;
+            let permit = sender.try_reserve().map_err(|e| match e {
+                mpsc::error::TrySendError::Full(_) => io::ErrorKind::WouldBlock,
+                mpsc::error::TrySendError::Closed(_) => io::ErrorKind::BrokenPipe,
+            })?;
+            let frame = encode(record);
+            let (done, completion) = oneshot::channel();
+            permit.send(Job { frame, done });
+            completion
+        };
         match tokio::time::timeout(self.deadline, completion).await {
             Ok(Ok(true)) => Ok(()),
             _ => {
