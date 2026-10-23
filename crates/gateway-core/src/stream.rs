@@ -34,6 +34,10 @@ impl StreamChunk {
         ensures out@ == self.body(),
     { self.bytes.as_slice() }
 
+    pub fn owner_id(&self) -> (out: u64)
+        ensures out == self.owner(),
+    { self.owner }
+
     pub fn chunk_id(&self) -> (out: u64)
         ensures out == self.chunk(),
     { self.chunk }

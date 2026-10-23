@@ -92,7 +92,8 @@ from remaining adapter obligations. The [authorization notes](docs/authorization
 describe digest authentication, tenant-scoped tokens, and configuration confinement.
 The [runtime ownership layer](docs/runtime-ownership.md) binds authorized requests
 to capacity leases. Initial stream creation is now verified against the authority
-and live slot; async ownership and release composition remain tested Rust.
+and live slot, and stream retirement consumes the matching owned stream before
+releasing its slot. Async ownership and external-effect lifetimes remain tested Rust.
 The [configuration boundary](docs/configuration.md) now parses root policy and
 candidate routes, loads credentials, and binds admitted requests to fixed endpoints.
 The [HTTP metadata boundary](docs/http-boundary.md) validates gateway authentication
@@ -141,8 +142,8 @@ cargo verus verify -p gateway-core --locked -- --triggers-mode silent
 VERUS=/path/to/verus python3 scripts/check_mutations.py
 ```
 
-Validation on 2026-10-23: 69 core verification checks passed, 89 workspace tests
-passed, the opt-in TLS proxy/gateway process-failover test and six load/fault workloads passed, and all 61
+Validation on 2026-10-23: 71 core verification checks passed, 90 workspace tests
+passed, the opt-in TLS proxy/gateway process-failover test and six load/fault workloads passed, and all 65
 deliberate mutations failed their proof obligations.
 These counts are checks, not a count of independent security guarantees.
 

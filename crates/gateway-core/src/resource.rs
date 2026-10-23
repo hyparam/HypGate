@@ -246,6 +246,25 @@ impl ResourceAdmission {
         }
     }
 
+    // Consume the owned stream before the caller can expose the released slot.
+    // External effects must already be stopped; registry identity remains scoped.
+    pub fn release_stream(&mut self, key: &RequestKey, stream: StreamChunk) -> (ok: bool)
+        requires old(self).valid(),
+        ensures final(self).valid(), final(self).limit() == old(self).limit(),
+            final(self).per_request() == old(self).per_request(),
+            final(self).next_id() == old(self).next_id(),
+            ok == (key.stream_claimed() && stream.owner() == key.id() && old(self).owns(key)),
+            ok ==> !final(self).owns(key)
+                && occupied(final(self).entries()) + 1 == occupied(old(self).entries())
+                && final(self).entries()[key.slot() as int] == 0
+                && (forall|i: int| 0 <= i < old(self).limit() && i != key.slot()
+                    ==> #[trigger] final(self).entries()[i] == old(self).entries()[i]),
+            !ok ==> *final(self) == *old(self),
+    {
+        if !key.stream_claimed || stream.owner_id() != key.id { return false; }
+        self.release(key)
+    }
+
     // The adapter must stop and dispose of request work before returning its credit.
     pub fn release(&mut self, key: &RequestKey) -> (ok: bool)
         requires old(self).valid(),

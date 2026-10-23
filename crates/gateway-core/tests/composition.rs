@@ -20,8 +20,7 @@ fn stream_creation_binds_live_capacity_and_authority_once() {
     assert!(stream.acknowledge(first.owner(), chunk, 4));
     let ticket = stream.prepare(4).unwrap();
     assert!(stream.complete(&ticket, 4));
-    drop(stream);
-    assert!(registry.release(&first));
+    assert!(registry.release_stream(&first, stream));
     assert!(registry.release(&second));
     assert!(registry.authorized_stream(&mut second, &second_authority, false).is_none());
     let mut replacement = registry.acquire().unwrap();
@@ -61,4 +60,31 @@ fn normalized_limits_reject_overflow_and_enforce_combined_payload_budget() {
     ] {
         assert_eq!(validate_limits(requests, chunk), expected, "{requests} slots of {chunk}");
     }
+}
+
+
+#[test]
+fn retirement_rejects_wrong_unclaimed_and_stale_stream_ownership() {
+    use gateway_core::stream::StreamChunk;
+    let route = || Route { tenant: 1, selector: 7, origin: 0, credential: 0 };
+    let policy = Policy::validate(vec![Identity { tenant: 1, digest: vec![9; 32] }],
+        vec![route()], vec![route()], 1, vec![1]).unwrap();
+    let identity = policy.authenticate(&[9; 32]).unwrap();
+    let mut registry = ResourceAdmission::new(2, 4);
+    let mut first = registry.acquire().unwrap(); let mut second = registry.acquire().unwrap();
+    let authority = identity.authorize(7, first.owner()).unwrap();
+    let first_stream = registry.authorized_stream(&mut first, &authority, true).unwrap();
+    let authority = identity.authorize(7, second.owner()).unwrap();
+    let second_stream = registry.authorized_stream(&mut second, &authority, true).unwrap();
+    assert!(!registry.release_stream(&first, second_stream));
+    assert_eq!(registry.usage(), (2, 2));
+    assert!(registry.release_stream(&first, first_stream));
+    assert_eq!(registry.usage(), (1, 2));
+    let replacement = registry.acquire().unwrap();
+    let forged = StreamChunk::new(replacement.owner(), vec![1], 4, true).unwrap();
+    assert!(!registry.release_stream(&replacement, forged)); // no authorized construction
+    let stale = StreamChunk::new(first.owner(), vec![], 4, true).unwrap();
+    assert!(!registry.release_stream(&first, stale));
+    assert_eq!(registry.usage(), (2, 2));
+    assert!(registry.release(&replacement)); assert!(registry.release(&second));
 }

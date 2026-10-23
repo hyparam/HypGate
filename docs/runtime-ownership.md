@@ -11,8 +11,9 @@ initially empty stream. A denied route
 returns its reservation. Registry poisoning rejects new requests.
 
 The returned `Request` privately owns its authorization token, stream, and lease.
-There is no stream extraction or mutable reference to the core. Field destruction
-disposes of the stream before returning its slot. Cancellation closes the stream
+There is no stream extraction or mutable reference to the core. The lease owns
+the stream and consumes it through verified `release_stream` while holding the
+registry mutex, before another admission can reuse the slot. Cancellation closes the stream
 but retains the lease until the request is dropped. Unwinding also drops the lease;
 process abort does not promise cleanup. Deliberately forgetting a request leaks its
 credit rather than allowing unsafe reuse.
@@ -38,9 +39,25 @@ Keys must remain scoped to their registry; identical numeric slots and IDs in
 independent registries are not globally distinct. The runtime lease binds that
 identity by ownership. The core still exposes lower-level constructors for other
 verified callers, so arbitrary trusted embedding code could bypass this path.
-Drop order, async effects, release timing, and whole-process budgets remain
-separate obligations. No proof claims that a slot cannot be released while an
+Async effects, release timing, and whole-process budgets remain separate obligations. No proof claims that a slot cannot be released while an
 independently retained stream exists; the runtime wrapper prevents that extraction.
+
+## Verified stream retirement
+
+`ResourceAdmission::release_stream` consumes a stream by value and succeeds exactly
+when the key has claimed a stream, its ID matches the stream owner, and the registry
+still owns the key. Success clears only that slot and decreases occupancy by one;
+rejection leaves the registry unchanged. Both outcomes consume the supplied stream.
+The runtime lease uses this operation for constructed streams, retaining raw
+`release` only for reservations that failed before stream construction. Storage is
+dropped inside the locked operation; no async I/O occurs under the lock.
+
+This proves the synchronous ownership check and registry transition. It does not
+prove that external async effects have stopped, distinguish equal numeric IDs in
+separate registries, or prevent trusted callers from using lower-level constructors
+and raw release. Runtime encapsulation supplies those ownership boundaries.
+Composition tests cover valid retirement, mismatched owners, unclaimed streams,
+and stale keys; four mutations check the owner accessor and acceptance conditions.
 
 ## Admission progress within the synchronous core
 
@@ -57,7 +74,7 @@ proof rejection. These are synchronous non-rejection/termination properties unde
 the core preconditions, not scheduler fairness, mutex availability, memory-allocation
 success, or network/storage liveness. Poisoned runtime locks still fail closed.
 Identifier exhaustion intentionally disables further admissions rather than reusing
-IDs. Runtime cleanup must still reach `release`; the theorem cannot force a caller
+IDs. Runtime cleanup must still reach a release operation; the theorem cannot force a caller
 to drop a forgotten or indefinitely retained request.
 
 ## Verified occupancy snapshot

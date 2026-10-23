@@ -15,6 +15,10 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("resource.rs", "release_wrong_stream", " || stream.owner_id() != key.id", ""),
+    ("resource.rs", "release_unclaimed_stream", "if !key.stream_claimed || stream.owner_id() != key.id", "if stream.owner_id() != key.id"),
+    ("resource.rs", "deny_owned_stream_retirement", "if !key.stream_claimed || stream.owner_id() != key.id", "if true"),
+    ("stream.rs", "wrong_stream_owner_accessor", "ensures out == self.owner(),\n    { self.owner }", "ensures out == self.owner(),\n    { 0 }"),
     ("framing.rs", "deny_valid_recovered_record", "if !checksum_valid { return None; }", "if true { return None; }"),
     ("framing.rs", "deny_complete_frame", "if !self.stopped || ticket.start != self.offset { return false; }", "if true { return false; }"),
     ("framing.rs", "ignore_record_checksum", "if !checksum_valid { return None; }", ""),

@@ -22,6 +22,7 @@ pub struct Admission {
 struct Lease<'a> {
     admission: &'a Admission,
     key: RequestKey,
+    stream: Option<StreamChunk>,
 }
 
 impl Drop for Lease<'_> {
@@ -29,17 +30,19 @@ impl Drop for Lease<'_> {
         // Poison permanently closes admission. Do not recover potentially broken
         // registry state merely to reclaim a credit.
         if let Ok(mut registry) = self.admission.registry.lock() {
-            let released = registry.release(&self.key);
+            let released = match self.stream.take() {
+                Some(stream) => registry.release_stream(&self.key, stream),
+                None => registry.release(&self.key), // reservation before stream construction
+            };
             debug_assert!(released, "private lease must own its registry slot");
         }
     }
 }
 
-/// Fields drop in declaration order: stream storage before the capacity lease.
+/// The lease owns stream storage and consumes it under the registry lock on drop.
 /// There is no public extraction, mutable core reference, or cloning operation.
 pub struct Request<'a> {
     authorized: AuthorizedRequest<'a>,
-    stream: StreamChunk,
     capacity: usize,
     log_failed: bool,
     lease: Lease<'a>,
@@ -68,7 +71,7 @@ impl Admission {
             let mut registry = self.registry.lock().map_err(|_| AdmissionError::Unavailable)?;
             let key = registry.acquire().ok_or(AdmissionError::AtCapacity)?;
             let capacity = registry.capacity(&key).expect("fresh registry key");
-            (Lease { admission: self, key }, capacity)
+            (Lease { admission: self, key, stream: None }, capacity)
         };
         // Any early return drops the lease, including failed route authorization.
         let authorized = identity.authorize(selector, lease.key.owner())
@@ -78,7 +81,8 @@ impl Admission {
             registry.authorized_stream(&mut lease.key, &authorized, self.strict)
                 .ok_or(AdmissionError::Unavailable)?
         };
-        Ok(Request { authorized, stream, capacity, log_failed: false, lease })
+        lease.stream = Some(stream);
+        Ok(Request { authorized, capacity, log_failed: false, lease })
     }
 }
 
@@ -88,23 +92,25 @@ pub struct WriteTicket<'a> {
 }
 
 impl<'a> Request<'a> {
+    fn stream(&self) -> &StreamChunk { self.lease.stream.as_ref().expect("admitted stream") }
+    fn stream_mut(&mut self) -> &mut StreamChunk { self.lease.stream.as_mut().expect("admitted stream") }
     pub fn request_id(&self) -> u64 { self.authorized.request_id() }
     pub fn tenant_id(&self) -> u64 { self.authorized.tenant_id() }
     pub fn origin(&self) -> usize { self.authorized.origin() }
     pub fn credential(&self) -> usize { self.authorized.credential() }
     pub(crate) fn capacity(&self) -> usize { self.capacity }
-    pub(crate) fn is_closed(&self) -> bool { self.stream.is_closed() }
-    pub(crate) fn log_bytes(&self) -> &[u8] { self.stream.log_bytes() }
+    pub(crate) fn is_closed(&self) -> bool { self.stream().is_closed() }
+    pub(crate) fn log_bytes(&self) -> &[u8] { self.stream().log_bytes() }
     pub(crate) fn log_failed(&self) -> bool { self.log_failed }
     pub(crate) fn strict(&self) -> bool { self.lease.admission.strict }
 
-    pub(crate) fn discard_completed(&mut self) -> bool { self.stream.discard_completed() }
+    pub(crate) fn discard_completed(&mut self) -> bool { self.stream_mut().discard_completed() }
 
     pub fn advance(&mut self, bytes: Vec<u8>) -> Option<u64> {
         // Verus models payload length, not Vec backing capacity. Reject excess
         // spare allocation at the trusted ownership boundary before retaining it.
         if bytes.capacity() > self.capacity { return None; }
-        self.stream.advance(bytes)
+        self.stream_mut().advance(bytes)
     }
     /// Bind the awaited logger result to this request's current immutable chunk.
     /// The logger remains trusted to report actual durability. Cancellation closes
@@ -120,7 +126,7 @@ impl<'a> Request<'a> {
         if pending.request.is_closed() || pending.request.log_failed() {
             return Err(TransferError::InvalidState);
         }
-        let chunk = pending.request.stream.chunk_id();
+        let chunk = pending.request.stream().chunk_id();
         let length = pending.request.log_bytes().len();
         let record = LogRecord { tenant: pending.request.tenant_id(), request: pending.request.request_id(),
             chunk, direction, bytes: pending.request.log_bytes() };
@@ -129,23 +135,24 @@ impl<'a> Request<'a> {
             pending.armed = false;
             return Err(TransferError::Log);
         }
-        if !pending.request.stream.acknowledge(pending.request.lease.key.owner(), chunk, length) {
+        let owner = pending.request.lease.key.owner();
+        if !pending.request.stream_mut().acknowledge(owner, chunk, length) {
             return Err(TransferError::InvalidState);
         }
         pending.armed = false;
         Ok(())
     }
     pub fn prepare(&mut self, max: usize) -> Option<WriteTicket<'a>> {
-        self.stream.prepare(max).map(|core| WriteTicket { admission: self.lease.admission, core })
+        self.stream_mut().prepare(max).map(|core| WriteTicket { admission: self.lease.admission, core })
     }
     pub fn pending_bytes(&self, ticket: &WriteTicket<'_>) -> Option<&[u8]> {
         if !std::ptr::eq(ticket.admission, self.lease.admission) { return None; }
-        self.stream.pending_bytes(&ticket.core)
+        self.stream().pending_bytes(&ticket.core)
     }
     pub fn complete(&mut self, ticket: &WriteTicket<'_>, count: usize) -> bool {
         if !std::ptr::eq(ticket.admission, self.lease.admission) { return false; }
-        self.stream.complete(&ticket.core, count)
+        self.stream_mut().complete(&ticket.core, count)
     }
-    pub fn cancel(&mut self) { self.stream.cancel(); }
-    pub fn fail_log(&mut self) { self.log_failed = true; self.stream.fail_log(); }
+    pub fn cancel(&mut self) { self.stream_mut().cancel(); }
+    pub fn fail_log(&mut self) { self.log_failed = true; self.stream_mut().fail_log(); }
 }
