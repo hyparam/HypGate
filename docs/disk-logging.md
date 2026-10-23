@@ -75,7 +75,13 @@ Tests cover real-file acknowledgment and permissions, refusal to overwrite,
 strict transfer payload identity, every truncation position in a record and file
 header, single-bit changes at every record byte, excessive lengths, partial writes,
 injected disk-full and sync errors, blocked sync deadlines, and queue saturation.
-These are tests, not a filesystem crash theorem. Real process-kill experiments and the conditional journal-prefix theorem now exist;
+Scanner I/O tests inject a transient non-EOF error at every byte of a following
+record, including header, payload, checksum, and the next record boundary. They
+check the exact retained prefix offset and that subsequent scanner calls never
+read the underlying source again, even though the source could recover. Separate
+tests interleave interruptions with fragmented reads at sizes from one byte to
+128 bytes and check unchanged recovered payloads and offsets. All 70 workspace
+tests pass. These are tests, not a filesystem crash theorem. Real process-kill experiments and the conditional journal-prefix theorem now exist;
 see the [storage contract](storage-crash-contract.md). Scanner refinement and
 power-loss/storage-stack validation remain milestone-three requirements.
 

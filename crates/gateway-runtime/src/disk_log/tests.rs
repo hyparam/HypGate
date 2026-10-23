@@ -232,3 +232,74 @@ async fn shutdown_deadline_does_not_wait_for_stuck_sync_or_replace_worker() {
     log.shutdown(Duration::from_secs(1)).await.unwrap();
     assert!(log.worker.lock().unwrap().thread.is_none());
 }
+
+// Errors are transient at the source so a scanner that incorrectly resumes could
+// consume later bytes. Observe read calls as well as the reported valid offset.
+struct FaultReader {
+    bytes: Cursor<Vec<u8>>,
+    fail_at: Option<u64>,
+    interrupt_next: bool,
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+    fragment: usize,
+}
+impl Read for FaultReader {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        if self.interrupt_next {
+            self.interrupt_next = false;
+            return Err(io::ErrorKind::Interrupted.into());
+        }
+        self.interrupt_next = true;
+        if self.fail_at == Some(self.bytes.position()) {
+            self.fail_at = None;
+            return Err(io::ErrorKind::Other.into());
+        }
+        let before_fault = self.fail_at.map(|end| (end - self.bytes.position()) as usize).unwrap_or(usize::MAX);
+        let n = out.len().min(self.fragment).min(before_fault);
+        self.bytes.read(&mut out[..n])
+    }
+}
+
+#[test]
+fn scanner_retries_interruptions_and_fragmented_reads_without_changing_records() {
+    let mut bytes = header();
+    bytes.extend(encode(record(b"first", 1)));
+    bytes.extend(encode(record(b"second", 2)));
+    for fragment in [1, 2, 7, 33, 128] {
+        let source = FaultReader { bytes: Cursor::new(bytes.clone()), fail_at: None,
+            interrupt_next: true, calls: Arc::default(), fragment };
+        let mut scanner = LogReader::new(source).unwrap();
+        assert_eq!(scanner.next_record().unwrap().unwrap().bytes, b"first");
+        assert_eq!(scanner.next_record().unwrap().unwrap().bytes, b"second");
+        assert!(scanner.next_record().unwrap().is_none());
+        assert_eq!(scanner.valid_end(), bytes.len() as u64);
+        let calls = scanner.reader.calls.load(Ordering::Relaxed);
+        assert!(scanner.next_record().unwrap().is_none());
+        assert_eq!(scanner.reader.calls.load(Ordering::Relaxed), calls);
+    }
+}
+
+#[test]
+fn scanner_io_error_at_every_record_byte_preserves_prefix_and_stops_reading() {
+    let mut bytes = header(); bytes.extend(encode(record(b"first", 1)));
+    let prefix = bytes.len() as u64;
+    bytes.extend(encode(record(b"second", 2)));
+    for fail_at in prefix..=bytes.len() as u64 {
+        let calls = Arc::default();
+        let source = FaultReader { bytes: Cursor::new(bytes.clone()), fail_at: Some(fail_at),
+            interrupt_next: true, calls, fragment: 7 };
+        let mut scanner = LogReader::new(source).unwrap();
+        assert_eq!(scanner.next_record().unwrap().unwrap().bytes, b"first");
+        // A fault at the boundary after record two occurs on the following read.
+        let expected_end = if fail_at == bytes.len() as u64 {
+            assert_eq!(scanner.next_record().unwrap().unwrap().bytes, b"second");
+            fail_at
+        } else { prefix };
+        assert_eq!(scanner.next_record(), Err(ScanError::Io), "fault at {fail_at}");
+        assert_eq!(scanner.valid_end(), expected_end);
+        let calls = scanner.reader.calls.load(Ordering::Relaxed);
+        assert!(scanner.next_record().unwrap().is_none());
+        assert_eq!(scanner.reader.calls.load(Ordering::Relaxed), calls);
+        assert_eq!(scanner.valid_end(), expected_end);
+    }
+}
