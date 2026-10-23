@@ -61,9 +61,22 @@ metrics are not exposed publicly. No provider credentials or external API calls
 are used. Local validation used HAProxy 3.2.0 as a test tool, not a recommended
 production patch version. CI exercises the Ubuntu package and reports its version.
 
-This test covers proxy policy, not a full gateway process-kill or host-failure
-experiment. The gateway's separate tests cover real HTTP/TLS forwarding, request
-cancellation, logging failure modes, disk-worker process kills, and gateway runtime
-process death during a streamed response (see the [crash contract](storage-crash-contract.md)). Whole-system
-failover testing, deployment hardening, benchmarks, and independent review remain
-release obligations. HAProxy, TLS termination, and the OS remain trusted.
+The separate `proxy_gateway_process_failover_without_replay` runtime test launches
+this configuration with fixture TLS and two real gateway runtime child processes.
+It kills the primary mid-response, requires a truncated-body error, observes no
+provider connection during the health-detection window, and checks a distinct new
+request completes through the standby. Both gateways' strict audit logs are checked
+for exact payloads and distinct sessions. Only ports and the certificate path are
+substituted; retry and health-check policy are unchanged.
+
+Run it with an installed HAProxy (CI uses the distribution package):
+
+```sh
+SOUNDGATE_HAPROXY=/path/to/haproxy cargo test -p gateway-runtime --locked proxy_gateway_process_failover -- --ignored --nocapture
+```
+
+The child processes run the gateway runtime in a test binary so a fixture CA can
+be supplied; this does not test CLI provisioning or real provider connectivity.
+Host/storage/proxy failure, broader load, deployment hardening, and independent
+review remain release obligations. HAProxy, TLS termination, and the OS remain
+trusted. A finite no-replay observation is test evidence, not a universal theorem.

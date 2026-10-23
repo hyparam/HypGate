@@ -71,3 +71,9 @@ jobs:
           haproxy -v
       - name: Check no replay and standby routing
         run: python3 scripts/check_proxy.py --haproxy /usr/sbin/haproxy
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Check gateway-process failover
+        env:
+          SOUNDGATE_HAPROXY: /usr/sbin/haproxy
+        run: cargo test -p gateway-runtime --locked proxy_gateway_process_failover -- --ignored --nocapture

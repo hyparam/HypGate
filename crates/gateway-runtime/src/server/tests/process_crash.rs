@@ -44,8 +44,14 @@ async fn start(directory: &TempDir, root: &[u8], upstream: u16) -> (Process, u16
 }
 
 #[tokio::test]
-async fn killed_gateway_truncates_response_preserves_audit_prefix_and_does_not_replay() {
-    tokio::time::timeout(Duration::from_secs(15), async {
+async fn killed_gateway_truncates_response_preserves_audit_prefix_and_does_not_replay() { exercise(false).await; }
+
+#[tokio::test]
+#[ignore = "requires HAProxy; set SOUNDGATE_HAPROXY and run with --ignored"]
+async fn proxy_gateway_process_failover_without_replay() { exercise(true).await; }
+
+async fn exercise(with_proxy: bool) {
+    tokio::time::timeout(Duration::from_secs(25), async {
         let cert = generate_simple_self_signed(vec!["localhost".into()]).unwrap();
         let tls = ServerConfig::builder().with_no_client_auth().with_single_cert(vec![cert.cert.der().clone()],
             PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()).into()).unwrap();
@@ -55,9 +61,10 @@ async fn killed_gateway_truncates_response_preserves_audit_prefix_and_does_not_r
         let (release, waiting) = oneshot::channel::<()>();
         let waiting = Arc::new(Mutex::new(Some(waiting)));
         let provider_listener = upstream.clone();
+        let first_acceptor = acceptor.clone();
         let provider = tokio::spawn(async move {
             let (socket, _) = provider_listener.accept().await.unwrap();
-            let socket = acceptor.accept(socket).await.unwrap();
+            let socket = first_acceptor.accept(socket).await.unwrap();
             let service = service_fn(move |request: Request<Incoming>| {
                 let waiting = waiting.lock().unwrap().take().unwrap();
                 async move {
@@ -76,7 +83,16 @@ async fn killed_gateway_truncates_response_preserves_audit_prefix_and_does_not_r
         });
         let dir = TempDir::new();
         let (mut child, port) = start(&dir, cert.cert.der(), upstream_port).await;
-        let (mut response, connection) = send(port, "/routes/7", "gateway", "POST").await;
+        let standby_dir = TempDir::new();
+        let standby = if with_proxy { Some(start(&standby_dir, cert.cert.der(), upstream_port).await) } else { None };
+        let proxy_dir = TempDir::new();
+        let proxy = if let Some((_, standby_port)) = &standby {
+            Some(start_proxy(&proxy_dir, port, *standby_port,
+                &(cert.cert.pem() + &cert.signing_key.serialize_pem())).await)
+        } else { None };
+        let (mut response, connection) = if let Some((_, proxy_port)) = &proxy {
+            send_proxy(*proxy_port, cert.cert.der(), b"{\"stream\":true}").await
+        } else { send(port, "/routes/7", "gateway", "POST").await };
         assert_eq!(response.status(), StatusCode::OK);
         let mut visible = Vec::new();
         while visible.len() < 6 {
@@ -99,6 +115,39 @@ async fn killed_gateway_truncates_response_preserves_audit_prefix_and_does_not_r
         }
         assert_eq!(upload, b"{\"stream\":true}"); assert_eq!(download, visible);
         assert_eq!(scanner.valid_end(), before.len() as u64);
+        if let Some((_, proxy_port)) = &proxy {
+            // Two failed 1-second readiness checks remove the dead primary.
+            // Any attempted replay would create a provider connection here.
+            assert!(tokio::time::timeout(Duration::from_millis(2500), upstream.accept()).await.is_err());
+            let provider_listener = upstream.clone();
+            let second = tokio::spawn(async move {
+                let (socket, _) = provider_listener.accept().await.unwrap();
+                let socket = acceptor.accept(socket).await.unwrap();
+                let service = service_fn(|request: Request<Incoming>| async move {
+                    assert_eq!(request.headers()["x-api-key"], "provider-secret");
+                    assert_eq!(request.collect().await.unwrap().to_bytes(), b"second-request"[..]);
+                    Ok::<_, Infallible>(Response::new(Full::new(Bytes::from_static(b"standby-response"))))
+                });
+                let _ = hyper::server::conn::http1::Builder::new().serve_connection(TokioIo::new(socket), service).await;
+            });
+            let (response, connection) = send_proxy(*proxy_port, cert.cert.der(), b"second-request").await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.collect().await.unwrap().to_bytes(), b"standby-response"[..]);
+            connection.await.unwrap(); second.await.unwrap();
+            let mut recovered = LogReader::new(File::open(standby_dir.0.join("audit.log")).unwrap()).unwrap();
+            assert_ne!(recovered.session(), session);
+            let mut upload = Vec::new(); let mut download = Vec::new();
+            while let Some(record) = recovered.next_record().unwrap() {
+                assert_eq!((record.tenant, record.request), (1, 1));
+                match record.direction {
+                    crate::transfer::Direction::Upload => upload.extend(record.bytes),
+                    crate::transfer::Direction::Download => download.extend(record.bytes),
+                }
+            }
+            assert_eq!(upload, b"second-request"); assert_eq!(download, b"standby-response");
+            assert_eq!(std::fs::read(path).unwrap(), before);
+            return;
+        }
         let restart_dir = TempDir::new();
         let (_restart, restarted_port) = start(&restart_dir, cert.cert.der(), upstream_port).await;
         let (health, connection) = send(restarted_port, "/healthz", "", "GET").await;
@@ -108,4 +157,42 @@ async fn killed_gateway_truncates_response_preserves_audit_prefix_and_does_not_r
         assert_ne!(session, restarted.session());
         assert_eq!(std::fs::read(path).unwrap(), before);
     }).await.unwrap();
+}
+
+
+async fn start_proxy(directory: &TempDir, primary: u16, standby: u16, pem: &str) -> (Process, u16) {
+    let reservation = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = reservation.local_addr().unwrap().port();
+    let certificate = directory.0.join("tls.pem");
+    std::fs::write(&certificate, pem).unwrap();
+    let config = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../deploy/haproxy.cfg"))
+        .replace("bind :8443", &format!("bind 127.0.0.1:{port}"))
+        .replace("127.0.0.1:8081", &format!("127.0.0.1:{primary}"))
+        .replace("127.0.0.1:8082", &format!("127.0.0.1:{standby}"));
+    let path = directory.0.join("haproxy.cfg"); std::fs::write(&path, config).unwrap();
+    drop(reservation);
+    let mut process = Process(Command::new(std::env::var_os("SOUNDGATE_HAPROXY").unwrap_or_else(|| "haproxy".into()))
+        .arg("-db").arg("-f").arg(&path).env("SOUNDGATE_TLS_PEM", certificate)
+        .stdout(Stdio::null()).stderr(Stdio::inherit()).spawn().unwrap());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            assert!(process.0.try_wait().unwrap().is_none(), "proxy exited during startup");
+            if TcpStream::connect(("127.0.0.1", port)).await.is_ok() { break; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    (process, port)
+}
+
+async fn send_proxy(port: u16, root: &[u8], payload: &'static [u8]) -> (Response<Incoming>, JoinHandle<()>) {
+    use tokio_rustls::{TlsConnector, rustls::{ClientConfig, pki_types::ServerName}};
+    let mut roots = RootCertStore::empty(); roots.add(CertificateDer::from(root.to_vec())).unwrap();
+    let connector = TlsConnector::from(Arc::new(ClientConfig::builder().with_root_certificates(roots).with_no_client_auth()));
+    let socket = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let socket = connector.connect(ServerName::try_from("localhost").unwrap(), socket).await.unwrap();
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(socket)).await.unwrap();
+    let connection = tokio::spawn(async move { let _ = conn.await; });
+    let request = Request::builder().method("POST").uri("/routes/7").header("host", "localhost")
+        .header("authorization", "Bearer gateway").body(Full::new(Bytes::from_static(payload))).unwrap();
+    (sender.send_request(request).await.unwrap(), connection)
 }

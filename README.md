@@ -96,7 +96,8 @@ VERUS=/path/to/verus python3 scripts/check_mutations.py
 ```
 
 Validation on 2026-10-23: 63 core verification checks passed, 84 workspace tests
-passed, and all 61 deliberate mutations failed their proof obligations.
+passed, the opt-in TLS proxy/gateway process-failover test passed, and all 61
+deliberate mutations failed their proof obligations.
 These counts are checks, not a count of independent security guarantees.
 
 [GitHub Actions CI](.github/workflows/ci.yml) runs on pushes, pull requests, and

@@ -69,4 +69,10 @@ identities. Starting a fresh gateway produces a new log session, leaves the old
 log unchanged, and makes no upstream connection during the observation window.
 This exercises the runtime in a test binary with a fixture CA, not the CLI binary;
 it does not establish absence of replay for arbitrary future executions.
-Combined proxy/gateway failover and host/power-loss tests remain open.
+An opt-in test in the same module uses the example HAProxy configuration with
+fixture TLS and two gateway runtime child processes. It kills the primary after
+a response prefix, checks truncated client framing and the primary audit prefix,
+observes no upstream replay during health detection, then sends a distinct new
+request through the standby and checks its exact audit bytes in a separate session.
+CI runs this test with the distribution HAProxy package. This remains a local
+process-failure experiment; host/power-loss tests remain open.
