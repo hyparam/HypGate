@@ -96,7 +96,7 @@ VERUS=/path/to/verus python3 scripts/check_mutations.py
 ```
 
 Validation on 2026-10-23: 63 core verification checks passed, 88 workspace tests
-passed, the opt-in TLS proxy/gateway process-failover test passed, and all 61
+passed, the opt-in TLS proxy/gateway process-failover test and six load/fault workloads passed, and all 61
 deliberate mutations failed their proof obligations.
 These counts are checks, not a count of independent security guarantees.
 

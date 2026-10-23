@@ -11,7 +11,7 @@ provider returns its body immediately, so this is not an LLM token-generation mo
 The fixture checks exact client response bytes, zero failed exchanges/audit gaps,
 released workers, and recovery totals for each request in both directions. It
 reports JSON with request throughput, first-response-byte and completion p50/p95,
-and log size. Timing begins before inbound connection setup and includes upload,
+log size, sampled peak admission occupancy, and forwarded/rejected counts. Timing begins before inbound connection setup and includes upload,
 upstream TLS, logging, and response processing. Throughput includes the brief
 between-batch worker cleanup, but excludes final server shutdown and log scanning.
 Percentiles use nearest rank over 32 samples; this is a small baseline, not a
@@ -39,8 +39,8 @@ Do not measure the Cargo build when reporting gateway memory. The test process
 still includes the local provider, clients, TLS certificate generation, test
 harness, and recovery scan; its peak RSS is not isolated gateway RSS. It excludes
 filesystem cache outside the process and does not establish a resource bound.
-The tests are ignored in normal CI and can be run explicitly; ordinary workspace
-checks compile them so interface changes cannot silently break the harness.
+The default workspace invocation skips these ignored tests but compiles them. CI
+explicitly runs the two permanent-failure cases; timing workloads remain opt-in.
 
 ## Observed baseline, 2026-10-23
 
@@ -60,7 +60,57 @@ The small differences here do not demonstrate that either mode is faster.
 Successful local sync calls retain the documented storage-contract assumptions;
 this workload does not test power-loss durability.
 
-Remaining measurements include stalled/failed logging, slow clients/providers,
+## Extended fault and paced-peer workloads
+
+The same fixture now has six opt-in runs: healthy, paced peers, and permanent log
+failure, each in strict and availability mode. The healthy fixture now streams
+provider output through 16 KiB frames; the earlier baseline table predates this
+fixture change and is retained as historical evidence, not a direct comparison.
+
+Paced-peer runs use 4 MiB responses generated in 16 KiB pieces with a 2 ms delay
+before each piece. Clients delay 5 ms between reads of HTTP body frames, whose
+sizes are determined by the transport. This is an imposed workload, not a gateway
+throughput ceiling or proof that every buffer is saturated. Payloads are checked
+incrementally without retaining whole response bodies in the client fixture.
+
+Failure runs poison the real disk logger after the first eight requests drain.
+Strict mode must reject the remaining 24 requests with 503 before provider
+connection; availability mode must complete them with 24 reported audit gaps.
+Only the first batch may appear in either log. This tests permanent failure,
+not a permanently blocked syscall (which has separate fault-injection tests).
+
+All runs sample active admission at 1 ms intervals, check it never exceeds eight,
+require zero active requests and no workers afterward, verify exact payloads, and
+scan every logged request's byte totals. Sampling can miss transient values;
+the core count invariant is separately proved. Percentiles include successful
+requests only; rejected requests are counted separately. Rates distinguish all
+attempts from forwarded requests. No process-memory bound follows from slot counts.
+
+Observed on the same local machine on 2026-10-23, release build, one run per row:
+
+| Workload | Mode | Forwarded / rejected | Audit gaps | Elapsed (s) | Successful completion p95 (ms) |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Healthy streamed fixture | Strict | 32 / 0 | 0 | 1.259 | 319.62 |
+| Healthy streamed fixture | Availability | 32 / 0 | 0 | 1.433 | 371.84 |
+| Paced 4 MiB responses | Strict | 32 / 0 | 0 | 59.557 | 18,076.18 |
+| Paced 4 MiB responses | Availability | 32 / 0 | 0 | 54.908 | 13,939.35 |
+| Log fails after batch one | Strict | 8 / 24 | 0 | 0.366 | 363.80 |
+| Log fails after batch one | Availability | 32 / 0 | 24 | 0.383 | 360.63 |
+
+All six runs sampled a peak of eight active requests and finished with zero active
+requests and workers. Paced runs each recovered 135,284,888-byte logs; failure runs
+recovered only the first eight complete requests. These single samples include
+local scheduling and disk variability and do not establish comparative performance.
+The two permanent-failure workloads also run in the normal CI test job; slow-peer
+and healthy timing workloads remain opt-in.
+
+A separate strict paced-peer process run under `/usr/bin/time -l` completed in
+56.22 seconds with a peak RSS of 15,368,192 bytes, zero audit gaps, and all 32
+requests recovered. This includes provider/client fixtures and the recovery scan,
+excludes kernel filesystem cache, and is one observation rather than a memory bound.
+The repeated workload's completion p95 was 14,571.22 ms, illustrating run variability.
+
+Remaining measurements include stalled logging under sustained load,
 long-running streams, increasing concurrency, admission overload, repeated runs,
 isolated gateway memory, deployment-proxy overhead, and supported Linux storage.
 These remain milestone-four/five work. No load or memory theorem follows from this
