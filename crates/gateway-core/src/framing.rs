@@ -98,4 +98,55 @@ pub fn frame_end(start: u64, payload: u32, available: u64) -> (out: Option<u64>)
     if available < length || start > u64::MAX - length { return None; }
     Some(start + length)
 }
+
+// One cursor per reader. Tickets must not cross reader instances: offsets alone
+// are not a global identity. The adapter owns the ticket during exact reads.
+pub struct ScanTicket { start: u64 }
+impl ScanTicket { pub closed spec fn start(&self) -> u64 { self.start } }
+pub struct Cursor { offset: u64, stopped: bool }
+impl Cursor {
+    pub closed spec fn position(&self) -> u64 { self.offset }
+    pub closed spec fn stopped(&self) -> bool { self.stopped }
+
+    pub fn new(start: u64) -> (out: Self)
+        ensures out.position() == start, !out.stopped(),
+    { Cursor { offset: start, stopped: false } }
+
+    pub fn offset(&self) -> (out: u64)
+        ensures out == self.position(),
+    { self.offset }
+
+    // Default to stopped before any fallible I/O. Dropping the ticket on an
+    // error or EOF leaves this cursor permanently unable to start another read.
+    pub fn begin(&mut self) -> (out: Option<ScanTicket>)
+        ensures final(self).position() == old(self).position(), final(self).stopped(),
+            match out {
+                Some(t) => !old(self).stopped() && t.start() == old(self).position(),
+                None => old(self).stopped(),
+            },
+    {
+        if self.stopped { return None; }
+        self.stopped = true;
+        Some(ScanTicket { start: self.offset })
+    }
+
+    // The caller certifies successful exact reads and checksum validation.
+    // This transition proves structural extent/state accounting, not that I/O fact.
+    pub fn accept(&mut self, ticket: ScanTicket, payload: u32, available: u64) -> (ok: bool)
+        ensures
+            ok ==> old(self).stopped() && ticket.start() == old(self).position()
+                && !final(self).stopped() && payload <= 1048576
+                && final(self).position() == old(self).position() + 65 + payload
+                && final(self).position() > old(self).position()
+                && final(self).position() - old(self).position() <= available,
+            !ok ==> *final(self) == *old(self),
+    {
+        if !self.stopped || ticket.start != self.offset { return false; }
+        match frame_end(self.offset, payload, available) {
+            Some(end) => { self.offset = end; self.stopped = false; true },
+            None => false,
+        }
+    }
+}
+
 }

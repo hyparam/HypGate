@@ -20,6 +20,25 @@ and proves that every accepted header re-encodes to the identical input bytes.
 It rejects oversized payloads, insufficient available bytes, and offset overflow.
 The accepted end strictly advances and never exceeds the supplied available extent.
 
+## Recovery cursor
+
+The production scanner now owns a verified `Cursor` instead of independently
+updating an offset and stop flag. `begin` preserves the offset, sets the cursor
+stopped before any I/O, and issues one private-constructor, non-cloneable ticket.
+While stopped, further `begin` calls fail. `accept` consumes the ticket, checks
+its starting offset, and uses `frame_end` to advance by exactly one complete
+bounded frame. A rejected completion leaves the state unchanged; a successful
+completion strictly advances the offset and permits the next read.
+
+The runtime keeps the ticket local to `next_record`. Every EOF, read failure,
+malformed header, or checksum error drops it without reopening the cursor.
+Only successful exact reads and checksum validation reach `accept`. This makes
+failure default to stopping, but the call-site validation remains trusted.
+Tickets must stay with their originating reader: identical offsets in separate
+cursors do not establish distinct identities. The runtime never exports tickets.
+These statements are state/extent proofs, not a theorem that the recovered
+records equal the acknowledged journal prefix.
+
 ## Runtime binding and trusted boundary
 
 The scanner decodes the fixed-size header before allocating the payload buffer.
@@ -44,7 +63,8 @@ states the separate persistence assumptions.
 ## Validation
 
 Boundary-value roundtrips and malformed header/extent tests run through ordinary
-Cargo. Four proof mutations switch the request field to tenant bytes, remove the
+Cargo. Three cursor mutations reopen a stopped scanner, advance before validation, or
+regress its offset. Four framing mutations switch the request field to tenant bytes, remove the
 payload bound, accept incomplete extents, and skip a frame byte; all are rejected.
-The complete core passes 48 verification checks, 61 workspace tests pass, and all
-29 proof mutations are rejected. Counts describe checks, not independent guarantees.
+The complete core passes 52 verification checks, 68 workspace tests pass, and all
+32 proof mutations are rejected. Counts describe checks, not independent guarantees.

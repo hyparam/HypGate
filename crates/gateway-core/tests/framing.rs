@@ -40,3 +40,28 @@ fn malformed_headers_and_incomplete_frame_extents_are_rejected() {
     assert!(frame_end(u64::MAX - 71, 7, 72).is_none());
     assert!(frame_end(0, 1048577, u64::MAX).is_none());
 }
+
+
+#[test]
+fn recovery_cursor_stops_on_abandoned_or_incomplete_records() {
+    use gateway_core::framing::Cursor;
+    let mut cursor = Cursor::new(56);
+    let ticket = cursor.begin().unwrap();
+    assert_eq!(cursor.offset(), 56);
+    assert!(cursor.begin().is_none());
+    assert!(cursor.accept(ticket, 7, 72));
+    assert_eq!(cursor.offset(), 128);
+    let ticket = cursor.begin().unwrap();
+    assert!(!cursor.accept(ticket, 7, 71));
+    assert_eq!(cursor.offset(), 128);
+    assert!(cursor.begin().is_none());
+    let mut abandoned = Cursor::new(56);
+    let _ = abandoned.begin().unwrap();
+    assert!(abandoned.begin().is_none());
+    assert_eq!(abandoned.offset(), 56);
+    let mut overflow = Cursor::new(u64::MAX - 64);
+    let ticket = overflow.begin().unwrap();
+    assert!(!overflow.accept(ticket, 0, 65));
+    assert!(overflow.begin().is_none());
+    assert_eq!(overflow.offset(), u64::MAX - 64);
+}

@@ -179,7 +179,7 @@ pub struct StoredRecord {
 
 /// Incremental, read-only recovery scanner. It never truncates files or replays
 /// traffic. After any malformed record it stops permanently at the valid prefix.
-pub struct LogReader<R> { reader: R, session: [u8; 16], valid_end: u64, stopped: bool }
+pub struct LogReader<R> { reader: R, session: [u8; 16], cursor: framing::Cursor }
 impl<R: Read> LogReader<R> {
     pub fn new(mut reader: R) -> Result<Self, ScanError> {
         let mut header = [0; FILE_HEADER];
@@ -188,14 +188,13 @@ impl<R: Read> LogReader<R> {
             return Err(ScanError::Corrupt);
         }
         let session = header[8..24].try_into().unwrap();
-        Ok(Self { reader, session, valid_end: FILE_HEADER as u64, stopped: false })
+        Ok(Self { reader, session, cursor: framing::Cursor::new(FILE_HEADER as u64) })
     }
     pub fn session(&self) -> [u8; 16] { self.session }
-    pub fn valid_end(&self) -> u64 { self.valid_end }
+    pub fn valid_end(&self) -> u64 { self.cursor.offset() }
 
     pub fn next_record(&mut self) -> Result<Option<StoredRecord>, ScanError> {
-        if self.stopped { return Ok(None); }
-        self.stopped = true;
+        let Some(ticket) = self.cursor.begin() else { return Ok(None); };
         let mut header = [0u8; RECORD_HEADER];
         loop {
             match self.reader.read(&mut header[..1]) {
@@ -214,9 +213,8 @@ impl<R: Read> LogReader<R> {
         exact(&mut self.reader, &mut checksum)?;
         let mut digest = Sha256::new(); digest.update(header); digest.update(&bytes);
         if digest.finalize()[..] != checksum { return Err(ScanError::Corrupt); }
-        self.valid_end = framing::frame_end(self.valid_end, fields.payload,
-            (header.len() + bytes.len() + checksum.len()) as u64).ok_or(ScanError::Corrupt)?;
-        self.stopped = false;
+        if !self.cursor.accept(ticket, fields.payload,
+            (header.len() + bytes.len() + checksum.len()) as u64) { return Err(ScanError::Corrupt); }
         Ok(Some(StoredRecord {
             tenant: fields.tenant, request: fields.request, chunk: fields.chunk,
             direction: if fields.direction == 0 { Direction::Upload } else { Direction::Download }, bytes,

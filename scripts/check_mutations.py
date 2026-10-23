@@ -15,6 +15,9 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("framing.rs", "restart_stopped_scan", "if self.stopped { return None; }", "if false { return None; }"),
+    ("framing.rs", "advance_before_validation", "self.stopped = true;", "self.stopped = true; self.offset = 0;"),
+    ("framing.rs", "scan_offset_regression", "self.offset = end;", "self.offset = 0;"),
     ("framing.rs", "decode_wrong_request", "let request = u64_from_le_bytes(slice_subrange(bytes, 16, 24));", "let request = u64_from_le_bytes(slice_subrange(bytes, 8, 16));"),
     ("framing.rs", "unbounded_payload", "if payload > 1048576 || request == 0 || direction > 1", "if request == 0 || direction > 1"),
     ("framing.rs", "accept_incomplete_frame", "available < length || ", ""),
