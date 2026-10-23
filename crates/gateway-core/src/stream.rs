@@ -1,5 +1,6 @@
 use vstd::prelude::*;
 use vstd::slice::slice_subrange;
+use crate::{framing::Header, policy::AuthorizedRequest};
 
 verus! {
 
@@ -33,6 +34,29 @@ impl StreamChunk {
     pub fn log_bytes(&self) -> (out: &[u8])
         ensures out@ == self.body(),
     { self.bytes.as_slice() }
+
+    // Bind the audit metadata and borrowed payload in one checked operation.
+    // Authority and stream must be scoped to the same admission instance.
+    pub fn audit_record<'a>(&'a self, authority: &AuthorizedRequest, direction: u8)
+        -> (out: Option<(Header, &'a [u8])>)
+        requires self.valid(), authority.valid(),
+        ensures match out {
+            Some((h, bytes)) => crate::framing::valid(h) && h.tenant == authority.tenant()
+                && h.request == authority.request() && h.request == self.owner()
+                && h.chunk == self.chunk() && h.direction == direction
+                && h.payload == self.body().len() && bytes@ == self.body()
+                && !self.closed() && !self.failed(),
+            None => self.closed() || self.failed() || self.owner() == 0
+                || self.owner() != authority.request() || self.body().len() > 1048576
+                || direction > 1,
+        },
+    {
+        if self.closed || self.failed || self.owner == 0
+            || self.owner != authority.request_id() || self.bytes.len() > 1048576
+            || direction > 1 { return None; }
+        Some((Header { payload: self.bytes.len() as u32, tenant: authority.tenant_id(),
+            request: self.owner, chunk: self.chunk, direction }, self.bytes.as_slice()))
+    }
 
     pub fn owner_id(&self) -> (out: u64)
         ensures out == self.owner(),

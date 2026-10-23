@@ -123,8 +123,15 @@ The admission mutex protects only admission and release; no I/O occurs under it.
 The eventual transport must own the request for the lifetime of every effect and
 must not detach work that survives its lease. Repeated borrowed views still do not
 authorize repeated submissions. Logging acknowledgments remain trusted events:
-`audit_current` binds the awaited logger result to the exclusively borrowed current
-chunk and is the runtime request's only acknowledgment path. A direct cancellation
+`audit_current` obtains metadata and bytes together through verified
+`StreamChunk::audit_record`, then binds the awaited logger result to the exclusively
+borrowed current chunk. It is the runtime request's only acknowledgment path.
+The constructor proves that tenant comes from the supplied authority, request ID
+matches the stream owner, chunk ID and payload length match current stream state,
+and borrowed bytes equal the current payload. It rejects mismatched authority,
+closed/failed streams, oversized records, and invalid directions. Numeric request
+IDs still require the runtime to keep authority and stream in the same admission
+instance; this check cannot authenticate an arbitrary independently supplied token. A direct cancellation
 test covers both logging modes, rejects further writes/chunks, and retains the
 lease until request drop. A custom `AuditLog` implementation must still truthfully
 report durability; the type boundary cannot prove a syscall or an external callback.

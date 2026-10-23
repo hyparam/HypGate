@@ -88,3 +88,31 @@ fn retirement_rejects_wrong_unclaimed_and_stale_stream_ownership() {
     assert_eq!(registry.usage(), (2, 2));
     assert!(registry.release(&replacement)); assert!(registry.release(&second));
 }
+
+#[test]
+fn audit_record_binds_authority_current_chunk_and_exact_payload() {
+    use gateway_core::stream::StreamChunk;
+    let route = || Route { tenant: 42, selector: 7, origin: 0, credential: 0 };
+    let policy = Policy::validate(vec![Identity { tenant: 42, digest: vec![9; 32] }],
+        vec![route()], vec![route()], 1, vec![42]).unwrap();
+    let identity = policy.authenticate(&[9; 32]).unwrap();
+    let authority = identity.authorize(7, 11).unwrap();
+    let other = identity.authorize(7, 12).unwrap();
+    let mut stream = StreamChunk::new(11, vec![], 4, true).unwrap();
+    let chunk = stream.advance(vec![3, 1, 4]).unwrap();
+    for direction in [0, 1] {
+        let (header, bytes) = stream.audit_record(&authority, direction).unwrap();
+        assert_eq!((header.tenant, header.request, header.chunk, header.direction, header.payload),
+            (42, 11, chunk, direction, 3));
+        assert_eq!(bytes, &[3, 1, 4]);
+    }
+    assert!(stream.audit_record(&other, 0).is_none());
+    assert!(stream.audit_record(&authority, 2).is_none());
+    stream.cancel();
+    assert!(stream.audit_record(&authority, 0).is_none());
+    let mut failed = StreamChunk::new(11, vec![1], 4, false).unwrap();
+    failed.fail_log();
+    assert!(failed.audit_record(&authority, 0).is_none());
+    let oversized = StreamChunk::new(11, vec![0; 1048577], 1048577, false).unwrap();
+    assert!(oversized.audit_record(&authority, 0).is_none());
+}

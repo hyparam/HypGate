@@ -15,6 +15,11 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("stream.rs", "audit_wrong_authority", " || self.owner != authority.request_id()", ""),
+    ("stream.rs", "audit_wrong_tenant", "tenant: authority.tenant_id(),", "tenant: 0,"),
+    ("stream.rs", "audit_wrong_chunk", "request: self.owner, chunk: self.chunk, direction", "request: self.owner, chunk: 0, direction"),
+    ("stream.rs", "audit_wrong_bytes", "direction }, self.bytes.as_slice()", "direction }, slice_subrange(self.bytes.as_slice(), 0, 0)"),
+
     ("journal.rs", "durable_commit_without_sync", "let _synced = self.sync_succeeded();", "let _synced = true;"),
     ("journal.rs", "durable_commit_without_ack", "let _acknowledged = self.acknowledge(t);", "let _acknowledged = true;"),
     ("journal.rs", "durable_commit_skips_prior_ack", " || self.acknowledged != self.written", ""),

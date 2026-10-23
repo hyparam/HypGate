@@ -100,7 +100,6 @@ impl<'a> Request<'a> {
     pub fn credential(&self) -> usize { self.authorized.credential() }
     pub(crate) fn capacity(&self) -> usize { self.capacity }
     pub(crate) fn is_closed(&self) -> bool { self.stream().is_closed() }
-    pub(crate) fn log_bytes(&self) -> &[u8] { self.stream().log_bytes() }
     pub(crate) fn log_failed(&self) -> bool { self.log_failed }
     pub(crate) fn strict(&self) -> bool { self.lease.admission.strict }
 
@@ -126,10 +125,14 @@ impl<'a> Request<'a> {
         if pending.request.is_closed() || pending.request.log_failed() {
             return Err(TransferError::InvalidState);
         }
-        let chunk = pending.request.stream().chunk_id();
-        let length = pending.request.log_bytes().len();
-        let record = LogRecord { tenant: pending.request.tenant_id(), request: pending.request.request_id(),
-            chunk, direction, bytes: pending.request.log_bytes() };
+        let direction_id = match direction { Direction::Upload => 0, Direction::Download => 1 };
+        let (header, bytes) = pending.request.stream()
+            .audit_record(&pending.request.authorized, direction_id)
+            .ok_or(TransferError::InvalidState)?;
+        let chunk = header.chunk;
+        let length = header.payload as usize;
+        let record = LogRecord { tenant: header.tenant, request: header.request,
+            chunk, direction, bytes };
         if log.append(record).await.is_err() {
             pending.request.fail_log();
             pending.armed = false;
