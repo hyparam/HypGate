@@ -15,6 +15,10 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("framing.rs", "session_wrong_identity", "let session = [bytes[8], bytes[9]", "let session = [bytes[9], bytes[9]"),
+    ("framing.rs", "session_wrong_version", " || bytes[7] != 49", ""),
+    ("framing.rs", "session_ignores_checksum", "if !checksum_valid || bytes.len() != 24", "if bytes.len() != 24"),
+
     ("stream.rs", "deny_matching_receipt", "if !receipt.matches_record(header, bytes)", "if true"),
     ("framing.rs", "receipt_ignores_payload", "let payload_ok = equal_bytes(slice_subrange(bytes, 33, bytes.len() - 32), payload);", "let payload_ok = true;"),
     ("framing.rs", "receipt_ignores_header", "let header_ok = equal_bytes(slice_subrange(bytes, 0, 33), header.as_slice());", "let header_ok = true;"),

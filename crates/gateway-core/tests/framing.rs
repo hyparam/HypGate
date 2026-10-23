@@ -129,3 +129,26 @@ fn sealed_record_preserves_canonical_header_payload_and_checksum() {
         assert!(RecordBody::new(header(), &vec![0; length + 1]).is_none());
     }
 }
+
+#[test]
+fn session_header_requires_exact_version_length_checksum_and_identity() {
+    use gateway_core::framing::{encode_session, decode_session};
+    for session in [[0; 16], [255; 16], std::array::from_fn(|i| i as u8)] {
+        let encoded = encode_session(&session);
+        assert_eq!(&encoded[..8], b"SGLOG001");
+        assert_eq!(&encoded[8..], session);
+        assert_eq!(decode_session(&encoded, true), Some(session));
+        assert_eq!(decode_session(&encoded, false), None);
+        for length in 0..encoded.len() { assert_eq!(decode_session(&encoded[..length], true), None); }
+        let mut extra = encoded.clone(); extra.push(0);
+        assert_eq!(decode_session(&extra, true), None);
+        for byte in 0..8 {
+            let mut changed = encoded.clone(); changed[byte] ^= 1;
+            assert_eq!(decode_session(&changed, true), None);
+        }
+        // The session is data, not a fixed value or authentication credential.
+        let mut changed = encoded.clone(); changed[8] ^= 1;
+        let mut expected = session; expected[0] ^= 1;
+        assert_eq!(decode_session(&changed, true), Some(expected));
+    }
+}

@@ -8,6 +8,7 @@ use std::{fs::{File, OpenOptions}, io::{self, Read, Write}, path::Path,
     sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}}, time::Duration};
 use tokio::sync::{mpsc, oneshot};
 
+#[cfg(test)]
 const FILE_MAGIC: &[u8; 8] = b"SGLOG001";
 const FILE_HEADER: usize = 56; // magic + random session ID + checksum
 const RECORD_HEADER: usize = 33; // magic + length + tenant + request + chunk + direction
@@ -53,9 +54,7 @@ impl DiskLog {
             options.mode(0o600);
         }
         let mut file = options.open(path)?;
-        let mut header = Vec::with_capacity(FILE_HEADER);
-        header.extend_from_slice(FILE_MAGIC);
-        header.extend_from_slice(&session);
+        let mut header = framing::encode_session(&session);
         header.extend_from_slice(&Sha256::digest(&header));
         file.write_all(&header)?;
         file.sync_all()?;
@@ -231,10 +230,8 @@ impl<R: Read> LogReader<R> {
     pub fn new(mut reader: R) -> Result<Self, ScanError> {
         let mut header = [0; FILE_HEADER];
         exact(&mut reader, &mut header)?;
-        if &header[..8] != FILE_MAGIC || Sha256::digest(&header[..24])[..] != header[24..] {
-            return Err(ScanError::Corrupt);
-        }
-        let session = header[8..24].try_into().unwrap();
+        let checksum_valid = Sha256::digest(&header[..24])[..] == header[24..];
+        let session = framing::decode_session(&header[..24], checksum_valid).ok_or(ScanError::Corrupt)?;
         Ok(Self { reader, session, cursor: framing::Cursor::new(FILE_HEADER as u64) })
     }
     pub fn session(&self) -> [u8; 16] { self.session }

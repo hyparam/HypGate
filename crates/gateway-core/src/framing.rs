@@ -3,6 +3,37 @@ use vstd::bytes::*;
 use vstd::slice::slice_subrange;
 
 verus! {
+pub open spec fn session_encoding(session: Seq<u8>) -> Seq<u8> {
+    seq![83u8, 71u8, 76u8, 79u8, 71u8, 48u8, 48u8, 49u8] + session
+}
+
+pub fn encode_session(session: &[u8; 16]) -> (bytes: Vec<u8>)
+    ensures bytes@ == session_encoding(session@), bytes.len() == 24,
+{
+    let mut bytes = Vec::with_capacity(56);
+    append(&mut bytes, &[83u8, 71u8, 76u8, 79u8, 71u8, 48u8, 48u8, 49u8]);
+    append(&mut bytes, session.as_slice());
+    bytes
+}
+
+// Checksum computation/comparison is external. Bind the accepted version and
+// exact session identity to the bytes read before record recovery begins.
+pub fn decode_session(bytes: &[u8], checksum_valid: bool) -> (out: Option<[u8; 16]>)
+    ensures match out {
+        Some(session) => checksum_valid && bytes@ == session_encoding(session@),
+        None => !checksum_valid || bytes.len() != 24
+            || bytes@.subrange(0, 8) != session_encoding(Seq::empty()),
+    },
+{
+    if !checksum_valid || bytes.len() != 24 { return None; }
+    if bytes[0] != 83 || bytes[1] != 71 || bytes[2] != 76 || bytes[3] != 79
+        || bytes[4] != 71 || bytes[5] != 48 || bytes[6] != 48 || bytes[7] != 49 { return None; }
+    let session = [bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+        bytes[16], bytes[17], bytes[18], bytes[19], bytes[20], bytes[21], bytes[22], bytes[23]];
+    proof { assert(bytes@ =~= session_encoding(session@)); }
+    Some(session)
+}
+
 pub struct Header {
     pub payload: u32,
     pub tenant: u64,

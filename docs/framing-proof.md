@@ -6,6 +6,14 @@ both call it; the on-disk format is unchanged.
 
 ## Checked properties
 
+`encode_session` produces exactly the eight-byte `SGLOG001` version marker and
+sixteen supplied session bytes. `decode_session` accepts exactly that 24-byte
+prefix when the externally supplied checksum result is true, returns the exact
+session identity, and rejects other lengths or versions. Startup and recovery
+both call these operations. The fixed-length session checksum is still computed
+and compared by trusted SHA-256 code; random-session generation and uniqueness
+are not proved, and a checksum is not source authentication.
+
 A valid header has a payload length at most one MiB, a nonzero request ID, and a
 direction of zero or one. Tenant and chunk IDs may use the full u64 range. These
 are structural checks, not authentication or authorization of recorded identities.
@@ -70,7 +78,7 @@ It reads the entire payload and digest, validates SHA-256, and only then calls
 validates record bounds before calling the core payload encoder, then hashes its
 result and consumes it through the verified sealing operation. Those call-site bindings remain trusted Rust.
 
-Verus does not prove the file-header parser, `Read` implementation, exact-read
+Verus does not prove the `Read` implementation, exact-read
 helper, checksum implementation, scanner loop, or correspondence to physical disk.
 The extent theorem depends on the caller reporting bytes actually available; it
 cannot establish that fact from I/O. Checksums are not authentication against a
