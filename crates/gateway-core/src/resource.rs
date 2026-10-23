@@ -262,11 +262,29 @@ impl ResourceAdmission {
             !ok ==> *final(self) == *old(self),
     {
         if !key.stream_claimed || stream.owner_id() != key.id { return false; }
-        self.release(key)
+        self.release_slot(key)
     }
 
-    // The adapter must stop and dispose of request work before returning its credit.
+    // Only an unclaimed reservation can return credit without consuming a stream.
     pub fn release(&mut self, key: &RequestKey) -> (ok: bool)
+        requires old(self).valid(),
+        ensures final(self).valid(), final(self).limit() == old(self).limit(),
+            final(self).per_request() == old(self).per_request(),
+            final(self).next_id() == old(self).next_id(),
+            ok == (!key.stream_claimed() && old(self).owns(key)),
+            ok ==> !final(self).owns(key)
+                && occupied(final(self).entries()) + 1 == occupied(old(self).entries())
+                && final(self).entries()[key.slot() as int] == 0
+                && (forall|i: int| 0 <= i < old(self).limit() && i != key.slot()
+                    ==> #[trigger] final(self).entries()[i] == old(self).entries()[i]),
+            !ok ==> *final(self) == *old(self),
+    {
+        if key.stream_claimed { return false; }
+        self.release_slot(key)
+    }
+
+    // Private primitive: claimed reservations must pass through release_stream.
+    fn release_slot(&mut self, key: &RequestKey) -> (ok: bool)
         requires old(self).valid(),
         ensures final(self).valid(), final(self).limit() == old(self).limit(),
             final(self).per_request() == old(self).per_request(),

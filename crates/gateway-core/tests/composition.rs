@@ -78,6 +78,9 @@ fn retirement_rejects_wrong_unclaimed_and_stale_stream_ownership() {
     let second_stream = registry.authorized_stream(&mut second, &authority, true).unwrap();
     assert!(!registry.release_stream(&first, second_stream));
     assert_eq!(registry.usage(), (2, 2));
+    assert!(!registry.release(&first));
+    assert_eq!(registry.usage(), (2, 2));
+    assert!(registry.acquire().is_none());
     assert!(registry.release_stream(&first, first_stream));
     assert_eq!(registry.usage(), (1, 2));
     let replacement = registry.acquire().unwrap();
@@ -86,7 +89,10 @@ fn retirement_rejects_wrong_unclaimed_and_stale_stream_ownership() {
     let stale = StreamChunk::new(first.owner(), vec![], 4, true).unwrap();
     assert!(!registry.release_stream(&first, stale));
     assert_eq!(registry.usage(), (2, 2));
-    assert!(registry.release(&replacement)); assert!(registry.release(&second));
+    assert!(registry.release(&replacement));
+    // A mismatched consuming release dropped the second stream, but cannot
+    // make its claimed slot reusable through the reservation-only API.
+    assert!(!registry.release(&second));
 }
 
 #[test]

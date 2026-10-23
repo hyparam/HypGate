@@ -101,6 +101,7 @@ MUTATIONS = [
     ("stream.rs", "pretend_full_write", "self.sent = self.sent + count;", "self.sent = self.offered;"),
     ("stream.rs", "wrong_slice", "slice_subrange(self.bytes.as_slice(), self.sent, self.offered)", "slice_subrange(self.bytes.as_slice(), 0, self.offered)"),
     ("stream.rs", "ignore_cancellation", "if self.closed || self.pending || max == 0 || self.generation == u64::MAX", "if self.pending || max == 0 || self.generation == u64::MAX"),
+    ("resource.rs", "release_claimed_reservation", "if key.stream_claimed { return false; }", "if false { return false; }"),
     ("resource.rs", "evict_live_request", "if self.slots[i] == 0 {", "if true {"),
     ("resource.rs", "reuse_id", "self.next = self.next + 1;", "self.next = self.next;"),
     ("resource.rs", "change_budget", "let id = self.next;", "let id = self.next; self.per_request = 0;"),

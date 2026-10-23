@@ -48,16 +48,22 @@ independently retained stream exists; the runtime wrapper prevents that extracti
 when the key has claimed a stream, its ID matches the stream owner, and the registry
 still owns the key. Success clears only that slot and decreases occupancy by one;
 rejection leaves the registry unchanged. Both outcomes consume the supplied stream.
-The runtime lease uses this operation for constructed streams, retaining raw
-`release` only for reservations that failed before stream construction. Storage is
+The runtime lease uses this operation for constructed streams, retaining reservation-only
+`release` for reservations that failed before stream construction. Storage is
 dropped inside the locked operation; no async I/O occurs under the lock.
 
 This proves the synchronous ownership check and registry transition. It does not
 prove that external async effects have stopped, distinguish equal numeric IDs in
 separate registries, or prevent trusted callers from using lower-level constructors
-and raw release. Runtime encapsulation supplies those ownership boundaries.
+to synthesize another stream with the same owner. Runtime encapsulation supplies
+those ownership boundaries. Reservation-only `release` now rejects every claimed
+key without changing registry state; the lower-level slot-clearing primitive is
+private and used only by the two verified release paths. This removes the direct
+non-consuming release bypass, but does not yet prove the global stream-to-slot map.
 Composition tests cover valid retirement, mismatched owners, unclaimed streams,
-and stale keys; four mutations check the owner accessor and acceptance conditions.
+and stale keys, and verify that a claimed slot stays occupied when reservation-only
+release is attempted. A dedicated mutation removes that guard and must fail its
+proof; the existing mutations check the owner accessor and acceptance conditions.
 
 ## Admission progress within the synchronous core
 
