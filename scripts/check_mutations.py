@@ -15,6 +15,10 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("journal.rs", "deny_valid_append", "if self.failed || self.pending != 0 || length == 0 || length > u64::MAX - self.written", "if true"),
+    ("journal.rs", "deny_written_record", "if self.failed || t.start != self.written || t.end != self.pending", "if true || t.start != self.written || t.end != self.pending"),
+    ("journal.rs", "deny_ready_sync", "if self.failed || self.pending != 0 { return false; }", "if true { return false; }"),
+    ("journal.rs", "deny_durable_ack", "if self.failed || t.start != self.acknowledged || t.end <= t.start || self.durable < t.end", "if true"),
     ("resource.rs", "ignore_combined_budget", "total <= 134217728", "true"),
     ("resource.rs", "allow_zero_request_budget", "requests == 0 || ", ""),
     ("resource.rs", "hide_active_requests", "(active, self.slots.len())", "(0, self.slots.len())"),

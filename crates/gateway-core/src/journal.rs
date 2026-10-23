@@ -20,6 +20,7 @@ pub struct Journal {
 
 impl Journal {
     pub closed spec fn written_len(&self) -> u64 { self.written }
+    pub closed spec fn durable_len(&self) -> u64 { self.durable }
     pub closed spec fn acked_len(&self) -> u64 { self.acknowledged }
     pub closed spec fn idle(&self) -> bool { self.pending == 0 }
     pub closed spec fn valid(&self) -> bool {
@@ -46,6 +47,8 @@ impl Journal {
         ensures final(self).valid(), final(self).history() == old(self).history(),
             final(self).stable() == old(self).stable(), final(self).acked() == old(self).acked(),
             final(self).failed() == old(self).failed(),
+            out.is_some() <==> (!old(self).failed() && old(self).idle()
+                && 0 < length && length <= u64::MAX - old(self).written_len()),
             match out { Some(t) => old(self).idle() && final(self).matches(&t) && t.end() - t.start() == length && !final(self).failed(),
                 None => *final(self) == *old(self) },
     {
@@ -59,6 +62,8 @@ impl Journal {
         requires old(self).valid(),
         ensures final(self).valid(), final(self).stable() == old(self).stable(),
             final(self).acked() == old(self).acked(), final(self).failed() == old(self).failed(),
+            ok <==> (!old(self).failed() && old(self).matches(t)
+                && bytes@.len() == t.end() - t.start()),
             ok ==> old(self).matches(t) && final(self).history() == old(self).history() + bytes@
                 && final(self).written_len() == t.end() && final(self).idle() && !final(self).failed(),
             !ok ==> *final(self) == *old(self),
@@ -81,6 +86,7 @@ impl Journal {
         requires old(self).valid(),
         ensures final(self).valid(), final(self).history() == old(self).history(),
             final(self).acked() == old(self).acked(), final(self).failed() == old(self).failed(),
+            ok <==> (!old(self).failed() && old(self).idle()),
             ok ==> old(self).idle() && final(self).stable() == final(self).history() && !final(self).failed(),
             !ok ==> *final(self) == *old(self),
     {
@@ -93,6 +99,8 @@ impl Journal {
         requires old(self).valid(),
         ensures final(self).valid(), final(self).history() == old(self).history(),
             final(self).stable() == old(self).stable(), final(self).failed() == old(self).failed(),
+            ok <==> (!old(self).failed() && t.start() == old(self).acked_len()
+                && t.end() > t.start() && t.end() <= old(self).durable_len()),
             ok ==> final(self).acked_len() == t.end() && t.start() == old(self).acked_len()
                 && t.end() > t.start() && !final(self).failed(),
             !ok ==> *final(self) == *old(self),

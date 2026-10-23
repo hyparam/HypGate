@@ -13,6 +13,11 @@ The journal theorem is conditional on this external storage contract:
    flushes; permanent loss, bit rot, malicious rewriting, and lying devices are
    outside the model.
 
+The journal also proves exact acceptance conditions for append reservation,
+complete-write recording, sync recording, and acknowledgment: valid events cannot
+be arbitrarily refused by the state machine. This does not guarantee syscall
+success, worker scheduling, or correspondence between journal and stream tickets.
+
 These are assumptions, not Verus-verified filesystem properties. The prototype uses
 Unix file permissions and directory syncing; it has not certified a filesystem
 against power loss. Deployment must validate the actual filesystem, mount/storage
