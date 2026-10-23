@@ -53,8 +53,8 @@ ownership is an adapter obligation. Storage must preserve previously synced byte
 This proves acknowledgment ordering and conditional byte-prefix survival, not
 complete crash-safe logging. [Header and frame-extent proofs](framing-proof.md),
 a documented [storage contract](storage-crash-contract.md), and process-kill
-experiments now exist. Named-storage validation and
-async receipt delivery and journal/session ownership remain trusted. No `assume` or external-body escape was introduced.
+experiments now exist, including Linux ext4 ENOSPC, EROFS, and process-death
+validation. Async receipt delivery and journal/session ownership remain trusted. No `assume` or external-body escape was introduced.
 
 The wrapper's ghost frame sequence proves that acknowledged bytes are exactly
 those frames concatenated in commit order. Its conditional reconstruction theorem

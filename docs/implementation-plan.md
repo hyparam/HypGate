@@ -4,7 +4,7 @@
 | --- | :---: | --- |
 | 1. Verified streaming core | ☐ | ✓ Streaming and resource proofs; ✓ authorization/configuration proofs; ✓ tested request ownership; ✓ verified completed-chunk release; ✓ verified owner-checked stream retirement used by runtime leases; ✓ verified configuration budget arithmetic and runtime retained-vector capacity checks; ✓ conditional combined payload bound for streams mapped to live slots; ✓ verified zero initial occupancy and exact admission/release count changes; ✓ verified initial authority/slot/stream binding and admission/release/stream non-rejection. ✓ Source-level buffer/queue inventory and visible-payload subtotal. Composed resource proofs and full allocation accounting remain. |
 | 2. Minimal working gateway | ✓ | Runnable HTTP/TLS/disk path, concurrent tenant isolation, disconnect/failure and unsolicited-upgrade rejection tests, and documented adapter audit. Production hardening and broader proofs remain in the other milestones. |
-| 3. Crash-safe logging | ☐ | ✓ Bounded disk writer, framing/scanner tests; ✓ Verified session-header version/identity encoding and decoding in startup/recovery; ✓ Header/payload encoding, frame-extent, recovery-cursor, and recovered-record binding and non-rejection proofs; ✓ Verified authority/stream audit-record binding; ✓ Request-scoped async audit acknowledgment; ✓ Exact durable-receipt/stream acknowledgment theorem and production receipt delivery; ✓ Immutable queued frames and composed canonical-frame/journal acknowledgment; ✓ composed durable-frame commit used by the disk worker; ✓ journal acknowledgment proof, exact acceptance/rejection contracts, and conditional prefix-survival lemma. ✓ Process-kill recovery tests and storage contract; ✓ Scanner I/O faults at every record byte. ✓ Conditional scanner source-byte/checksum refinement and justified rejection. ✓ Ordered acknowledged-prefix reconstruction under explicit storage/read/checksum assumptions. Named-storage validation and the milestone exit audit remain. |
+| 3. Crash-safe logging | ✓ | ✓ Bounded disk writer, framing/scanner tests; ✓ Verified session-header version/identity encoding and decoding in startup/recovery; ✓ Header/payload encoding, frame-extent, recovery-cursor, and recovered-record binding and non-rejection proofs; ✓ Verified authority/stream audit-record binding; ✓ Request-scoped async audit acknowledgment; ✓ Exact durable-receipt/stream acknowledgment theorem and production receipt delivery; ✓ Immutable queued frames and composed canonical-frame/journal acknowledgment; ✓ composed durable-frame commit used by the disk worker; ✓ journal acknowledgment proof, exact acceptance/rejection contracts, and conditional prefix-survival lemma. ✓ Process-kill recovery tests and storage contract; ✓ Scanner I/O faults at every record byte. ✓ Conditional scanner source-byte/checksum refinement and justified rejection. ✓ Ordered acknowledged-prefix reconstruction under explicit storage/read/checksum assumptions. ✓ Linux ext4 ENOSPC/EROFS and process-death validation; ✓ exit audit. Complete under the documented storage/read/checksum assumptions, without power-loss certification. |
 | 4. Availability hardening | ☐ | ✓ Separate worker permits cover rejection and cleanup, with saturation/cancellation tests; ✓ Admission/connection limits, bounded logging, network deadlines, health/readiness, and bounded connection drain. ✓ Audit-health/gap metrics and verified request-occupancy gauges; ✓ Poisoned-admission readiness/fail-closed tests; ✓ Incomplete-connection overload, pre-header/streaming disconnect, bodyless-response completion, and shutdown tests; ✓ Bounded logger drain/join and canceled-caller worker-panic health; ✓ Explicit HTTP input-frame limit; ✓ Gateway runtime process-kill test checks truncated response, strict audit prefix, and fresh-session restart; ✓ Combined TLS proxy/two-gateway process-kill test verifies no replay and a new request on standby. ✓ Eight-client paced 4 MiB responses and mid-workload permanent log failure in both modes. ✓ Repeated admission overload preserves eight active streams and health checks, rejects excess traffic before dispatch, and recovers capacity. ✓ Concurrent stalled-sync test verifies bounded queues, request cleanup, and both operator modes. Long-duration overload, broader fault/load tests, and shutdown/resource proofs remain. |
 | 5. Auditable first release | ☐ | ✓ Pinned core toolchain, proof/mutation checks, security notes, and source-linked proof index; ✓ GitHub Actions test/proof workflow. ✓ Tested TLS proxy/standby example; ✓ Local TLS/disk latency and process-RSS baseline for both modes; ✓ Concurrent stalled-sync/queue-saturation test in both logging modes; ✓ Paced-peer and permanent-log-failure workload results, with a separate paced strict-mode RSS measurement. Reproducible full deployment, broader benchmarks, and end-to-end audit remain. |
 
@@ -13,9 +13,10 @@ criteria are not yet met. Update this table at each implementation checkpoint.
 Milestone 2's evidence is recorded in the [adapter audit](adapter-audit.md); its
 completion does not imply completion of the earlier composition proofs or release gates.
 
-Status: approved direction is Rust plus Verus. Current focus is closing milestone 3
-(crash-safe logging). Work on other unfinished milestones waits unless it is a
-direct dependency of that closure.
+Status: approved direction is Rust plus Verus. Milestone 3 is closed under its
+explicit storage assumptions; see the [exit audit](storage-crash-contract.md#milestone-3-exit-audit).
+Next focus is closing milestone 1: composed resource ownership and allocation
+accounting. Other unfinished milestones wait unless they are a direct dependency.
 See the [streaming-core progress notes](streaming-core-progress.md) and
 [authorization core](authorization-core.md) for completed increments and remaining gaps.
 The [runtime ownership layer](runtime-ownership.md) now ties authorization, a single
@@ -113,23 +114,15 @@ Exit criteria:
 - No crash recovery path replays a possibly executed generation automatically.
 - Both operator modes have documented guarantees and failure behavior.
 
-### Remaining closure work for milestone 3
+### Closure evidence for milestone 3
 
-1. ✓ Compose the acknowledged journal record sequence with the recovered source
-   snapshot and scanner steps: `AuditJournal::reconstruct_acknowledged` now proves
-   exact ordered reconstruction under successful initialization, no read errors,
-   checksum correctness, representable offsets, and preserved synced-prefix assumptions.
-2. Validate the disk adapter on a named deployment OS/filesystem, including actual
-   write/disk-full errors and process-death recovery. Keep hardware flush/power-loss
-   behavior an explicit assumption unless separately tested at that scope.
-   A private ext4 CI fixture now covers ENOSPC, read-only startup, and process
-   death; its first successful Linux CI run is still pending.
-3. Audit each logging exit criterion against the resulting theorem, runtime path,
-   and failure evidence before marking this milestone complete.
-
-The [scanner proof](recovery-proof.md) now covers per-step source correspondence
-and justified rejection, and its trace theorem closes the conditional proof item
-above. Next work stays on named-storage validation and the exit audit.
+The [exit audit](storage-crash-contract.md#milestone-3-exit-audit) maps every criterion
+to the theorem, runtime path, test evidence, and limitations. Linux ext4 tests cover
+actual ENOSPC, read-only startup, and process-death recovery on a private filesystem.
+[CI run 40039148167](https://github.com/platypii/LogGate/actions/runs/40039148167)
+passed all four jobs at `7b9ce21`, including production proofs and deliberate defects.
+Hardware flush behavior, syscall correspondence, and stable read/checksum contracts
+remain explicit assumptions. This milestone does not certify physical power loss.
 
 ## 4. Availability hardening
 

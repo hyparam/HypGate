@@ -81,4 +81,5 @@ prefix. The checksum predicate is explicit and shared with the source model.
 Physical persistence, syscall truth, stable-source behavior, SHA-256, and the
 adapter implementation remain trusted. This is not an initial-open or scheduling
 liveness theorem, power-loss certification, or protection against malicious log
-rewriting. Named-storage validation and the logging milestone exit audit remain.
+rewriting. Linux ext4 validation and the logging milestone exit audit are recorded
+in the [storage contract](storage-crash-contract.md#milestone-3-exit-audit).

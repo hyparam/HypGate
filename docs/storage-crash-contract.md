@@ -38,7 +38,7 @@ reads, checksum computation, session randomness/uniqueness, and conversion to th
 record remain trusted. The [scanner refinement](recovery-proof.md) now proves
 per-step source correspondence under explicit adapter contracts; ordered
 acknowledged-prefix reconstruction is now proved under its explicit read/checksum
-and preserved-byte assumptions. Named-storage validation remains open. Checksums defend against accidental corruption, not malicious changes.
+and preserved-byte assumptions. The named ext4 validation below covers live-OS errors and process death. Checksums defend against accidental corruption, not malicious changes.
 EOF exactly at a record boundary cannot reveal whether later records were lost.
 
 Restart creates a new file and session ID. It never appends to an existing file,
@@ -85,7 +85,12 @@ process-failure experiment; host/power-loss tests remain open.
 `scripts/check_storage.sh` creates a private 64 MiB ext4 loopback image on Linux,
 with `data=ordered,barrier=1`, and removes it after testing. It never formats a host
 device. The Ubuntu 24.04 CI storage job records the kernel, mount options, and
-e2fsprogs version. Validation is pending its first successful CI run.
+e2fsprogs version. The storage job passed on 2026-10-23 in
+[CI run 40039148167](https://github.com/platypii/LogGate/actions/runs/40039148167),
+commit `7b9ce21`: Linux `6.17.0-1022-azure`, e2fsprogs `1.47.0`, observed mounts
+`rw,relatime,data=ordered` and then `ro,relatime,data=ordered`. Barriers were requested
+explicitly; their default enabled state is omitted from the displayed mount options.
+Both storage tests and all three crash-test harness cases passed.
 
 The fixture fills that image until actual ENOSPC, checks that a failed append
 preserves the acknowledged prefix, and checks sticky failure even after space is
@@ -94,3 +99,20 @@ same filesystem, then remounts it read-only and requires EROFS at logger startup
 Recovery remains read-only and restart uses a fresh file/session. These tests
 exercise live-OS storage errors and process death; they do not establish power-loss
 durability or certify the backing device's flush behavior.
+
+## Milestone 3 exit audit
+
+Audited against the production code and proof contracts at `7b9ce21`. All four CI jobs passed, including production proofs and deliberate defects. This audit makes
+no unconditional durability claim.
+
+| Exit criterion | Evidence and scope | Status |
+| --- | --- | --- |
+| Partial records cannot masquerade as complete records | Verified `Scanner::next_record` requires the exact complete extent and checksum predicate. `every_torn_record_tail_stops_at_the_last_complete_record` tests every cut of a sample frame and session header; corruption tests reject every single-byte mutation of a sample frame without resynchronization. This excludes malicious checksum forgery and assumes truthful source reads. | Covered under source/checksum contract |
+| Acknowledged records survive every modeled crash point | `Journal::acknowledged_prefix_survives` preserves acknowledged bytes for every recovered sequence satisfying the stable-prefix crash contract. `AuditJournal::reconstruct_acknowledged` proves ordered exact reconstruction under successful initialization, completed error-free reads, correct checksums, and representable offsets. Production commits only after `write_all` and `sync_all`; startup syncs both header and parent directory. Syscall correspondence and persistence remain trusted. | Covered under storage/adapter contract |
+| Process-kill, torn-tail, write-error, and disk-full experiments match the contract | Writer child-process kills after acknowledgment and during later appends; exhaustive sample-tail cuts; injected write/sync failures and blocked sync; private Linux ext4 fixture for actual ENOSPC, EROFS, and writer process death. | Regular tests and Linux ext4 fixture passed |
+| Recovery never automatically replays a possibly executed generation | `LogReader` only reads; `DiskLog::create` requires a new path and session. Gateway process-kill and proxy failover tests check truncated responses, preserved audit prefixes, no observed replay, and new-request routing to standby. No retry/replay path exists in the recovery adapter. The observation window is test evidence, not an unbounded runtime liveness proof. | Covered by implementation inspection and tests |
+| Both operator modes document guarantees and failure behavior | `async-transfer.md`, `running.md`, and `streaming-core-progress.md` describe strict durable byte gating, availability-mode audit gaps, suppressed later appends, deadlines, and volatile diagnostics. Transfer tests exercise both modes; stalled-sync workloads cover bounded queues and continued availability forwarding. Strict mode may establish a connection/send headers before body logging fails. | Covered; full process resource composition belongs to milestones 1 and 4 |
+
+Milestone 3 is closed: these conditional proofs and adapter experiments are
+complete. This does not mean power-loss certification, verified kernel/filesystem
+code, permanent-device-loss tolerance, or durable audit-gap reporting.
