@@ -37,8 +37,11 @@ async fn send(port: u16, path: &str, token: &str, method: &str) -> (Response<Inc
     (sender.send_request(request).await.unwrap(), connection)
 }
 
-async fn exercise(availability: bool, failed_log: bool, truncated: bool, disconnect: bool) {
-    tokio::time::timeout(Duration::from_secs(10), async {
+#[derive(Clone, Copy)]
+enum Stop { None, Disconnect, Drain, Abort }
+
+async fn exercise(availability: bool, failed_log: bool, truncated: bool, stop: Stop) {
+    tokio::time::timeout(Duration::from_secs(25), async {
         let cert = generate_simple_self_signed(vec!["localhost".into()]).unwrap();
         let mut roots = RootCertStore::empty(); roots.add(cert.cert.der().clone()).unwrap();
         let tls = ServerConfig::builder().with_no_client_auth().with_single_cert(vec![cert.cert.der().clone()],
@@ -49,10 +52,12 @@ async fn exercise(availability: bool, failed_log: bool, truncated: bool, disconn
         let dir = TempDir::new(); let path = dir.0.join("audit.log");
         let log = DiskLog::create(&path, 4, Duration::from_secs(2)).unwrap();
         if failed_log { log.inject_failure(); }
-        let app = Gateway::new(config, HttpsTransport::with_roots(roots, Duration::from_secs(5)).unwrap(), log);
+        // Shutdown tests must expire through the drain, not the transport deadline.
+        let deadline = if matches!(stop, Stop::Drain | Stop::Abort) { 60 } else { 5 };
+        let app = Gateway::new(config, HttpsTransport::with_roots(roots, Duration::from_secs(deadline)).unwrap(), log);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap(); let port = listener.local_addr().unwrap().port();
         let (shutdown, stopped) = oneshot::channel();
-        let gateway = tokio::spawn(serve(listener, app.clone(), 4, Duration::from_secs(8), async { let _ = stopped.await; }));
+        let gateway = tokio::spawn(serve(listener, app.clone(), 4, Duration::from_secs(deadline + 3), async { let _ = stopped.await; }));
         for (path, token, method, status) in [("/healthz", "", "GET", 200), ("/readyz", "", "GET", if failed_log && !availability { 503 } else { 200 }),
             ("/routes/7", "wrong", "POST", 401), ("/routes/99", "gateway", "POST", 401)] {
             let (r, c) = send(port, path, token, method).await;
@@ -101,7 +106,38 @@ async fn exercise(availability: bool, failed_log: bool, truncated: bool, disconn
         let (busy, busy_connection) = send(port, "/routes/7", "gateway", "POST").await;
         assert_eq!(busy.status(), StatusCode::SERVICE_UNAVAILABLE);
         busy.collect().await.unwrap(); busy_connection.await.unwrap();
-        if disconnect {
+        if matches!(stop, Stop::Drain | Stop::Abort) {
+            let started = tokio::time::Instant::now();
+            shutdown.send(()).unwrap();
+            // Observe listener closure before releasing the provider. This proves
+            // the stream is completing during drain, rather than before shutdown.
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+                    tokio::task::yield_now().await;
+                }
+            }).await.unwrap();
+            assert!(!gateway.is_finished());
+            if matches!(stop, Stop::Drain) {
+                release.send(()).unwrap();
+                let mut bytes = first.to_vec();
+                bytes.extend_from_slice(&response.collect().await.unwrap().to_bytes());
+                assert_eq!(bytes, b"data: hello\n\ndata: [DONE]\n\n");
+                tokio::time::timeout(Duration::from_secs(2), gateway).await.unwrap().unwrap().unwrap();
+                assert_eq!(app.failed_exchanges(), 0);
+            } else {
+                // The provider remains blocked and both network deadlines are
+                // over a minute away: only the ten-second drain can end this.
+                tokio::time::timeout(Duration::from_secs(15), gateway).await.unwrap().unwrap().unwrap();
+                assert!(started.elapsed() >= Duration::from_secs(10));
+                assert!(response.collect().await.is_err());
+                drop(release);
+            }
+            connection.await.unwrap(); upstream_task.await.unwrap();
+            assert!(app.workers.is_empty());
+            assert!(app.config.admit(b"gateway", 7).is_ok());
+            return;
+        }
+        if matches!(stop, Stop::Disconnect) {
             drop(response); connection.abort(); let _ = connection.await;
             // No new provider output is needed to make cancellation observable.
             tokio::time::timeout(Duration::from_secs(1), async {
@@ -160,13 +196,13 @@ async fn worker_body_drop_aborts_pending_request() {
 }
 
 #[tokio::test]
-async fn full_gateway_streams_before_upstream_eof_and_logs_exact_bytes() { exercise(false, false, false, false).await; }
+async fn full_gateway_streams_before_upstream_eof_and_logs_exact_bytes() { exercise(false, false, false, Stop::None).await; }
 #[tokio::test]
-async fn strict_log_failure_prevents_even_upstream_connection() { exercise(false, true, false, false).await; }
+async fn strict_log_failure_prevents_even_upstream_connection() { exercise(false, true, false, Stop::None).await; }
 #[tokio::test]
-async fn availability_log_failure_preserves_stream_and_reports_gap() { exercise(true, true, false, false).await; }
+async fn availability_log_failure_preserves_stream_and_reports_gap() { exercise(true, true, false, Stop::None).await; }
 #[tokio::test]
-async fn truncated_generation_is_an_error_and_still_reports_audit_gap() { exercise(true, true, true, false).await; }
+async fn truncated_generation_is_an_error_and_still_reports_audit_gap() { exercise(true, true, true, Stop::None).await; }
 
 #[tokio::test]
 async fn concurrent_tenants_keep_credentials_bodies_and_audit_records_isolated() {
@@ -262,4 +298,14 @@ async fn concurrent_tenants_keep_credentials_bodies_and_audit_records_isolated()
 }
 
 #[tokio::test]
-async fn client_disconnect_cancels_stalled_provider_and_releases_request() { exercise(false, false, false, true).await; }
+async fn client_disconnect_cancels_stalled_provider_and_releases_request() { exercise(false, false, false, Stop::Disconnect).await; }
+
+#[tokio::test]
+async fn shutdown_drains_active_response_without_truncation() {
+    exercise(false, false, false, Stop::Drain).await;
+}
+
+#[tokio::test]
+async fn shutdown_aborts_stalled_response_after_drain_and_releases_request() {
+    exercise(false, false, false, Stop::Abort).await;
+}

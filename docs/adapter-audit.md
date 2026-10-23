@@ -41,7 +41,22 @@ only background filesystem worker and is not replaced after a timeout.
 | Tenant/request effects remain distinct | Two tenants share a selector and upstream while using distinct credentials. A barrier forces overlapping requests; tests check provider headers, responses, distinct audit request IDs, sequential chunk IDs, and both body directions grouped by tenant. |
 | Log acknowledgments correspond to synced frames | Single worker/immutable job/oneshot association and verified journal transitions. Partial-write, sync/disk-full failure, timeout, real-file payload, and process-kill tests. Real storage durability and scanner refinement remain assumptions/open work. |
 | Cancellation and failure do not synthesize success | Explicit body end markers, writer-drop errors, post-header transport failure aborts HTTP framing. Provider-truncation tests reject successful EOF; a real client disconnect cancels a stalled request and releases its slot without new provider output. |
-| Request ownership reaches response completion | Lease remains through the sink finish hook and application-queue drain. Admission-contention, worker-drop, client-disconnect, normal shutdown, and concurrent-request tests. This is tested ownership, not a complete memory/resource theorem. |
+| Request ownership reaches response completion | Lease remains through the sink finish hook and application-queue drain. Admission-contention, worker-drop, client-disconnect, active-response drain, forced stalled-response shutdown, and concurrent-request tests. This is tested ownership, not a complete memory/resource theorem. |
+
+## Shutdown evidence
+
+Two real HTTP/TLS tests trigger shutdown while a provider response is active.
+Both first observe the listening socket close while the gateway task remains alive.
+One releases the provider and checks the exact complete response and clean EOF
+during the drain. The other keeps the provider blocked beyond the ten-second drain,
+with transport and connection deadlines exceeding sixty seconds, so those deadlines
+cannot explain termination. It checks bounded server return, a client body error
+rather than clean EOF, an empty worker tracker, and restored admission capacity.
+
+These exercise the production drain duration without changing runtime behavior.
+They do not prove scheduler fairness, bound an uninterruptible filesystem syscall,
+or establish a formal shutdown/resource theorem. The disk worker still has no
+explicit join protocol.
 
 ## Remaining limits
 
@@ -57,5 +72,5 @@ power-loss validation, formal scanner refinement, performance benchmarks, deploy
 failover experiments, and independent review remain open. Live-provider compatibility
 and full duplex/early-response behavior are not certified by the local fixtures.
 
-Validation at this checkpoint: 59 workspace tests pass; the unchanged core retains
-43 verified checks and 25 proof-rejected mutations. GitHub CI reruns all three gates.
+Validation at this checkpoint: 63 workspace tests pass; the unchanged core retains
+48 verified checks and 29 proof-rejected mutations. GitHub CI reruns all three gates.
