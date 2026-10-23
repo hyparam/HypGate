@@ -65,3 +65,21 @@ fn recovery_cursor_stops_on_abandoned_or_incomplete_records() {
     assert!(overflow.begin().is_none());
     assert_eq!(overflow.offset(), u64::MAX - 64);
 }
+
+
+#[test]
+fn framed_payload_is_exact_and_cannot_disagree_with_header_length() {
+    use gateway_core::framing::encode_payload;
+    for length in [0, 1, 255, 65536, 1048576] {
+        let payload: Vec<_> = (0..length).map(|i| (i % 251) as u8).collect();
+        let header = || Header { payload: length as u32, tenant: 19, request: 29, chunk: 37, direction: 1 };
+        let frame = encode_payload(header(), &payload).unwrap();
+        assert_eq!(&frame[..33], encode(header()).unwrap());
+        assert_eq!(&frame[33..], payload);
+        assert_eq!(frame.len(), 33 + length);
+        assert!(frame.capacity() >= frame.len() + 32);
+        let wrong = Header { payload: length as u32 + 1, tenant: 19, request: 29, chunk: 37, direction: 1 };
+        assert!(encode_payload(wrong, &payload).is_none());
+    }
+    assert!(encode_payload(Header { payload: 0, tenant: 0, request: 0, chunk: 0, direction: 0 }, &[]).is_none());
+}

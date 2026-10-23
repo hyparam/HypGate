@@ -156,12 +156,10 @@ impl AuditLog for DiskLog {
 
 fn encode(record: LogRecord<'_>) -> Vec<u8> {
     // append checked the record bounds before queue reservation/allocation.
-    let mut frame = framing::encode(Header { payload: record.bytes.len() as u32,
+    let mut frame = framing::encode_payload(Header { payload: record.bytes.len() as u32,
         tenant: record.tenant, request: record.request, chunk: record.chunk,
         direction: match record.direction { Direction::Upload => 0, Direction::Download => 1 },
-    }).expect("validated log record");
-    frame.reserve(record.bytes.len() + 32);
-    frame.extend_from_slice(record.bytes);
+    }, record.bytes).expect("validated log record");
     frame.extend_from_slice(&Sha256::digest(&frame));
     frame
 }

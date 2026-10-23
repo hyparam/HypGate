@@ -16,6 +16,14 @@ Its postcondition proves that specification decoding returns the original fields
 `decode` agrees with the specification on every input, rejects malformed headers,
 and proves that every accepted header re-encodes to the identical input bytes.
 
+`encode_payload` rejects a header whose declared payload length differs from the
+supplied slice, as well as invalid headers. On success it proves the output is
+exactly the canonical header followed by the unchanged complete payload, with
+length 33 plus the payload length and at most 1,048,609 bytes. The runtime hashes
+these verified bytes and appends the digest. The encoder reserves payload plus
+65 bytes so the checksum fits without adapter growth; allocator behavior remains
+outside the byte-sequence proof.
+
 `frame_end` advances by exactly 33 header bytes plus payload plus 32 digest bytes.
 It rejects oversized payloads, insufficient available bytes, and offset overflow.
 The accepted end strictly advances and never exceeds the supplied available extent.
@@ -44,8 +52,8 @@ records equal the acknowledged journal prefix.
 The scanner decodes the fixed-size header before allocating the payload buffer.
 It reads the entire payload and digest, validates SHA-256, and only then calls
 `frame_end` with the lengths of those successfully read buffers. The serializer
-validates record bounds before calling the core encoder, then appends the payload
-and its digest. Those call-site bindings remain trusted Rust.
+validates record bounds before calling the core payload encoder, then hashes its
+result and appends the digest. Those call-site bindings remain trusted Rust.
 
 Verus does not prove the file-header parser, `Read` implementation, exact-read
 helper, checksum implementation, scanner loop, or correspondence to physical disk.
@@ -64,7 +72,7 @@ states the separate persistence assumptions.
 
 Boundary-value roundtrips and malformed header/extent tests run through ordinary
 Cargo. Three cursor mutations reopen a stopped scanner, advance before validation, or
-regress its offset. Four framing mutations switch the request field to tenant bytes, remove the
+regress its offset. Two payload mutations omit the body or remove its length check. Four framing mutations switch the request field to tenant bytes, remove the
 payload bound, accept incomplete extents, and skip a frame byte; all are rejected.
-The complete core passes 52 verification checks, 68 workspace tests pass, and all
-32 proof mutations are rejected. Counts describe checks, not independent guarantees.
+The complete core passes 55 verification checks, 75 workspace tests pass, and all
+39 proof mutations are rejected. Counts describe checks, not independent guarantees.

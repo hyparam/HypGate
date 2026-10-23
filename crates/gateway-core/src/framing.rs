@@ -66,6 +66,24 @@ pub fn encode(h: Header) -> (out: Option<Vec<u8>>)
     Some(bytes)
 }
 
+// Frame bytes covered by the digest: canonical header followed by exact payload.
+// Reserve room for the external 32-byte checksum to avoid growth in the adapter.
+pub fn encode_payload(h: Header, payload: &[u8]) -> (out: Option<Vec<u8>>)
+    ensures match out {
+        Some(bytes) => valid(h) && h.payload == payload.len()
+            && bytes@ == encoding(h) + payload@ && bytes.len() == 33 + payload.len()
+            && bytes.len() <= 1048609,
+        None => !valid(h) || h.payload != payload.len(),
+    },
+{
+    if h.payload as usize != payload.len() { return None; }
+    let header = match encode(h) { Some(header) => header, None => return None };
+    let mut bytes = Vec::with_capacity(payload.len() + 65);
+    append(&mut bytes, header.as_slice());
+    append(&mut bytes, payload);
+    Some(bytes)
+}
+
 pub fn decode(bytes: &[u8]) -> (out: Option<Header>)
     ensures out == decoded(bytes@), match out { Some(h) => valid(h) && encoding(h) == bytes@, None => true },
 {
