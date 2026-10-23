@@ -1,0 +1,117 @@
+use super::*;
+use crate::disk_log::LogReader;
+use http_body_util::BodyExt;
+use rcgen::generate_simple_self_signed;
+use serde_json::json;
+use sha2::{Digest, Sha256};
+use std::{fs::File, sync::Mutex};
+use tokio::net::TcpStream;
+use tokio_rustls::{TlsAcceptor, rustls::{RootCertStore, ServerConfig, pki_types::PrivatePkcs8KeyDer}};
+
+struct TempDir(std::path::PathBuf);
+impl TempDir {
+    fn new() -> Self {
+        let mut random = [0; 16]; getrandom::fill(&mut random).unwrap();
+        let name: String = random.iter().map(|b| format!("{b:02x}")).collect();
+        let path = std::env::temp_dir().join(format!("soundgate-server-{name}"));
+        std::fs::create_dir(&path).unwrap(); Self(path)
+    }
+}
+impl Drop for TempDir { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }
+fn config(port: u16) -> GatewayConfig {
+    let routes = json!([{"tenant":1,"selector":7,"origin":0,"credential":0}]);
+    let root = json!({"identities":[{"tenant":1,"sha256":format!("{:x}",Sha256::digest(b"gateway"))}],
+        "destinations":[format!("https://localhost:{port}/v1/messages")],
+        "credentials":[{"tenant":1,"kind":"api_key","env":"KEY"}],"grants":routes,
+        "limits":{"requests":1,"chunk_bytes":3},"logging":"strict"});
+    GatewayConfig::from_json(&serde_json::to_vec(&root).unwrap(), &serde_json::to_vec(&json!({"routes":routes})).unwrap(),
+        |_| Some("provider-secret".into())).unwrap()
+}
+async fn send(port: u16, path: &str, token: &str, method: &str) -> (Response<Incoming>, JoinHandle<()>) {
+    let socket = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(socket)).await.unwrap();
+    let connection = tokio::spawn(async move { let _ = conn.await; });
+    let request = Request::builder().method(method).uri(path).header("host", "attacker.example")
+        .header("authorization", format!("Bearer {token}")).header("x-api-key", "caller-secret")
+        .body(Full::new(Bytes::from_static(b"{\"stream\":true}"))).unwrap();
+    (sender.send_request(request).await.unwrap(), connection)
+}
+
+#[tokio::test]
+async fn full_gateway_streams_before_upstream_eof_and_logs_exact_bytes() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let cert = generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let mut roots = RootCertStore::empty(); roots.add(cert.cert.der().clone()).unwrap();
+        let tls = ServerConfig::builder().with_no_client_auth().with_single_cert(vec![cert.cert.der().clone()],
+            PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()).into()).unwrap();
+        let acceptor = TlsAcceptor::from(Arc::new(tls));
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let config = config(upstream.local_addr().unwrap().port());
+        let dir = TempDir::new(); let path = dir.0.join("audit.log");
+        let log = DiskLog::create(&path, 4, Duration::from_secs(2)).unwrap();
+        let app = Gateway::new(config, HttpsTransport::with_roots(roots, Duration::from_secs(5)).unwrap(), log);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap(); let port = listener.local_addr().unwrap().port();
+        let (shutdown, stopped) = oneshot::channel();
+        let gateway = tokio::spawn(serve(listener, app.clone(), 4, Duration::from_secs(8), async { let _ = stopped.await; }));
+        for (path, token, method, status) in [("/healthz", "", "GET", 200), ("/readyz", "", "GET", 200),
+            ("/routes/7", "wrong", "POST", 401), ("/routes/99", "gateway", "POST", 401)] {
+            let (r, c) = send(port, path, token, method).await;
+            assert_eq!(r.status().as_u16(), status); r.collect().await.unwrap(); c.await.unwrap();
+        }
+        // Rejected requests must not have connected to the provider.
+        assert!(tokio::time::timeout(Duration::from_millis(20), upstream.accept()).await.is_err());
+        let (release, waiting) = oneshot::channel(); let waiting = Arc::new(Mutex::new(Some(waiting)));
+        let upstream_task = tokio::spawn(async move {
+            let (socket, _) = upstream.accept().await.unwrap(); let socket = acceptor.accept(socket).await.unwrap();
+            let service = service_fn(move |request: Request<Incoming>| {
+                let waiting = waiting.lock().unwrap().take().unwrap();
+                async move {
+                    assert_eq!(request.uri(), "/v1/messages");
+                    assert_eq!(request.headers()["x-api-key"], "provider-secret");
+                    assert!(!request.headers().contains_key("authorization"));
+                    assert_eq!(request.collect().await.unwrap().to_bytes(), "{\"stream\":true}");
+                    let (mut writer, body) = http_body::channel(16);
+                    tokio::spawn(async move {
+                        writer.write_all(b"data: hello\n\n").await.unwrap();
+                        waiting.await.unwrap();
+                        writer.write_all(b"data: [DONE]\n\n").await.unwrap();
+                        writer.shutdown().await.unwrap();
+                    });
+                    Ok::<_, Infallible>(Response::builder().header("content-type", "text/event-stream")
+                        .header("set-cookie", "provider-secret").body(body).unwrap())
+                }
+            });
+            let _ = hyper::server::conn::http1::Builder::new().serve_connection(TokioIo::new(socket), service).await;
+        });
+        let (mut response, connection) = send(port, "/routes/7", "gateway", "POST").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(!response.headers().contains_key("set-cookie"));
+        let first = response.body_mut().frame().await.unwrap().unwrap().into_data().unwrap();
+        assert!(!first.is_empty()); // arrives while the upstream is waiting, before EOF
+        release.send(()).unwrap();
+        let rest = response.collect().await.unwrap().to_bytes();
+        let mut bytes = first.to_vec(); bytes.extend_from_slice(&rest);
+        assert_eq!(bytes, b"data: hello\n\ndata: [DONE]\n\n");
+        connection.await.unwrap(); upstream_task.await.unwrap();
+        shutdown.send(()).unwrap(); gateway.await.unwrap().unwrap();
+        assert!(app.workers.is_empty()); assert_eq!(app.failed_exchanges(), 0); assert_eq!(app.audit_gaps(), 0);
+        let mut reader = LogReader::new(File::open(path).unwrap()).unwrap();
+        let mut upload = Vec::new(); let mut download = Vec::new();
+        while let Some(r) = reader.next_record().unwrap() {
+            match r.direction { crate::transfer::Direction::Upload => &mut upload,
+                crate::transfer::Direction::Download => &mut download }.extend(r.bytes);
+        }
+        assert_eq!(upload, b"{\"stream\":true}"); assert_eq!(download, bytes);
+    }).await.unwrap();
+}
+
+#[tokio::test]
+async fn worker_body_drop_aborts_pending_request() {
+    let tracker = TaskTracker::new();
+    let task = tracker.spawn(std::future::pending::<()>());
+    let (writer, body) = http_body::channel(16);
+    let response = GatewayBody::Stream { body, _task: AbortOnDrop(Some(task)) };
+    drop(response); drop(writer); tracker.close();
+    tokio::time::timeout(Duration::from_secs(1), tracker.wait()).await.unwrap();
+    assert!(tracker.is_empty());
+}

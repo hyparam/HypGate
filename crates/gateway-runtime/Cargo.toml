@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+[[bin]]
+name = "soundgate"
+path = "src/main.rs"
+
 [dependencies]
 gateway-core = { path = "../gateway-core" }
 http = "1"
@@ -11,7 +15,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 getrandom = "0.3"
-tokio = { version = "1", features = ["io-util", "macros", "rt", "sync", "time", "net"] }
+tokio = { version = "1", features = ["io-util", "macros", "rt", "sync", "time", "net", "signal"] }
 bytes = "1"
 hyper = { version = "1", features = ["client", "http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }

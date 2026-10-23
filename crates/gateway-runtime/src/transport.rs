@@ -9,7 +9,9 @@ use tokio_rustls::{TlsConnector, rustls::{ClientConfig, RootCertStore, pki_types
 pub trait ResponseSink: AsyncWrite + Unpin {
     /// Called once before response body bytes. This must preserve status and the
     /// supplied filtered headers. A body error afterward must abort HTTP framing.
-    fn start(&mut self, status: StatusCode, headers: HeaderMap) -> impl Future<Output = io::Result<()>>;
+    fn start(&mut self, status: StatusCode, headers: HeaderMap) -> impl Future<Output = io::Result<()>> + Send;
+    /// Complete a successful body and drain any sink-owned application queue.
+    fn finish(&mut self) -> impl Future<Output = io::Result<()>> + Send { async { Ok(()) } }
 }
 #[derive(Debug, PartialEq, Eq)]
 pub enum TransportError { Timeout, Connect, Tls, Http, Metadata, Upload, Download, Client }
@@ -21,7 +23,7 @@ impl HttpsTransport {
         let roots = RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         Self::with_roots(roots, deadline)
     }
-    fn with_roots(roots: RootCertStore, deadline: Duration) -> io::Result<Self> {
+    pub(crate) fn with_roots(roots: RootCertStore, deadline: Duration) -> io::Result<Self> {
         if deadline.is_zero() || deadline > Duration::from_secs(3600) { return Err(io::ErrorKind::InvalidInput.into()); }
         let config = ClientConfig::builder().with_root_certificates(roots).with_no_client_auth();
         Ok(Self { connector: TlsConnector::from(Arc::new(config)), deadline })
@@ -67,6 +69,7 @@ impl HttpsTransport {
             output.start(parts.status, headers).await.map_err(|_| TransportError::Client)?;
             let download = transfer::copy_body(prepared.routed.stream(), &mut http_body::Reader::new(body), output, log, Direction::Download)
                 .await.map_err(|_| TransportError::Download)?;
+            output.finish().await.map_err(|_| TransportError::Client)?;
             Ok(ExchangeStats { upload, download })
         };
         tokio::pin!(operation, connection);

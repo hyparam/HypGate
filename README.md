@@ -3,8 +3,37 @@
 Research toward a minimal LLM gateway: forward request bodies unchanged, stream
 responses back, and record traffic to disk. No provider API translation.
 
-Status: a Rust Cargo library with Verus-checked authorization, configuration,
-streaming, and resource invariants. No HTTP gateway or end-to-end guarantees yet.
+Status: a runnable prototype with Verus-checked authorization, configuration,
+streaming, and resource invariants. The network and disk adapters are tested;
+end-to-end formal guarantees and production hardening remain incomplete.
+
+## Important properties we aim to prove
+
+These are the project's proof targets, not a claim that the whole gateway already
+satisfies them formally. “Core proved” means a synchronous model or transition is
+checked by Verus, conditional on the documented adapter contracts.
+
+| Property | Intended guarantee | Evidence today |
+| --- | --- | --- |
+| Authorization and fail-closed security | Every upstream dispatch requires an authenticated tenant's grant; authentication or policy failures cannot authorize forwarding, in either logging mode. | Core token issuance proved; HTTP binding tested. Complete mediation remains a trusted adapter obligation. |
+| Tenant and credential isolation | Requests, completions, and credentials cannot cross tenant/request boundaries; gateway authentication material never becomes an upstream credential. | Core tenant/credential-handle and ticket checks proved; secret/header handling tested. Composed isolation and audit access controls remain open. |
+| Routing and configuration confinement | Candidate configuration and request fields cannot expand operator grants or change the authorized destination/credential binding. | Normalized configuration and route selection proved; URI, DNS, TLS, and actual dispatch remain trusted/tested. |
+| Byte integrity and ordering | Forwarded body bytes form an unchanged, ordered prefix of the input, across chunks and partial writes, without skipped or duplicated advancement. | Core byte-prefix and completion properties proved; async HTTP integration tested. Peer receipt is not proved. |
+| Strict audit-before-forwarding | Every submitted body range in strict mode is covered by a durable log acknowledgment for that request and chunk. | Core gate proved conditional on truthful acknowledgments; disk sync adapter tested. Filesystem crash guarantees remain open. |
+| Crash-safe recovery | Recovery exposes only complete records, and acknowledged records survive every crash in the specified storage model. | Framing/scanning and fault tests implemented. Crash model, recovery theorem, and process-kill validation remain open. |
+| Cancellation and no replay | Cancellation prevents new submissions; uncertain effects, crashes, or failover never trigger automatic replay of a possibly executed generation. | Core cancellation/stale-event checks proved; transport has no replay path. Async cancellation and recovery composition remain unproved. |
+| Resource bounds and safe release | Slots, buffers, queues, and outstanding operations stay within explicit budgets; capacity cannot be reused while work retaining it remains alive. | Logical slot limits and ID isolation proved; ownership, queues, and deadlines tested. Full allocation accounting and composed release proofs remain open. |
+| Logging-mode separation | Availability mode may lose audit coverage but cannot relax authorization, routing, or tenant isolation; logging failure cannot create unbounded replacement work. | Core logging-mode transitions proved; bounded logger and failure handling tested. End-to-end composition remains open. |
+| Honest completion and conditional progress | Failed/truncated streams cannot masquerade as successful completion; under stated scheduler and I/O assumptions, admitted work terminates or times out and releases resources. | EOF/error behavior and deadlines tested. Liveness and whole-system shutdown/resource-release proofs remain open. |
+
+Verus does not verify Tokio, Hyper, rustls, the OS, DNS/PKI, or the filesystem for us.
+Availability also depends on deployment: an external load balancer must route around
+a failed gateway instance, and interrupted generations are not transparently replayed.
+The [security contract](docs/security-contract.md) and progress notes below specify
+the assumptions and limits; these targets do not promise secrecy of arbitrary
+opaque body contents or survival of permanent storage loss.
+
+## Implementation progress
 
 The [implementation milestones](docs/implementation-plan.md) are the active plan,
 starting with a bounded chunk interface and verified partial-write accounting.
@@ -24,7 +53,8 @@ reads/writes and an explicit durable-log contract, with cancellation tests.
 The [disk logger](docs/disk-logging.md) now implements that contract with a bounded
 worker, sync acknowledgments, and an incremental recovery scanner; crash proofs remain open.
 The [HTTPS upstream transport](docs/https-transport.md) now forwards opaque bodies
-over real TLS through the stream core. An inbound server/executable is still missing.
+over real TLS through the stream core. The [runnable gateway](docs/running.md)
+connects the inbound server, authorization, streaming, and disk logging.
 
 See [language and verification research](docs/verification-research.md) for the
 candidate comparison, agreed scope, proposed proof obligations, and next experiment.
@@ -51,7 +81,7 @@ cargo verus verify -p gateway-core --locked -- --triggers-mode silent
 VERUS=/path/to/verus python3 scripts/check_mutations.py
 ```
 
-Validation on 2026-10-23: 36 core verification checks passed, 45 workspace tests
+Validation on 2026-10-23: 36 core verification checks passed, 48 workspace tests
 passed, and all 21 deliberate mutations failed their proof obligations.
 These counts are checks, not a count of independent security guarantees.
 

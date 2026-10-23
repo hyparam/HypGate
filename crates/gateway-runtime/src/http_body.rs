@@ -2,7 +2,8 @@
 use bytes::{Buf, Bytes};
 use http_body::{Body, Frame};
 use std::{io, pin::Pin, task::{Context, Poll}};
-use tokio::{io::{AsyncRead, AsyncWrite, ReadBuf}, sync::mpsc};
+use tokio::{io::{AsyncRead, AsyncWrite, ReadBuf}, sync::{mpsc, oneshot}};
+use std::future::Future;
 use tokio_util::sync::PollSender;
 
 pub(crate) struct Reader<B> { body: B, buffered: Bytes, ended: bool }
@@ -36,11 +37,13 @@ impl<B: Body<Data = Bytes> + Unpin> AsyncRead for Reader<B> {
 }
 
 enum Message { Data(Bytes), End }
-pub(crate) struct Writer { sender: PollSender<Message>, max_frame: usize, ended: bool }
-pub(crate) struct ChannelBody { receiver: mpsc::Receiver<Message>, ended: bool }
+pub(crate) struct Writer { sender: PollSender<Message>, max_frame: usize, ended: bool, drained: oneshot::Receiver<()>, complete: bool }
+pub(crate) struct ChannelBody { receiver: mpsc::Receiver<Message>, ended: bool, drained: Option<oneshot::Sender<()>> }
 pub(crate) fn channel(max_frame: usize) -> (Writer, ChannelBody) {
     let (sender, receiver) = mpsc::channel(1);
-    (Writer { sender: PollSender::new(sender), max_frame, ended: false }, ChannelBody { receiver, ended: false })
+    let (done, drained) = oneshot::channel();
+    (Writer { sender: PollSender::new(sender), max_frame, ended: false, drained, complete: false },
+        ChannelBody { receiver, ended: false, drained: Some(done) })
 }
 impl AsyncWrite for Writer {
     fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, bytes: &[u8]) -> Poll<io::Result<usize>> {
@@ -64,14 +67,19 @@ impl AsyncWrite for Writer {
     }
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        if this.ended { return Poll::Ready(Ok(())); }
-        match this.sender.poll_reserve(cx) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(Err(_)) => Poll::Ready(Err(io::ErrorKind::BrokenPipe.into())),
+        if this.complete { return Poll::Ready(Ok(())); }
+        if !this.ended { match this.sender.poll_reserve(cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(_)) => return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into())),
             Poll::Ready(Ok(())) => {
                 this.ended = true;
-                Poll::Ready(this.sender.send_item(Message::End).map_err(|_| io::ErrorKind::BrokenPipe.into()))
+                if this.sender.send_item(Message::End).is_err() { return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into())); }
             }
+        } }
+        match Pin::new(&mut this.drained).poll(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Ok(())) => { this.complete = true; Poll::Ready(Ok(())) }
+            Poll::Ready(Err(_)) => Poll::Ready(Err(io::ErrorKind::BrokenPipe.into())),
         }
     }
 }
@@ -84,7 +92,11 @@ impl Body for ChannelBody {
         match this.receiver.poll_recv(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Some(Message::Data(data))) => Poll::Ready(Some(Ok(Frame::data(data)))),
-            Poll::Ready(Some(Message::End)) => { this.ended = true; Poll::Ready(None) }
+            Poll::Ready(Some(Message::End)) => {
+                this.ended = true;
+                if let Some(done) = this.drained.take() { let _ = done.send(()); }
+                Poll::Ready(None)
+            }
             Poll::Ready(None) => {
                 this.ended = true;
                 // Dropped/canceled upload is not a successful HTTP EOF.

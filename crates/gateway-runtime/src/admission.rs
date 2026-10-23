@@ -45,6 +45,7 @@ pub struct Request<'a> {
 }
 
 impl Admission {
+    pub(crate) fn requires_audit(&self) -> bool { self.strict }
     pub fn new(policy: Policy, requests: usize, chunk_bytes: usize, strict: bool) -> Self {
         Self { registry: Mutex::new(ResourceAdmission::new(requests, chunk_bytes)), policy, strict }
     }

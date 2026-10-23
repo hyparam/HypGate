@@ -1,7 +1,7 @@
 # HTTPS upstream transport
 
 The runtime now performs real HTTP/1.1 exchanges through Tokio, Hyper, and rustls.
-It is a library transport, not yet a listening gateway executable. The transport
+The [runnable gateway](running.md) wraps this transport in a listening server. The transport
 consumes a private-constructor `PreparedRequest`, retaining its admission lease
 through request upload and response streaming. No separate URL or credential
 override is accepted by the exchange API.
@@ -31,8 +31,9 @@ compression/decompression is performed.
 Status and filtered response headers reach a `ResponseSink` before body bytes.
 Redirects are returned as status/body without following Location. After a response
 starts, any later error must cause the eventual server adapter to abort framing,
-not emit a successful final chunk. The transport does not itself shut down the
-caller-owned output sink; only its successful return authorizes a clean end.
+not emit a successful final chunk. After successful body transfer, the transport invokes the sink completion hook
+while it still owns admission. The server hook sends a clean end marker and waits
+for its application queue to drain. Errors do not invoke that hook.
 
 Upload and response-header reception are driven concurrently, but download starts
 after upload completion. Providers that reject an upload early may cause an upload
@@ -50,5 +51,5 @@ through the same transfer driver. No live model provider was contacted.
 All network code, TLS, HTTP parsing/framing, DNS, async scheduling, and body queues
 remain trusted and tested rather than Verus-verified. The 32 KiB Hyper connection
 buffer setting and bounded channel do not prove whole-process memory bounds.
-Next work is the inbound server, executable configuration, response completion and
-abort integration, health/readiness, and end-to-end tests using the disk logger.
+The inbound server, executable, response completion/abort integration, health/readiness,
+and an end-to-end disk test now exist; broader fault and concurrency coverage remain.

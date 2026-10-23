@@ -107,6 +107,7 @@ fn digest(text: &str) -> Result<Vec<u8>, ConfigError> {
 }
 
 impl GatewayConfig {
+    pub(crate) fn requires_audit(&self) -> bool { self.admission.requires_audit() }
     /// Root policy and secret resolver are operator-controlled. Candidate JSON
     /// can select only grants already in root policy. Errors never echo inputs.
     pub fn from_json(root: &[u8], candidate: &[u8], mut secret: impl FnMut(&str) -> Option<String>)
