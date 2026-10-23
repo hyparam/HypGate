@@ -93,15 +93,37 @@ impl Gateway {
             }
         });
         let guard = AbortOnDrop(Some(task));
-        match headers.await {
-            Ok((status, headers)) => {
-                let mut response = Response::new(GatewayBody::Stream { body, _task: guard });
-                *response.status_mut() = status;
+        worker_response(headers, body, guard).await
+    }
+}
+
+// Build the response while retaining cancellation ownership of its worker.
+async fn worker_response(headers: oneshot::Receiver<(StatusCode, HeaderMap)>,
+    mut body: http_body::ChannelBody, mut guard: AbortOnDrop) -> Result<Response<GatewayBody>, Infallible>
+{
+    match headers.await {
+        Ok((status, headers)) => {
+            // Hyper suppresses body polling for these statuses. Drain the
+            // empty channel and await accounting before transferring headers,
+            // otherwise dropping an unpolled body aborts a successful worker.
+            if status == StatusCode::NO_CONTENT || status == StatusCode::NOT_MODIFIED {
+                if http_body_util::BodyExt::frame(&mut body).await.is_some() {
+                    return Ok(fixed(StatusCode::BAD_GATEWAY, "unexpected upstream body\n"));
+                }
+                if let Some(task) = &mut guard.0 {
+                    if task.await.is_err() { return Ok(fixed(StatusCode::BAD_GATEWAY, "upstream failed\n")); }
+                }
+                guard.0.take();
+                let mut response = fixed(status, "");
                 *response.headers_mut() = headers;
-                Ok(response)
+                return Ok(response);
             }
-            Err(_) => Ok(fixed(StatusCode::BAD_GATEWAY, "upstream failed\n")),
+            let mut response = Response::new(GatewayBody::Stream { body, _task: guard });
+            *response.status_mut() = status;
+            *response.headers_mut() = headers;
+            Ok(response)
         }
+        Err(_) => Ok(fixed(StatusCode::BAD_GATEWAY, "upstream failed\n")),
     }
 }
 

@@ -70,3 +70,15 @@ A full memory budget must also account for one driver chunk per active request,
 one frame per HTTP output queue, logger queue/worker frames, connection state,
 TLS buffers, allocator overhead, and filesystem caches. Load measurements and
 formal composition remain open.
+
+
+## Responses without HTTP bodies
+
+HTTP 204 and 304 suppress body polling in Hyper. The inbound adapter therefore
+drains their internal empty completion channel and waits for the tracked worker
+to finish before returning fixed empty responses. Cancellation retains the worker
+abort guard while waiting. An unexpected payload or missing clean completion
+returns 502 before upstream headers are sent. Normal streaming responses continue
+to release the abort guard only at clean EOF. Tests reproduce the original aborted
+accounting path over real HTTP and cover unexpected data and dropped writers.
+This is trusted async adapter behavior, not a Verus proof of Hyper or cancellation.

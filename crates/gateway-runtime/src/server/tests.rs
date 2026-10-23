@@ -451,3 +451,61 @@ async fn poisoned_admission_is_unready_and_fail_closed_in_both_logging_modes() {
 }
 
 mod process_crash;
+
+
+#[tokio::test]
+async fn bodyless_http_statuses_finish_worker_accounting() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        for status in [StatusCode::NO_CONTENT, StatusCode::NOT_MODIFIED, StatusCode::OK] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let (done, completed) = oneshot::channel();
+            let done = Arc::new(Mutex::new(Some(done)));
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let service = service_fn(move |_: Request<Incoming>| {
+                    let done = done.lock().unwrap().take().unwrap();
+                    async move {
+                        let (head, headers) = oneshot::channel();
+                        let (writer, body) = http_body::channel(16);
+                        let task = tokio::spawn(async move {
+                            let mut output = Output { head: Some(head), writer };
+                            output.start(status, HeaderMap::new()).await.unwrap();
+                            output.finish().await.unwrap();
+                            // Emulates final metrics/lease cleanup after draining.
+                            done.send(()).unwrap();
+                        });
+                        worker_response(headers, body, AbortOnDrop(Some(task))).await
+                    }
+                });
+                hyper::server::conn::http1::Builder::new().keep_alive(false)
+                    .serve_connection(TokioIo::new(socket), service).await.unwrap();
+            });
+            let (response, connection) = send(port, "/", "", "GET").await;
+            assert_eq!(response.status(), status);
+            assert!(response.collect().await.unwrap().to_bytes().is_empty());
+            connection.await.unwrap(); server.await.unwrap();
+            completed.await.expect("HTTP body suppression must not abort final worker accounting");
+        }
+    }).await.unwrap();
+}
+
+#[tokio::test]
+async fn bodyless_status_rejects_payload_or_missing_completion() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        for status in [StatusCode::NO_CONTENT, StatusCode::NOT_MODIFIED] {
+            for payload in [false, true] {
+                let (head, headers) = oneshot::channel();
+                let (writer, body) = http_body::channel(16);
+                let task = tokio::spawn(async move {
+                    let mut output = Output { head: Some(head), writer };
+                    output.start(status, HeaderMap::new()).await.unwrap();
+                    if payload { output.write_all(b"unexpected").await.unwrap(); }
+                    // Missing clean completion is an error, even with no bytes.
+                });
+                let response = worker_response(headers, body, AbortOnDrop(Some(task))).await.unwrap();
+                assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+            }
+        }
+    }).await.unwrap();
+}
