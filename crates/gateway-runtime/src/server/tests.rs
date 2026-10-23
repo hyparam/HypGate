@@ -311,3 +311,60 @@ async fn shutdown_aborts_stalled_response_after_drain_and_releases_request() {
 }
 
 mod benchmark;
+
+#[tokio::test]
+async fn client_disconnect_before_headers_cancels_request_and_upstream_socket() {
+    use tokio::io::AsyncReadExt;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let cert = generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let mut roots = RootCertStore::empty(); roots.add(cert.cert.der().clone()).unwrap();
+        let tls = ServerConfig::builder().with_no_client_auth().with_single_cert(vec![cert.cert.der().clone()],
+            PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()).into()).unwrap();
+        let acceptor = TlsAcceptor::from(Arc::new(tls));
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dir = TempDir::new();
+        let app = Gateway::new(config(upstream.local_addr().unwrap().port(), false),
+            HttpsTransport::with_roots(roots, Duration::from_secs(60)).unwrap(),
+            DiskLog::create(&dir.0.join("audit.log"), 4, Duration::from_secs(2)).unwrap());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap(); let port = listener.local_addr().unwrap().port();
+        let (shutdown, stopped) = oneshot::channel();
+        let gateway = tokio::spawn(serve(listener, app.clone(), 4, Duration::from_secs(65), async { let _ = stopped.await; }));
+        let (received, request_received) = oneshot::channel();
+        let provider = tokio::spawn(async move {
+            let (socket, _) = upstream.accept().await.unwrap();
+            let mut socket = acceptor.accept(socket).await.unwrap();
+            let mut request = Vec::new();
+            // Read the empty chunked upload without sending any response bytes.
+            // One-byte reads deliberately avoid consuming closure before signaling.
+            loop {
+                let mut byte = [0];
+                assert_eq!(socket.read(&mut byte).await.unwrap(), 1);
+                request.push(byte[0]);
+                assert!(request.len() < 4096);
+                if request.ends_with(b"\r\n\r\n0\r\n\r\n") { break; }
+            }
+            received.send(()).unwrap();
+            let mut byte = [0];
+            // TLS may report an unclean EOF when cancellation drops the socket.
+            match socket.read(&mut byte).await {
+                Ok(0) => {},
+                Err(error) => assert!(matches!(error.kind(), io::ErrorKind::UnexpectedEof
+                    | io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
+                    | io::ErrorKind::BrokenPipe), "unexpected socket error: {error}"),
+                Ok(_) => panic!("unexpected bytes after empty upload"),
+            }
+        });
+        let mut client = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        client.write_all(b"POST /routes/7 HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer gateway\r\nContent-Length: 0\r\n\r\n").await.unwrap();
+        request_received.await.unwrap();
+        assert!(!app.workers.is_empty());
+        assert!(app.config.admit(b"gateway", 7).is_err());
+        drop(client);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !app.workers.is_empty() { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        assert!(app.config.admit(b"gateway", 7).is_ok());
+        provider.await.unwrap();
+        shutdown.send(()).unwrap(); gateway.await.unwrap().unwrap();
+    }).await.unwrap();
+}
