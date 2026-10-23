@@ -18,12 +18,13 @@ impl TempDir {
     }
 }
 impl Drop for TempDir { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }
-fn config(port: u16, availability: bool) -> GatewayConfig {
+fn config(port: u16, availability: bool) -> GatewayConfig { config_with_limits(port, availability, 1, 3) }
+fn config_with_limits(port: u16, availability: bool, requests: usize, chunk_bytes: usize) -> GatewayConfig {
     let routes = json!([{"tenant":1,"selector":7,"origin":0,"credential":0}]);
     let root = json!({"identities":[{"tenant":1,"sha256":format!("{:x}",Sha256::digest(b"gateway"))}],
         "destinations":[format!("https://localhost:{port}/v1/messages")],
         "credentials":[{"tenant":1,"kind":"api_key","env":"KEY"}],"grants":routes,
-        "limits":{"requests":1,"chunk_bytes":3},"logging":if availability { "availability" } else { "strict" }});
+        "limits":{"requests":requests,"chunk_bytes":chunk_bytes},"logging":if availability { "availability" } else { "strict" }});
     GatewayConfig::from_json(&serde_json::to_vec(&root).unwrap(), &serde_json::to_vec(&json!({"routes":routes})).unwrap(),
         |_| Some("provider-secret".into())).unwrap()
 }
@@ -509,3 +510,5 @@ async fn bodyless_status_rejects_payload_or_missing_completion() {
         }
     }).await.unwrap();
 }
+
+mod overload;

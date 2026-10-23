@@ -110,8 +110,24 @@ requests recovered. This includes provider/client fixtures and the recovery scan
 excludes kernel filesystem cache, and is one observation rather than a memory bound.
 The repeated workload's completion p95 was 14,571.22 ms, illustrating run variability.
 
+## Repeated admission overload
+
+The ordinary CI test in `server/tests/overload.rs` holds eight real TLS exchanges
+open, then sends four waves of 32 concurrent excess requests in each logging mode.
+All 128 must return 503 while liveness, readiness, and metrics remain reachable.
+Occupied slots stay at eight and provider connections stay at eight: rejected
+requests must not reach the provider. Releasing the held streams must preserve
+all response bytes, return occupancy to zero, and permit a fresh successful request.
+Recovery must contain exactly the nine admitted requests with exact upload and
+download bytes, and final worker, failure, and audit-gap counts must be zero.
+
+The test passes locally and runs in the regular workspace suite. It stays below
+the separate inbound connection cap to isolate request admission; it is a bounded
+burst experiment, not a long-duration soak, latency SLA, or whole-memory theorem.
+Incomplete-connection overload is exercised separately by the server tests.
+
 Remaining measurements include stalled logging under sustained load,
-long-running streams, increasing concurrency, admission overload, repeated runs,
+long-running streams, increasing concurrency, long-duration overload, repeated runs,
 isolated gateway memory, deployment-proxy overhead, and supported Linux storage.
 These remain milestone-four/five work. No load or memory theorem follows from this
 small baseline, and no release performance threshold has been set.
