@@ -37,7 +37,7 @@ The production disk queue now carries `RecordFrame`. The worker writes its byte
 view and, after sync, uses `Journal::record_durable_frame`. On success the checked
 acknowledged prefix is exactly the old history followed by this frame's canonical
 header, payload, and checksum. Thus framing and journal byte identities compose;
-this does not yet connect a durable receipt back to stream write authorization.
+the [journal receipt path](journal-proof.md) now connects this record to stream write authorization.
 
 `frame_end` advances by exactly 33 header bytes plus payload plus 32 digest bytes.
 It rejects oversized payloads, insufficient available bytes, and offset overflow.

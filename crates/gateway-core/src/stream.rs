@@ -145,6 +145,38 @@ impl StreamChunk {
         true
     }
 
+    pub fn acknowledge_receipt(&mut self, authority: &AuthorizedRequest, direction: u8,
+        receipt: &crate::journal::DurableFrame) -> (ok: bool)
+        requires old(self).valid(), authority.valid(), receipt.valid(),
+        ensures final(self).valid(),
+            ok == (!old(self).closed() && !old(self).failed() && old(self).owner() != 0
+                && old(self).owner() == authority.request() && old(self).body().len() <= 1048576
+                && direction <= 1 && receipt.record() == crate::framing::encoding(Header {
+                    payload: old(self).body().len() as u32, tenant: authority.tenant(),
+                    request: old(self).owner(), chunk: old(self).chunk(), direction })
+                    + old(self).body() + receipt.checksum()),
+            final(self).body() == old(self).body(), final(self).owner() == old(self).owner(),
+            final(self).chunk() == old(self).chunk(), final(self).input() == old(self).input(),
+            final(self).completed() == old(self).completed(), final(self).position() == old(self).position(),
+            final(self).end() == old(self).end(), final(self).pending() == old(self).pending(),
+            final(self).generation() == old(self).generation(), final(self).strict() == old(self).strict(),
+            final(self).closed() == old(self).closed(), final(self).failed() == old(self).failed(),
+            final(self).capacity() == old(self).capacity(),
+            ok ==> final(self).durable() == old(self).body().len()
+                && receipt.acknowledged() == receipt.prefix()
+                    + crate::framing::encoding(Header { payload: old(self).body().len() as u32,
+                        tenant: authority.tenant(), request: old(self).owner(),
+                        chunk: old(self).chunk(), direction })
+                    + old(self).body() + receipt.checksum(),
+            !ok ==> *final(self) == *old(self),
+    {
+        let (header, bytes) = match self.audit_record(authority, direction) {
+            Some(record) => record, None => return false,
+        };
+        if !receipt.matches_record(header, bytes) { return false; }
+        self.acknowledge(self.owner, self.chunk, self.bytes.len())
+    }
+
     // A reservation does not advance the completed offset.
     pub fn prepare(&mut self, max: usize) -> (out: Option<Ticket>)
         requires old(self).valid(),

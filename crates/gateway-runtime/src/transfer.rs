@@ -1,6 +1,7 @@
 //! Trusted async driver for verified stream transitions. The writer's accepted
 //! count and the logger's durable acknowledgment are external contracts.
 use crate::admission::Request;
+pub use gateway_core::journal::DurableFrame;
 use std::{future::Future, io};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -16,11 +17,12 @@ pub struct LogRecord<'a> {
 }
 
 pub trait AuditLog {
-    /// Success means this exact record is durable under the logger's documented
+    /// Returns an owned journal receipt for this exact record, durable under the logger's documented
     /// crash model. Implementations must bound work and retain any buffer credits
-    /// for effects that survive cancellation. DiskLog supplies this implementation.
+    /// for effects that survive cancellation. The receipt retains its frame until
+    /// consumed or dropped. DiskLog supplies this implementation.
     fn append<'a>(&'a mut self, record: LogRecord<'a>)
-        -> impl Future<Output = io::Result<()>> + Send + 'a;
+        -> impl Future<Output = io::Result<DurableFrame>> + Send + 'a;
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -83,6 +85,17 @@ where R: AsyncRead + Unpin, W: AsyncWrite + Unpin, L: AuditLog {
         writer.flush().await.map_err(|_| TransferError::Flush)?;
         total = next_total;
     }
+}
+
+#[cfg(test)]
+pub(crate) fn receipt_for_test(record: LogRecord<'_>) -> DurableFrame {
+    let frame = gateway_core::framing::RecordBody::new(gateway_core::framing::Header {
+        payload: record.bytes.len() as u32, tenant: record.tenant, request: record.request,
+        chunk: record.chunk, direction: match record.direction { Direction::Upload => 0, Direction::Download => 1 },
+    }, record.bytes).unwrap().seal(&[0; 32]);
+    let mut journal = gateway_core::journal::Journal::new();
+    let ticket = journal.begin(frame.bytes().len() as u64).unwrap();
+    journal.commit_frame(&ticket, frame).unwrap()
 }
 
 #[cfg(test)]

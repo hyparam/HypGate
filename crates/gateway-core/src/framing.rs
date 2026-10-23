@@ -84,6 +84,23 @@ pub fn encode_payload(h: Header, payload: &[u8]) -> (out: Option<Vec<u8>>)
     Some(bytes)
 }
 
+fn equal_bytes(a: &[u8], b: &[u8]) -> (out: bool)
+    ensures out == (a@ == b@),
+{
+    if a.len() != b.len() { return false; }
+    let mut i: usize = 0;
+    while i < a.len()
+        invariant i <= a.len(), a.len() == b.len(),
+            forall|j: int| 0 <= j < i ==> #[trigger] a@[j] == b@[j],
+        decreases a.len() - i,
+    {
+        if a[i] != b[i] { return false; }
+        i += 1;
+    }
+    proof { assert(a@ =~= b@); }
+    true
+}
+
 // Private immutable containers keep canonical metadata and payload associated
 // while trusted code computes a checksum and queues the finished frame.
 pub struct RecordBody { bytes: Vec<u8>, header: Ghost<Header>, payload: Ghost<Seq<u8>> }
@@ -136,6 +153,34 @@ impl RecordFrame {
         valid(self.header@) && self.header@.payload == self.payload@.len()
             && self.checksum@.len() == 32
             && self.bytes@ == encoding(self.header@) + self.payload@ + self.checksum@
+    }
+    pub fn matches_record(&self, h: Header, payload: &[u8]) -> (ok: bool)
+        requires self.valid(),
+        ensures ok == (valid(h) && h.payload == payload.len()
+            && self.contents() == encoding(h) + payload@ + self.checksum()),
+    {
+        if h.payload as usize != payload.len() { return false; }
+        let header = match encode(h) { Some(header) => header, None => return false };
+        proof {
+            lemma_auto_spec_u32_to_from_le_bytes(); lemma_auto_spec_u64_to_from_le_bytes();
+            assert(encoding(self.header()).len() == 33);
+        }
+        let bytes = self.bytes.as_slice();
+        let header_ok = equal_bytes(slice_subrange(bytes, 0, 33), header.as_slice());
+        let payload_ok = equal_bytes(slice_subrange(bytes, 33, bytes.len() - 32), payload);
+        proof {
+            assert(bytes@.subrange(bytes.len() as int - 32, bytes.len() as int) =~= self.checksum());
+            assert(bytes@ =~= bytes@.subrange(0, 33)
+                + bytes@.subrange(33, bytes.len() as int - 32) + self.checksum());
+            if header_ok && payload_ok {
+                assert(bytes@ =~= encoding(h) + payload@ + self.checksum());
+            }
+            if bytes@ == encoding(h) + payload@ + self.checksum() {
+                assert(bytes@.subrange(0, 33) =~= encoding(h));
+                assert(bytes@.subrange(33, bytes.len() as int - 32) =~= payload@);
+            }
+        }
+        header_ok && payload_ok
     }
     pub proof fn canonical(&self)
         requires self.valid(),

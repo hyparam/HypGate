@@ -17,8 +17,9 @@ sandbox preventing arbitrary embedding code from opening its own sockets.
 
 There is one record-writing worker per DiskLog. Startup writes/syncs the session
 header and parent directory in `disk_log.rs`. The worker reserves a journal ticket,
-writes that frame and syncs, then uses verified `record_durable_frame` to compose the
-write, sync, and acknowledgment transitions for those exact frame bytes. A per-job oneshot binds the result to that append. The transfer
+writes that frame and syncs, then uses verified `commit_frame` to compose the
+write, sync, and acknowledgment transitions for those exact frame bytes. A per-job oneshot returns its owned durable receipt, which the verified stream
+operation checks against exact current metadata and payload before acknowledging. The transfer
 driver uses verified `audit_record` to bind authority, current chunk, and bytes,
 never caller headers.
 

@@ -22,7 +22,8 @@ at most 32 KiB of visible frame data. One DiskLog owns one disk worker.
 | Provider upload channel | One data message of at most 16 KiB per admitted exchange | Constructed in `HttpsTransport::run`; `Writer::poll_write` reserves queue credit before copying bytes. Hyper may retain previously consumed frames outside the channel. |
 | Disk frames being encoded or queued | At most Q reserved/queued records, each at most K + 65 bytes for production requests | `DiskLog::append` reserves before encoding. Encoding and enqueueing are serialized under the worker mutex. Other library callers may supply up to 1 MiB per record independently of K. |
 | Active disk frame | One additional frame of at most K + 65 bytes | The worker owns the job after receiving it, through write, sync, and acknowledgment. Cancellation of its caller does not reclaim or duplicate that frame. A stalled worker is never replaced. |
-| Encoding scratch | One 33-byte header vector at a time per logger | `framing::encode_payload` copies a canonical header into the reserved frame. SHA-256 state and the 32-byte digest are additional fixed-size implementation state. |
+| Delivered durable receipts | At most one frame of at most K + 65 bytes per admitted exchange | The job oneshot transfers its owned frame to the waiting request. Exact receipt validation then drops it; cancellation drops undelivered receipts. The worker can advance to another job before delivery is consumed. Custom library callers retaining receipts must budget separately. |
+| Encoding/comparison scratch | One 33-byte header vector per logger encoder plus one per validating request | `framing::encode_payload` copies a canonical header into the reserved frame. Receipt validation also encodes the expected 33-byte header, then compares payload slices without copying the payload. SHA-256 state and the 32-byte digest are additional fixed-size implementation state. |
 | Inbound connection tasks | At most C entries in the server JoinSet | Admission checks the set before spawning; completed-but-unreaped entries also consume the limit. Excess accepted sockets are closed. The listener and one just-accepted socket are additional objects. |
 | Server request workers, including rejection and cleanup | At most R worker leases | A semaphore permit is acquired before allocating response channels or spawning. A private lease drops its task-tracker token before returning the permit; cancellation before first poll also releases it. This is trusted Rust/Tokio behavior, not a Verus theorem. |
 | Admitted exchanges and upstream connections | At most R live leases; one upstream connection per exchange | Verified slot transitions plus trusted ownership. No pooling, replay, or detached upstream connection task. Failed authentication can still create a tracked server worker without a lease. |
@@ -31,7 +32,7 @@ at most 32 KiB of visible frame data. One DiskLog owns one disk worker.
 A conservative **visible payload subtotal**, under the ownership relationships
 above, is:
 
-    R × K + 2 × R × 32 KiB + (C + R) × 16 KiB + (Q + 1) × (K + 65) + 33 bytes
+    R × K + 2 × R × 32 KiB + (C + R) × 16 KiB + (Q + R + 1) × (K + 65) + (R + 1) × 33 bytes
 
 This intentionally overcounts reader views and queue data that may not coexist.
 It is useful for finding missing categories, not for promising a memory ceiling.

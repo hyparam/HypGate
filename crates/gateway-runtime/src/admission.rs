@@ -130,16 +130,18 @@ impl<'a> Request<'a> {
             .audit_record(&pending.request.authorized, direction_id)
             .ok_or(TransferError::InvalidState)?;
         let chunk = header.chunk;
-        let length = header.payload as usize;
         let record = LogRecord { tenant: header.tenant, request: header.request,
             chunk, direction, bytes };
-        if log.append(record).await.is_err() {
-            pending.request.fail_log();
-            pending.armed = false;
-            return Err(TransferError::Log);
-        }
-        let owner = pending.request.lease.key.owner();
-        if !pending.request.stream_mut().acknowledge(owner, chunk, length) {
+        let receipt = match log.append(record).await {
+            Ok(receipt) => receipt,
+            Err(_) => {
+                pending.request.fail_log();
+                pending.armed = false;
+                return Err(TransferError::Log);
+            }
+        };
+        if !pending.request.lease.stream.as_mut().expect("admitted stream")
+            .acknowledge_receipt(&pending.request.authorized, direction_id, &receipt) {
             return Err(TransferError::InvalidState);
         }
         pending.armed = false;

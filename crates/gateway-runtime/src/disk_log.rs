@@ -1,7 +1,7 @@
 //! Bounded disk logging. Filesystem effects and checksum security are trusted,
 //! not verified. A single worker owns the file; requests never choose its path.
 use crate::transfer::{AuditLog, Direction, LogRecord};
-use gateway_core::journal::Journal;
+use gateway_core::journal::{Journal, DurableFrame};
 use gateway_core::framing::{self, Header, RecordBody, RecordFrame};
 use sha2::{Digest, Sha256};
 use std::{fs::{File, OpenOptions}, io::{self, Read, Write}, path::Path,
@@ -13,7 +13,7 @@ const FILE_HEADER: usize = 56; // magic + random session ID + checksum
 const RECORD_HEADER: usize = 33; // magic + length + tenant + request + chunk + direction
 pub const MAX_RECORD_BYTES: usize = 1024 * 1024;
 
-struct Job { frame: RecordFrame, done: oneshot::Sender<bool> }
+struct Job { frame: RecordFrame, done: oneshot::Sender<Option<DurableFrame>> }
 
 /// Clones share one bounded queue and one worker. Never create replacement workers
 /// to escape a stuck filesystem call. A timeout closes logging health permanently.
@@ -72,16 +72,17 @@ impl DiskLog {
             let _health_on_exit = UnhealthyOnExit(worker_health.clone());
             let mut journal = Journal::new();
             while let Some(job) = receiver.blocking_recv() {
-                let ok = worker_health.load(Ordering::Acquire) && match journal.begin(job.frame.bytes().len() as u64) {
-                    Some(ticket) => file.write_all(job.frame.bytes()).is_ok()
-                        && file.sync().is_ok()
-                        && journal.record_durable_frame(&ticket, &job.frame),
-                    None => false,
-                };
-                if !ok { journal.fail(); worker_health.store(false, Ordering::Release); }
+                let receipt = if worker_health.load(Ordering::Acquire) {
+                    match journal.begin(job.frame.bytes().len() as u64) {
+                        Some(ticket) if file.write_all(job.frame.bytes()).is_ok() && file.sync().is_ok() =>
+                            journal.commit_frame(&ticket, job.frame),
+                        _ => None,
+                    }
+                } else { None };
+                if receipt.is_none() { journal.fail(); worker_health.store(false, Ordering::Release); }
                 // A canceled caller may leave a durable but unsent record. It must
                 // never cause the worker to retry or the gateway to replay traffic.
-                let _ = job.done.send(ok);
+                let _ = job.done.send(receipt);
             }
         })?;
         Ok(Self { worker: Arc::new(Mutex::new(Worker { sender: Some(sender), thread: Some(thread) })),
@@ -165,7 +166,7 @@ impl DiskLog {
 }
 
 impl AuditLog for DiskLog {
-    async fn append(&mut self, record: LogRecord<'_>) -> io::Result<()> {
+    async fn append(&mut self, record: LogRecord<'_>) -> io::Result<DurableFrame> {
         if !self.healthy() { return Err(io::ErrorKind::BrokenPipe.into()); }
         if record.bytes.len() > MAX_RECORD_BYTES || record.request == 0 {
             return Err(io::ErrorKind::InvalidInput.into());
@@ -190,7 +191,7 @@ impl AuditLog for DiskLog {
             completion
         };
         match tokio::time::timeout(self.deadline, completion).await {
-            Ok(Ok(true)) => Ok(()),
+            Ok(Ok(Some(receipt))) => Ok(receipt),
             _ => {
                 self.healthy.store(false, Ordering::Release);
                 Err(io::ErrorKind::BrokenPipe.into())

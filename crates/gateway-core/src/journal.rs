@@ -10,6 +10,30 @@ impl Append {
     pub closed spec fn start(&self) -> u64 { self.start }
     pub closed spec fn end(&self) -> u64 { self.end }
 }
+// Only a successful journal commit issues this receipt. It owns the immutable
+// frame so consumers can check exact bytes without a collision assumption.
+pub struct DurableFrame { frame: RecordFrame, #[allow(dead_code)] prefix: Ghost<Seq<u8>> }
+impl DurableFrame {
+    pub closed spec fn valid(&self) -> bool { self.frame.valid() }
+    pub closed spec fn prefix(&self) -> Seq<u8> { self.prefix@ }
+    pub closed spec fn acknowledged(&self) -> Seq<u8> { self.prefix@ + self.frame.contents() }
+    pub closed spec fn checksum(&self) -> Seq<u8> { self.frame.checksum() }
+    pub closed spec fn record(&self) -> Seq<u8> { self.frame.contents() }
+    pub fn matches_record(&self, h: crate::framing::Header, payload: &[u8]) -> (ok: bool)
+        requires self.valid(),
+        ensures ok == (crate::framing::valid(h) && h.payload == payload.len()
+                && self.record() == crate::framing::encoding(h) + payload@ + self.checksum()),
+            ok ==> self.acknowledged() == self.prefix()
+            + crate::framing::encoding(h) + payload@ + self.checksum(),
+    {
+        let ok = self.frame.matches_record(h, payload);
+        proof {
+            assert((self.prefix() + (crate::framing::encoding(h) + payload@ + self.checksum()))
+                =~= (self.prefix() + crate::framing::encoding(h) + payload@ + self.checksum()));
+        }
+        ok
+    }
+}
 pub struct Journal {
     written: u64,
     durable: u64,
@@ -163,6 +187,25 @@ impl Journal {
                 + crate::framing::encoding(frame.header()) + frame.payload() + frame.checksum()));
         }
         ok
+    }
+
+    pub fn commit_frame(&mut self, t: &Append, frame: RecordFrame) -> (out: Option<DurableFrame>)
+        requires old(self).valid(), frame.valid(),
+        ensures final(self).valid(),
+            out.is_some() == (!old(self).failed() && old(self).matches(t)
+                && old(self).acked_len() == old(self).written_len()
+                && frame.contents().len() == t.end() - t.start()),
+            match out {
+            Some(receipt) => receipt.valid() && receipt.prefix() == old(self).history()
+                && receipt.acknowledged() == final(self).acked()
+                && final(self).stable() == final(self).history(),
+            None => *final(self) == *old(self),
+        },
+    {
+        let ghost prefix = self.history();
+        if !self.record_durable_frame(t, &frame) { return None; }
+        proof { frame.canonical(); }
+        Some(DurableFrame { frame, prefix: Ghost(prefix) })
     }
 
     pub fn fail(&mut self)

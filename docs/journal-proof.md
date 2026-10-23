@@ -29,9 +29,9 @@ a separate obligation; the lemma does not assume or prove scanner correctness.
 
 ## Runtime correspondence and limits
 
-The worker reserves before writing, then calls `record_durable_frame` only after both
+The worker reserves before writing, then calls `commit_frame` only after both
 `write_all` and `sync_all` succeed for that immutable frame. This verified operation
-uses `record_durable` to compose `record_written`, `sync_succeeded`, and
+uses `record_durable_frame` and `record_durable` to compose `record_written`, `sync_succeeded`, and
 `acknowledge`. The queued immutable `RecordFrame` binds that byte sequence to its
 canonical metadata, payload, and checksum. Success proves that
 the new acknowledged and stable histories equal the previous complete history
@@ -53,7 +53,37 @@ This proves acknowledgment ordering and conditional byte-prefix survival, not
 complete crash-safe logging. [Header and frame-extent proofs](framing-proof.md),
 a documented [storage contract](storage-crash-contract.md), and process-kill
 experiments now exist. Full scanner refinement, storage-stack validation, and
-record-identity/stream-ack composition remain open. No `assume` or external-body escape was introduced.
+async receipt delivery and journal/session ownership remain trusted. No `assume` or external-body escape was introduced.
+
+## Durable receipts and stream authorization
+
+`commit_frame` consumes the sealed frame and issues a private-constructor
+`DurableFrame` only after successful journal acknowledgment. Its ghost prefix and
+owned frame capture exactly the journal's acknowledged history at issuance.
+The worker sends this receipt through the job's oneshot instead of a boolean.
+`AuditLog::append` now returns the receipt, and `Request::audit_current` passes it
+to verified `StreamChunk::acknowledge_receipt` while retaining exclusive ownership.
+
+The stream checks canonical tenant/request/chunk/direction metadata and exact
+payload bytes, not merely their length or a digest. Success proves that the receipt's
+acknowledged history contains that canonical current record and advances the
+stream's durable offset to the complete chunk length. All other stream state is
+preserved. Invalid receipts leave core state unchanged; the runtime cancellation
+guard closes the request on rejection, in either logging mode. Exact acceptance
+conditions also rule out arbitrary refusal of an otherwise valid receipt.
+
+This composes journal acknowledgment with the stream gate under the journal's
+truthful write/sync event assumptions. It does not prove an external logger actually
+performed I/O: custom implementations can invoke the journal's event API, just as
+other trusted adapters can. Receipt origin and file/session scope remain bound by
+the production logger's ownership. Equal record bytes in separate journals do not
+establish the same physical log. Checksum cryptography remains trusted for recovery,
+but receipt-to-stream byte equality does not assume collision resistance.
+
+Receipts retain one frame until consumed or canceled. The additional memory is
+accounted for in the [resource inventory](resource-accounting.md). Runtime tests
+return receipts with wrong tenant, request, chunk, direction, same-length bytes,
+and payload length, and check that none permits forwarding or reusing the request.
 
 ## Validation
 

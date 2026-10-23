@@ -28,9 +28,9 @@ impl ResponseSink for Output {
 #[derive(Default)]
 struct Log { upload: Vec<u8>, download: Vec<u8> }
 impl AuditLog for Log {
-    async fn append(&mut self, r: LogRecord<'_>) -> io::Result<()> {
+    async fn append(&mut self, r: LogRecord<'_>) -> io::Result<crate::transfer::DurableFrame> {
         match r.direction { Direction::Upload => &mut self.upload, Direction::Download => &mut self.download }.extend_from_slice(r.bytes);
-        Ok(())
+        Ok(crate::transfer::receipt_for_test(r))
     }
 }
 fn config(port: u16) -> GatewayConfig {

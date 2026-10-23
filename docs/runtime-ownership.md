@@ -125,7 +125,10 @@ must not detach work that survives its lease. Repeated borrowed views still do n
 authorize repeated submissions. Logging acknowledgments remain trusted events:
 `audit_current` obtains metadata and bytes together through verified
 `StreamChunk::audit_record`, then binds the awaited logger result to the exclusively
-borrowed current chunk. It is the runtime request's only acknowledgment path.
+borrowed current chunk. It is the runtime request's only acknowledgment path. The logger returns a
+private journal receipt, and verified `acknowledge_receipt` compares its canonical
+metadata and exact payload to the current stream before advancing durability.
+A mismatched receipt closes the runtime request, including in availability mode.
 The constructor proves that tenant comes from the supplied authority, request ID
 matches the stream owner, chunk ID and payload length match current stream state,
 and borrowed bytes equal the current payload. It rejects mismatched authority,

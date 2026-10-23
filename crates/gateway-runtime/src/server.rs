@@ -142,7 +142,7 @@ async fn worker_response(headers: oneshot::Receiver<(StatusCode, HeaderMap)>,
 // successful response: cancellation and provider failures must not hide it.
 struct ObservedLog<'a> { log: DiskLog, gaps: &'a AtomicU64, availability: bool, reported: bool }
 impl AuditLog for ObservedLog<'_> {
-    async fn append(&mut self, record: LogRecord<'_>) -> io::Result<()> {
+    async fn append(&mut self, record: LogRecord<'_>) -> io::Result<crate::transfer::DurableFrame> {
         let result = self.log.append(record).await;
         if result.is_err() && self.availability && !self.reported {
             self.gaps.fetch_add(1, Ordering::Relaxed); self.reported = true;

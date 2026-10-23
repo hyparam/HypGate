@@ -75,3 +75,20 @@ fn typed_frame_commits_only_the_reserved_complete_record() {
     journal.fail();
     assert!(!journal.record_durable_frame(&next, &frame));
 }
+
+#[test]
+fn durable_receipt_matches_exact_metadata_and_payload() {
+    use gateway_core::framing::{Header, RecordBody};
+    let header = || Header { payload: 3, tenant: 1, request: 2, chunk: 3, direction: 0 };
+    let frame = RecordBody::new(header(), &[4, 5, 6]).unwrap().seal(&[7; 32]);
+    let mut journal = Journal::new();
+    let ticket = journal.begin(frame.bytes().len() as u64).unwrap();
+    let receipt = journal.commit_frame(&ticket, frame).unwrap();
+    assert!(receipt.matches_record(header(), &[4, 5, 6]));
+    assert!(!receipt.matches_record(header(), &[6, 5, 4]));
+    assert!(!receipt.matches_record(header(), &[4, 5]));
+    let mut other = header(); other.chunk += 1;
+    assert!(!receipt.matches_record(other, &[4, 5, 6]));
+    let mut other = header(); other.direction = 2;
+    assert!(!receipt.matches_record(other, &[4, 5, 6]));
+}

@@ -48,10 +48,10 @@ async fn strict_logging_and_cancellation_keep_the_lease_until_drop() {
     assert!(r.prepare(2).is_none());
     struct Log;
     impl gateway_runtime::transfer::AuditLog for Log {
-        async fn append(&mut self, record: gateway_runtime::transfer::LogRecord<'_>) -> std::io::Result<()> {
+        async fn append(&mut self, record: gateway_runtime::transfer::LogRecord<'_>) -> std::io::Result<gateway_runtime::transfer::DurableFrame> {
             assert_eq!((record.tenant, record.request, record.chunk), (1, 1, 1));
             assert_eq!(record.bytes, &[1, 2]);
-            Ok(())
+            Ok(receipt(record))
         }
     }
     r.audit_current(&mut Log, gateway_runtime::transfer::Direction::Upload).await.unwrap();
@@ -136,7 +136,7 @@ fn spare_vector_capacity_cannot_escape_the_retained_chunk_budget() {
 async fn canceled_audit_cannot_authorize_or_reuse_the_chunk() {
     struct PendingLog;
     impl gateway_runtime::transfer::AuditLog for PendingLog {
-        async fn append(&mut self, record: gateway_runtime::transfer::LogRecord<'_>) -> std::io::Result<()> {
+        async fn append(&mut self, record: gateway_runtime::transfer::LogRecord<'_>) -> std::io::Result<gateway_runtime::transfer::DurableFrame> {
             assert_eq!(record.bytes, &[7, 8]);
             std::future::pending().await
         }
@@ -152,5 +152,51 @@ async fn canceled_audit_cannot_authorize_or_reuse_the_chunk() {
         assert!(matches!(a.admit(&[11; 32], 7), Err(AdmissionError::AtCapacity)));
         drop(r);
         assert!(a.admit(&[11; 32], 7).is_ok());
+    }
+}
+
+fn receipt(record: gateway_runtime::transfer::LogRecord<'_>) -> gateway_runtime::transfer::DurableFrame {
+    let frame = gateway_core::framing::RecordBody::new(gateway_core::framing::Header {
+        payload: record.bytes.len() as u32, tenant: record.tenant, request: record.request,
+        chunk: record.chunk, direction: match record.direction {
+            gateway_runtime::transfer::Direction::Upload => 0, gateway_runtime::transfer::Direction::Download => 1 },
+    }, record.bytes).unwrap().seal(&[0; 32]);
+    let mut journal = gateway_core::journal::Journal::new();
+    let ticket = journal.begin(frame.bytes().len() as u64).unwrap();
+    journal.commit_frame(&ticket, frame).unwrap()
+}
+
+#[tokio::test]
+async fn mismatched_durable_receipts_never_authorize_forwarding() {
+    struct WrongLog(u8);
+    impl gateway_runtime::transfer::AuditLog for WrongLog {
+        async fn append(&mut self, mut record: gateway_runtime::transfer::LogRecord<'_>)
+            -> std::io::Result<gateway_runtime::transfer::DurableFrame>
+        {
+            match self.0 {
+                0 => record.tenant += 1,
+                1 => record.request += 1,
+                2 => record.chunk += 1,
+                3 => record.direction = gateway_runtime::transfer::Direction::Download,
+                4 => record.bytes = &[8, 7], // same length, different content
+                _ => record.bytes = &[7],
+            }
+            Ok(receipt(record))
+        }
+    }
+    for strict in [true, false] {
+        for mismatch in 0..6 {
+            let a = admission(1, strict);
+            let mut request = a.admit(&[11; 32], 7).unwrap();
+            request.advance(vec![7, 8]).unwrap();
+            let result = request.audit_current(&mut WrongLog(mismatch),
+                gateway_runtime::transfer::Direction::Upload).await;
+            assert_eq!(result, Err(gateway_runtime::transfer::TransferError::InvalidState));
+            assert!(request.prepare(2).is_none());
+            assert!(request.advance(vec![9]).is_none());
+            assert!(matches!(a.admit(&[11; 32], 7), Err(AdmissionError::AtCapacity)));
+            drop(request);
+            assert!(a.admit(&[11; 32], 7).is_ok());
+        }
     }
 }

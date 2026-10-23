@@ -175,7 +175,7 @@ async fn queue_capacity_rejects_excess_work_before_allocation() {
     tokio::time::timeout(Duration::from_secs(1), async {
         while log.worker.lock().unwrap().sender.as_ref().unwrap().capacity() != 0 { tokio::task::yield_now().await; }
     }).await.unwrap();
-    assert_eq!(log.append(record(b"third", 3)).await.unwrap_err().kind(), io::ErrorKind::WouldBlock);
+    assert_eq!(log.append(record(b"third", 3)).await.err().unwrap().kind(), io::ErrorKind::WouldBlock);
     assert!(log.healthy());
     release.send(()).unwrap();
     first.await.unwrap().unwrap(); second.await.unwrap().unwrap();
@@ -327,7 +327,7 @@ async fn worker_panic_marks_health_failed_even_after_append_caller_is_canceled()
         let mut caller = log.clone();
         let caller = tokio::spawn(async move { caller.append(record(b"pending", 1)).await });
         inside.await.unwrap();
-        caller.abort(); assert!(caller.await.unwrap_err().is_cancelled());
+        caller.abort(); assert!(caller.await.err().unwrap().is_cancelled());
         assert!(log.healthy());
         release.send(()).unwrap();
         while !log.worker.lock().unwrap().thread.as_ref().unwrap().is_finished() {

@@ -65,7 +65,7 @@ checked by Verus, conditional on the documented adapter contracts.
 | Tenant and credential isolation | Requests, completions, and credentials cannot cross tenant/request boundaries; gateway authentication material never becomes an upstream credential. | Core tenant/credential-handle and ticket checks proved; secret/header handling tested. Composed isolation and audit access controls remain open. |
 | Routing and configuration confinement | Candidate configuration and request fields cannot expand operator grants or change the authorized destination/credential binding. | Normalized configuration and route selection proved; URI, DNS, TLS, and actual dispatch remain trusted/tested. |
 | Byte integrity and ordering | Forwarded body bytes form an unchanged, ordered prefix of the input, across chunks and partial writes, without skipped or duplicated advancement. | Core byte-prefix and completion properties proved; async HTTP integration tested. Peer receipt is not proved. |
-| Strict audit-before-forwarding | Every submitted body range in strict mode is covered by a durable log acknowledgment for that request and chunk. | Core gate proved conditional on truthful acknowledgments; disk sync adapter tested. Filesystem crash guarantees remain open. |
+| Strict audit-before-forwarding | Every submitted body range in strict mode is covered by a durable log acknowledgment for that request and chunk. | Core gate and exact journal-receipt/stream binding proved; disk sync adapter tested. Filesystem crash guarantees remain open. |
 | Crash-safe recovery | Recovery exposes only complete records, and acknowledged records survive every crash in the specified storage model. | Journal acknowledgment ordering and conditional synced-prefix survival proved; header/payload encoding, header decoding, frame extents, and scanner cursor transitions proved; scanner I/O tested. Process-kill recovery tested and storage assumptions documented; scanner refinement and power-loss validation remain open. |
 | Cancellation and no replay | Cancellation prevents new submissions; uncertain effects, crashes, or failover never trigger automatic replay of a possibly executed generation. | Core cancellation/stale-event checks proved; transport has no replay path. Async cancellation and recovery composition remain unproved. |
 | Resource bounds and safe release | Slots, buffers, queues, and outstanding operations stay within explicit budgets; capacity cannot be reused while work retaining it remains alive. | Logical slot limits, ID isolation, and combined payload bound under an explicit stream-to-slot mapping proved; ownership, queues, and deadlines tested. Full allocation accounting and composed release proofs remain open. |
@@ -144,8 +144,8 @@ cargo verus verify -p gateway-core --locked -- --triggers-mode silent
 VERUS=/path/to/verus python3 scripts/check_mutations.py
 ```
 
-Validation on 2026-10-23: 79 core verification checks passed, 96 workspace tests
-passed, the opt-in TLS proxy/gateway process-failover test and six load/fault workloads passed, and all 75
+Validation on 2026-10-23: 85 core verification checks passed, 98 workspace tests
+passed, the opt-in TLS proxy/gateway process-failover test and six load/fault workloads passed, and all 80
 deliberate mutations failed their proof obligations.
 These counts are checks, not a count of independent security guarantees.
 

@@ -14,12 +14,12 @@ enum Event { Log(u64, Direction, Vec<u8>), Write(Vec<u8>) }
 type Events = Arc<Mutex<Vec<Event>>>;
 struct Log { events: Events, fail: bool, pending: bool }
 impl AuditLog for Log {
-    async fn append(&mut self, record: LogRecord<'_>) -> io::Result<()> {
+    async fn append(&mut self, record: LogRecord<'_>) -> io::Result<crate::transfer::DurableFrame> {
         assert_eq!(record.tenant, 1);
         assert!(record.request != 0);
         if self.pending { std::future::pending::<()>().await; }
         self.events.lock().unwrap().push(Event::Log(record.chunk, record.direction, record.bytes.to_vec()));
-        if self.fail { Err(io::ErrorKind::Other.into()) } else { Ok(()) }
+        if self.fail { Err(io::ErrorKind::Other.into()) } else { Ok(receipt_for_test(record)) }
     }
 }
 struct Writer { events: Events, max: usize, fail: bool, flush_fail: bool, pending: bool }
