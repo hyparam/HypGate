@@ -50,3 +50,9 @@ VERUS=/path/to/verus python3 scripts/check_mutations.py
 Validation on 2026-10-23: 36 core verification checks passed, 30 workspace tests
 passed, and all 21 deliberate mutations failed their proof obligations.
 These counts are checks, not a count of independent security guarantees.
+
+[GitHub Actions CI](.github/workflows/ci.yml) runs on pushes, pull requests, and
+manual dispatch. Separate Linux jobs run locked workspace tests and the production
+core's Verus proofs plus all mutation checks. Rust comes from rust-toolchain.toml;
+the Verus release archive is SHA-256 pinned, and checkout is commit-pinned.
+Jobs have read-only repository permissions and bounded execution times.

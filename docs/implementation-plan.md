@@ -6,7 +6,7 @@
 | 2. Minimal working gateway | ☐ | ✓ Static configuration and endpoint/credential binding; ✓ tested HTTP authentication/header boundary; ✓ async body driver. Network and HTTP-body integration remain. |
 | 3. Crash-safe logging | ☐ | ✓ Core strict/availability logging gates. Disk format, writer, recovery proofs, and crash tests remain. |
 | 4. Availability hardening | ☐ | ✓ Admission limits and request cleanup. Deadlines, backpressure, health/readiness, shutdown, and fault/load tests remain. |
-| 5. Auditable first release | ☐ | ✓ Pinned core toolchain, proof/mutation checks, and security notes. Automated release checks, reproducible deployment, benchmarks, and end-to-end audit remain. |
+| 5. Auditable first release | ☐ | ✓ Pinned core toolchain, proof/mutation checks, and security notes; ✓ GitHub Actions test/proof workflow. Reproducible deployment, benchmarks, and end-to-end audit remain. |
 
 ✓ marks completed work within a milestone; ☐ means the full milestone's exit
 criteria are not yet met. Update this table at each implementation checkpoint.

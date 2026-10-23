@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Rust tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Test executable workspace
+        run: cargo test --workspace --locked
+
+  verify:
+    name: Verus proofs and mutations
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      VERUS_RELEASE: 0.2026.10.18.7d82994
+      VERUS_ARCHIVE_SHA256: e9af03732d4bdd32b93a8fcf471706739c24c1473fa5086618d96c47237845dd
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Install checksum-pinned Verus release
+        shell: bash
+        run: |
+          archive="$RUNNER_TEMP/verus.zip"
+          curl --fail --location --retry 3 --output "$archive" \
+            "https://github.com/verus-lang/verus/releases/download/release/${VERUS_RELEASE}/verus-${VERUS_RELEASE}-x86-linux.zip"
+          echo "${VERUS_ARCHIVE_SHA256}  ${archive}" | sha256sum --check --strict
+          unzip -q "$archive" -d "$RUNNER_TEMP/verus"
+          echo "$RUNNER_TEMP/verus/verus-x86-linux" >> "$GITHUB_PATH"
+          echo "VERUS=$RUNNER_TEMP/verus/verus-x86-linux/verus" >> "$GITHUB_ENV"
+      - name: Report verifier version
+        run: verus --version
+      - name: Verify production core
+        run: cargo verus verify -p gateway-core --locked -- --triggers-mode silent
+      - name: Reject deliberate defects
+        run: python3 scripts/check_mutations.py
