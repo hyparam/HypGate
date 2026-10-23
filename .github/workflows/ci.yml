@@ -55,3 +55,19 @@ jobs:
         run: cargo verus verify -p gateway-core --locked -- --triggers-mode silent
       - name: Reject deliberate defects
         run: python3 scripts/check_mutations.py
+
+  proxy:
+    name: Proxy failover policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install distribution proxy and TLS tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes haproxy openssl
+          haproxy -v
+      - name: Check no replay and standby routing
+        run: python3 scripts/check_proxy.py --haproxy /usr/sbin/haproxy

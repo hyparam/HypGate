@@ -81,8 +81,10 @@ deadline. These operational defaults are not yet CLI/config options.
 
 SIGINT or SIGTERM stops acceptance and allows up to ten seconds for connections to
 drain, then aborts them and waits for tracked request workers to drop. A stuck disk
-worker is not replaced and does not hold the Tokio executor; explicit disk-worker
-joining and crash-model guarantees remain open. Never retry a generation solely
+worker is not replaced and does not hold the Tokio executor. After request workers
+stop, the server gives the logger two seconds to drain and join; a timeout returns
+an error and cannot interrupt an in-progress filesystem syscall. Crash-model
+guarantees remain conditional on the storage contract. Never retry a generation solely
 because the gateway disconnected: the provider may already have executed it.
 
 The response body owns its worker's abort guard. Client disconnects or connection
@@ -103,9 +105,12 @@ and checks its health endpoint. Additional end-to-end scenarios inject failed lo
 They check strict refusal without a provider connection, availability-mode forwarding
 with unchanged authorization, audit-gap reporting after failure, metrics, and
 rejection of a second request while the sole slot is occupied. Logger I/O failures
-are tested separately at the disk adapter. All 51 workspace tests pass.
+are tested separately at the disk adapter. All 71 workspace tests pass.
 
 This is a runnable prototype, not a production-ready or wholly verified gateway.
 Concurrent-request stress tests, all end-to-end failure modes, resource composition
 proofs, crash-recovery proofs, load measurements, retention/rotation, and operator
 deployment hardening remain open. See the milestone checklist for the full scope.
+
+See [proxy deployment and failover](deployment.md) for a tested HAProxy example
+with TLS, readiness checks, a standby instance, and generation retries disabled.

@@ -59,6 +59,8 @@ lengths, and exact frame extents in the serializer and recovery scanner.
 The [HTTPS upstream transport](docs/https-transport.md) now forwards opaque bodies
 over real TLS through the stream core. The [runnable gateway](docs/running.md)
 connects the inbound server, authorization, streaming, and disk logging.
+The [deployment example](docs/deployment.md) adds TLS termination and readiness-based
+standby routing with proxy retries disabled.
 The [adapter audit](docs/adapter-audit.md) maps runtime trust obligations to effect
 paths and tests, including concurrent tenants and client disconnects.
 
