@@ -164,11 +164,8 @@ impl RoutedRequest<'_> {
     pub fn tenant_id(&self) -> u64 { self.request.tenant_id() }
     pub fn destination(&self) -> &Uri { self.destination }
 
-    // Kept private until the transport implementation can consume this request.
-    // Unit tests exercise this exact credential mapping without exposing secrets
-    // through the public API.
-    #[allow(dead_code)]
-    fn credential_header(&self) -> (&'static str, &HeaderValue) {
+    // Only the trusted HTTP boundary may inject provider credentials.
+    pub(crate) fn credential_header(&self) -> (&'static str, &HeaderValue) {
         let name = match self.credential.kind { CredentialKind::Bearer => "authorization", CredentialKind::ApiKey => "x-api-key" };
         (name, &self.credential.value)
     }

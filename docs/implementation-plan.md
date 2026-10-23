@@ -3,7 +3,7 @@
 | Milestone | Complete | Progress |
 | --- | :---: | --- |
 | 1. Verified streaming core | ☐ | ✓ Streaming and resource proofs; ✓ authorization/configuration proofs; ✓ tested request ownership. Composed resource proofs and full buffer accounting remain. |
-| 2. Minimal working gateway | ☐ | ✓ Static configuration and endpoint/credential binding. HTTP boundary in progress; network forwarding and streaming integration remain. |
+| 2. Minimal working gateway | ☐ | ✓ Static configuration and endpoint/credential binding; ✓ tested HTTP authentication/header boundary. Network forwarding and streaming integration remain. |
 | 3. Crash-safe logging | ☐ | ✓ Core strict/availability logging gates. Disk format, writer, recovery proofs, and crash tests remain. |
 | 4. Availability hardening | ☐ | ✓ Admission limits and request cleanup. Deadlines, backpressure, health/readiness, shutdown, and fault/load tests remain. |
 | 5. Auditable first release | ☐ | ✓ Pinned core toolchain, proof/mutation checks, and security notes. Automated release checks, reproducible deployment, benchmarks, and end-to-end audit remain. |
@@ -19,6 +19,8 @@ stream, and slot release together in tested safe Rust. Composed resource proofs
 and accounting for adapter allocations remain open.
 Static JSON policy loading and immutable endpoint/credential mapping are implemented
 and tested; see [configuration](configuration.md). HTTP dispatch remains unimplemented.
+The [HTTP metadata boundary](http-boundary.md) now authenticates and prepares fixed
+upstream requests; network/body processing is the next step.
 Scope: forward opaque HTTP request bodies and streaming responses, and log to disk.
 No provider translation, automatic generation replay, billing, or plugin system.
 Operators choose strict durable logging or forwarding with degraded audit coverage.

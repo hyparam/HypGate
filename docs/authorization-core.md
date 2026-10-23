@@ -23,7 +23,8 @@ The root grant includes the exact tenant, selector, origin, and credential tuple
 
 The runtime configuration layer now hashes gateway tokens with SHA-256 before
 authentication. This hashing and its cryptographic security are not verified.
-Secure token provisioning and HTTP authentication header parsing remain open. Digest comparison
+HTTP authentication header parsing is now tested in the [HTTP boundary](http-boundary.md);
+secure token provisioning remains an operator obligation. Digest comparison
 scans every byte but carries no constant-time theorem. Tests use synthetic digests.
 
 Origins and credentials are numeric handles, not URLs or secrets. The future

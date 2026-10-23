@@ -67,6 +67,7 @@ are trusted and tested, not formally verified. The core theorem still concerns
 normalized route handles. The HTTP adapter must consume `RoutedRequest`, strip
 gateway/client credential headers, construct Host from its fixed destination,
 disable redirects/proxies/retries, and retain request ownership during effects.
-DNS and TLS validation, HTTP authentication header parsing, disk logging, and
+HTTP authentication header parsing and metadata filtering now exist in the
+[HTTP boundary](http-boundary.md). DNS and TLS validation, disk logging, and
 network-level IP restrictions are not implemented here. Approved destinations may
 resolve to private IPs: this is origin confinement, not an SSRF/IP-range theorem.
