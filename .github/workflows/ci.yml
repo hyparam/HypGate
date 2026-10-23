@@ -79,3 +79,20 @@ jobs:
         env:
           SOUNDGATE_HAPROXY: /usr/sbin/haproxy
         run: cargo test -p gateway-runtime --locked proxy_gateway_process_failover -- --ignored --nocapture
+
+  storage:
+    name: Linux ext4 storage contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Install filesystem fixture tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes e2fsprogs util-linux
+      - name: Validate full, read-only, and process-crash behavior on private ext4
+        run: bash scripts/check_storage.sh

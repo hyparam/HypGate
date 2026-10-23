@@ -122,6 +122,8 @@ Exit criteria:
 2. Validate the disk adapter on a named deployment OS/filesystem, including actual
    write/disk-full errors and process-death recovery. Keep hardware flush/power-loss
    behavior an explicit assumption unless separately tested at that scope.
+   A private ext4 CI fixture now covers ENOSPC, read-only startup, and process
+   death; its first successful Linux CI run is still pending.
 3. Audit each logging exit criterion against the resulting theorem, runtime path,
    and failure evidence before marking this milestone complete.
 

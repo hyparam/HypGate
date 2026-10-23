@@ -79,3 +79,18 @@ observes no upstream replay during health detection, then sends a distinct new
 request through the standby and checks its exact audit bytes in a separate session.
 CI runs this test with the distribution HAProxy package. This remains a local
 process-failure experiment; host/power-loss tests remain open.
+
+## Named filesystem validation
+
+`scripts/check_storage.sh` creates a private 64 MiB ext4 loopback image on Linux,
+with `data=ordered,barrier=1`, and removes it after testing. It never formats a host
+device. The Ubuntu 24.04 CI storage job records the kernel, mount options, and
+e2fsprogs version. Validation is pending its first successful CI run.
+
+The fixture fills that image until actual ENOSPC, checks that a failed append
+preserves the acknowledged prefix, and checks sticky failure even after space is
+freed before logger shutdown. It runs the real writer process-death tests on the
+same filesystem, then remounts it read-only and requires EROFS at logger startup.
+Recovery remains read-only and restart uses a fresh file/session. These tests
+exercise live-OS storage errors and process death; they do not establish power-loss
+durability or certify the backing device's flush behavior.

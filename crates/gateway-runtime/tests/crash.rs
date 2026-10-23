@@ -10,7 +10,9 @@ impl TempDir {
     fn new() -> Self {
         let mut nonce = [0; 16]; getrandom::fill(&mut nonce).unwrap();
         let name: String = nonce.iter().map(|b| format!("{b:02x}")).collect();
-        let p = std::env::temp_dir().join(format!("soundgate-crash-{name}"));
+        let root = std::env::var_os("SOUNDGATE_STORAGE_TEST_DIR")
+            .map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);
+        let p = root.join(format!("soundgate-crash-{name}"));
         fs::create_dir(&p).unwrap(); Self(p)
     }
 }
