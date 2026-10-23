@@ -42,3 +42,23 @@ zero progress, cancellation at read/log/write waits, capacity retention, and fra
 SSE bytes through bounded Tokio duplex streams. The in-memory test logger is an
 event recorder, not a durable implementation. The driver is tested Rust; its async
 control flow and cancellation guard are not formally verified.
+
+## HTTP frame retention
+
+The HTTP-to-byte reader retains at most one accepted data frame, with a visible
+length at most 32 KiB. The same constant configures both inbound and upstream
+HTTP/1 parser buffer limits. Larger frames fail with `InvalidData` before the
+reader retains them or forwards their bytes; trailers and body errors also stop
+further polling. The transfer driver treats that first error as terminal and
+cancels its stream, so a later reader EOF cannot synthesize successful transfer.
+The limit applies to individual adapter frames, not total request/response size.
+
+Tests cover a maximum-size frame consumed through small reads and an oversized
+frame rejected without retention or further body polling. All 67 workspace tests
+pass. These checks bound visible bytes owned by this adapter; `Bytes` may share a
+larger backing allocation, and the producing body already allocated the rejected
+frame. They therefore do not prove peak memory or the dependency's allocations.
+A full memory budget must also account for two driver chunks per active request,
+one frame per HTTP output queue, logger queue/worker frames, connection state,
+TLS buffers, allocator overhead, and filesystem caches. Load measurements and
+formal composition remain open.

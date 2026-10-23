@@ -6,6 +6,10 @@ use tokio::{io::{AsyncRead, AsyncWrite, ReadBuf}, sync::{mpsc, oneshot}};
 use std::future::Future;
 use tokio_util::sync::PollSender;
 
+// Matches the inbound and upstream HTTP/1 parser buffer limits. This bounds
+// visible retained frame bytes, not the backing allocation made by Hyper.
+pub(crate) const MAX_INPUT_FRAME: usize = 32 * 1024;
+
 pub(crate) struct Reader<B> { body: B, buffered: Bytes, ended: bool }
 impl<B> Reader<B> {
     pub(crate) fn new(body: B) -> Self { Self { body, buffered: Bytes::new(), ended: false } }
@@ -25,10 +29,13 @@ impl<B: Body<Data = Bytes> + Unpin> AsyncRead for Reader<B> {
             match Pin::new(&mut this.body).poll_frame(cx) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(None) => { this.ended = true; return Poll::Ready(Ok(())); }
-                Poll::Ready(Some(Err(_))) => return Poll::Ready(Err(io::ErrorKind::UnexpectedEof.into())),
+                Poll::Ready(Some(Err(_))) => { this.ended = true; return Poll::Ready(Err(io::ErrorKind::UnexpectedEof.into())); },
                 Poll::Ready(Some(Ok(frame))) => match frame.into_data() {
-                    Ok(data) => this.buffered = data,
-                    Err(_) => return Poll::Ready(Err(io::ErrorKind::InvalidData.into())), // trailers unsupported
+                    Ok(data) if data.len() <= MAX_INPUT_FRAME => this.buffered = data,
+                    _ => {
+                        this.ended = true;
+                        return Poll::Ready(Err(io::ErrorKind::InvalidData.into()));
+                    }, // oversized frames and trailers unsupported
                 },
             }
         }
@@ -130,6 +137,40 @@ mod tests {
         let consume = async { let mut out = Vec::new(); Reader::new(body).read_to_end(&mut out).await.unwrap(); out };
         let ((), bytes) = tokio::join!(produce, consume);
         assert_eq!(bytes, b"abcdef");
+    }
+
+    #[tokio::test]
+    async fn oversized_input_frame_is_rejected_without_retention_or_resumption() {
+        struct Frames { polls: std::sync::Arc<std::sync::atomic::AtomicUsize> }
+        impl Body for Frames {
+            type Data = Bytes; type Error = io::Error;
+            fn poll_frame(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Result<Frame<Bytes>, io::Error>>> {
+                self.polls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Poll::Ready(Some(Ok(Frame::data(Bytes::from(vec![7; MAX_INPUT_FRAME + 1])))))
+            }
+        }
+        let polls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut reader = Reader::new(Frames { polls: polls.clone() });
+        let mut out = [0; 1];
+        assert_eq!(reader.read(&mut out).await.unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert!(reader.buffered.is_empty());
+        assert_eq!(reader.read(&mut out).await.unwrap(), 0);
+        assert_eq!(polls.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn maximum_input_frame_survives_small_reads_without_reordering() {
+        let expected: Vec<_> = (0..MAX_INPUT_FRAME).map(|i| (i % 251) as u8).collect();
+        let mut reader = Reader::new(http_body_util::Full::new(Bytes::from(expected.clone())));
+        let mut actual = Vec::new();
+        let mut small = [0; 97];
+        loop {
+            let n = reader.read(&mut small).await.unwrap();
+            if n == 0 { break; }
+            actual.extend_from_slice(&small[..n]);
+            assert!(reader.buffered.len() <= MAX_INPUT_FRAME);
+        }
+        assert_eq!(actual, expected);
     }
 
     #[tokio::test]

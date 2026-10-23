@@ -173,7 +173,7 @@ pub async fn serve(listener: TcpListener, app: Arc<Gateway>, connections: usize,
                 tasks.spawn(async move {
                     let service = service_fn(move |request| app.clone().handle(request));
                     let mut builder = hyper::server::conn::http1::Builder::new();
-                    builder.keep_alive(false).max_headers(100).max_buf_size(32 * 1024)
+                    builder.keep_alive(false).max_headers(100).max_buf_size(http_body::MAX_INPUT_FRAME)
                         .timer(TokioTimer::new()).header_read_timeout(Duration::from_secs(10));
                     let _ = tokio::time::timeout(connection_deadline, builder.serve_connection(TokioIo::new(socket), service)).await;
                 });

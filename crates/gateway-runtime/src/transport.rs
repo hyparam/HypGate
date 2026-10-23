@@ -48,7 +48,7 @@ impl HttpsTransport {
         let tcp = TcpStream::connect((host.as_str(), port)).await.map_err(|_| TransportError::Connect)?;
         let tls = self.connector.connect(server, tcp).await.map_err(|_| TransportError::Tls)?;
         let (mut sender, connection) = hyper::client::conn::http1::Builder::new()
-            .max_buf_size(32 * 1024).handshake(TokioIo::new(tls)).await.map_err(|_| TransportError::Http)?;
+            .max_buf_size(http_body::MAX_INPUT_FRAME).handshake(TokioIo::new(tls)).await.map_err(|_| TransportError::Http)?;
         let (mut body_writer, body) = http_body::channel(16 * 1024);
         // Direct HTTP/1 connection uses origin-form; authority was already bound
         // to the TCP/TLS destination and the trusted Host header.
