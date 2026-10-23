@@ -18,7 +18,7 @@ pub struct LogRecord<'a> {
 pub trait AuditLog {
     /// Success means this exact record is durable under the logger's documented
     /// crash model. Implementations must bound work and retain any buffer credits
-    /// for effects that survive cancellation. No production logger exists yet.
+    /// for effects that survive cancellation. DiskLog supplies this implementation.
     fn append<'a>(&'a mut self, record: LogRecord<'a>)
         -> impl Future<Output = io::Result<()>> + Send + 'a;
 }

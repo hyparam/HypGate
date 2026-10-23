@@ -4,3 +4,4 @@ pub mod admission;
 pub mod config;
 pub mod http_boundary;
 pub mod transfer;
+pub mod disk_log;
