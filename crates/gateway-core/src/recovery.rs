@@ -51,7 +51,180 @@ pub open spec fn complete_record<R: Source>(data: Seq<u8>, start: nat) -> bool {
     }
 }
 
+proof fn matching_subrange(data: Seq<u8>, whole: Seq<u8>, start: nat, lo: nat, hi: nat)
+    requires start + whole.len() <= data.len(), lo <= hi <= whole.len(),
+        data.subrange(start as int, (start + whole.len()) as int) == whole,
+    ensures data.subrange((start + lo) as int, (start + hi) as int)
+        == whole.subrange(lo as int, hi as int),
+{
+    assert forall|i: int| 0 <= i < hi - lo implies
+        data.subrange((start + lo) as int, (start + hi) as int)[i]
+            == whole.subrange(lo as int, hi as int)[i] by {
+        assert(data.subrange(start as int, (start + whole.len()) as int)[lo + i] == whole[lo + i]);
+    }
+    assert(data.subrange((start + lo) as int, (start + hi) as int)
+        =~= whole.subrange(lo as int, hi as int));
+}
+
+pub proof fn canonical_frame_is_complete<R: Source>(frame: &framing::RecordFrame,
+    data: Seq<u8>, start: nat)
+    requires frame.valid(), start + frame.contents().len() <= data.len(),
+        start + frame.contents().len() <= u64::MAX,
+        data.subrange(start as int, (start + frame.contents().len()) as int) == frame.contents(),
+        R::digest(framing::encoding(frame.header()) + frame.payload()) == frame.checksum(),
+    ensures complete_record::<R>(data, start),
+        framing::decoded(data.subrange(start as int, start as int + 33)) == Some(frame.header()),
+        data.subrange(start as int + 33, (start + frame.contents().len()) as int - 32) == frame.payload(),
+        frame.contents().len() == 65 + frame.payload().len(),
+{
+    frame.canonical();
+    framing::encoded_header_roundtrip(frame.header());
+    let end = start + frame.contents().len();
+    assert(frame.contents().len() == 65 + frame.payload().len());
+    matching_subrange(data, frame.contents(), start, 33, (frame.contents().len() - 32) as nat);
+    matching_subrange(data, frame.contents(), start, (frame.contents().len() - 32) as nat, frame.contents().len());
+    assert(data.subrange(start as int, start as int + 33) =~= framing::encoding(frame.header()));
+    assert(data.subrange(start as int + 33, end as int - 32) =~= frame.payload());
+    assert(data.subrange(start as int, end as int - 32) =~= framing::encoding(frame.header()) + frame.payload());
+    assert(data.subrange(end as int - 32, end as int) =~= frame.checksum());
+}
+
+pub proof fn canonical_prefix_is_complete<R: Source>(frames: Seq<framing::RecordFrame>,
+    data: Seq<u8>, start: nat)
+    requires
+        forall|i: int| 0 <= i < frames.len() ==> #[trigger] frames[i].valid(),
+        forall|i: int| 0 <= i < frames.len() ==> R::digest(framing::encoding(frames[i].header())
+            + frames[i].payload()) == #[trigger] frames[i].checksum(),
+        start + crate::audit_journal::encoded_frames(frames).len() <= data.len(),
+        start + crate::audit_journal::encoded_frames(frames).len() <= u64::MAX,
+        data.subrange(start as int, (start + crate::audit_journal::encoded_frames(frames).len()) as int)
+            == crate::audit_journal::encoded_frames(frames),
+    ensures forall|i: int| 0 <= i < frames.len() ==> complete_record::<R>(data,
+        start + crate::audit_journal::encoded_frames(frames.take(i)).len()),
+    decreases frames.len(),
+{
+    if frames.len() > 0 {
+        let prior = frames.drop_last();
+        let prefix = crate::audit_journal::encoded_frames(prior);
+        let last = frames.last();
+        assert(data.subrange(start as int, (start + prefix.len()) as int) =~= prefix);
+        matching_subrange(data, crate::audit_journal::encoded_frames(frames), start,
+            prefix.len(), crate::audit_journal::encoded_frames(frames).len());
+        assert(data.subrange((start + prefix.len()) as int,
+            (start + prefix.len() + last.contents().len()) as int) =~= last.contents());
+        canonical_prefix_is_complete::<R>(prior, data, start);
+        canonical_frame_is_complete::<R>(&last, data, start + prefix.len());
+        assert forall|i: int| 0 <= i < frames.len() implies complete_record::<R>(data,
+            start + crate::audit_journal::encoded_frames(frames.take(i)).len()) by {
+            if i < prior.len() {
+                assert(frames.take(i) =~= prior.take(i));
+            } else {
+                assert(frames.take(i) =~= prior);
+            }
+        }
+    }
+}
+
 pub struct Scanner<R: Source> { source: R, cursor: Cursor, session: [u8; 16] }
+pub open spec fn scanner_step<R: Source>(before: &Scanner<R>, after: &Scanner<R>,
+    out: Result<Option<RecoveredRecord>, ScanError>) -> bool {
+    after.valid() && after.data() == before.data() && after.session_id() == before.session_id()
+        && match out {
+                Ok(Some(record)) => !before.stopped() && !after.stopped()
+                    && after.position() == before.position() + 65 + record.bytes.len()
+                    && after.position() <= after.data().len()
+                    && framing::decoded(after.data().subrange(before.position() as int,
+                        before.position() as int + 33)) == Some(record.header)
+                    && record.bytes@ == after.data().subrange(before.position() as int + 33,
+                        after.position() as int - 32)
+                    && framing::valid(record.header) && record.header.payload == record.bytes.len()
+                    && R::digest(after.data().subrange(before.position() as int,
+                        after.position() as int - 32)) == after.data().subrange(
+                        after.position() as int - 32, after.position() as int),
+                Ok(None) => after.stopped() && after.position() == before.position()
+                    && (before.stopped() || before.position() == before.data().len()),
+                Err(error) => after.stopped() && after.position() == before.position()
+                    && match error {
+                        ScanError::Io => after.io_errors() > before.io_errors(),
+                        _ => !complete_record::<R>(before.data(), before.position() as nat),
+                    },
+            }
+}
+
+pub proof fn recover_frame_step<R: Source>(before: &Scanner<R>, after: &Scanner<R>,
+    out: Result<Option<RecoveredRecord>, ScanError>, frame: &framing::RecordFrame)
+    requires before.valid(), !before.stopped(), scanner_step(before, after, out),
+        after.io_errors() == before.io_errors(), frame.valid(),
+        before.position() + frame.contents().len() <= before.data().len(),
+        before.position() + frame.contents().len() <= u64::MAX,
+        before.data().subrange(before.position() as int,
+            (before.position() + frame.contents().len()) as int) == frame.contents(),
+        R::digest(framing::encoding(frame.header()) + frame.payload()) == frame.checksum(),
+    ensures !after.stopped(), after.position() == before.position() + frame.contents().len(),
+        match out {
+            Ok(Some(record)) => record.header == frame.header() && record.bytes@ == frame.payload(),
+            _ => false,
+        },
+{
+    canonical_frame_is_complete::<R>(frame, before.data(), before.position() as nat);
+    frame.canonical();
+    match out {
+        Ok(Some(record)) => {
+            assert(record.header == frame.header());
+            assert(record.bytes@ == frame.payload());
+        },
+        _ => {},
+    }
+}
+
+pub proof fn reconstruct_prefix<R: Source>(frames: Seq<framing::RecordFrame>, data: Seq<u8>,
+    start: nat, states: Seq<Scanner<R>>, results: Seq<Result<Option<RecoveredRecord>, ScanError>>)
+    requires
+        forall|i: int| 0 <= i < frames.len() ==> #[trigger] frames[i].valid(),
+        forall|i: int| 0 <= i < frames.len() ==> R::digest(framing::encoding(frames[i].header())
+            + frames[i].payload()) == #[trigger] frames[i].checksum(),
+        start + crate::audit_journal::encoded_frames(frames).len() <= data.len(),
+        start + crate::audit_journal::encoded_frames(frames).len() <= u64::MAX,
+        data.subrange(start as int, (start + crate::audit_journal::encoded_frames(frames).len()) as int)
+            == crate::audit_journal::encoded_frames(frames),
+        states.len() == frames.len() + 1, results.len() == frames.len(),
+        states[0].position() == start, !states[0].stopped(),
+        forall|i: int| 0 <= i < states.len() ==> #[trigger] states[i].valid()
+            && states[i].data() == data && states[i].io_errors() == states[0].io_errors(),
+        forall|i: int| 0 <= i < results.len() ==> scanner_step(&states[i], &states[i + 1], results[i]),
+    ensures !states.last().stopped(),
+        states.last().position() == start + crate::audit_journal::encoded_frames(frames).len(),
+        forall|i: int| 0 <= i < results.len() ==> match #[trigger] results[i] {
+            Ok(Some(record)) => record.header == frames[i].header() && record.bytes@ == frames[i].payload(),
+            _ => false,
+        },
+    decreases frames.len(),
+{
+    if frames.len() > 0 {
+        let prior = frames.drop_last();
+        let prefix = crate::audit_journal::encoded_frames(prior);
+        let last = frames.last();
+        assert(data.subrange(start as int, (start + prefix.len()) as int) =~= prefix);
+        reconstruct_prefix::<R>(prior, data, start, states.drop_last(), results.drop_last());
+        matching_subrange(data, crate::audit_journal::encoded_frames(frames), start,
+            prefix.len(), crate::audit_journal::encoded_frames(frames).len());
+        assert(data.subrange((start + prefix.len()) as int,
+            (start + prefix.len() + last.contents().len()) as int) =~= last.contents());
+        let i = results.len() as int - 1;
+        assert(states[i].valid() && states[i + 1].valid());
+        recover_frame_step::<R>(&states[i], &states[i + 1], results[i], &last);
+        assert forall|j: int| 0 <= j < results.len() implies match #[trigger] results[j] {
+            Ok(Some(record)) => record.header == frames[j].header() && record.bytes@ == frames[j].payload(),
+            _ => false,
+        } by {
+            if j < i {
+                assert(results[j] == results.drop_last()[j]);
+                assert(frames[j] == prior[j]);
+            } else { assert(frames[j] == last); }
+        }
+    }
+}
+
 impl<R: Source> Scanner<R> {
     pub closed spec fn valid(&self) -> bool {
         self.source.valid() && self.cursor.position() <= self.source.position()
@@ -102,28 +275,7 @@ impl<R: Source> Scanner<R> {
 
     pub fn next_record(&mut self) -> (out: Result<Option<RecoveredRecord>, ScanError>)
         requires old(self).valid(),
-        ensures final(self).valid(), final(self).data() == old(self).data(),
-            final(self).session_id() == old(self).session_id(),
-            match out {
-                Ok(Some(record)) => !old(self).stopped() && !final(self).stopped()
-                    && final(self).position() == old(self).position() + 65 + record.bytes.len()
-                    && final(self).position() <= final(self).data().len()
-                    && framing::decoded(final(self).data().subrange(old(self).position() as int,
-                        old(self).position() as int + 33)) == Some(record.header)
-                    && record.bytes@ == final(self).data().subrange(old(self).position() as int + 33,
-                        final(self).position() as int - 32)
-                    && framing::valid(record.header) && record.header.payload == record.bytes.len()
-                    && R::digest(final(self).data().subrange(old(self).position() as int,
-                        final(self).position() as int - 32)) == final(self).data().subrange(
-                        final(self).position() as int - 32, final(self).position() as int),
-                Ok(None) => final(self).stopped() && final(self).position() == old(self).position()
-                    && (old(self).stopped() || old(self).position() == old(self).data().len()),
-                Err(error) => final(self).stopped() && final(self).position() == old(self).position()
-                    && match error {
-                        ScanError::Io => final(self).io_errors() > old(self).io_errors(),
-                        _ => !complete_record::<R>(old(self).data(), old(self).position() as nat),
-                    },
-            },
+        ensures scanner_step(old(self), final(self), out),
     {
         let ticket = match self.cursor.begin() { Some(ticket) => ticket, None => return Ok(None) };
         let header = match self.source.read_exact(33) {

@@ -1,7 +1,8 @@
 # Journal acknowledgment proof
 
-The production core's [journal.rs](../crates/gateway-core/src/journal.rs) is used
-by the disk worker for every framed record. It tracks one pending append and
+The production disk worker uses [AuditJournal](../crates/gateway-core/src/audit_journal.rs),
+which wraps the [journal state machine](../crates/gateway-core/src/journal.rs) and
+permits only canonical-frame commits. It tracks one pending append and
 written, durable, and acknowledged offsets relative to the already-synced session
 header. Full byte history is ghost state, erased in the executable; runtime journal
 memory is constant-size.
@@ -52,8 +53,15 @@ ownership is an adapter obligation. Storage must preserve previously synced byte
 This proves acknowledgment ordering and conditional byte-prefix survival, not
 complete crash-safe logging. [Header and frame-extent proofs](framing-proof.md),
 a documented [storage contract](storage-crash-contract.md), and process-kill
-experiments now exist. Full acknowledged-prefix reconstruction, storage-stack validation, and
+experiments now exist. Named-storage validation and
 async receipt delivery and journal/session ownership remain trusted. No `assume` or external-body escape was introduced.
+
+The wrapper's ghost frame sequence proves that acknowledged bytes are exactly
+those frames concatenated in commit order. Its conditional reconstruction theorem
+connects that sequence to actual verified scanner steps; see the
+[recovery proof](recovery-proof.md). This assumes preserved synced bytes, correct
+checksums, successful scanner initialization, no read errors, and offsets fitting
+in `u64`. It does not retain past frame allocations at runtime.
 
 ## Durable receipts and stream authorization
 

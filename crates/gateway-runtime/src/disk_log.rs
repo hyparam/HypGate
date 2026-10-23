@@ -1,7 +1,7 @@
 //! Bounded disk logging. Filesystem effects and checksum security are trusted,
 //! not verified. A single worker owns the file; requests never choose its path.
 use crate::transfer::{AuditLog, Direction, LogRecord};
-use gateway_core::journal::{Journal, DurableFrame};
+use gateway_core::{audit_journal::AuditJournal as Journal, journal::DurableFrame};
 use gateway_core::framing::{self, Header, RecordBody, RecordFrame};
 use sha2::{Digest, Sha256};
 use std::{fs::{File, OpenOptions}, io::{self, Read, Write}, path::Path,

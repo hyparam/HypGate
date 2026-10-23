@@ -15,6 +15,10 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("audit_journal.rs", "ledger_drops_frame", "self.frames = Ghost(self.frames@.push(saved));", ""),
+    ("audit_journal.rs", "ledger_reverses_order", "self.frames = Ghost(self.frames@.push(saved));", "self.frames = Ghost(seq![saved] + self.frames@);"),
+    ("audit_journal.rs", "ledger_denies_valid_commit", "let ghost saved = frame;", "if true { return None; } let ghost saved = frame;"),
+
     ("recovery.rs", "scanner_wrong_payload", "Some(record) => Ok(Some(record)),", "Some(mut record) => { record.bytes = Vec::new(); Ok(Some(record)) },"),
     ("recovery.rs", "scanner_wrong_header_extent", "self.source.read_exact(33)", "self.source.read_exact(34)"),
     ("recovery.rs", "scanner_ignores_checksum", "let checked = self.source.checksum_valid(header.as_slice(), bytes.as_slice(), checksum.as_slice());", "let checked = true;"),

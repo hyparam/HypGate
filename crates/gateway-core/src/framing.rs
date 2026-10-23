@@ -115,6 +115,18 @@ pub fn encode_payload(h: Header, payload: &[u8]) -> (out: Option<Vec<u8>>)
     Some(bytes)
 }
 
+pub proof fn encoded_header_roundtrip(h: Header)
+    requires valid(h),
+    ensures encoding(h).len() == 33, decoded(encoding(h)) == Some(h),
+{
+    lemma_auto_spec_u32_to_from_le_bytes(); lemma_auto_spec_u64_to_from_le_bytes();
+    let bytes = encoding(h);
+    assert(bytes.subrange(4, 8) =~= spec_u32_to_le_bytes(h.payload));
+    assert(bytes.subrange(8, 16) =~= spec_u64_to_le_bytes(h.tenant));
+    assert(bytes.subrange(16, 24) =~= spec_u64_to_le_bytes(h.request));
+    assert(bytes.subrange(24, 32) =~= spec_u64_to_le_bytes(h.chunk));
+}
+
 fn equal_bytes(a: &[u8], b: &[u8]) -> (out: bool)
     ensures out == (a@ == b@),
 {
@@ -216,6 +228,7 @@ impl RecordFrame {
     pub proof fn canonical(&self)
         requires self.valid(),
         ensures self.contents() == encoding(self.header()) + self.payload() + self.checksum(),
+            valid(self.header()), self.header().payload == self.payload().len(), self.checksum().len() == 32,
     {}
     pub fn bytes(&self) -> (out: &Vec<u8>)
         ensures out@ == self.contents(),

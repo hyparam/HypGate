@@ -4,7 +4,7 @@
 | --- | :---: | --- |
 | 1. Verified streaming core | ☐ | ✓ Streaming and resource proofs; ✓ authorization/configuration proofs; ✓ tested request ownership; ✓ verified completed-chunk release; ✓ verified owner-checked stream retirement used by runtime leases; ✓ verified configuration budget arithmetic and runtime retained-vector capacity checks; ✓ conditional combined payload bound for streams mapped to live slots; ✓ verified zero initial occupancy and exact admission/release count changes; ✓ verified initial authority/slot/stream binding and admission/release/stream non-rejection. ✓ Source-level buffer/queue inventory and visible-payload subtotal. Composed resource proofs and full allocation accounting remain. |
 | 2. Minimal working gateway | ✓ | Runnable HTTP/TLS/disk path, concurrent tenant isolation, disconnect/failure and unsolicited-upgrade rejection tests, and documented adapter audit. Production hardening and broader proofs remain in the other milestones. |
-| 3. Crash-safe logging | ☐ | ✓ Bounded disk writer, framing/scanner tests; ✓ Verified session-header version/identity encoding and decoding in startup/recovery; ✓ Header/payload encoding, frame-extent, recovery-cursor, and recovered-record binding and non-rejection proofs; ✓ Verified authority/stream audit-record binding; ✓ Request-scoped async audit acknowledgment; ✓ Exact durable-receipt/stream acknowledgment theorem and production receipt delivery; ✓ Immutable queued frames and composed canonical-frame/journal acknowledgment; ✓ composed durable-frame commit used by the disk worker; ✓ journal acknowledgment proof, exact acceptance/rejection contracts, and conditional prefix-survival lemma. ✓ Process-kill recovery tests and storage contract; ✓ Scanner I/O faults at every record byte. ✓ Conditional scanner source-byte/checksum refinement and justified rejection. Acknowledged-prefix reconstruction and storage-stack validation remain. |
+| 3. Crash-safe logging | ☐ | ✓ Bounded disk writer, framing/scanner tests; ✓ Verified session-header version/identity encoding and decoding in startup/recovery; ✓ Header/payload encoding, frame-extent, recovery-cursor, and recovered-record binding and non-rejection proofs; ✓ Verified authority/stream audit-record binding; ✓ Request-scoped async audit acknowledgment; ✓ Exact durable-receipt/stream acknowledgment theorem and production receipt delivery; ✓ Immutable queued frames and composed canonical-frame/journal acknowledgment; ✓ composed durable-frame commit used by the disk worker; ✓ journal acknowledgment proof, exact acceptance/rejection contracts, and conditional prefix-survival lemma. ✓ Process-kill recovery tests and storage contract; ✓ Scanner I/O faults at every record byte. ✓ Conditional scanner source-byte/checksum refinement and justified rejection. ✓ Ordered acknowledged-prefix reconstruction under explicit storage/read/checksum assumptions. Named-storage validation and the milestone exit audit remain. |
 | 4. Availability hardening | ☐ | ✓ Separate worker permits cover rejection and cleanup, with saturation/cancellation tests; ✓ Admission/connection limits, bounded logging, network deadlines, health/readiness, and bounded connection drain. ✓ Audit-health/gap metrics and verified request-occupancy gauges; ✓ Poisoned-admission readiness/fail-closed tests; ✓ Incomplete-connection overload, pre-header/streaming disconnect, bodyless-response completion, and shutdown tests; ✓ Bounded logger drain/join and canceled-caller worker-panic health; ✓ Explicit HTTP input-frame limit; ✓ Gateway runtime process-kill test checks truncated response, strict audit prefix, and fresh-session restart; ✓ Combined TLS proxy/two-gateway process-kill test verifies no replay and a new request on standby. ✓ Eight-client paced 4 MiB responses and mid-workload permanent log failure in both modes. ✓ Repeated admission overload preserves eight active streams and health checks, rejects excess traffic before dispatch, and recovers capacity. ✓ Concurrent stalled-sync test verifies bounded queues, request cleanup, and both operator modes. Long-duration overload, broader fault/load tests, and shutdown/resource proofs remain. |
 | 5. Auditable first release | ☐ | ✓ Pinned core toolchain, proof/mutation checks, security notes, and source-linked proof index; ✓ GitHub Actions test/proof workflow. ✓ Tested TLS proxy/standby example; ✓ Local TLS/disk latency and process-RSS baseline for both modes; ✓ Concurrent stalled-sync/queue-saturation test in both logging modes; ✓ Paced-peer and permanent-log-failure workload results, with a separate paced strict-mode RSS measurement. Reproducible full deployment, broader benchmarks, and end-to-end audit remain. |
 
@@ -115,9 +115,10 @@ Exit criteria:
 
 ### Remaining closure work for milestone 3
 
-1. Compose the acknowledged journal record sequence with the recovered source
-   snapshot and scanner steps: prove reconstruction of every acknowledged record
-   under explicit successful-read, checksum, and synced-prefix assumptions.
+1. ✓ Compose the acknowledged journal record sequence with the recovered source
+   snapshot and scanner steps: `AuditJournal::reconstruct_acknowledged` now proves
+   exact ordered reconstruction under successful initialization, no read errors,
+   checksum correctness, representable offsets, and preserved synced-prefix assumptions.
 2. Validate the disk adapter on a named deployment OS/filesystem, including actual
    write/disk-full errors and process-death recovery. Keep hardware flush/power-loss
    behavior an explicit assumption unless separately tested at that scope.
@@ -125,7 +126,8 @@ Exit criteria:
    and failure evidence before marking this milestone complete.
 
 The [scanner proof](recovery-proof.md) now covers per-step source correspondence
-and justified rejection. It does not yet close the first item above.
+and justified rejection, and its trace theorem closes the conditional proof item
+above. Next work stays on named-storage validation and the exit audit.
 
 ## 4. Availability hardening
 

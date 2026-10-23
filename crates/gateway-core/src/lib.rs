@@ -10,3 +10,4 @@ pub mod journal;
 pub mod framing;
 
 pub mod recovery;
+pub mod audit_journal;

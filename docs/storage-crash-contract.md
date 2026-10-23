@@ -36,8 +36,9 @@ checksum result, wrong cursor/ticket state, or offset overflow. These are finite
 core transitions, not a promise that reads or checksum computation finish. File
 reads, checksum computation, session randomness/uniqueness, and conversion to the public runtime
 record remain trusted. The [scanner refinement](recovery-proof.md) now proves
-per-step source correspondence under explicit adapter contracts; complete
-acknowledged-prefix reconstruction remains open. Checksums defend against accidental corruption, not malicious changes.
+per-step source correspondence under explicit adapter contracts; ordered
+acknowledged-prefix reconstruction is now proved under its explicit read/checksum
+and preserved-byte assumptions. Named-storage validation remains open. Checksums defend against accidental corruption, not malicious changes.
 EOF exactly at a record boundary cannot reveal whether later records were lost.
 
 Restart creates a new file and session ID. It never appends to an existing file,

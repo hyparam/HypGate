@@ -61,8 +61,13 @@ impl Journal {
         t.start == self.written && t.end == self.pending && t.end > t.start
     }
 
+    pub proof fn prefix_lengths(&self)
+        requires self.valid(),
+        ensures self.history().len() == self.written_len(), self.acked().len() == self.acked_len(),
+    {}
+
     pub fn new() -> (j: Self)
-        ensures j.valid(), j.history() == Seq::<u8>::empty(), j.acked() == Seq::<u8>::empty(), !j.failed(),
+        ensures j.valid(), j.history() == Seq::<u8>::empty(), j.acked() == Seq::<u8>::empty(), j.stable() == Seq::<u8>::empty(), !j.failed(),
     {
         Journal { written: 0, durable: 0, acknowledged: 0, pending: 0, failed: false, bytes: Ghost(Seq::empty()) }
     }
@@ -173,7 +178,9 @@ impl Journal {
             ok == (!old(self).failed() && old(self).matches(t)
                 && old(self).acked_len() == old(self).written_len()
                 && frame.contents().len() == t.end() - t.start()),
-            ok ==> final(self).acked() == old(self).history()
+            ok ==> final(self).history() == old(self).history() + frame.contents()
+                && final(self).acked() == final(self).history() && !final(self).failed()
+                && final(self).acked() == old(self).history()
                 + crate::framing::encoding(frame.header()) + frame.payload() + frame.checksum()
                 && final(self).stable() == final(self).history()
                 && final(self).acked_len() == t.end() && final(self).idle(),
@@ -198,7 +205,9 @@ impl Journal {
             match out {
             Some(receipt) => receipt.valid() && receipt.prefix() == old(self).history()
                 && receipt.acknowledged() == final(self).acked()
-                && final(self).stable() == final(self).history(),
+                && final(self).acked() == final(self).history()
+                && final(self).history() == old(self).history() + frame.contents()
+                && final(self).stable() == final(self).history() && !final(self).failed(),
             None => *final(self) == *old(self),
         },
     {

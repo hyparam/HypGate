@@ -53,9 +53,32 @@ header read extent, substitute returned payload, or bypass record/session checks
 results. The wrong-extent mutation initially exposed an overly permissive error
 contract; justified rejection is now part of the checked contract.
 
-This establishes conditional per-step scanner refinement. A complete argument
-that scanning reconstructs every acknowledged frame still needs composition across
-the journal's sequence of records and the recovered snapshot, including the
-checksum/storage assumptions. The initial-open error path is not a proved liveness
-guarantee. No theorem here proves physical persistence, resistance to malicious
-log rewriting, or authenticity/uniqueness of random session identifiers.
+## Ordered acknowledged-prefix reconstruction
+
+The production writer now owns `AuditJournal`, which exposes only reservation,
+canonical-frame commit, and permanent failure. Its erased frame sequence is kept
+in order, and its invariant equates acknowledged/stable bytes to the concatenation
+of those frames. Lower-level raw journal operations cannot bypass this wrapper.
+No past frame buffers are retained at runtime; the sequence is ghost state.
+
+`canonical_frame_is_complete` connects canonical encoding to the scanner's
+complete-record predicate. `recover_frame_step` combines that fact with the actual
+`scanner_step` postcondition: a live scanner at the frame boundary, with no new
+I/O error, must return that exact header and payload and advance to its end.
+`reconstruct_prefix` inducts over an arbitrary finite record sequence and scanner
+trace, proving that every result is the corresponding record in the same order.
+It also proves that the final accepted offset is exactly the prefix end.
+`AuditJournal::reconstruct_acknowledged` supplies the production journal invariant
+and starts the trace after the 56-byte session header.
+
+The theorem assumes successful scanner initialization and one completed
+`next_record` call per acknowledged frame; it does not assume those calls return
+success. It proves success from preserved prefix bytes, correct frame checksums,
+representable `u64` offsets, and no read errors. A later uncertain suffix may
+exist and may fail scanning; it cannot change the reconstructed acknowledged
+prefix. The checksum predicate is explicit and shared with the source model.
+
+Physical persistence, syscall truth, stable-source behavior, SHA-256, and the
+adapter implementation remain trusted. This is not an initial-open or scheduling
+liveness theorem, power-loss certification, or protection against malicious log
+rewriting. Named-storage validation and the logging milestone exit audit remain.
