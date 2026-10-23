@@ -160,7 +160,13 @@ impl Cursor {
                 && record.bytes@ == bytes@ && old(self).stopped()
                 && ticket.start() == old(self).position() && !final(self).stopped()
                 && final(self).position() == old(self).position() + 65 + bytes.len(),
-            None => *final(self) == *old(self),
+            None => *final(self) == *old(self) && (!checksum_valid
+                || !old(self).stopped() || ticket.start() != old(self).position()
+                || old(self).position() + 65 + bytes.len() > u64::MAX
+                || match decoded(header@) {
+                    Some(h) => h.payload != bytes.len(),
+                    None => true,
+                }),
         },
     {
         if !checksum_valid { return None; }
@@ -175,6 +181,9 @@ impl Cursor {
     // This transition proves structural extent/state accounting, not that I/O fact.
     pub fn accept(&mut self, ticket: ScanTicket, payload: u32, available: u64) -> (ok: bool)
         ensures
+            ok == (old(self).stopped() && ticket.start() == old(self).position()
+                && payload <= 1048576 && 65 + payload <= available
+                && old(self).position() + 65 + payload <= u64::MAX),
             ok ==> old(self).stopped() && ticket.start() == old(self).position()
                 && !final(self).stopped() && payload <= 1048576
                 && final(self).position() == old(self).position() + 65 + payload

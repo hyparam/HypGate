@@ -28,7 +28,12 @@ The scanner emits only complete, checksum-valid records and stops at the first
 incomplete/corrupt tail, reporting the preceding valid offset. The production
 scanner now calls verified `Cursor::accept_record` to bind header decoding, exact
 payload length/content, successful checksum-result input, and cursor advancement.
-An unsuccessful acceptance preserves the stopped cursor and prior offset. File
+An unsuccessful acceptance preserves the stopped cursor and prior offset. The
+contracts also prove acceptance of a valid complete record when its ticket matches,
+the supplied checksum result is successful, and its end offset fits in `u64`.
+Rejection must identify a malformed header, payload-length mismatch, failed
+checksum result, wrong cursor/ticket state, or offset overflow. These are finite
+core transitions, not a promise that reads or checksum computation finish. File
 reads, checksum computation, session parsing, and conversion to the public runtime
 record remain trusted; full scanner refinement remains open. Checksums defend against accidental corruption, not malicious changes.
 EOF exactly at a record boundary cannot reveal whether later records were lost.
