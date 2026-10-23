@@ -21,6 +21,7 @@ their formal scope.
 | Candidate routes cannot expand root grants or select another tenant's credential | [policy.rs](../crates/gateway-core/src/policy.rs): `allowed`, `Policy::valid`, `Policy::validate` | Root-policy intent, JSON parsing, and mapping handles to concrete URLs/secrets are trusted. |
 | Issued authority belongs to an authenticated tenant and configured route | Same module: `Policy::authenticate`, `Authenticated::authorize`, `AuthorizedRequest::valid`, verified accessors | Token provisioning and SHA-256 are trusted. Actual dispatch through the wrapper is audited/tested, not formally proved. |
 | Normalized request/chunk limits fit the configured combined allowance without arithmetic overflow | [resource.rs](../crates/gateway-core/src/resource.rs): `validate_limits` | Covers one chunk per slot; parser binding and total process memory remain separate. |
+| Combined logical payload of streams mapped to live slots fits the occupied-slot allowance and configured cap | [resource.rs](../crates/gateway-core/src/resource.rs): `streams_bound`, `retained_payload`, `bound_payload`, `ResourceAdmission::logical_payload_bound`; [stream.rs](../crates/gateway-core/src/stream.rs): `payload_within_capacity` | Requires at most one valid stream snapshot per slot, a live matching owner, and bounded stream capacity. Async preservation of this mapping, spare vector capacity, and other buffers remain outside the theorem. |
 | Live resource IDs are distinct within one registry and stale release cannot free a replacement | [resource.rs](../crates/gateway-core/src/resource.rs): `ResourceAdmission::valid`, `acquire`, `capacity`, `release` | Keys must remain scoped to their registry. Runtime ownership controls when release occurs. |
 | Initial stream ownership matches a live reservation and authority, with one creation per key | Same module: `authorized_stream`, `RequestKey::stream_claimed` | This covers construction, not the lifetime of every later async effect. Trusted code could bypass this path using lower-level constructors. |
 | Active counts start at zero, increase/decrease by exactly one on admission/release, and snapshots never exceed the slot limit | Same module: `occupied`, `occupied_update`, `new`, `acquire`, `release`, `usage` | The runtime lock supplies a coherent snapshot. Slots are not total memory, connections, or outstanding disk jobs. |
@@ -42,7 +43,7 @@ of network effects, stream-to-journal acknowledgment correspondence, scanner
 refinement, and the storage contract. The [security contract](security-contract.md)
 and [storage contract](storage-crash-contract.md) specify those boundaries.
 
-There is also no whole-process memory theorem. Logical slot/chunk bounds are
+There is also no whole-process memory theorem. Logical slot/chunk bounds and a conditional sum bound for mapped streams are
 verified; retained vector capacities, HTTP frame limits, queues, worker lifetimes,
 and deadlines have runtime checks/tests. TLS/HTTP backing allocations, allocator
 behavior, OS caches, and full resource-release composition remain outside that

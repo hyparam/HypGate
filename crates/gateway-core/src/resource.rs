@@ -26,6 +26,49 @@ pub open spec fn occupied(slots: Seq<u64>) -> nat
     }
 }
 
+// Ghost snapshots of at most one retained stream per registry slot.
+pub open spec fn retained_payload(streams: Seq<Option<StreamChunk>>) -> nat
+    decreases streams.len(),
+{
+    if streams.len() == 0 { 0 } else {
+        retained_payload(streams.subrange(0, streams.len() as int - 1))
+            + match streams[streams.len() as int - 1] { Some(s) => s.body().len(), None => 0nat }
+    }
+}
+
+pub open spec fn streams_bound(slots: Seq<u64>, streams: Seq<Option<StreamChunk>>, capacity: nat) -> bool {
+    streams.len() == slots.len()
+        && forall|i: int| 0 <= i < streams.len() ==> match #[trigger] streams[i] {
+            Some(s) => slots[i] != 0 && s.owner() == slots[i] && s.valid() && s.capacity() <= capacity,
+            None => true,
+        }
+}
+
+proof fn bound_payload(slots: Seq<u64>, streams: Seq<Option<StreamChunk>>, capacity: nat)
+    requires streams_bound(slots, streams, capacity),
+    ensures occupied(slots) <= slots.len(), retained_payload(streams) <= occupied(slots) * capacity,
+    decreases slots.len(),
+{
+    if slots.len() > 0 {
+        let last = slots.len() as int - 1;
+        let before_slots = slots.subrange(0, last);
+        let before_streams = streams.subrange(0, last);
+        assert(streams_bound(before_slots, before_streams, capacity));
+        bound_payload(before_slots, before_streams, capacity);
+        let bytes = match streams[last] { Some(s) => s.body().len(), None => 0nat };
+        match streams[last] { Some(s) => { s.payload_within_capacity(); }, None => {} }
+        assert(bytes <= capacity);
+        if slots[last] == 0 {
+            assert(bytes == 0);
+        } else {
+            assert(retained_payload(before_streams) + bytes <= (occupied(before_slots) + 1) * capacity)
+                by(nonlinear_arith)
+                requires retained_payload(before_streams) <= occupied(before_slots) * capacity,
+                    bytes <= capacity;
+        }
+    }
+}
+
 // Changing one slot changes occupancy only by that slot's zero/nonzero status.
 proof fn occupied_update(slots: Seq<u64>, index: int, value: u64)
     requires 0 <= index < slots.len(),
@@ -74,6 +117,20 @@ impl ResourceAdmission {
         && (forall|i: int, j: int| 0 <= i < j < self.slots.len()
             && self.slots@[i] != 0 && self.slots@[j] != 0
             ==> self.slots@[i] != self.slots@[j])
+    }
+
+    // Conditional composition theorem. The runtime must maintain the mapping
+    // of owned streams to live slots; async ownership itself is not proved here.
+    pub proof fn logical_payload_bound(&self, streams: Seq<Option<StreamChunk>>)
+        requires self.valid(), streams_bound(self.entries(), streams, self.per_request()),
+        ensures retained_payload(streams) <= occupied(self.entries()) * self.per_request(),
+            retained_payload(streams) <= self.limit() * self.per_request(),
+            self.limit() * self.per_request() <= 134217728 ==> retained_payload(streams) <= 134217728,
+    {
+        bound_payload(self.entries(), streams, self.per_request());
+        assert(occupied(self.entries()) * self.per_request() <= self.limit() * self.per_request())
+            by(nonlinear_arith)
+            requires occupied(self.entries()) <= self.limit(), 0 <= self.per_request();
     }
 
     pub fn new(request_limit: usize, per_request: usize) -> (a: Self)

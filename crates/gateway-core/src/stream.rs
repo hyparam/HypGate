@@ -52,6 +52,11 @@ impl StreamChunk {
         && self.history@ == self.prefix@ + self.bytes@.subrange(0, self.sent as int)
     }
 
+    pub proof fn payload_within_capacity(&self)
+        requires self.valid(),
+        ensures self.body().len() <= self.capacity(),
+    {}
+
     pub closed spec fn chunk(&self) -> u64 { self.chunk }
     pub closed spec fn capacity(&self) -> nat { self.capacity as nat }
     pub closed spec fn input(&self) -> Seq<u8> { self.prefix@ + self.bytes@ }

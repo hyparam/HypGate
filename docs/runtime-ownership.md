@@ -120,3 +120,28 @@ immutable mappings and owns the request in a routed wrapper. The HTTP transport 
 One stream currently serializes chunks. Concurrent upload/download would require
 separately owned directional streams and explicit shared budget accounting; it
 must not be implemented by duplicating the current stream under the same owner.
+
+
+## Conditional combined payload theorem
+
+`ResourceAdmission::logical_payload_bound` takes a ghost sequence with one optional
+stream snapshot per registry slot. Its explicit `streams_bound` premise requires
+every present stream to have the live slot's nonzero owner ID, a valid stream state,
+and capacity no larger than the registry's per-request allowance. Empty slots
+therefore cannot carry payload; a slot cannot contribute multiple streams.
+
+The inductive `bound_payload` proof sums actual logical body lengths and establishes
+that total retained payload is at most occupied slots times per-request capacity,
+and therefore at most configured slots times capacity. If that configured product
+is at most 128 MiB, the mapped payload total is also at most 128 MiB. The stream
+module exports a checked lemma deriving its body-size bound from its invariant.
+No runtime allocation or per-byte scan is added: these snapshots and sums are ghost
+specifications erased by Cargo.
+
+This composes the synchronous slot and chunk bounds under the stated ownership
+mapping. It does not prove that every async transition maintains that mapping, or
+that dropping a request stops every external effect. Numeric owners remain scoped
+to their registry. It also excludes vector spare capacity, HTTP/TLS backing storage,
+log queues, allocator overhead, and OS caches. The runtime ownership boundary and
+load tests support those separate obligations without turning this into a
+whole-process memory theorem.
