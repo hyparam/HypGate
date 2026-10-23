@@ -15,6 +15,9 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("resource.rs", "deny_valid_release", "if key.slot >= self.slots.len() || key.id == 0 || self.slots[key.slot] != key.id {\n            return false;\n        }", "if true { return false; }"),
+    ("resource.rs", "deny_free_capacity", "if self.next == u64::MAX { return None; }", "if true { return None; }"),
+    ("resource.rs", "deny_valid_stream", "if key.stream_claimed || key.id != authority.request_id() { return None; }", "if true { return None; }"),
     ("framing.rs", "wrong_payload_length", "if h.payload as usize != payload.len() { return None; }", ""),
     ("framing.rs", "omit_framed_payload", "append(&mut bytes, payload);", ""),
     ("resource.rs", "bind_wrong_authority", " || key.id != authority.request_id()", ""),

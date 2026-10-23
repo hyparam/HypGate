@@ -61,7 +61,8 @@ impl ResourceAdmission {
                     && old(self).entries()[key.slot() as int] == 0
                     && (forall|i: int| 0 <= i < old(self).limit() && i != key.slot()
                         ==> #[trigger] final(self).entries()[i] == old(self).entries()[i]),
-                None => *final(self) == *old(self),
+                None => *final(self) == *old(self) && (old(self).next_id() == u64::MAX
+                    || forall|i: int| 0 <= i < old(self).limit() ==> #[trigger] old(self).entries()[i] != 0),
             },
     {
         if self.next == u64::MAX { return None; }
@@ -69,6 +70,7 @@ impl ResourceAdmission {
         while i < self.slots.len()
             invariant self.valid(), *self == *old(self), self.next < u64::MAX,
                 i <= self.slots.len(),
+                forall|j: int| 0 <= j < i ==> #[trigger] self.slots@[j] != 0,
             decreases self.slots.len() - i,
         {
             if self.slots[i] == 0 {
@@ -106,7 +108,8 @@ impl ResourceAdmission {
                     && stream.owner() == authority.request() && stream.owner() == final(key).id()
                     && stream.capacity() == self.per_request() && stream.body().len() == 0
                     && stream.strict() == strict && !stream.closed() && !stream.pending(),
-                None => *final(key) == *old(key),
+                None => *final(key) == *old(key) && (old(key).stream_claimed()
+                    || old(key).id() != authority.request() || !self.owns(old(key))),
             },
     {
         if key.stream_claimed || key.id != authority.request_id() { return None; }
@@ -130,7 +133,7 @@ impl ResourceAdmission {
                 && final(self).entries()[key.slot() as int] == 0
                 && (forall|i: int| 0 <= i < old(self).limit() && i != key.slot()
                     ==> #[trigger] final(self).entries()[i] == old(self).entries()[i]),
-            !ok ==> *final(self) == *old(self),
+            !ok ==> !old(self).owns(key) && *final(self) == *old(self),
     {
         if key.slot >= self.slots.len() || key.id == 0 || self.slots[key.slot] != key.id {
             return false;

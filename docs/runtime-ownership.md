@@ -42,6 +42,24 @@ Drop order, async effects, release timing, and whole-process budgets remain
 separate obligations. No proof claims that a slot cannot be released while an
 independently retained stream exists; the runtime wrapper prevents that extraction.
 
+## Admission progress within the synchronous core
+
+The registry now specifies the reasons for rejection, not only the safety of
+successful operations. `acquire` returns no key only when the monotonic ID space
+is exhausted or every slot is occupied. Its finite scan records that every
+previously visited slot is occupied. Thus a free slot with IDs remaining produces
+a reservation. `authorized_stream` returns no stream only for an already-claimed
+key, a mismatched authorization ID, or a key not owned by this registry. `release`
+returns false only for an unowned key; a valid owned key must release its slot.
+
+Mutation checks replace each operation with unconditional refusal and require
+proof rejection. These are synchronous non-rejection/termination properties under
+the core preconditions, not scheduler fairness, mutex availability, memory-allocation
+success, or network/storage liveness. Poisoned runtime locks still fail closed.
+Identifier exhaustion intentionally disables further admissions rather than reusing
+IDs. Runtime cleanup must still reach `release`; the theorem cannot force a caller
+to drop a forgotten or indefinitely retained request.
+
 ## Evidence and remaining gaps
 
 Seven runtime integration tests cover authentication/route failures, slot exhaustion,
