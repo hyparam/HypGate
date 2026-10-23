@@ -368,3 +368,44 @@ async fn client_disconnect_before_headers_cancels_request_and_upstream_socket() 
         shutdown.send(()).unwrap(); gateway.await.unwrap().unwrap();
     }).await.unwrap();
 }
+
+#[tokio::test]
+async fn incomplete_connections_expire_without_workers_and_capacity_recovers() {
+    use tokio::io::AsyncReadExt;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let dir = TempDir::new();
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let app = Gateway::new(config(upstream.local_addr().unwrap().port(), false),
+            HttpsTransport::with_roots(RootCertStore::empty(), Duration::from_secs(60)).unwrap(),
+            DiskLog::create(&dir.0.join("audit.log"), 4, Duration::from_secs(2)).unwrap());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap(); let port = listener.local_addr().unwrap().port();
+        let (shutdown, stopped) = oneshot::channel();
+        let gateway = tokio::spawn(serve(listener, app.clone(), 2, Duration::from_millis(200), async { let _ = stopped.await; }));
+        let mut peers = JoinSet::new();
+        for _ in 0..8 {
+            let mut socket = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+            peers.spawn(async move {
+                // No complete header, hence no request worker or upstream dispatch.
+                // Excess sockets may already have been closed by admission.
+                let _ = socket.write_all(b"POST /routes/7 HTTP/1.1\r\nHost:").await;
+                let mut bytes = Vec::new();
+                match socket.read_to_end(&mut bytes).await {
+                    Ok(_) => assert!(bytes.is_empty()),
+                    Err(error) => assert!(matches!(error.kind(), io::ErrorKind::ConnectionReset
+                        | io::ErrorKind::ConnectionAborted | io::ErrorKind::BrokenPipe)),
+                }
+            });
+        }
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(result) = peers.join_next().await { result.unwrap(); }
+        }).await.unwrap();
+        assert!(app.workers.is_empty());
+        assert!(tokio::time::timeout(Duration::from_millis(20), upstream.accept()).await.is_err());
+        let (response, connection) = send(port, "/healthz", "", "GET").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.collect().await.unwrap().to_bytes(), b"ok\n"[..]);
+        connection.await.unwrap();
+        assert!(app.config.admit(b"gateway", 7).is_ok());
+        shutdown.send(()).unwrap(); gateway.await.unwrap().unwrap();
+    }).await.unwrap();
+}

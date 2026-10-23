@@ -43,6 +43,16 @@ only background filesystem worker and is not replaced after a timeout.
 | Cancellation and failure do not synthesize success | Explicit body end markers, writer-drop errors, post-header transport failure aborts HTTP framing. Provider-truncation tests reject successful EOF; real client disconnects before headers and during a response cancel stalled requests and release their slots without new provider output. The pre-header case also observes upstream TLS socket closure. |
 | Request ownership reaches response completion | Lease remains through the sink finish hook and application-queue drain. Admission-contention, worker-drop, client-disconnect, active-response drain, forced stalled-response shutdown, and concurrent-request tests. This is tested ownership, not a complete memory/resource theorem. |
 
+## Incomplete-connection evidence
+
+A real-socket test opens eight incomplete HTTP requests against a two-connection
+limit and a short total connection deadline. Excess connections are closed and
+accepted stalled connections expire. It checks that no request workers remain,
+no upstream connection was made, a subsequent health request succeeds, and an
+authorized request slot remains available. This exercises unauthenticated resource
+cleanup; it is not a formal connection-count or memory theorem, and does not
+simulate a distributed denial-of-service workload.
+
 ## Shutdown evidence
 
 Two real HTTP/TLS tests trigger shutdown while a provider response is active.
