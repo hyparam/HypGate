@@ -27,6 +27,12 @@ pub struct DiskLog {
 
 struct Worker { sender: Option<mpsc::Sender<Job>>, thread: Option<std::thread::JoinHandle<()>> }
 
+// Health must not depend on an append caller surviving to observe failure.
+struct UnhealthyOnExit(Arc<AtomicBool>);
+impl Drop for UnhealthyOnExit {
+    fn drop(&mut self) { self.0.store(false, Ordering::Release); }
+}
+
 trait DurableWrite: Write + Send + 'static { fn sync(&mut self) -> io::Result<()>; }
 impl DurableWrite for File { fn sync(&mut self) -> io::Result<()> { self.sync_all() } }
 
@@ -63,6 +69,7 @@ impl DiskLog {
         let healthy = Arc::new(AtomicBool::new(true));
         let worker_health = healthy.clone();
         let thread = std::thread::Builder::new().name("soundgate-audit".into()).spawn(move || {
+            let _health_on_exit = UnhealthyOnExit(worker_health.clone());
             let mut journal = Journal::new();
             while let Some(job) = receiver.blocking_recv() {
                 let ok = worker_health.load(Ordering::Acquire) && match journal.begin(job.frame.len() as u64) {
@@ -137,7 +144,10 @@ impl AuditLog for DiskLog {
             let sender = worker.sender.as_ref().ok_or(io::ErrorKind::BrokenPipe)?;
             let permit = sender.try_reserve().map_err(|e| match e {
                 mpsc::error::TrySendError::Full(_) => io::ErrorKind::WouldBlock,
-                mpsc::error::TrySendError::Closed(_) => io::ErrorKind::BrokenPipe,
+                mpsc::error::TrySendError::Closed(_) => {
+                    self.healthy.store(false, Ordering::Release);
+                    io::ErrorKind::BrokenPipe
+                },
             })?;
             let frame = encode(record);
             let (done, completion) = oneshot::channel();

@@ -19,6 +19,13 @@ Each append reserves a queue slot before copying its record; the worker performs
 There is no retry after write or sync failure. Such failures poison logger health,
 and later appends fail. Queue saturation fails immediately without poisoning the
 whole logger; the request's logging policy decides whether forwarding may continue.
+The worker owns an exit guard that marks logging unhealthy even when a panic
+unwinds the thread after its append caller was canceled. A closed queue also
+poisons health on observation. This prevents a dead worker from leaving strict
+readiness healthy merely because no caller survived to report the failure.
+Normal shutdown closes admission and also leaves health false. The guard handles
+Rust unwinding, not process aborts or machine failure; those stop health serving
+altogether and require external failure detection.
 
 An acknowledgment deadline bounds caller waiting. Expiration poisons health and
 does not spawn a replacement worker. A syscall already in progress may later finish;
@@ -49,7 +56,9 @@ The thread handle and queue are shared across clones; shutdown is irreversible.
 Tests block sync, queue a second record, close admission, reject later records,
 then release sync and check both frames and worker joining. A separate test
 expires shutdown while sync is blocked and checks eventual joining without a
-replacement worker. These are runtime tests, not formal shutdown proofs.
+replacement worker. A worker-panic test cancels the waiting caller before injecting a sync panic,
+then checks unhealthy state without waiting for an append deadline, later append
+refusal, and a reported join error. These are runtime tests, not formal shutdown proofs.
 
 ## Format and scanner
 

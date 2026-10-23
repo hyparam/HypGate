@@ -303,3 +303,40 @@ fn scanner_io_error_at_every_record_byte_preserves_prefix_and_stops_reading() {
         assert_eq!(scanner.valid_end(), expected_end);
     }
 }
+
+
+#[tokio::test]
+async fn worker_panic_marks_health_failed_even_after_append_caller_is_canceled() {
+    struct PanicSync { entered: Option<oneshot::Sender<()>>, release: blocking::Receiver<()> }
+    impl Write for PanicSync {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> { Ok(bytes.len()) }
+        fn flush(&mut self) -> io::Result<()> { Ok(()) }
+    }
+    impl DurableWrite for PanicSync {
+        fn sync(&mut self) -> io::Result<()> {
+            self.entered.take().unwrap().send(()).unwrap();
+            self.release.recv().unwrap();
+            panic!("injected disk worker panic");
+        }
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let (entered, inside) = oneshot::channel();
+        let (release, wait) = blocking::channel();
+        let log = DiskLog::start(PanicSync { entered: Some(entered), release: wait },
+            1, Duration::from_secs(60), [0; 16]).unwrap();
+        let mut caller = log.clone();
+        let caller = tokio::spawn(async move { caller.append(record(b"pending", 1)).await });
+        inside.await.unwrap();
+        caller.abort(); assert!(caller.await.unwrap_err().is_cancelled());
+        assert!(log.healthy());
+        release.send(()).unwrap();
+        while !log.worker.lock().unwrap().thread.as_ref().unwrap().is_finished() {
+            tokio::task::yield_now().await;
+        }
+        // No live append observer or deadline was needed to detect worker death.
+        assert!(!log.healthy());
+        assert!(log.clone().append(record(b"later", 2)).await.is_err());
+        assert_eq!(log.shutdown(Duration::from_secs(1)).await.unwrap_err().kind(), io::ErrorKind::Other);
+        assert!(log.worker.lock().unwrap().thread.is_none());
+    }).await.unwrap();
+}
