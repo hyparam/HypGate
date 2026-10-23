@@ -67,6 +67,11 @@ count equals the recursively specified number of nonzero slots and never exceeds
 the returned slot limit. Its loop records the exact occupied count for the visited
 prefix and terminates after the finite registry length. This is a read-only
 snapshot; it neither reserves slots nor predicts whether a later request succeeds.
+The constructor proves zero occupied slots. A recursive `occupied_update` lemma
+then establishes that a successful `acquire` increases occupancy by exactly one,
+and a successful `release` decreases it by exactly one. Rejected operations leave
+the registry unchanged. These contracts compose count changes across arbitrary
+valid synchronous call sequences; they do not prove when async owners drop leases.
 
 The runtime takes this snapshot under the admission mutex. `/metrics` reports
 `soundgate_requests_active`, `soundgate_requests_limit`, and

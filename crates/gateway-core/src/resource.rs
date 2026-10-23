@@ -26,6 +26,23 @@ pub open spec fn occupied(slots: Seq<u64>) -> nat
     }
 }
 
+// Changing one slot changes occupancy only by that slot's zero/nonzero status.
+proof fn occupied_update(slots: Seq<u64>, index: int, value: u64)
+    requires 0 <= index < slots.len(),
+    ensures occupied(slots.update(index, value)) + (if slots[index] == 0 { 0nat } else { 1nat })
+        == occupied(slots) + (if value == 0 { 0nat } else { 1nat }),
+    decreases slots.len(),
+{
+    let last = slots.len() as int - 1;
+    if index == last {
+        assert(slots.update(index, value).subrange(0, last) =~= slots.subrange(0, last));
+    } else {
+        occupied_update(slots.subrange(0, last), index, value);
+        assert(slots.update(index, value).subrange(0, last)
+            =~= slots.subrange(0, last).update(index, value));
+    }
+}
+
 // Keys are scoped to one ResourceAdmission instance. Production will use one registry.
 pub struct RequestKey { slot: usize, id: u64, stream_claimed: bool }
 pub struct ResourceAdmission {
@@ -61,15 +78,19 @@ impl ResourceAdmission {
 
     pub fn new(request_limit: usize, per_request: usize) -> (a: Self)
         ensures a.valid(), a.limit() == request_limit, a.per_request() == per_request,
-            a.next_id() == 1,
+            a.next_id() == 1, occupied(a.entries()) == 0,
             forall|i: int| 0 <= i < a.limit() ==> #[trigger] a.entries()[i] == 0,
     {
         let mut slots = Vec::new();
         while slots.len() < request_limit
-            invariant slots.len() <= request_limit,
+            invariant slots.len() <= request_limit, occupied(slots@) == 0,
                 forall|i: int| 0 <= i < slots.len() ==> #[trigger] slots@[i] == 0,
             decreases request_limit - slots.len(),
-        { slots.push(0u64); }
+        {
+            let ghost previous = slots@;
+            slots.push(0u64);
+            proof { assert(slots@.subrange(0, slots.len() as int - 1) =~= previous); }
+        }
         ResourceAdmission { slots, next: 1, per_request }
     }
 
@@ -101,6 +122,7 @@ impl ResourceAdmission {
             match out {
                 Some(key) => final(self).owns(&key) && !key.stream_claimed() && key.id() == old(self).next_id()
                     && final(self).next_id() == old(self).next_id() + 1
+                    && occupied(final(self).entries()) == occupied(old(self).entries()) + 1
                     && old(self).entries()[key.slot() as int] == 0
                     && (forall|i: int| 0 <= i < old(self).limit() && i != key.slot()
                         ==> #[trigger] final(self).entries()[i] == old(self).entries()[i]),
@@ -118,6 +140,7 @@ impl ResourceAdmission {
         {
             if self.slots[i] == 0 {
                 let id = self.next;
+                proof { occupied_update(self.slots@, i as int, id); }
                 self.slots.set(i, id);
                 self.next = self.next + 1;
                 return Some(RequestKey { slot: i, id, stream_claimed: false });
@@ -173,6 +196,7 @@ impl ResourceAdmission {
             final(self).per_request() == old(self).per_request(),
             final(self).next_id() == old(self).next_id(),
             ok ==> old(self).owns(key) && !final(self).owns(key)
+                && occupied(final(self).entries()) + 1 == occupied(old(self).entries())
                 && final(self).entries()[key.slot() as int] == 0
                 && (forall|i: int| 0 <= i < old(self).limit() && i != key.slot()
                     ==> #[trigger] final(self).entries()[i] == old(self).entries()[i]),
@@ -181,6 +205,7 @@ impl ResourceAdmission {
         if key.slot >= self.slots.len() || key.id == 0 || self.slots[key.slot] != key.id {
             return false;
         }
+        proof { occupied_update(self.slots@, key.slot as int, 0); }
         self.slots.set(key.slot, 0);
         true
     }
