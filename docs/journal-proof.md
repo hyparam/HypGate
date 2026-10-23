@@ -29,9 +29,15 @@ a separate obligation; the lemma does not assume or prove scanner correctness.
 
 ## Runtime correspondence and limits
 
-The worker reserves before writing, calls `record_written` after `write_all` succeeds
-with that immutable frame, and calls `sync_succeeded` only after `sync_all` succeeds.
-It sends a positive result only after `acknowledge` succeeds. Any failed operation
+The worker reserves before writing, then calls `record_durable` only after both
+`write_all` and `sync_all` succeed for that immutable frame. This verified operation
+composes `record_written`, `sync_succeeded`, and `acknowledge`. Success proves that
+the new acknowledged and stable histories equal the previous complete history
+followed by exactly the supplied frame bytes. It rejects stale tickets, incorrect
+lengths, failed journals, and an unacknowledged earlier record without changing state.
+The worker sends a positive result only after this operation succeeds. If writing
+or syncing fails, the model retains its earlier prefix and the journal is failed;
+physical bytes beyond that prefix may exist but cannot authorize an acknowledgment. Any failed operation
 closes the journal and poisons logger health. A failed syscall may leave an unknown
 physical suffix; no later record is written or acknowledged through that journal.
 
@@ -49,7 +55,9 @@ record-identity/stream-ack composition remain open. No `assume` or external-body
 
 ## Validation
 
-The combined core passes 48 Verus checks and all 61 workspace tests pass. All 29
-deliberate mutations fail proof obligations. Four journal mutations remove the sync
-gate, replace a pending append, accept the wrong frame length, or regress the stable
-prefix. CI checks the same production sources and pinned toolchain.
+The current totals are recorded in the README. Journal tests cover exact-length
+commit, duplicate and stale tickets, failure, and refusal to skip an earlier
+unacknowledged record. Mutations additionally remove the composed sync, remove the
+acknowledgment, or bypass the prior-acknowledgment check and must fail verification.
+The earlier mutations still check sync gating, pending append replacement, incorrect
+frame length, and stable-prefix regression. CI uses the production sources.

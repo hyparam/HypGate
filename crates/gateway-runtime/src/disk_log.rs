@@ -74,10 +74,8 @@ impl DiskLog {
             while let Some(job) = receiver.blocking_recv() {
                 let ok = worker_health.load(Ordering::Acquire) && match journal.begin(job.frame.len() as u64) {
                     Some(ticket) => file.write_all(&job.frame).is_ok()
-                        && journal.record_written(&ticket, &job.frame)
                         && file.sync().is_ok()
-                        && journal.sync_succeeded()
-                        && journal.acknowledge(&ticket),
+                        && journal.record_durable(&ticket, &job.frame),
                     None => false,
                 };
                 if !ok { journal.fail(); worker_health.store(false, Ordering::Release); }

@@ -15,6 +15,10 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("journal.rs", "durable_commit_without_sync", "let _synced = self.sync_succeeded();", "let _synced = true;"),
+    ("journal.rs", "durable_commit_without_ack", "let _acknowledged = self.acknowledge(t);", "let _acknowledged = true;"),
+    ("journal.rs", "durable_commit_skips_prior_ack", " || self.acknowledged != self.written", ""),
+
     ("resource.rs", "release_wrong_stream", " || stream.owner_id() != key.id", ""),
     ("resource.rs", "release_unclaimed_stream", "if !key.stream_claimed || stream.owner_id() != key.id", "if stream.owner_id() != key.id"),
     ("resource.rs", "deny_owned_stream_retirement", "if !key.stream_claimed || stream.owner_id() != key.id", "if true"),

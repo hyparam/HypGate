@@ -61,7 +61,8 @@ impl Journal {
     pub fn record_written(&mut self, t: &Append, bytes: &Vec<u8>) -> (ok: bool)
         requires old(self).valid(),
         ensures final(self).valid(), final(self).stable() == old(self).stable(),
-            final(self).acked() == old(self).acked(), final(self).failed() == old(self).failed(),
+            final(self).acked() == old(self).acked(), final(self).acked_len() == old(self).acked_len(),
+            final(self).failed() == old(self).failed(),
             ok <==> (!old(self).failed() && old(self).matches(t)
                 && bytes@.len() == t.end() - t.start()),
             ok ==> old(self).matches(t) && final(self).history() == old(self).history() + bytes@
@@ -85,7 +86,9 @@ impl Journal {
     pub fn sync_succeeded(&mut self) -> (ok: bool)
         requires old(self).valid(),
         ensures final(self).valid(), final(self).history() == old(self).history(),
-            final(self).acked() == old(self).acked(), final(self).failed() == old(self).failed(),
+            final(self).written_len() == old(self).written_len(), final(self).idle() == old(self).idle(),
+            final(self).acked() == old(self).acked(), final(self).acked_len() == old(self).acked_len(),
+            final(self).failed() == old(self).failed(),
             ok <==> (!old(self).failed() && old(self).idle()),
             ok ==> old(self).idle() && final(self).stable() == final(self).history() && !final(self).failed(),
             !ok ==> *final(self) == *old(self),
@@ -98,6 +101,7 @@ impl Journal {
     pub fn acknowledge(&mut self, t: &Append) -> (ok: bool)
         requires old(self).valid(),
         ensures final(self).valid(), final(self).history() == old(self).history(),
+            final(self).written_len() == old(self).written_len(), final(self).idle() == old(self).idle(),
             final(self).stable() == old(self).stable(), final(self).failed() == old(self).failed(),
             ok <==> (!old(self).failed() && t.start() == old(self).acked_len()
                 && t.end() > t.start() && t.end() <= old(self).durable_len()),
@@ -107,6 +111,34 @@ impl Journal {
     {
         if self.failed || t.start != self.acknowledged || t.end <= t.start || self.durable < t.end { return false; }
         self.acknowledged = t.end;
+        true
+    }
+
+    // Trusted caller reports successful write_all AND sync for these exact bytes.
+    // Compose the events so success binds the acknowledged prefix to the frame.
+    pub fn record_durable(&mut self, t: &Append, bytes: &Vec<u8>) -> (ok: bool)
+        requires old(self).valid(),
+        ensures final(self).valid(),
+            ok == (!old(self).failed() && old(self).matches(t)
+                && old(self).acked_len() == old(self).written_len()
+                && bytes@.len() == t.end() - t.start()),
+            ok ==> final(self).history() == old(self).history() + bytes@
+                && final(self).acked() == old(self).history() + bytes@
+                && final(self).stable() == final(self).history()
+                && final(self).acked_len() == t.end() && final(self).idle()
+                && !final(self).failed(),
+            !ok ==> *final(self) == *old(self),
+    {
+        if t.start != self.written || self.failed || t.end != self.pending
+            || t.end <= t.start || t.end - t.start != bytes.len() as u64
+            || self.acknowledged != self.written { return false; }
+        let _written = self.record_written(t, bytes);
+        assert(_written);
+        let _synced = self.sync_succeeded();
+        assert(_synced);
+        let _acknowledged = self.acknowledge(t);
+        assert(_acknowledged);
+        proof { assert(self.acked() =~= self.history()); }
         true
     }
 

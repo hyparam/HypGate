@@ -36,3 +36,25 @@ fn failure_prevents_new_records_sync_and_acknowledgment() {
         assert!(!journal.acknowledge(&ticket));
     }
 }
+
+#[test]
+fn durable_frame_commit_binds_one_complete_record_and_rejects_stale_tickets() {
+    let mut journal = Journal::new();
+    let first = journal.begin(3).unwrap();
+    assert!(!journal.record_durable(&first, &vec![1, 2]));
+    assert!(journal.record_durable(&first, &vec![1, 2, 3]));
+    assert!(!journal.record_durable(&first, &vec![1, 2, 3]));
+    let second = journal.begin(1).unwrap();
+    assert!(!journal.record_durable(&first, &vec![1, 2, 3]));
+    assert!(journal.record_durable(&second, &vec![4]));
+    let third = journal.begin(1).unwrap();
+    journal.fail();
+    assert!(!journal.record_durable(&third, &vec![5]));
+
+    let mut gap = Journal::new();
+    let prior = gap.begin(1).unwrap();
+    assert!(gap.record_written(&prior, &vec![7]));
+    let next = gap.begin(1).unwrap();
+    assert!(!gap.record_durable(&next, &vec![8]));
+    assert!(!gap.sync_succeeded()); // rejected commit preserved the pending append
+}
