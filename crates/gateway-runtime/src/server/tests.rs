@@ -512,3 +512,5 @@ async fn bodyless_status_rejects_payload_or_missing_completion() {
 }
 
 mod overload;
+
+mod stalled_log;

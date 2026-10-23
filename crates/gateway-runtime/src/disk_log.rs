@@ -124,6 +124,43 @@ impl DiskLog {
     }
     #[cfg(test)]
     pub(crate) fn inject_failure(&self) { self.healthy.store(false, Ordering::Release); }
+    #[cfg(test)]
+    pub(crate) fn stalled_for_test(capacity: usize, deadline: Duration) ->
+        (Self, oneshot::Receiver<()>, std::sync::mpsc::Sender<()>, Arc<std::sync::atomic::AtomicUsize>)
+    {
+        struct Stalled {
+            entered: Option<oneshot::Sender<()>>,
+            release: std::sync::mpsc::Receiver<()>,
+            writes: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        impl Write for Stalled {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.writes.fetch_add(1, Ordering::Relaxed); Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> { Ok(()) }
+        }
+        impl DurableWrite for Stalled {
+            fn sync(&mut self) -> io::Result<()> {
+                if let Some(entered) = self.entered.take() {
+                    let _ = entered.send(());
+                    let _ = self.release.recv();
+                }
+                Ok(())
+            }
+        }
+        let (entered, started) = oneshot::channel();
+        let (release, waiting) = std::sync::mpsc::channel();
+        let writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let log = Self::start(Stalled { entered: Some(entered), release: waiting, writes: writes.clone() },
+            capacity, deadline, [0; 16]).unwrap();
+        (log, started, release, writes)
+    }
+    #[cfg(test)]
+    pub(crate) fn queued_for_test(&self) -> usize {
+        let worker = self.worker.lock().unwrap();
+        let sender = worker.sender.as_ref().unwrap();
+        sender.max_capacity() - sender.capacity()
+    }
     pub fn session(&self) -> [u8; 16] { self.session }
 }
 

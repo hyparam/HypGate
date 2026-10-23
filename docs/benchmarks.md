@@ -131,3 +131,27 @@ long-running streams, increasing concurrency, long-duration overload, repeated r
 isolated gateway memory, deployment-proxy overhead, and supported Linux storage.
 These remain milestone-four/five work. No load or memory theorem follows from this
 small baseline, and no release performance threshold has been set.
+
+## Stalled disk under concurrent traffic
+
+The regular-CI `stalled_log_under_load_preserves_health_deadlines_and_mode_policy`
+test runs the production server and TLS transport with eight request slots, a
+two-record logger queue, and a one-second acknowledgment deadline. A test sink
+blocks the existing disk worker inside its first sync. The test waits until both
+queue slots are occupied, then completes a batch of eight requests followed by a
+second batch of eight while the disk worker remains blocked.
+
+Health and metrics remain reachable during the stall. After the deadline, all
+request slots and exchange workers return to zero. Strict mode fails the first
+eight requests without sending any body bytes and rejects the next eight with
+503; its readiness becomes 503. The first batch may open TLS connections and send
+HTTP headers before body logging, so this is not a no-connection or no-header
+claim. Availability mode completes all sixteen requests with exact response bytes
+and records sixteen audit gaps; readiness remains 200. Both modes retain exactly
+two queued jobs and one blocked worker. A write-call counter remains one throughout
+and after releasing/joining the worker: no replacement, replay, or later queued
+write occurs once health has failed.
+
+This is deterministic fault injection into a synchronous writer, not an actual
+filesystem hang, long-duration soak, memory measurement, or proof of OS scheduling
+and syscall cancellation. It complements the smaller disk-worker timeout tests.
