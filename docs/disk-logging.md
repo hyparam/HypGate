@@ -57,9 +57,9 @@ Tests cover real-file acknowledgment and permissions, refusal to overwrite,
 strict transfer payload identity, every truncation position in a record and file
 header, single-bit changes at every record byte, excessive lengths, partial writes,
 injected disk-full and sync errors, blocked sync deadlines, and queue saturation.
-These are tests, not a filesystem crash theorem. Real process-kill/power-loss
-experiments, the formal recoverable-prefix model, and a deployment crash contract
-remain milestone-three requirements.
+These are tests, not a filesystem crash theorem. Real process-kill experiments and the conditional journal-prefix theorem now exist;
+see the [storage contract](storage-crash-contract.md). Scanner refinement and
+power-loss/storage-stack validation remain milestone-three requirements.
 
 Durability assumes the OS/filesystem/storage stack honors successful sync calls
 and that the parent directory was already durable. Permanent disk loss, malicious

@@ -49,6 +49,13 @@ and full duplex are outside the current interface.
 
 ## Operational behavior
 
+`target/debug/soundgate scan LOG` reads an existing log without changing it. It
+prints newline-delimited JSON metadata for each valid record, then a summary with
+session ID, record count, valid-prefix byte offset, and status. Raw payloads are
+not printed. A malformed header or incomplete/corrupt tail gives a nonzero exit;
+valid earlier records remain reported. Scanning never replays or truncates data.
+See the [storage crash contract](storage-crash-contract.md) for its limits.
+
 GET `/healthz` reports process responsiveness. GET `/readyz` fails when the logger
 is unhealthy in strict mode; availability mode stays ready despite logging loss.
 Readiness does not yet probe upstream availability, request capacity, or disk space.
