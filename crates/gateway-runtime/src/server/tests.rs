@@ -37,7 +37,7 @@ async fn send(port: u16, path: &str, token: &str, method: &str) -> (Response<Inc
     (sender.send_request(request).await.unwrap(), connection)
 }
 
-async fn exercise(availability: bool, failed_log: bool, truncated: bool) {
+async fn exercise(availability: bool, failed_log: bool, truncated: bool, disconnect: bool) {
     tokio::time::timeout(Duration::from_secs(10), async {
         let cert = generate_simple_self_signed(vec!["localhost".into()]).unwrap();
         let mut roots = RootCertStore::empty(); roots.add(cert.cert.der().clone()).unwrap();
@@ -82,10 +82,9 @@ async fn exercise(availability: bool, failed_log: bool, truncated: bool) {
                     let (mut writer, body) = http_body::channel(16);
                     tokio::spawn(async move {
                         writer.write_all(b"data: hello\n\n").await.unwrap();
-                        waiting.await.unwrap();
+                        if waiting.await.is_err() { return; }
                         if truncated { return; } // no End marker: simulate a provider disconnect
-                        writer.write_all(b"data: [DONE]\n\n").await.unwrap();
-                        writer.shutdown().await.unwrap();
+                        if writer.write_all(b"data: [DONE]\n\n").await.is_ok() { let _ = writer.shutdown().await; }
                     });
                     Ok::<_, Infallible>(Response::builder().header("content-type", "text/event-stream")
                         .header("set-cookie", "provider-secret").body(body).unwrap())
@@ -102,6 +101,17 @@ async fn exercise(availability: bool, failed_log: bool, truncated: bool) {
         let (busy, busy_connection) = send(port, "/routes/7", "gateway", "POST").await;
         assert_eq!(busy.status(), StatusCode::SERVICE_UNAVAILABLE);
         busy.collect().await.unwrap(); busy_connection.await.unwrap();
+        if disconnect {
+            drop(response); connection.abort(); let _ = connection.await;
+            // No new provider output is needed to make cancellation observable.
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while !app.workers.is_empty() { tokio::task::yield_now().await; }
+            }).await.unwrap();
+            assert!(app.config.admit(b"gateway", 7).is_ok());
+            drop(release); upstream_task.await.unwrap();
+            shutdown.send(()).unwrap(); gateway.await.unwrap().unwrap();
+            assert!(app.workers.is_empty()); return;
+        }
         release.send(()).unwrap();
         let rest = response.collect().await;
         let mut bytes = first.to_vec();
@@ -150,10 +160,106 @@ async fn worker_body_drop_aborts_pending_request() {
 }
 
 #[tokio::test]
-async fn full_gateway_streams_before_upstream_eof_and_logs_exact_bytes() { exercise(false, false, false).await; }
+async fn full_gateway_streams_before_upstream_eof_and_logs_exact_bytes() { exercise(false, false, false, false).await; }
 #[tokio::test]
-async fn strict_log_failure_prevents_even_upstream_connection() { exercise(false, true, false).await; }
+async fn strict_log_failure_prevents_even_upstream_connection() { exercise(false, true, false, false).await; }
 #[tokio::test]
-async fn availability_log_failure_preserves_stream_and_reports_gap() { exercise(true, true, false).await; }
+async fn availability_log_failure_preserves_stream_and_reports_gap() { exercise(true, true, false, false).await; }
 #[tokio::test]
-async fn truncated_generation_is_an_error_and_still_reports_audit_gap() { exercise(true, true, true).await; }
+async fn truncated_generation_is_an_error_and_still_reports_audit_gap() { exercise(true, true, true, false).await; }
+
+#[tokio::test]
+async fn concurrent_tenants_keep_credentials_bodies_and_audit_records_isolated() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let cert = generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let mut roots = RootCertStore::empty(); roots.add(cert.cert.der().clone()).unwrap();
+        let tls = ServerConfig::builder().with_no_client_auth().with_single_cert(vec![cert.cert.der().clone()],
+            PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()).into()).unwrap();
+        let acceptor = TlsAcceptor::from(Arc::new(tls));
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let routes = json!([
+            {"tenant":1,"selector":7,"origin":0,"credential":0},
+            {"tenant":2,"selector":7,"origin":0,"credential":1}
+        ]);
+        let root = json!({
+            "identities":[
+                {"tenant":1,"sha256":format!("{:x}",Sha256::digest(b"tenant-one"))},
+                {"tenant":2,"sha256":format!("{:x}",Sha256::digest(b"tenant-two"))}
+            ],
+            "destinations":[format!("https://localhost:{}/v1/messages", upstream.local_addr().unwrap().port())],
+            "credentials":[{"tenant":1,"kind":"api_key","env":"KEY_ONE"},
+                           {"tenant":2,"kind":"api_key","env":"KEY_TWO"}],
+            "grants":routes,"limits":{"requests":2,"chunk_bytes":3},"logging":"strict"
+        });
+        let config = GatewayConfig::from_json(&serde_json::to_vec(&root).unwrap(),
+            &serde_json::to_vec(&json!({"routes":routes})).unwrap(), |name| Some(format!("secret-{name}"))).unwrap();
+        let dir = TempDir::new(); let path = dir.0.join("audit.log");
+        let app = Gateway::new(config, HttpsTransport::with_roots(roots, Duration::from_secs(5)).unwrap(),
+            DiskLog::create(&path, 4, Duration::from_secs(2)).unwrap());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap(); let port = listener.local_addr().unwrap().port();
+        let (shutdown, stopped) = oneshot::channel();
+        let gateway = tokio::spawn(serve(listener, app.clone(), 4, Duration::from_secs(8), async { let _ = stopped.await; }));
+        // Neither provider response starts until both tenant requests have arrived.
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let upstream_task = tokio::spawn(async move {
+            let mut connections = JoinSet::new();
+            for _ in 0..2 {
+                let (socket, _) = upstream.accept().await.unwrap();
+                let acceptor = acceptor.clone(); let barrier = barrier.clone();
+                connections.spawn(async move {
+                    let socket = acceptor.accept(socket).await.unwrap();
+                    let service = service_fn(move |request: Request<Incoming>| {
+                        let barrier = barrier.clone();
+                        async move {
+                            let credential = request.headers()["x-api-key"].to_str().unwrap().to_owned();
+                            assert!(!request.headers().contains_key("authorization"));
+                            let bytes = request.collect().await.unwrap().to_bytes();
+                            match bytes.as_ref() {
+                                b"body-one" => assert_eq!(credential, "secret-KEY_ONE"),
+                                b"body-two" => assert_eq!(credential, "secret-KEY_TWO"),
+                                _ => panic!("unexpected tenant body"),
+                            }
+                            barrier.wait().await;
+                            Ok::<_, Infallible>(Response::new(Full::new(bytes)))
+                        }
+                    });
+                    let _ = hyper::server::conn::http1::Builder::new().serve_connection(TokioIo::new(socket), service).await;
+                });
+            }
+            while let Some(result) = connections.join_next().await { result.unwrap(); }
+        });
+        let client = |token: &'static str, bytes: &'static [u8]| async move {
+            let socket = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+            let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(socket)).await.unwrap();
+            let connection = tokio::spawn(async move { let _ = connection.await; });
+            let request = Request::builder().method("POST").uri("/routes/7").header("host", "localhost")
+                .header("authorization", format!("Bearer {token}")).header("x-api-key", "malicious-override")
+                .body(Full::new(Bytes::from_static(bytes))).unwrap();
+            let response = sender.send_request(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.collect().await.unwrap().to_bytes(), bytes);
+            connection.await.unwrap();
+        };
+        tokio::join!(client("tenant-one", b"body-one"), client("tenant-two", b"body-two"));
+        upstream_task.await.unwrap(); shutdown.send(()).unwrap(); gateway.await.unwrap().unwrap();
+        assert!(app.workers.is_empty()); assert_eq!(app.failed_exchanges(), 0);
+        let mut reader = LogReader::new(File::open(path).unwrap()).unwrap();
+        let mut records = std::collections::BTreeMap::<u64, (u64, u64, Vec<u8>, Vec<u8>)>::new();
+        while let Some(record) = reader.next_record().unwrap() {
+            let entry = records.entry(record.request).or_insert((record.tenant, 0, Vec::new(), Vec::new()));
+            assert_eq!(entry.0, record.tenant); assert_eq!(record.chunk, entry.1 + 1); entry.1 = record.chunk;
+            match record.direction { crate::transfer::Direction::Upload => &mut entry.2,
+                crate::transfer::Direction::Download => &mut entry.3 }.extend(record.bytes);
+        }
+        assert_eq!(records.len(), 2);
+        let tenants: std::collections::BTreeSet<_> = records.values().map(|r| r.0).collect();
+        assert_eq!(tenants, [1, 2].into_iter().collect());
+        for (tenant, _, upload, download) in records.values() {
+            let expected = if *tenant == 1 { b"body-one" } else { b"body-two" };
+            assert_eq!(upload, expected); assert_eq!(download, expected);
+        }
+    }).await.unwrap();
+}
+
+#[tokio::test]
+async fn client_disconnect_cancels_stalled_provider_and_releases_request() { exercise(false, false, false, true).await; }

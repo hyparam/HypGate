@@ -3,13 +3,15 @@
 | Milestone | Complete | Progress |
 | --- | :---: | --- |
 | 1. Verified streaming core | ☐ | ✓ Streaming and resource proofs; ✓ authorization/configuration proofs; ✓ tested request ownership. Composed resource proofs and full buffer accounting remain. |
-| 2. Minimal working gateway | ☐ | ✓ Runnable inbound server, authorization, HTTPS streaming, and real disk integration. ✓ Logging-failure, truncation, and admission-contention tests. Concurrent tenant isolation and trusted-boundary audit remain. |
+| 2. Minimal working gateway | ✓ | Runnable HTTP/TLS/disk path, concurrent tenant isolation, disconnect/failure tests, and documented adapter audit. Production hardening and broader proofs remain in the other milestones. |
 | 3. Crash-safe logging | ☐ | ✓ Bounded disk writer, framing/scanner tests; ✓ journal acknowledgment proof and conditional prefix-survival lemma. ✓ Process-kill recovery tests and storage contract. Scanner refinement and storage-stack validation remain. |
 | 4. Availability hardening | ☐ | ✓ Admission/connection limits, bounded logging, network deadlines, health/readiness, and bounded connection drain. ✓ Audit-health/gap metrics. Full fault/load tests and shutdown/resource proofs remain. |
 | 5. Auditable first release | ☐ | ✓ Pinned core toolchain, proof/mutation checks, and security notes; ✓ GitHub Actions test/proof workflow. Reproducible deployment, benchmarks, and end-to-end audit remain. |
 
 ✓ marks completed work within a milestone; ☐ means the full milestone's exit
 criteria are not yet met. Update this table at each implementation checkpoint.
+Milestone 2's evidence is recorded in the [adapter audit](adapter-audit.md); its
+completion does not imply completion of the earlier composition proofs or release gates.
 
 Status: approved direction is Rust plus Verus; milestone 1 is in progress.
 See the [streaming-core progress notes](streaming-core-progress.md) and

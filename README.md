@@ -57,6 +57,8 @@ survival conditional on the storage preserving synced bytes.
 The [HTTPS upstream transport](docs/https-transport.md) now forwards opaque bodies
 over real TLS through the stream core. The [runnable gateway](docs/running.md)
 connects the inbound server, authorization, streaming, and disk logging.
+The [adapter audit](docs/adapter-audit.md) maps runtime trust obligations to effect
+paths and tests, including concurrent tenants and client disconnects.
 
 See [language and verification research](docs/verification-research.md) for the
 candidate comparison, agreed scope, proposed proof obligations, and next experiment.
@@ -83,7 +85,7 @@ cargo verus verify -p gateway-core --locked -- --triggers-mode silent
 VERUS=/path/to/verus python3 scripts/check_mutations.py
 ```
 
-Validation on 2026-10-23: 43 core verification checks passed, 57 workspace tests
+Validation on 2026-10-23: 43 core verification checks passed, 59 workspace tests
 passed, and all 25 deliberate mutations failed their proof obligations.
 These counts are checks, not a count of independent security guarantees.
 
