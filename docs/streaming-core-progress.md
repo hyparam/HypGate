@@ -2,12 +2,11 @@
 
 Status: implementation started; milestone 1 is not complete.
 
-`experiments/verus/stream.rs` replaces per-byte iteration with an immutable owned
+`crates/gateway-core/src/stream.rs` replaces per-byte iteration with an immutable owned
 chunk, a borrowed slice view, and one outstanding write reservation. The older
-experiments remain as research baselines. This is not an HTTP adapter or a packaged
-production library yet.
+experiments remain as research baselines. The core is now a Cargo library; it does not yet have an HTTP adapter.
 
-`experiments/verus/admission.rs` adds `ResourceAdmission`, a bounded slot registry
+`crates/gateway-core/src/resource.rs` adds `ResourceAdmission`, a bounded slot registry
 with opaque request keys, monotonically allocated owner IDs, and a configured
 per-request payload allowance. This is resource accounting, not caller authorization;
 the [security contract](security-contract.md) specifies that separate boundary.
@@ -49,9 +48,10 @@ prove liveness or force a blocking syscall to return.
 
 ## Checked properties and tests
 
-Validation on 2026-10-23: Verus reported **15 verified checks, 0 errors** for the
-combined streaming and registry code (including loop checks). Compiled scenarios
-passed; eight streaming and four registry mutations were rejected by proof failures.
+The initial streaming and registry increment passed 15 verification checks.
+After extraction into the Cargo library and addition of authorization on 2026-10-23,
+the combined core passes **34 verified checks, 0 errors**, six integration tests,
+and 19 mutation checks (12 streaming/registry and seven authorization mutations).
 
 All public executable operations have Verus contracts. The invariant bounds the
 completed, reserved, and durable offsets; strict reservations remain within the
@@ -66,7 +66,7 @@ acknowledgments, partial writes, duplicate/stale/wrong-owner completions, interl
 owners, cancellation during a reservation, strict logging failure, and zero progress
 in availability-first mode, rollover including empty chunks, stale chunk log events,
 admission exhaustion, slot reuse, and stale releases. These scenarios test ordinary Rust calling the verified
-methods; the scenario's main function is not itself verified.
+methods; the integration test itself is not verified.
 
 The streaming mutation runner rejects bypassing durability, accepting the
 wrong owner, accepting a stale generation, claiming a partial write was complete,
@@ -78,8 +78,9 @@ The runners distinguish failed proof obligations from incidental compiler errors
 With the Verus/Rust versions pinned in [the experiment results](experiment-results.md):
 
 ```sh
-VERUS=/path/to/verus python3 experiments/verus/check_stream.py
-VERUS=/path/to/verus python3 experiments/verus/check_admission.py
+cargo test --workspace --locked
+cargo verus verify -p gateway-core --locked -- --triggers-mode silent
+VERUS=/path/to/verus python3 scripts/check_mutations.py
 ```
 
 ## Boundaries and remaining work
@@ -111,5 +112,6 @@ request before release, but the registry does not own or enforce that disposal.
 
 Still required for milestone 1: enforce registry-to-stream ownership, account for
 all queued and in-flight allocations, prove composed resource release on error,
-and implement the distinct security admission/token boundary. Then extract a
-production library and connect its contract to the streaming adapter in milestone 2.
+and compose resource admission with the now-verified security token boundary.
+The library extraction is complete; connecting its contracts to the streaming
+adapter remains milestone 2 work.

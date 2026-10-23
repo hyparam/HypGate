@@ -1,0 +1,6 @@
+[workspace]
+members = ["crates/gateway-core"]
+resolver = "2"
+
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_only)'] }

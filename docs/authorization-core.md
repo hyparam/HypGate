@@ -1,0 +1,52 @@
+# Verified authorization core
+
+Status: implemented in the Cargo library, not yet connected to HTTP dispatch.
+The source is [policy.rs](../crates/gateway-core/src/policy.rs).
+
+## Checked boundary
+
+The operator provisions identity digests, root grants, origin count, and credential
+ownership. Candidate routes are untrusted. Validation rejects unknown tenants,
+invalid origin or credential indices, cross-tenant credentials, routes outside the
+root grants, and duplicate tenant/selector bindings. Identity digests must contain
+32 bytes; duplicate tenants or digests are rejected. A successful validation result
+preserves the supplied root snapshot and satisfies all of these constraints.
+
+Authentication matches an input digest against the immutable identity table.
+Authorization then selects only that tenant's configured route and rejects a zero
+request ID. Private-constructor `Authenticated` and `AuthorizedRequest` tokens
+borrow the actual policy snapshot; they cannot be constructed or cloned by callers.
+Verified accessors return the authorized origin, credential, tenant, and request ID.
+The root grant includes the exact tenant, selector, origin, and credential tuple.
+
+## Assumptions and remaining obligations
+
+The planned HTTP shell hashes high-entropy gateway tokens with SHA-256 before
+authentication. Hashing, token provisioning, cryptographic security, and parsing
+authentication headers are not implemented or verified here. Digest comparison
+scans every byte but carries no constant-time theorem. Tests use synthetic digests.
+
+Origins and credentials are numeric handles, not URLs or secrets. The future
+transport must consume the authorized token and use the same immutable mapping
+snapshot, without accepting independent destination or credential overrides.
+URI validation, DNS, TLS, proxy/redirect disabling, header filtering, and secret
+confinement remain adapter obligations. Root-policy intent is a trusted input;
+candidate configuration cannot enlarge that policy.
+
+Nonzero request IDs are not inherently unique. Composition with the resource
+registry must enforce uniqueness and own the request/stream lifetime. The existing
+registry bounds logical slots and payload allowances, not total process memory.
+No proof yet connects tokens to actual network effects or disk records.
+
+## Evidence
+
+On 2026-10-23 the pinned Verus release checked 34 core obligations with no errors;
+the dependency vstd checked 2,060. All six Cargo integration tests passed: five
+policy tests and one streaming/resource lifecycle scenario. Policy tests include
+108 candidate configurations plus invalid identities and authorization failures.
+
+The consolidated mutation runner rejects all 19 injected defects. Seven exercise
+unauthenticated identity acceptance, cross-tenant routing, expanded root grants,
+cross-tenant credentials, unknown origins, wrong origin accessors, and ambiguous
+identities. A mutation counts only when a proof obligation fails, not when the
+source merely fails to compile. Reproduction commands are in the [README](../README.md).

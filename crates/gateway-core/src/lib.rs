@@ -1,0 +1,8 @@
+#![forbid(unsafe_code)]
+//! Synchronous verified policy and streaming operations; no network or disk I/O.
+#[allow(unused_imports)]
+use vstd::prelude::*;
+
+pub mod resource;
+pub mod stream;
+pub mod policy;
