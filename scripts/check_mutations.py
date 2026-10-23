@@ -15,6 +15,9 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("resource.rs", "mapping_reserve_live_slot", "slots[index] == 0, owner != 0,", "owner != 0,"),
+    ("resource.rs", "mapping_wrong_stream_owner", "slots[index] != 0, stream.valid(), stream.owner() == slots[index], stream.capacity() <= capacity,", "slots[index] != 0, stream.valid(), stream.capacity() <= capacity,"),
+    ("resource.rs", "mapping_retains_retired_stream", "ensures streams_bound(slots.update(index, 0), streams.update(index, None), capacity),", "ensures streams_bound(slots.update(index, 0), streams, capacity),"),
     ("audit_journal.rs", "ledger_drops_frame", "self.frames = Ghost(self.frames@.push(saved));", ""),
     ("audit_journal.rs", "ledger_reverses_order", "self.frames = Ghost(self.frames@.push(saved));", "self.frames = Ghost(seq![saved] + self.frames@);"),
     ("audit_journal.rs", "ledger_denies_valid_commit", "let ghost saved = frame;", "if true { return None; } let ghost saved = frame;"),

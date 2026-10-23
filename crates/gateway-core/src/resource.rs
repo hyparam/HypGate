@@ -44,6 +44,49 @@ pub open spec fn streams_bound(slots: Seq<u64>, streams: Seq<Option<StreamChunk>
         }
 }
 
+// Preservation rules for the ghost ownership map. These do not assume that
+// the next map is valid; they derive it from the prior map and one local event.
+pub proof fn reserve_preserves_streams(slots: Seq<u64>, streams: Seq<Option<StreamChunk>>,
+    capacity: nat, index: int, owner: u64)
+    requires streams_bound(slots, streams, capacity), 0 <= index < slots.len(),
+        slots[index] == 0, owner != 0,
+    ensures streams_bound(slots.update(index, owner), streams, capacity),
+        streams[index].is_none(),
+{
+    assert(streams[index].is_none());
+    assert forall|i: int| 0 <= i < streams.len() implies match #[trigger] streams[i] {
+        Some(s) => slots.update(index, owner)[i] != 0
+            && s.owner() == slots.update(index, owner)[i] && s.valid() && s.capacity() <= capacity,
+        None => true,
+    } by { }
+}
+
+pub proof fn replace_preserves_streams(slots: Seq<u64>, streams: Seq<Option<StreamChunk>>,
+    capacity: nat, index: int, stream: StreamChunk)
+    requires streams_bound(slots, streams, capacity), 0 <= index < slots.len(),
+        slots[index] != 0, stream.valid(), stream.owner() == slots[index], stream.capacity() <= capacity,
+    ensures streams_bound(slots, streams.update(index, Some(stream)), capacity),
+{
+    assert forall|i: int| 0 <= i < streams.len() implies match
+        #[trigger] streams.update(index, Some(stream))[i] {
+        Some(s) => slots[i] != 0 && s.owner() == slots[i] && s.valid() && s.capacity() <= capacity,
+        None => true,
+    } by { }
+}
+
+pub proof fn retire_preserves_streams(slots: Seq<u64>, streams: Seq<Option<StreamChunk>>,
+    capacity: nat, index: int)
+    requires streams_bound(slots, streams, capacity), 0 <= index < slots.len(),
+    ensures streams_bound(slots.update(index, 0), streams.update(index, None), capacity),
+{
+    assert forall|i: int| 0 <= i < streams.len() implies match
+        #[trigger] streams.update(index, None)[i] {
+        Some(s) => slots.update(index, 0)[i] != 0
+            && s.owner() == slots.update(index, 0)[i] && s.valid() && s.capacity() <= capacity,
+        None => true,
+    } by { }
+}
+
 proof fn bound_payload(slots: Seq<u64>, streams: Seq<Option<StreamChunk>>, capacity: nat)
     requires streams_bound(slots, streams, capacity),
     ensures occupied(slots) <= slots.len(), retained_payload(streams) <= occupied(slots) * capacity,
@@ -136,6 +179,7 @@ impl ResourceAdmission {
     pub fn new(request_limit: usize, per_request: usize) -> (a: Self)
         ensures a.valid(), a.limit() == request_limit, a.per_request() == per_request,
             a.next_id() == 1, occupied(a.entries()) == 0,
+            streams_bound(a.entries(), Seq::new(request_limit as nat, |i: int| None::<StreamChunk>), a.per_request()),
             forall|i: int| 0 <= i < a.limit() ==> #[trigger] a.entries()[i] == 0,
     {
         let mut slots = Vec::new();
@@ -176,6 +220,9 @@ impl ResourceAdmission {
         requires old(self).valid(),
         ensures final(self).valid(), final(self).limit() == old(self).limit(),
             final(self).per_request() == old(self).per_request(),
+            forall|streams: Seq<Option<StreamChunk>>|
+                #[trigger] streams_bound(old(self).entries(), streams, old(self).per_request())
+                ==> streams_bound(final(self).entries(), streams, final(self).per_request()),
             match out {
                 Some(key) => final(self).owns(&key) && !key.stream_claimed() && key.id() == old(self).next_id()
                     && final(self).next_id() == old(self).next_id() + 1
@@ -197,7 +244,13 @@ impl ResourceAdmission {
         {
             if self.slots[i] == 0 {
                 let id = self.next;
-                proof { occupied_update(self.slots@, i as int, id); }
+                proof {
+                    occupied_update(self.slots@, i as int, id);
+                    assert forall|streams: Seq<Option<StreamChunk>>|
+                        #[trigger] streams_bound(self.slots@, streams, self.per_request as nat)
+                        implies streams_bound(self.slots@.update(i as int, id), streams, self.per_request as nat)
+                    by { reserve_preserves_streams(self.slots@, streams, self.per_request as nat, i as int, id); }
+                }
                 self.slots.set(i, id);
                 self.next = self.next + 1;
                 return Some(RequestKey { slot: i, id, stream_claimed: false });
@@ -230,7 +283,10 @@ impl ResourceAdmission {
                     && final(key).stream_claimed() && stream.valid()
                     && stream.owner() == authority.request() && stream.owner() == final(key).id()
                     && stream.capacity() == self.per_request() && stream.body().len() == 0
-                    && stream.strict() == strict && !stream.closed() && !stream.pending(),
+                    && stream.strict() == strict && !stream.closed() && !stream.pending()
+                    && (forall|streams: Seq<Option<StreamChunk>>|
+                        #[trigger] streams_bound(self.entries(), streams, self.per_request())
+                        ==> streams_bound(self.entries(), streams.update(final(key).slot() as int, Some(stream)), self.per_request())),
                 None => *final(key) == *old(key) && (old(key).stream_claimed()
                     || old(key).id() != authority.request() || !self.owns(old(key))),
             },
@@ -240,6 +296,14 @@ impl ResourceAdmission {
             Some(capacity) => {
                 let stream = StreamChunk::new(key.id, Vec::new(), capacity, strict);
                 key.stream_claimed = true;
+                proof {
+                    if let Some(ref s) = stream {
+                        assert forall|streams: Seq<Option<StreamChunk>>|
+                            #[trigger] streams_bound(self.entries(), streams, self.per_request())
+                            implies streams_bound(self.entries(), streams.update(key.slot as int, Some(*s)), self.per_request())
+                        by { replace_preserves_streams(self.entries(), streams, self.per_request(), key.slot as int, *s); }
+                    }
+                }
                 stream
             },
             None => None,
@@ -253,6 +317,9 @@ impl ResourceAdmission {
         ensures final(self).valid(), final(self).limit() == old(self).limit(),
             final(self).per_request() == old(self).per_request(),
             final(self).next_id() == old(self).next_id(),
+            ok ==> (forall|streams: Seq<Option<StreamChunk>>|
+                #[trigger] streams_bound(old(self).entries(), streams, old(self).per_request())
+                ==> streams_bound(final(self).entries(), streams.update(key.slot() as int, None), final(self).per_request())),
             ok == (key.stream_claimed() && stream.owner() == key.id() && old(self).owns(key)),
             ok ==> !final(self).owns(key)
                 && occupied(final(self).entries()) + 1 == occupied(old(self).entries())
@@ -271,6 +338,9 @@ impl ResourceAdmission {
         ensures final(self).valid(), final(self).limit() == old(self).limit(),
             final(self).per_request() == old(self).per_request(),
             final(self).next_id() == old(self).next_id(),
+            ok ==> (forall|streams: Seq<Option<StreamChunk>>|
+                #[trigger] streams_bound(old(self).entries(), streams, old(self).per_request())
+                ==> streams_bound(final(self).entries(), streams.update(key.slot() as int, None), final(self).per_request())),
             ok == (!key.stream_claimed() && old(self).owns(key)),
             ok ==> !final(self).owns(key)
                 && occupied(final(self).entries()) + 1 == occupied(old(self).entries())
@@ -289,6 +359,9 @@ impl ResourceAdmission {
         ensures final(self).valid(), final(self).limit() == old(self).limit(),
             final(self).per_request() == old(self).per_request(),
             final(self).next_id() == old(self).next_id(),
+            ok ==> (forall|streams: Seq<Option<StreamChunk>>|
+                #[trigger] streams_bound(old(self).entries(), streams, old(self).per_request())
+                ==> streams_bound(final(self).entries(), streams.update(key.slot() as int, None), final(self).per_request())),
             ok ==> old(self).owns(key) && !final(self).owns(key)
                 && occupied(final(self).entries()) + 1 == occupied(old(self).entries())
                 && final(self).entries()[key.slot() as int] == 0
@@ -299,7 +372,13 @@ impl ResourceAdmission {
         if key.slot >= self.slots.len() || key.id == 0 || self.slots[key.slot] != key.id {
             return false;
         }
-        proof { occupied_update(self.slots@, key.slot as int, 0); }
+        proof {
+            occupied_update(self.slots@, key.slot as int, 0);
+            assert forall|streams: Seq<Option<StreamChunk>>|
+                #[trigger] streams_bound(self.slots@, streams, self.per_request as nat)
+                implies streams_bound(self.slots@.update(key.slot as int, 0), streams.update(key.slot as int, None), self.per_request as nat)
+            by { retire_preserves_streams(self.slots@, streams, self.per_request as nat, key.slot as int); }
+        }
         self.slots.set(key.slot, 0);
         true
     }

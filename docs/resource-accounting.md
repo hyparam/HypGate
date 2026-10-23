@@ -81,7 +81,9 @@ checks reclaimed request slots and both logging modes, and releases that same
 worker without any additional write. [Benchmark results](benchmarks.md) report
 whole-fixture RSS separately from these logical budgets.
 
-Remaining work includes a checked preservation argument for the full runtime
-ownership map, dependency/backing-allocation accounting, formal worker-lifetime composition,
+Core ownership-map preservation is now checked for admission, stream creation,
+replacement, and retirement; see the [ownership notes](runtime-ownership.md#ownership-map-preservation).
+Remaining work includes correspondence between the full runtime ownership and
+those ghost-map events, dependency/backing-allocation accounting, formal worker-lifetime composition,
 and isolated-gateway memory measurements under sustained load. Until those exist,
 neither the subtotal nor the core's 128 MiB allowance is a whole-process guarantee.

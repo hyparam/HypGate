@@ -178,3 +178,34 @@ to their registry. It also excludes vector spare capacity, HTTP/TLS backing stor
 log queues, allocator overhead, and OS caches. The runtime ownership boundary and
 load tests support those separate obligations without turning this into a
 whole-process memory theorem.
+
+## Ownership-map preservation
+
+The core now proves preservation rules for the ghost stream-to-slot map, rather
+than requiring every later snapshot's validity independently:
+
+- `ResourceAdmission::new` establishes a valid all-empty map.
+- The actual `acquire` postcondition preserves every previously valid map. Its
+  proof derives that the newly reserved slot had no retained stream, since it was
+  free; other stream owners remain unchanged.
+- The actual `authorized_stream` postcondition proves that installing the returned
+  stream at its key's slot preserves the map.
+- `replace_preserves_streams` covers subsequent stream snapshots with valid state,
+  unchanged owner, and capacity within the slot's allowance. The executable stream
+  transitions specify these facts, including chunk rollover and cancellation.
+- Successful `release_stream` and reservation-only `release` prove that clearing
+  the released slot's map entry preserves the map. Failed releases leave the
+  registry unchanged. Clearing a map entry describes dropping the stream, not
+  permission to keep an independent copy alive.
+
+Together these rules allow induction over core lifecycle events and application
+of `logical_payload_bound` after each event. Three deliberate defects test
+reservation of a live mapped slot, replacement with the wrong stream owner, and
+retention of a stream after its slot is retired.
+
+This is still a conditional resource proof. The ghost map is a specification
+snapshot, not a runtime registry of buffers. Safe Rust lease encapsulation must
+faithfully implement its insertion/replacement/removal events and enforce one
+stream per key. Formal composition of that async ownership boundary, additional
+queue/receipt allocations, and dependency backing storage remains open. No new
+runtime collection or retained historical payload is introduced.
