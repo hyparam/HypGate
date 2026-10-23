@@ -52,9 +52,17 @@ and full duplex are outside the current interface.
 GET `/healthz` reports process responsiveness. GET `/readyz` fails when the logger
 is unhealthy in strict mode; availability mode stays ready despite logging loss.
 Readiness does not yet probe upstream availability, request capacity, or disk space.
-The library exposes in-memory failed-exchange and audit-gap counters; persistent
-gap diagnostics and a metrics endpoint remain to be added. Crashes can lose these
-counters. Changing `logging` to `availability` permits unaudited forwarding after
+After authorization, strict-mode requests also receive 503 without opening an
+upstream connection if logger health is already failed; later failures are handled
+by the stream durability gate.
+GET `/metrics` exposes `soundgate_failed_exchanges_total`,
+`soundgate_audit_gap_requests_total`, and `soundgate_audit_healthy` without payloads
+or credentials. Counters live in memory and crashes reset them. Failed exchanges
+count transport errors returned to the worker, not all externally canceled tasks.
+The gap counter increments once per availability-mode request at its first failed
+log append, even if the generation later fails or is canceled. It reports potential
+incomplete audit coverage, not a precise count of unlogged bytes. Strict-mode
+refusal is not counted as an audit gap. Persistent diagnostics remain open. Changing `logging` to `availability` permits unaudited forwarding after
 logging failure while retaining the same authentication/routing checks.
 
 The executable currently uses 128 connection slots, a 10-second header deadline,
@@ -84,7 +92,11 @@ fixture and a real disk logger. It checks that unauthorized requests make no
 provider connection, secret headers are replaced, response data arrives before
 provider EOF, logged request/response bytes match, and workers drain on shutdown.
 A separate executable smoke test starts the actual binary from JSON configuration
-and checks its health endpoint. All 48 workspace tests pass.
+and checks its health endpoint. Additional end-to-end scenarios inject failed logger health and provider truncation.
+They check strict refusal without a provider connection, availability-mode forwarding
+with unchanged authorization, audit-gap reporting after failure, metrics, and
+rejection of a second request while the sole slot is occupied. Logger I/O failures
+are tested separately at the disk adapter. All 51 workspace tests pass.
 
 This is a runnable prototype, not a production-ready or wholly verified gateway.
 Concurrent-request stress tests, all end-to-end failure modes, resource composition

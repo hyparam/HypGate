@@ -18,12 +18,12 @@ impl TempDir {
     }
 }
 impl Drop for TempDir { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }
-fn config(port: u16) -> GatewayConfig {
+fn config(port: u16, availability: bool) -> GatewayConfig {
     let routes = json!([{"tenant":1,"selector":7,"origin":0,"credential":0}]);
     let root = json!({"identities":[{"tenant":1,"sha256":format!("{:x}",Sha256::digest(b"gateway"))}],
         "destinations":[format!("https://localhost:{port}/v1/messages")],
         "credentials":[{"tenant":1,"kind":"api_key","env":"KEY"}],"grants":routes,
-        "limits":{"requests":1,"chunk_bytes":3},"logging":"strict"});
+        "limits":{"requests":1,"chunk_bytes":3},"logging":if availability { "availability" } else { "strict" }});
     GatewayConfig::from_json(&serde_json::to_vec(&root).unwrap(), &serde_json::to_vec(&json!({"routes":routes})).unwrap(),
         |_| Some("provider-secret".into())).unwrap()
 }
@@ -37,8 +37,7 @@ async fn send(port: u16, path: &str, token: &str, method: &str) -> (Response<Inc
     (sender.send_request(request).await.unwrap(), connection)
 }
 
-#[tokio::test]
-async fn full_gateway_streams_before_upstream_eof_and_logs_exact_bytes() {
+async fn exercise(availability: bool, failed_log: bool, truncated: bool) {
     tokio::time::timeout(Duration::from_secs(10), async {
         let cert = generate_simple_self_signed(vec!["localhost".into()]).unwrap();
         let mut roots = RootCertStore::empty(); roots.add(cert.cert.der().clone()).unwrap();
@@ -46,20 +45,30 @@ async fn full_gateway_streams_before_upstream_eof_and_logs_exact_bytes() {
             PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()).into()).unwrap();
         let acceptor = TlsAcceptor::from(Arc::new(tls));
         let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let config = config(upstream.local_addr().unwrap().port());
+        let config = config(upstream.local_addr().unwrap().port(), availability);
         let dir = TempDir::new(); let path = dir.0.join("audit.log");
         let log = DiskLog::create(&path, 4, Duration::from_secs(2)).unwrap();
+        if failed_log { log.inject_failure(); }
         let app = Gateway::new(config, HttpsTransport::with_roots(roots, Duration::from_secs(5)).unwrap(), log);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap(); let port = listener.local_addr().unwrap().port();
         let (shutdown, stopped) = oneshot::channel();
         let gateway = tokio::spawn(serve(listener, app.clone(), 4, Duration::from_secs(8), async { let _ = stopped.await; }));
-        for (path, token, method, status) in [("/healthz", "", "GET", 200), ("/readyz", "", "GET", 200),
+        for (path, token, method, status) in [("/healthz", "", "GET", 200), ("/readyz", "", "GET", if failed_log && !availability { 503 } else { 200 }),
             ("/routes/7", "wrong", "POST", 401), ("/routes/99", "gateway", "POST", 401)] {
             let (r, c) = send(port, path, token, method).await;
             assert_eq!(r.status().as_u16(), status); r.collect().await.unwrap(); c.await.unwrap();
         }
         // Rejected requests must not have connected to the provider.
         assert!(tokio::time::timeout(Duration::from_millis(20), upstream.accept()).await.is_err());
+        if failed_log && !availability {
+            let (r, c) = send(port, "/routes/7", "gateway", "POST").await;
+            assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
+            r.collect().await.unwrap(); c.await.unwrap();
+            assert!(tokio::time::timeout(Duration::from_millis(20), upstream.accept()).await.is_err());
+            shutdown.send(()).unwrap(); gateway.await.unwrap().unwrap();
+            assert!(app.workers.is_empty()); assert_eq!(app.audit_gaps(), 0);
+            return;
+        }
         let (release, waiting) = oneshot::channel(); let waiting = Arc::new(Mutex::new(Some(waiting)));
         let upstream_task = tokio::spawn(async move {
             let (socket, _) = upstream.accept().await.unwrap(); let socket = acceptor.accept(socket).await.unwrap();
@@ -74,6 +83,7 @@ async fn full_gateway_streams_before_upstream_eof_and_logs_exact_bytes() {
                     tokio::spawn(async move {
                         writer.write_all(b"data: hello\n\n").await.unwrap();
                         waiting.await.unwrap();
+                        if truncated { return; } // no End marker: simulate a provider disconnect
                         writer.write_all(b"data: [DONE]\n\n").await.unwrap();
                         writer.shutdown().await.unwrap();
                     });
@@ -88,20 +98,43 @@ async fn full_gateway_streams_before_upstream_eof_and_logs_exact_bytes() {
         assert!(!response.headers().contains_key("set-cookie"));
         let first = response.body_mut().frame().await.unwrap().unwrap().into_data().unwrap();
         assert!(!first.is_empty()); // arrives while the upstream is waiting, before EOF
+        // The first request still owns the sole admission slot while streaming.
+        let (busy, busy_connection) = send(port, "/routes/7", "gateway", "POST").await;
+        assert_eq!(busy.status(), StatusCode::SERVICE_UNAVAILABLE);
+        busy.collect().await.unwrap(); busy_connection.await.unwrap();
         release.send(()).unwrap();
-        let rest = response.collect().await.unwrap().to_bytes();
-        let mut bytes = first.to_vec(); bytes.extend_from_slice(&rest);
-        assert_eq!(bytes, b"data: hello\n\ndata: [DONE]\n\n");
+        let rest = response.collect().await;
+        let mut bytes = first.to_vec();
+        if truncated { assert!(rest.is_err()); }
+        else {
+            bytes.extend_from_slice(&rest.unwrap().to_bytes());
+            assert_eq!(bytes, b"data: hello\n\ndata: [DONE]\n\n");
+        }
         connection.await.unwrap(); upstream_task.await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !app.workers.is_empty() { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        let (metrics, metrics_connection) = send(port, "/metrics", "", "GET").await;
+        let metrics = metrics.collect().await.unwrap().to_bytes(); metrics_connection.await.unwrap();
+        let metrics = std::str::from_utf8(&metrics).unwrap();
+        assert!(metrics.contains(&format!("soundgate_audit_gap_requests_total {}\n", u8::from(failed_log && availability))));
+        assert!(metrics.contains(&format!("soundgate_failed_exchanges_total {}\n", u8::from(truncated))));
+        assert!(metrics.contains(&format!("soundgate_audit_healthy {}\n", u8::from(!failed_log))));
         shutdown.send(()).unwrap(); gateway.await.unwrap().unwrap();
-        assert!(app.workers.is_empty()); assert_eq!(app.failed_exchanges(), 0); assert_eq!(app.audit_gaps(), 0);
+        assert!(app.workers.is_empty()); assert_eq!(app.failed_exchanges(), u64::from(truncated));
+        assert_eq!(app.audit_gaps(), u64::from(failed_log && availability));
+        assert!(app.config.admit(b"gateway", 7).is_ok());
         let mut reader = LogReader::new(File::open(path).unwrap()).unwrap();
         let mut upload = Vec::new(); let mut download = Vec::new();
         while let Some(r) = reader.next_record().unwrap() {
             match r.direction { crate::transfer::Direction::Upload => &mut upload,
                 crate::transfer::Direction::Download => &mut download }.extend(r.bytes);
         }
-        assert_eq!(upload, b"{\"stream\":true}"); assert_eq!(download, bytes);
+        if failed_log { assert!(upload.is_empty()); assert!(download.is_empty()); }
+        else {
+            assert_eq!(upload, b"{\"stream\":true}");
+            if !truncated { assert_eq!(download, bytes); }
+        }
     }).await.unwrap();
 }
 
@@ -115,3 +148,12 @@ async fn worker_body_drop_aborts_pending_request() {
     tokio::time::timeout(Duration::from_secs(1), tracker.wait()).await.unwrap();
     assert!(tracker.is_empty());
 }
+
+#[tokio::test]
+async fn full_gateway_streams_before_upstream_eof_and_logs_exact_bytes() { exercise(false, false, false).await; }
+#[tokio::test]
+async fn strict_log_failure_prevents_even_upstream_connection() { exercise(false, true, false).await; }
+#[tokio::test]
+async fn availability_log_failure_preserves_stream_and_reports_gap() { exercise(true, true, false).await; }
+#[tokio::test]
+async fn truncated_generation_is_an_error_and_still_reports_audit_gap() { exercise(true, true, true).await; }

@@ -73,6 +73,8 @@ impl DiskLog {
     }
 
     pub fn healthy(&self) -> bool { self.healthy.load(Ordering::Acquire) }
+    #[cfg(test)]
+    pub(crate) fn inject_failure(&self) { self.healthy.store(false, Ordering::Release); }
     pub fn session(&self) -> [u8; 16] { self.session }
 }
 

@@ -1,7 +1,7 @@
 //! Inbound HTTP/1 server. Deploy behind a trusted TLS terminator; the executable
 //! binds loopback only. Each connection serves one request and owns its worker.
 use crate::{config::GatewayConfig, disk_log::DiskLog, http_body, http_boundary,
-    transport::{HttpsTransport, ResponseSink, TransportError}};
+    transport::{HttpsTransport, ResponseSink, TransportError}, transfer::{AuditLog, LogRecord}};
 use bytes::Bytes;
 use http::{HeaderMap, Request, Response, StatusCode};
 use ::http_body::{Body, Frame};
@@ -30,6 +30,13 @@ impl Gateway {
     pub fn failed_exchanges(&self) -> u64 { self.failed_exchanges.load(Ordering::Relaxed) }
 
     async fn handle(self: Arc<Self>, request: Request<Incoming>) -> Result<Response<GatewayBody>, Infallible> {
+        if request.method() == http::Method::GET && request.uri().path() == "/metrics" {
+            let text = format!("soundgate_audit_gap_requests_total {}\nsoundgate_failed_exchanges_total {}\nsoundgate_audit_healthy {}\n",
+                self.audit_gaps(), self.failed_exchanges(), u8::from(self.log.healthy()));
+            let mut response = Response::new(GatewayBody::Fixed(Full::new(Bytes::from(text))));
+            response.headers_mut().insert("content-type", http::HeaderValue::from_static("text/plain; version=0.0.4"));
+            return Ok(response);
+        }
         if request.method() == http::Method::GET && request.uri().path() == "/healthz" {
             return Ok(fixed(StatusCode::OK, "ok\n"));
         }
@@ -52,13 +59,18 @@ impl Gateway {
                     return;
                 }
             };
-            let mut log = app.log.clone();
+            // If strict logging is already unavailable, do not even open an
+            // upstream connection. Later failures still use the stream gate.
+            if app.config.requires_audit() && !app.log.healthy() {
+                let _ = output.start(StatusCode::SERVICE_UNAVAILABLE, HeaderMap::new()).await;
+                let _ = output.shutdown().await;
+                return;
+            }
+            let mut log = ObservedLog { log: app.log.clone(), gaps: &app.audit_gaps,
+                availability: !app.config.requires_audit(), reported: false };
             let result = app.transport.exchange(prepared, &mut http_body::Reader::new(input), &mut output, &mut log).await;
             match result {
-                Ok(stats) => {
-                    if stats.upload.audit_gap || stats.download.audit_gap {
-                        app.audit_gaps.fetch_add(1, Ordering::Relaxed);
-                    }
+                Ok(_) => {
                     let _ = output.shutdown().await; // only success sends the clean EOF marker
                 }
                 Err(e) => {
@@ -83,6 +95,19 @@ impl Gateway {
             }
             Err(_) => Ok(fixed(StatusCode::BAD_GATEWAY, "upstream failed\n")),
         }
+    }
+}
+
+// Report potential audit loss at the first failed append, not only after a
+// successful response: cancellation and provider failures must not hide it.
+struct ObservedLog<'a> { log: DiskLog, gaps: &'a AtomicU64, availability: bool, reported: bool }
+impl AuditLog for ObservedLog<'_> {
+    async fn append(&mut self, record: LogRecord<'_>) -> io::Result<()> {
+        let result = self.log.append(record).await;
+        if result.is_err() && self.availability && !self.reported {
+            self.gaps.fetch_add(1, Ordering::Relaxed); self.reported = true;
+        }
+        result
     }
 }
 

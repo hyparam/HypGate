@@ -3,9 +3,9 @@
 | Milestone | Complete | Progress |
 | --- | :---: | --- |
 | 1. Verified streaming core | ☐ | ✓ Streaming and resource proofs; ✓ authorization/configuration proofs; ✓ tested request ownership. Composed resource proofs and full buffer accounting remain. |
-| 2. Minimal working gateway | ☐ | ✓ Runnable inbound server, authorization, HTTPS streaming, and real disk integration. Broader concurrent/error-path validation and trusted-boundary audit remain. |
+| 2. Minimal working gateway | ☐ | ✓ Runnable inbound server, authorization, HTTPS streaming, and real disk integration. ✓ Logging-failure, truncation, and admission-contention tests. Concurrent tenant isolation and trusted-boundary audit remain. |
 | 3. Crash-safe logging | ☐ | ✓ Core logging gates; ✓ bounded disk writer, framed records, and recovery scanner. Recovery proofs and process-crash tests remain. |
-| 4. Availability hardening | ☐ | ✓ Admission/connection limits, bounded logging, network deadlines, health/readiness, and bounded connection drain. Full fault/load tests and shutdown/resource proofs remain. |
+| 4. Availability hardening | ☐ | ✓ Admission/connection limits, bounded logging, network deadlines, health/readiness, and bounded connection drain. ✓ Audit-health/gap metrics. Full fault/load tests and shutdown/resource proofs remain. |
 | 5. Auditable first release | ☐ | ✓ Pinned core toolchain, proof/mutation checks, and security notes; ✓ GitHub Actions test/proof workflow. Reproducible deployment, benchmarks, and end-to-end audit remain. |
 
 ✓ marks completed work within a milestone; ☐ means the full milestone's exit
