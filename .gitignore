@@ -1,3 +1,6 @@
 /target/
 __pycache__/
 *.pyc
+
+# Local audit logs from the README quick start contain request/response bodies.
+/logs/

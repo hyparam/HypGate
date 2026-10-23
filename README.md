@@ -32,6 +32,27 @@ Proofs complement fault testing, operational redundancy, and secure builds; they
 do not by themselves prevent a compromised release pipeline from shipping different
 code. The proof targets and remaining trust assumptions are listed below.
 
+## Run it
+
+Install Rust through rustup; this repository selects the pinned toolchain. Create
+`root.json` and `routes.json` from the [configuration example](docs/running.md#configuration-example),
+set your gateway-token digest, and supply `PROVIDER_KEY` through your environment.
+Then run:
+
+```sh
+cargo build --release --locked --bin soundgate
+mkdir -m 700 logs
+target/release/soundgate root.json routes.json logs/session-001.log
+```
+
+The server listens on `127.0.0.1:8080`; check it with
+`curl --fail http://127.0.0.1:8080/healthz`. Send native provider requests to
+`POST /routes/7` with `Authorization: Bearer <gateway-token>` and the provider's
+normal headers and JSON body. Use a **new log filename on every start**; logs
+contain request and response bodies. Remote access needs a
+[TLS reverse proxy](docs/deployment.md). See [running the gateway](docs/running.md)
+for provider configuration, scanning logs, and shutdown behavior.
+
 ## Important properties we aim to prove
 
 These are the project's proof targets, not a claim that the whole gateway already
@@ -125,8 +146,4 @@ passed, the opt-in TLS proxy/gateway process-failover test and six load/fault wo
 deliberate mutations failed their proof obligations.
 These counts are checks, not a count of independent security guarantees.
 
-[GitHub Actions CI](.github/workflows/ci.yml) runs on pushes, pull requests, and
-manual dispatch. Separate Linux jobs run locked workspace tests and the production
-core's Verus proofs plus all mutation checks. Rust comes from rust-toolchain.toml;
-the Verus release archive is SHA-256 pinned, and checkout is commit-pinned.
-Jobs have read-only repository permissions and bounded execution times.
+[Automated checks](.github/workflows/ci.yml) reproduce the tests and proofs on Linux.
