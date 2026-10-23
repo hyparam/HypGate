@@ -449,3 +449,5 @@ async fn poisoned_admission_is_unready_and_fail_closed_in_both_logging_modes() {
         }
     }).await.unwrap();
 }
+
+mod process_crash;

@@ -45,5 +45,14 @@ scanning, refusal to reuse the old path, and a new session ID after restart.
 The OS/page cache survives these process-crash tests. They do not simulate power
 loss, force every kernel-write interleaving, or prove sync semantics. Exhaustive
 synthetic tail truncation, corruption, disk-full/sync-error injection, and blocked
-sync tests provide separate evidence. Whole-gateway termination during an active
-generation and failover/load tests remain additional validation work.
+sync tests provide separate evidence.
+
+`crates/gateway-runtime/src/server/tests/process_crash.rs` additionally kills a real
+gateway runtime subprocess after a client receives a response prefix from a TLS
+provider. The client must observe a truncated-body error, and scanning the strict
+log must recover the exact request and observed response prefix with matching
+identities. Starting a fresh gateway produces a new log session, leaves the old
+log unchanged, and makes no upstream connection during the observation window.
+This exercises the runtime in a test binary with a fixture CA, not the CLI binary;
+it does not establish absence of replay for arbitrary future executions.
+Combined proxy/gateway failover and host/power-loss tests remain open.

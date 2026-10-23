@@ -95,7 +95,7 @@ cargo verus verify -p gateway-core --locked -- --triggers-mode silent
 VERUS=/path/to/verus python3 scripts/check_mutations.py
 ```
 
-Validation on 2026-10-23: 60 core verification checks passed, 80 workspace tests
+Validation on 2026-10-23: 60 core verification checks passed, 82 workspace tests
 passed, and all 51 deliberate mutations failed their proof obligations.
 These counts are checks, not a count of independent security guarantees.
 

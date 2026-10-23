@@ -63,6 +63,7 @@ production patch version. CI exercises the Ubuntu package and reports its versio
 
 This test covers proxy policy, not a full gateway process-kill or host-failure
 experiment. The gateway's separate tests cover real HTTP/TLS forwarding, request
-cancellation, logging failure modes, and disk-worker process kills. Whole-system
+cancellation, logging failure modes, disk-worker process kills, and gateway runtime
+process death during a streamed response (see the [crash contract](storage-crash-contract.md)). Whole-system
 failover testing, deployment hardening, benchmarks, and independent review remain
 release obligations. HAProxy, TLS termination, and the OS remain trusted.
