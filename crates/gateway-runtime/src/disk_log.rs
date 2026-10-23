@@ -220,12 +220,12 @@ impl<R: Read> LogReader<R> {
         let mut checksum = [0u8; 32];
         exact(&mut self.reader, &mut checksum)?;
         let mut digest = Sha256::new(); digest.update(header); digest.update(&bytes);
-        if digest.finalize()[..] != checksum { return Err(ScanError::Corrupt); }
-        if !self.cursor.accept(ticket, fields.payload,
-            (header.len() + bytes.len() + checksum.len()) as u64) { return Err(ScanError::Corrupt); }
+        let record = self.cursor.accept_record(ticket, &header, bytes,
+            digest.finalize()[..] == checksum).ok_or(ScanError::Corrupt)?;
+        let fields = record.header;
         Ok(Some(StoredRecord {
             tenant: fields.tenant, request: fields.request, chunk: fields.chunk,
-            direction: if fields.direction == 0 { Direction::Upload } else { Direction::Download }, bytes,
+            direction: if fields.direction == 0 { Direction::Upload } else { Direction::Download }, bytes: record.bytes,
         }))
     }
 }

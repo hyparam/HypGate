@@ -15,6 +15,9 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("framing.rs", "ignore_record_checksum", "if !checksum_valid { return None; }", ""),
+    ("framing.rs", "recover_wrong_payload_extent", "if fields.payload as usize != bytes.len() { return None; }", ""),
+    ("framing.rs", "discard_recovered_payload", "RecoveredRecord { header: fields, bytes }", "RecoveredRecord { header: fields, bytes: Vec::new() }"),
     ("stream.rs", "wrong_log_chunk_id", "ensures out == self.chunk(),\n    { self.chunk }", "ensures out == self.chunk(),\n    { 0 }"),
     ("journal.rs", "deny_valid_append", "if self.failed || self.pending != 0 || length == 0 || length > u64::MAX - self.written", "if true"),
     ("journal.rs", "deny_written_record", "if self.failed || t.start != self.written || t.end != self.pending", "if true || t.start != self.written || t.end != self.pending"),

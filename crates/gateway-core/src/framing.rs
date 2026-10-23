@@ -121,6 +121,8 @@ pub fn frame_end(start: u64, payload: u32, available: u64) -> (out: Option<u64>)
 // are not a global identity. The adapter owns the ticket during exact reads.
 pub struct ScanTicket { start: u64 }
 impl ScanTicket { pub closed spec fn start(&self) -> u64 { self.start } }
+// Parsed metadata and exact owned payload admitted together by the scanner core.
+pub struct RecoveredRecord { pub header: Header, pub bytes: Vec<u8> }
 pub struct Cursor { offset: u64, stopped: bool }
 impl Cursor {
     pub closed spec fn position(&self) -> u64 { self.offset }
@@ -146,6 +148,27 @@ impl Cursor {
         if self.stopped { return None; }
         self.stopped = true;
         Some(ScanTicket { start: self.offset })
+    }
+
+    // The checksum result is supplied by trusted cryptographic code. This binds
+    // structural decoding, payload identity, and cursor advancement in one step.
+    pub fn accept_record(&mut self, ticket: ScanTicket, header: &[u8], bytes: Vec<u8>,
+        checksum_valid: bool) -> (out: Option<RecoveredRecord>)
+        ensures match out {
+            Some(record) => checksum_valid && decoded(header@) == Some(record.header)
+                && valid(record.header) && record.header.payload == bytes.len()
+                && record.bytes@ == bytes@ && old(self).stopped()
+                && ticket.start() == old(self).position() && !final(self).stopped()
+                && final(self).position() == old(self).position() + 65 + bytes.len(),
+            None => *final(self) == *old(self),
+        },
+    {
+        if !checksum_valid { return None; }
+        let fields = match decode(header) { Some(fields) => fields, None => return None };
+        if fields.payload as usize != bytes.len() { return None; }
+        let available = 65u64 + bytes.len() as u64;
+        if !self.accept(ticket, fields.payload, available) { return None; }
+        Some(RecoveredRecord { header: fields, bytes })
     }
 
     // The caller certifies successful exact reads and checksum validation.

@@ -83,3 +83,31 @@ fn framed_payload_is_exact_and_cannot_disagree_with_header_length() {
     }
     assert!(encode_payload(Header { payload: 0, tenant: 0, request: 0, chunk: 0, direction: 0 }, &[]).is_none());
 }
+
+#[test]
+fn recovered_record_binds_header_payload_checksum_and_cursor() {
+    use gateway_core::framing::Cursor;
+    for direction in [0, 1] {
+        let header = encode(Header { payload: 3, tenant: 19, request: 29, chunk: 37, direction }).unwrap();
+        let mut cursor = Cursor::new(56);
+        let ticket = cursor.begin().unwrap();
+        let record = cursor.accept_record(ticket, &header, vec![7, 8, 9], true).unwrap();
+        assert_eq!((record.header.tenant, record.header.request, record.header.chunk, record.header.direction),
+            (19, 29, 37, direction));
+        assert_eq!(record.bytes, [7, 8, 9]);
+        assert_eq!(cursor.offset(), 124);
+        assert!(cursor.begin().is_some());
+        for (raw, payload, checksum) in [
+            (header.clone(), vec![7, 8, 9], false),
+            (header.clone(), vec![7, 8], true),
+            (header.clone(), vec![7, 8, 9, 10], true),
+            (header[..32].to_vec(), vec![7, 8, 9], true),
+        ] {
+            let mut cursor = Cursor::new(56);
+            let ticket = cursor.begin().unwrap();
+            assert!(cursor.accept_record(ticket, &raw, payload, checksum).is_none());
+            assert_eq!(cursor.offset(), 56);
+            assert!(cursor.begin().is_none());
+        }
+    }
+}

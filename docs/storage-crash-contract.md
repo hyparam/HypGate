@@ -25,8 +25,12 @@ configuration, and hardware against this contract. Live-OS tests do not establis
 it for network filesystems, ephemeral volumes, or another storage stack.
 
 The scanner emits only complete, checksum-valid records and stops at the first
-incomplete/corrupt tail, reporting the preceding valid offset. Its refinement proof
-remains open. Checksums defend against accidental corruption, not malicious changes.
+incomplete/corrupt tail, reporting the preceding valid offset. The production
+scanner now calls verified `Cursor::accept_record` to bind header decoding, exact
+payload length/content, successful checksum-result input, and cursor advancement.
+An unsuccessful acceptance preserves the stopped cursor and prior offset. File
+reads, checksum computation, session parsing, and conversion to the public runtime
+record remain trusted; full scanner refinement remains open. Checksums defend against accidental corruption, not malicious changes.
 EOF exactly at a record boundary cannot reveal whether later records were lost.
 
 Restart creates a new file and session ID. It never appends to an existing file,
