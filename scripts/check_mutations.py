@@ -15,6 +15,8 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("stream.rs", "discard_unsent_payload", " || self.bytes.len() != self.sent", ""),
+    ("stream.rs", "retain_completed_payload", "self.bytes = Vec::new();", ""),
     ("framing.rs", "restart_stopped_scan", "if self.stopped { return None; }", "if false { return None; }"),
     ("framing.rs", "advance_before_validation", "self.stopped = true;", "self.stopped = true; self.offset = 0;"),
     ("framing.rs", "scan_offset_regression", "self.offset = end;", "self.offset = 0;"),

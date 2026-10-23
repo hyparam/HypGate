@@ -51,7 +51,9 @@ where R: AsyncRead + Unpin, W: AsyncWrite + Unpin, L: AuditLog {
     if capacity == 0 || guard.request.is_closed() { return Err(TransferError::InvalidState); }
     let mut total = 0u64;
     loop {
-        // At most one replacement allocation plus the retained previous chunk.
+        // Release the previous completed payload before the next allocation.
+        // The verified transition preserves history and rejects unfinished work.
+        if !guard.request.discard_completed() { return Err(TransferError::InvalidState); }
         // This is not a bound on TLS/HTTP buffers or allocator overhead.
         let mut buffer = vec![0; capacity];
         let length = reader.read(&mut buffer).await.map_err(|_| TransferError::Read)?;

@@ -119,3 +119,20 @@ adapter remains milestone 2 work.
 Follow-up: the [runtime ownership wrapper](runtime-ownership.md) enforces private
 stream/lease ownership in safe Rust and tests cleanup and cross-registry tickets.
 This is not a proof of composed resource release or complete allocation accounting.
+
+## Completed payload release
+
+`StreamChunk::discard_completed` preserves the complete input and completed-byte
+histories, owner, capacity, chunk identity, generation, mode, and failure state.
+It succeeds only for an open stream with no outstanding write and all current
+bytes completed. On success the payload, sent/offered offsets, and durable offset
+are empty/zero; on failure the state is unchanged. Ghost history survives removal
+of the executable payload, so subsequent chunk advancement retains byte-prefix
+proofs without keeping earlier body bytes in memory.
+
+The production async driver uses this transition before allocating its next read
+buffer. Cargo tests cover unfinished and pending writes, partial completion,
+repeated release, stale write tickets, stale log acknowledgments after advancing,
+and cancellation. Proof mutations remove the completion guard and retain the old
+payload; both must fail. This verifies safe logical release, not allocator behavior
+or a composed theorem about total process memory.

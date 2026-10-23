@@ -83,6 +83,8 @@ impl<'a> Request<'a> {
     pub(crate) fn log_failed(&self) -> bool { self.log_failed }
     pub(crate) fn strict(&self) -> bool { self.lease.admission.strict }
 
+    pub(crate) fn discard_completed(&mut self) -> bool { self.stream.discard_completed() }
+
     pub fn advance(&mut self, bytes: Vec<u8>) -> Option<u64> { self.stream.advance(bytes) }
     pub fn acknowledge(&mut self, chunk: u64, end: usize) -> bool {
         self.stream.acknowledge(self.lease.key.owner(), chunk, end)

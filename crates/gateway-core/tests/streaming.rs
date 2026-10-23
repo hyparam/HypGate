@@ -94,3 +94,32 @@ fn streaming_and_resource_lifecycle() {
     assert!(disabled.acquire().is_none());
     println!("multi-chunk streaming, resource admission, stale-event, and cancellation scenarios passed");
 }
+
+
+#[test]
+fn completed_storage_release_preserves_chunk_and_stale_ticket_boundaries() {
+    let mut stream = StreamChunk::new(1, vec![1, 2], 2, true).unwrap();
+    assert!(!stream.discard_completed());
+    assert_eq!(stream.log_bytes(), &[1, 2]);
+    assert!(stream.acknowledge(1, 0, 2));
+    let first = stream.prepare(2).unwrap();
+    assert!(!stream.discard_completed());
+    assert!(stream.complete(&first, 1));
+    assert!(!stream.discard_completed());
+    let last = stream.prepare(1).unwrap();
+    assert!(stream.complete(&last, 1));
+    assert!(stream.discard_completed());
+    assert!(stream.log_bytes().is_empty());
+    assert!(stream.discard_completed());
+    assert!(!stream.complete(&last, 1));
+    assert_eq!(stream.advance(vec![3]), Some(1));
+    assert!(!stream.acknowledge(1, 0, 1));
+    assert!(stream.prepare(1).is_none());
+    assert!(stream.acknowledge(1, 1, 1));
+    let next = stream.prepare(1).unwrap();
+    assert!(!stream.complete(&last, 1));
+    assert!(stream.complete(&next, 1));
+    stream.cancel();
+    assert!(!stream.discard_completed());
+    assert_eq!(stream.log_bytes(), &[3]);
+}

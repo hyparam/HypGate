@@ -216,6 +216,31 @@ impl StreamChunk {
         Some(self.chunk)
     }
 
+    // Release completed payload storage before allocating the next input chunk.
+    pub fn discard_completed(&mut self) -> (ok: bool)
+        requires old(self).valid(),
+        ensures final(self).valid(),
+            final(self).owner() == old(self).owner(), final(self).capacity() == old(self).capacity(),
+            final(self).chunk() == old(self).chunk(), final(self).generation() == old(self).generation(),
+            final(self).strict() == old(self).strict(), final(self).failed() == old(self).failed(),
+            final(self).closed() == old(self).closed(), final(self).pending() == old(self).pending(),
+            final(self).input() == old(self).input(), final(self).completed() == old(self).completed(),
+            ok ==> !old(self).closed() && !old(self).pending()
+                && old(self).position() == old(self).body().len()
+                && final(self).body().len() == 0 && final(self).position() == 0
+                && final(self).end() == 0 && final(self).durable() == 0,
+            !ok ==> *final(self) == *old(self),
+    {
+        if self.closed || self.pending || self.bytes.len() != self.sent { return false; }
+        proof { assert(self.bytes@.subrange(0, self.sent as int) =~= self.bytes@); }
+        self.prefix = Ghost(self.history@);
+        self.bytes = Vec::new();
+        self.sent = 0;
+        self.offered = 0;
+        self.durable = 0;
+        true
+    }
+
     pub fn cancel(&mut self)
         requires old(self).valid(),
         ensures final(self).valid(), final(self).closed(),

@@ -31,10 +31,13 @@ upload/download; full duplex requires separately budgeted directional state.
 
 There are no detached tasks in the driver. External writer/logger implementations
 must account for their own buffering and any effects surviving cancellation.
-Accepted writes are not proof of peer receipt. At a chunk rollover, both the
-previous retained allocation and one incoming allocation may exist, so this driver
-can retain two chunk allocations per request. The current admission allowance is
-not a bound on allocator overhead or total HTTP/TLS/logger memory.
+Accepted writes are not proof of peer receipt. Before each input allocation, the
+driver calls the verified `discard_completed` transition. It drops the previous
+payload only when fully completed, without a pending write and while open. Thus
+the driver no longer retains an old chunk allocation while allocating its next
+chunk. The admission allowance is still not a bound on allocator overhead or
+total HTTP/TLS/logger memory. General callers of `Request::advance` can supply
+vectors with excess capacity; the production driver creates its own bounded buffers.
 
 Six driver tests exercise multi-chunk partial writes, strict log-before-write
 ordering, both logging failure modes, persistent audit gaps, write/read/flush errors,
@@ -58,7 +61,7 @@ frame rejected without retention or further body polling. All 67 workspace tests
 pass. These checks bound visible bytes owned by this adapter; `Bytes` may share a
 larger backing allocation, and the producing body already allocated the rejected
 frame. They therefore do not prove peak memory or the dependency's allocations.
-A full memory budget must also account for two driver chunks per active request,
+A full memory budget must also account for one driver chunk per active request,
 one frame per HTTP output queue, logger queue/worker frames, connection state,
 TLS buffers, allocator overhead, and filesystem caches. Load measurements and
 formal composition remain open.
