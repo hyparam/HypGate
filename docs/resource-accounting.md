@@ -1,0 +1,75 @@
+# Runtime resource accounting
+
+This is a source-level inventory of the production path, not a whole-process
+memory theorem. The verified combined bound covers logical payload in streams
+mapped to live registry slots. The adapter additionally allocates buffers and owns
+queues outside that model. RSS measurements include still more memory.
+
+## Parameters and ownership
+
+Let R be the configured request-slot limit, K the per-request chunk size, C the
+inbound connection limit, and Q the disk queue capacity. Configuration checks
+R × K ≤ 128 MiB, R ≤ 65,536, and K ≤ 1 MiB. The executable currently sets C = 128
+and Q = 16; library callers can configure these separately. Each HTTP body channel
+has one message slot and a maximum copied data frame of 16 KiB. Each reader accepts
+at most 32 KiB of visible frame data. One DiskLog owns one disk worker.
+
+| Retained object | Budget and ownership | Evidence and limitation |
+| --- | --- | --- |
+| Core chunk or next transfer buffer | At most K per admitted exchange in the production sequential driver | `transfer::copy_body` discards the completed core payload before allocating the next read buffer, then moves it into the stream. `Request::advance` rejects excessive vector capacity. The ghost theorem covers logical lengths, not allocator size. |
+| Inbound/outbound reader views | At most 32 KiB per reader; conservatively two readers per admitted exchange | `http_body::Reader` retains one bounded `Bytes` view. Upload and download run sequentially but the inbound reader object remains alive. A short view can share a larger backing allocation; the view limit is not an allocation limit. |
+| Client response channel | One data message of at most 16 KiB per connection with a response body | Created before authorization in `Gateway::handle`, so charging this solely to admitted requests is incorrect. A consumed message leaves this queue and becomes Hyper-owned. End markers carry no payload. |
+| Provider upload channel | One data message of at most 16 KiB per admitted exchange | Constructed in `HttpsTransport::run`; `Writer::poll_write` reserves queue credit before copying bytes. Hyper may retain previously consumed frames outside the channel. |
+| Disk frames being encoded or queued | At most Q reserved/queued records, each at most K + 65 bytes for production requests | `DiskLog::append` reserves before encoding. Encoding and enqueueing are serialized under the worker mutex. Other library callers may supply up to 1 MiB per record independently of K. |
+| Active disk frame | One additional frame of at most K + 65 bytes | The worker owns the job after receiving it, through write, sync, and acknowledgment. Cancellation of its caller does not reclaim or duplicate that frame. A stalled worker is never replaced. |
+| Encoding scratch | One 33-byte header vector at a time per logger | `framing::encode_payload` copies a canonical header into the reserved frame. SHA-256 state and the 32-byte digest are additional fixed-size implementation state. |
+| Inbound connection tasks | At most C entries in the server JoinSet | Admission checks the set before spawning; completed-but-unreaped entries also consume the limit. Excess accepted sockets are closed. The listener and one just-accepted socket are additional objects. |
+| Admitted exchanges and upstream connections | At most R live leases; one upstream connection per exchange | Verified slot transitions plus trusted ownership. No pooling, replay, or detached upstream connection task. Failed authentication can still create a tracked server worker without a lease. |
+| Disk operations | One worker, one sequential write/sync operation | A timeout bounds caller waiting, not syscall duration. Outstanding work retains its frame until completion or process exit. |
+
+A conservative **visible payload subtotal**, under the ownership relationships
+above, is:
+
+    R × K + 2 × R × 32 KiB + (C + R) × 16 KiB + (Q + 1) × (K + 65) + 33 bytes
+
+This intentionally overcounts reader views and queue data that may not coexist.
+It is useful for finding missing categories, not for promising a memory ceiling.
+It excludes allocations listed below and is not yet a Verus composition theorem.
+Do not substitute the lower observed concurrent-request count for R when publishing
+configuration guarantees. Multiple gateway/logger instances multiply their budgets.
+
+## Allocations outside that subtotal
+
+- Hyper parser and output buffers, incoming-body channels, HTTP headers and URIs,
+  and data frames already consumed from our channels. Both HTTP/1 builders set a
+  32 KiB parser-buffer limit, but that setting alone does not prove total Hyper
+  allocation bounds or backing-storage sizes.
+- rustls handshake and record buffers, certificate/root-store data, TLS overhead,
+  DNS resolution, and kernel socket buffers.
+- Tokio task/future state, task trackers, queue nodes, channel permits/oneshots,
+  thread stacks, allocator rounding/fragmentation, and runtime bookkeeping.
+- Immutable policy, routes, credential strings, configuration parsing scratch,
+  metrics response strings, and error/header metadata.
+- Filesystem page cache and storage-controller state. Audit-file disk usage grows
+  with cumulative traffic; bounded in-memory queues do not bound disk usage.
+
+The request tracker also includes rejected/unauthenticated requests and brief
+completion tails after body EOF. Its count must not be equated with live resource
+slots. A scheduler/interleaving argument is still needed to bound all such task
+state, including worker cleanup and connection-slot reuse.
+
+## Evidence and outstanding work
+
+The [runtime ownership notes](runtime-ownership.md) and [proof index](proof-index.md)
+identify the checked core contracts and trusted bindings. Body-channel tests cover
+fragmentation, bounded frame acceptance, trailers, and cancellation. Real TLS tests
+exercise overload, slow peers, deadlines, and shutdown. The stalled-sync test
+fills a two-record queue while eight requests run, observes one blocked writer,
+checks reclaimed request slots and both logging modes, and releases that same
+worker without any additional write. [Benchmark results](benchmarks.md) report
+whole-fixture RSS separately from these logical budgets.
+
+Remaining work includes a checked preservation argument for the full runtime
+ownership map, dependency/backing-allocation accounting, worker-lifetime bounds,
+and isolated-gateway memory measurements under sustained load. Until those exist,
+neither the subtotal nor the core's 128 MiB allowance is a whole-process guarantee.

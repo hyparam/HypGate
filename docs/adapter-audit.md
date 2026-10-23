@@ -17,9 +17,10 @@ sandbox preventing arbitrary embedding code from opening its own sockets.
 
 There is one record-writing worker per DiskLog. Startup writes/syncs the session
 header and parent directory in `disk_log.rs`. The worker reserves a journal ticket,
-writes that frame, records completion, syncs, advances durability, then authorizes
-its acknowledgment. A per-job oneshot binds the result to that append. The transfer
-driver supplies owner/chunk identities from its owned request, never caller headers.
+writes that frame and syncs, then uses verified `record_durable` to compose the
+write, sync, and acknowledgment transitions for those exact frame bytes. A per-job oneshot binds the result to that append. The transfer
+driver uses verified `audit_record` to bind authority, current chunk, and bytes,
+never caller headers.
 
 The async server spawns bounded connection tasks and tracked request workers.
 Each response body owns an abort guard for its worker; the header-wait path also
@@ -77,10 +78,12 @@ secrets and are logged verbatim; header filtering does not establish content sec
 Audit files are operator-owned shared logs, not a tenant-facing log retrieval API.
 
 The tests are representative safety/failure checks, not exhaustive interleaving or
-load verification. Full process-memory accounting, stuck-I/O/shutdown proofs,
-power-loss validation, formal scanner refinement, performance benchmarks, deployment
-failover experiments, and independent review remain open. Live-provider compatibility
+load verification. Full process-memory accounting, stuck-I/O/shutdown proofs, power-loss validation,
+formal scanner refinement, broader benchmarks/deployment validation, and independent
+review remain open. The [resource inventory](resource-accounting.md) records the
+source-level budgets and excluded allocations; local benchmarks and proxy/process
+failover experiments are recorded separately. Live-provider compatibility
 and full duplex/early-response behavior are not certified by the local fixtures.
 
-Validation at this checkpoint: 65 workspace tests pass; the unchanged core retains
-48 verified checks and 29 proof-rejected mutations. GitHub CI reruns all three gates.
+Current validation totals are maintained in the README. GitHub CI reruns the
+workspace tests, production proofs, and deliberate proof mutations.
