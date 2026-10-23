@@ -3,6 +3,9 @@
 Date: 2026-10-23. These experiments compare a small offset-based policy core,
 not whole gateways. Language selection remains provisional.
 
+This records the first experiment. The [follow-up](viability-followup.md) now
+includes checked Perennial theorems and byte-level Verus proofs.
+
 ## Executed results
 
 | Experiment | Result | What it establishes |

@@ -11,3 +11,6 @@ candidate comparison, agreed scope, proposed proof obligations, and next experim
 
 See [experiment results and implementation plan](docs/experiment-results.md) for
 the Verus proof, Go tests, limitations, and reproduction instructions.
+
+The [viability follow-up](docs/viability-followup.md) adds byte-level Verus proofs,
+checked Perennial policy theorems, and an updated recommendation.
