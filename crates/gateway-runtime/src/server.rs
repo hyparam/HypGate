@@ -10,20 +10,25 @@ use hyper::{body::Incoming, service::service_fn};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use std::{convert::Infallible, future::Future, io, pin::Pin, sync::{Arc, atomic::{AtomicU64, Ordering}},
     task::{Context, Poll}, time::Duration};
-use tokio::{io::{AsyncWrite, AsyncWriteExt}, net::TcpListener, sync::oneshot, task::{JoinHandle, JoinSet}};
-use tokio_util::task::TaskTracker;
+use tokio::{io::{AsyncWrite, AsyncWriteExt}, net::TcpListener, sync::{oneshot, Semaphore, OwnedSemaphorePermit}, task::{JoinHandle, JoinSet}};
+use tokio_util::task::{TaskTracker, task_tracker::TaskTrackerToken};
+
+// Field drop order removes tracking before making the worker credit reusable.
+struct WorkerLease { _tracked: TaskTrackerToken, _permit: OwnedSemaphorePermit }
 
 pub struct Gateway {
     config: Arc<GatewayConfig>,
     transport: HttpsTransport,
     log: DiskLog,
     workers: TaskTracker,
+    worker_slots: Arc<Semaphore>,
     audit_gaps: AtomicU64,
     failed_exchanges: AtomicU64,
 }
 impl Gateway {
     pub fn new(config: GatewayConfig, transport: HttpsTransport, log: DiskLog) -> Arc<Self> {
-        Arc::new(Self { config: Arc::new(config), transport, log, workers: TaskTracker::new(),
+        let limit = config.usage().map(|(_, limit)| limit).unwrap_or(0);
+        Arc::new(Self { worker_slots: Arc::new(Semaphore::new(limit)), config: Arc::new(config), transport, log, workers: TaskTracker::new(),
             audit_gaps: AtomicU64::new(0), failed_exchanges: AtomicU64::new(0) })
     }
     pub fn audit_gaps(&self) -> u64 { self.audit_gaps.load(Ordering::Relaxed) }
@@ -52,11 +57,17 @@ impl Gateway {
             return Ok(fixed(if ready { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE },
                 if ready { "ready\n" } else { "audit unavailable\n" }));
         }
+        let permit = match self.worker_slots.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => return Ok(fixed(StatusCode::SERVICE_UNAVAILABLE, "workers at capacity\n")),
+        };
+        let lease = WorkerLease { _tracked: self.workers.token(), _permit: permit };
         let (parts, input) = request.into_parts();
         let (head, headers) = oneshot::channel();
         let (writer, body) = http_body::channel(16 * 1024);
         let app = self.clone();
-        let task = self.workers.spawn(async move {
+        let task = tokio::spawn(async move {
+            let _lease = lease;
             let mut output = Output { head: Some(head), writer };
             let prepared = match http_boundary::prepare(&app.config, &parts.method, &parts.uri, &parts.headers) {
                 Ok(p) => p,

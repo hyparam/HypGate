@@ -514,3 +514,51 @@ async fn bodyless_status_rejects_payload_or_missing_completion() {
 mod overload;
 
 mod stalled_log;
+
+#[tokio::test]
+async fn worker_budget_covers_cleanup_without_consuming_request_slots() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dir = TempDir::new();
+        let app = Gateway::new(config(upstream.local_addr().unwrap().port(), false),
+            HttpsTransport::with_roots(RootCertStore::empty(), Duration::from_secs(2)).unwrap(),
+            DiskLog::create(&dir.0.join("workers.log"), 2, Duration::from_secs(1)).unwrap());
+        // Hold a worker lifetime with no request lease, as during rejected-request
+        // or post-EOF cleanup. Registry-only admission cannot bound this state.
+        let lease = WorkerLease { _tracked: app.workers.token(),
+            _permit: app.worker_slots.clone().try_acquire_owned().unwrap() };
+        assert_eq!(app.config.usage(), Some((0, 1)));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (shutdown, stopped) = oneshot::channel();
+        let gateway = tokio::spawn(serve(listener, app.clone(), 32, Duration::from_secs(3), async { let _ = stopped.await; }));
+        let mut clients = JoinSet::new();
+        for _ in 0..16 {
+            clients.spawn(async move {
+                let (response, connection) = send(port, "/routes/7", "gateway", "POST").await;
+                assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+                response.collect().await.unwrap(); connection.await.unwrap();
+            });
+        }
+        for path in ["/healthz", "/readyz", "/metrics"] {
+            let (response, connection) = send(port, path, "", "GET").await;
+            assert_eq!(response.status(), StatusCode::OK);
+            response.collect().await.unwrap(); connection.await.unwrap();
+        }
+        while let Some(result) = clients.join_next().await { result.unwrap(); }
+        assert_eq!(app.workers.len(), 1);
+        assert_eq!(app.config.usage(), Some((0, 1)));
+        assert!(tokio::time::timeout(Duration::from_millis(20), upstream.accept()).await.is_err());
+        // Cancel before the task's first poll: its captured lease must still drop.
+        let worker = tokio::spawn(async move { let _lease = lease; std::future::pending::<()>().await; });
+        worker.abort(); assert!(worker.await.unwrap_err().is_cancelled());
+        assert!(app.workers.is_empty());
+        assert_eq!(app.worker_slots.available_permits(), 1);
+        let (response, connection) = send(port, "/routes/7", "invalid", "POST").await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        response.collect().await.unwrap(); connection.await.unwrap();
+        while !app.workers.is_empty() { tokio::task::yield_now().await; }
+        assert_eq!(app.worker_slots.available_permits(), 1);
+        shutdown.send(()).unwrap(); gateway.await.unwrap().unwrap();
+    }).await.unwrap();
+}
