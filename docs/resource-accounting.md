@@ -12,12 +12,12 @@ inbound connection limit, and Q the disk queue capacity. Configuration checks
 R × K ≤ 128 MiB, R ≤ 65,536, and K ≤ 1 MiB. The executable currently sets C = 128
 and Q = 16; library callers can configure these separately. Each HTTP body channel
 has one message slot and a maximum copied data frame of 16 KiB. Each reader accepts
-at most 32 KiB of visible frame data. One DiskLog owns one disk worker.
+at most 32 KiB of frame data into its own bounded copy. One DiskLog owns one disk worker.
 
 | Retained object | Budget and ownership | Evidence and limitation |
 | --- | --- | --- |
 | Core chunk or next transfer buffer | At most K per admitted exchange in the production sequential driver | `transfer::copy_body` discards the completed core payload before allocating the next read buffer, then moves it into the stream. `Request::advance` rejects excessive vector capacity. The ghost theorem covers logical lengths, not allocator size. |
-| Inbound/outbound reader views | At most 32 KiB per reader; conservatively two readers per admitted exchange | `http_body::Reader` retains one bounded `Bytes` view. Upload and download run sequentially but the inbound reader object remains alive. A short view can share a larger backing allocation; the view limit is not an allocation limit. |
+| Inbound/outbound reader copies | At most 32 KiB of copied payload per reader; conservatively two readers per admitted exchange | `http_body::Reader` copies accepted visible frame bytes and releases its input reference before yielding; it clears the copy immediately when consumed. It cannot retain a large input owner through a small slice. Upload and download run sequentially; the inbound reader object remains alive. Allocator overhead and references retained inside Hyper remain separate. |
 | Client response channel | One data message of at most 16 KiB per connection with a response body | Created before authorization but after acquiring a worker permit in `Gateway::handle`; charging this solely to authorized request leases is incorrect. A consumed message leaves this queue and becomes Hyper-owned. End markers carry no payload. |
 | Provider upload channel | One data message of at most 16 KiB per admitted exchange | Constructed in `HttpsTransport::run`; `Writer::poll_write` reserves queue credit before copying bytes. Hyper may retain previously consumed frames outside the channel. |
 | Disk frames being encoded or queued | At most Q reserved/queued records, each at most K + 65 bytes for production requests | `DiskLog::append` reserves before encoding. Encoding and enqueueing are serialized under the worker mutex. Other library callers may supply up to 1 MiB per record independently of K. |
@@ -34,7 +34,7 @@ above, is:
 
     R × K + 2 × R × 32 KiB + (C + R) × 16 KiB + (Q + R + 1) × (K + 65) + (R + 1) × 33 bytes
 
-This intentionally overcounts reader views and queue data that may not coexist.
+This intentionally overcounts reader copies and queue data that may not coexist.
 It is useful for finding missing categories, not for promising a memory ceiling.
 It excludes allocations listed below and is not yet a Verus composition theorem.
 Do not substitute the lower observed concurrent-request count for R when publishing

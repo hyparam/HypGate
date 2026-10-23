@@ -61,16 +61,17 @@ further polling. The transfer driver treats that first error as terminal and
 cancels its stream, so a later reader EOF cannot synthesize successful transfer.
 The limit applies to individual adapter frames, not total request/response size.
 
-Tests cover a maximum-size frame consumed through small reads and an oversized
-frame rejected without retention or further body polling. All 67 workspace tests
-pass. These checks bound visible bytes owned by this adapter; `Bytes` may share a
-larger backing allocation, and the producing body already allocated the rejected
-frame. They therefore do not prove peak memory or the dependency's allocations.
-A full memory budget must also account for one driver chunk per active request,
-one frame per HTTP output queue, logger queue/worker frames, connection state,
-TLS buffers, allocator overhead, and filesystem caches. Load measurements and
-formal composition remain open.
+Accepted data is copied into a reader-owned buffer before the original frame
+reference is dropped. This prevents a small `Bytes` view from retaining a much
+larger backing allocation. Exhausting the copy releases it immediately. The cost
+is one bounded copy per frame; Hyper may still retain its own input references,
+and allocator overhead is outside this payload budget.
 
+Tests cover a maximum-size frame consumed through small reads, an oversized frame
+rejected without retention or further polling, and a 40-byte slice whose 256 KiB
+backing owner must be dropped after the first one-byte read. The producing body
+already allocated each input frame before this adapter can accept or reject it;
+this is not a whole-process allocation guarantee.
 
 ## Responses without HTTP bodies
 

@@ -7,7 +7,7 @@ use std::future::Future;
 use tokio_util::sync::PollSender;
 
 // Matches the inbound and upstream HTTP/1 parser buffer limits. This bounds
-// visible retained frame bytes, not the backing allocation made by Hyper.
+// the reader-owned copy. Hyper's own parser/body allocations remain separate.
 pub(crate) const MAX_INPUT_FRAME: usize = 32 * 1024;
 
 pub(crate) struct Reader<B> { body: B, buffered: Bytes, ended: bool }
@@ -23,6 +23,7 @@ impl<B: Body<Data = Bytes> + Unpin> AsyncRead for Reader<B> {
             if !this.buffered.is_empty() {
                 let n = out.remaining().min(this.buffered.len());
                 out.put_slice(&this.buffered[..n]); this.buffered.advance(n);
+                if this.buffered.is_empty() { this.buffered = Bytes::new(); }
                 return Poll::Ready(Ok(()));
             }
             if this.ended { return Poll::Ready(Ok(())); }
@@ -31,7 +32,10 @@ impl<B: Body<Data = Bytes> + Unpin> AsyncRead for Reader<B> {
                 Poll::Ready(None) => { this.ended = true; return Poll::Ready(Ok(())); }
                 Poll::Ready(Some(Err(_))) => { this.ended = true; return Poll::Ready(Err(io::ErrorKind::UnexpectedEof.into())); },
                 Poll::Ready(Some(Ok(frame))) => match frame.into_data() {
-                    Ok(data) if data.len() <= MAX_INPUT_FRAME => this.buffered = data,
+                    // A short Bytes view may retain an arbitrarily large owner.
+                    // Copy only the bounded visible frame, then release our input
+                    // reference before yielding or keeping a partial remainder.
+                    Ok(data) if data.len() <= MAX_INPUT_FRAME => this.buffered = Bytes::copy_from_slice(&data),
                     _ => {
                         this.ended = true;
                         return Poll::Ready(Err(io::ErrorKind::InvalidData.into()));
@@ -171,6 +175,34 @@ mod tests {
             assert!(reader.buffered.len() <= MAX_INPUT_FRAME);
         }
         assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
+    async fn small_frame_releases_large_backing_owner_before_partial_reads_finish() {
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        struct Backing { bytes: Vec<u8>, dropped: Arc<AtomicUsize> }
+        impl AsRef<[u8]> for Backing { fn as_ref(&self) -> &[u8] { &self.bytes } }
+        impl Drop for Backing { fn drop(&mut self) { self.dropped.fetch_add(1, Ordering::Relaxed); } }
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let backing = Bytes::from_owner(Backing {
+            bytes: (0..MAX_INPUT_FRAME * 8).map(|i| (i % 251) as u8).collect(),
+            dropped: dropped.clone(),
+        });
+        let frame = backing.slice(31..71);
+        let expected = frame.to_vec();
+        drop(backing);
+        let mut reader = Reader::new(http_body_util::Full::new(frame));
+        let mut first = [0; 1];
+        assert_eq!(reader.read(&mut first).await.unwrap(), 1);
+        assert_eq!(first[0], expected[0]);
+        // Full has transferred its only reference. The reader must not retain
+        // the 256 KiB owner while holding the remaining 39 visible bytes.
+        assert_eq!(dropped.load(Ordering::Relaxed), 1);
+        let mut rest = [0; 39];
+        reader.read_exact(&mut rest).await.unwrap();
+        assert_eq!(&rest, &expected[1..]);
+        assert!(reader.buffered.is_empty());
+        assert_eq!(reader.read(&mut first).await.unwrap(), 0);
     }
 
     #[tokio::test]
