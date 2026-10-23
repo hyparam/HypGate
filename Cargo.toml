@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/gateway-core"]
+members = ["crates/gateway-core", "crates/gateway-runtime"]
 resolver = "2"
 
 [workspace.lints.rust]

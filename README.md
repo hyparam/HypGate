@@ -13,6 +13,8 @@ current interface, checked behavior, and remaining milestone-one work.
 The [security contract](docs/security-contract.md) separates proved core properties
 from remaining adapter obligations. The [authorization notes](docs/authorization-core.md)
 describe digest authentication, tenant-scoped tokens, and configuration confinement.
+The [runtime ownership layer](docs/runtime-ownership.md) binds authorized requests
+to capacity leases; this composition is tested Rust, not yet a Verus theorem.
 
 See [language and verification research](docs/verification-research.md) for the
 candidate comparison, agreed scope, proposed proof obligations, and next experiment.

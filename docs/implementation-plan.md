@@ -3,6 +3,9 @@
 Status: approved direction is Rust plus Verus; milestone 1 is in progress.
 See the [streaming-core progress notes](streaming-core-progress.md) and
 [authorization core](authorization-core.md) for completed increments and remaining gaps.
+The [runtime ownership layer](runtime-ownership.md) now ties authorization, a single
+stream, and slot release together in tested safe Rust. Composed resource proofs
+and accounting for adapter allocations remain open.
 Scope: forward opaque HTTP request bodies and streaming responses, and log to disk.
 No provider translation, automatic generation replay, billing, or plugin system.
 Operators choose strict durable logging or forwarding with degraded audit coverage.

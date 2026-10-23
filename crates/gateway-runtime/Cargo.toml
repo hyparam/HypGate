@@ -1,0 +1,8 @@
+[package]
+name = "gateway-runtime"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+gateway-core = { path = "../gateway-core" }

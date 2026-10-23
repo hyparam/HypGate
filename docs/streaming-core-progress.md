@@ -115,3 +115,7 @@ all queued and in-flight allocations, prove composed resource release on error,
 and compose resource admission with the now-verified security token boundary.
 The library extraction is complete; connecting its contracts to the streaming
 adapter remains milestone 2 work.
+
+Follow-up: the [runtime ownership wrapper](runtime-ownership.md) enforces private
+stream/lease ownership in safe Rust and tests cleanup and cross-registry tickets.
+This is not a proof of composed resource release or complete allocation accounting.
