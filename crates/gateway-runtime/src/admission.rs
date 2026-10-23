@@ -45,6 +45,14 @@ pub struct Request<'a> {
 }
 
 impl Admission {
+    pub(crate) fn healthy(&self) -> bool { !self.registry.is_poisoned() }
+    #[cfg(test)]
+    pub(crate) fn poison_for_test(&self) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = self.registry.lock().unwrap();
+            panic!("injected admission panic");
+        }));
+    }
     pub fn usage(&self) -> Result<(usize, usize), AdmissionError> {
         self.registry.lock().map(|registry| registry.usage()).map_err(|_| AdmissionError::Unavailable)
     }

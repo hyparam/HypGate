@@ -416,3 +416,36 @@ async fn incomplete_connections_expire_without_workers_and_capacity_recovers() {
         shutdown.send(()).unwrap(); gateway.await.unwrap().unwrap();
     }).await.unwrap();
 }
+
+
+#[tokio::test]
+async fn poisoned_admission_is_unready_and_fail_closed_in_both_logging_modes() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        for availability in [false, true] {
+            let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let dir = TempDir::new();
+            let app = Gateway::new(config(upstream.local_addr().unwrap().port(), availability),
+                HttpsTransport::with_roots(RootCertStore::empty(), Duration::from_secs(60)).unwrap(),
+                DiskLog::create(&dir.0.join("audit.log"), 4, Duration::from_secs(2)).unwrap());
+            app.config.poison_admission_for_test();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap(); let port = listener.local_addr().unwrap().port();
+            let (shutdown, stopped) = oneshot::channel();
+            let gateway = tokio::spawn(serve(listener, app.clone(), 4, Duration::from_secs(10), async { let _ = stopped.await; }));
+            for (path, method, status) in [("/healthz", "GET", 200), ("/readyz", "GET", 503), ("/routes/7", "POST", 503)] {
+                let (response, connection) = send(port, path, "gateway", method).await;
+                assert_eq!(response.status().as_u16(), status);
+                response.collect().await.unwrap(); connection.await.unwrap();
+            }
+            let (metrics, connection) = send(port, "/metrics", "", "GET").await;
+            let metrics = metrics.collect().await.unwrap().to_bytes(); connection.await.unwrap();
+            let metrics = std::str::from_utf8(&metrics).unwrap();
+            assert!(metrics.contains("soundgate_admission_healthy 0\n"));
+            assert!(!metrics.contains("soundgate_requests_active"));
+            assert!(!metrics.contains("soundgate_requests_limit"));
+            assert!(metrics.contains("soundgate_audit_healthy 1\n"));
+            assert!(tokio::time::timeout(Duration::from_millis(20), upstream.accept()).await.is_err());
+            shutdown.send(()).unwrap(); gateway.await.unwrap().unwrap();
+            assert!(app.workers.is_empty());
+        }
+    }).await.unwrap();
+}

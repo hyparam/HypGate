@@ -45,6 +45,9 @@ impl Gateway {
             return Ok(fixed(StatusCode::OK, "ok\n"));
         }
         if request.method() == http::Method::GET && request.uri().path() == "/readyz" {
+            if !self.config.admission_healthy() {
+                return Ok(fixed(StatusCode::SERVICE_UNAVAILABLE, "admission unavailable\n"));
+            }
             let ready = !self.config.requires_audit() || self.log.healthy();
             return Ok(fixed(if ready { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE },
                 if ready { "ready\n" } else { "audit unavailable\n" }));

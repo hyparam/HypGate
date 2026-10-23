@@ -71,7 +71,11 @@ snapshot; it neither reserves slots nor predicts whether a later request succeed
 The runtime takes this snapshot under the admission mutex. `/metrics` reports
 `soundgate_requests_active`, `soundgate_requests_limit`, and
 `soundgate_admission_healthy`. If the mutex is poisoned, it reports admission health
-zero and omits occupancy gauges instead of inventing zero utilization. Snapshot
+zero and omits occupancy gauges instead of inventing zero utilization. Readiness
+also returns 503 in both logging modes after poisoning, while liveness stays 200
+so operators can distinguish an unusable registry from an unresponsive process.
+A fault-injection test poisons the actual mutex and checks readiness, metrics,
+authorized-request refusal, no upstream connection, and clean worker shutdown. Snapshot
 cost is linear in configured slots (configuration caps them at 65,536). The counts
 exclude unauthenticated connections, disk jobs, and dependency allocations, so they
 must not be presented as a whole-process memory measurement or liveness guarantee.

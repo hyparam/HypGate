@@ -56,8 +56,10 @@ not printed. A malformed header or incomplete/corrupt tail gives a nonzero exit;
 valid earlier records remain reported. Scanning never replays or truncates data.
 See the [storage crash contract](storage-crash-contract.md) for its limits.
 
-GET `/healthz` reports process responsiveness. GET `/readyz` fails when the logger
-is unhealthy in strict mode; availability mode stays ready despite logging loss.
+GET `/healthz` reports process responsiveness. GET `/readyz` fails when the
+admission registry is poisoned in either logging mode, or when the logger is
+unhealthy in strict mode. Availability mode stays ready despite logging loss but
+never overrides admission failure.
 Readiness does not yet probe upstream availability, request capacity, or disk space.
 After authorization, strict-mode requests also receive 503 without opening an
 upstream connection if logger health is already failed; later failures are handled

@@ -107,6 +107,9 @@ fn digest(text: &str) -> Result<Vec<u8>, ConfigError> {
 }
 
 impl GatewayConfig {
+    pub(crate) fn admission_healthy(&self) -> bool { self.admission.healthy() }
+    #[cfg(test)]
+    pub(crate) fn poison_admission_for_test(&self) { self.admission.poison_for_test(); }
     pub(crate) fn usage(&self) -> Option<(usize, usize)> { self.admission.usage().ok() }
     pub(crate) fn requires_audit(&self) -> bool { self.admission.requires_audit() }
     /// Root policy and secret resolver are operator-controlled. Candidate JSON
