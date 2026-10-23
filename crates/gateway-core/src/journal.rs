@@ -1,4 +1,5 @@
 use vstd::prelude::*;
+use crate::framing::RecordFrame;
 
 verus! {
 
@@ -140,6 +141,28 @@ impl Journal {
         assert(_acknowledged);
         proof { assert(self.acked() =~= self.history()); }
         true
+    }
+
+    pub fn record_durable_frame(&mut self, t: &Append, frame: &RecordFrame) -> (ok: bool)
+        requires old(self).valid(), frame.valid(),
+        ensures final(self).valid(),
+            ok == (!old(self).failed() && old(self).matches(t)
+                && old(self).acked_len() == old(self).written_len()
+                && frame.contents().len() == t.end() - t.start()),
+            ok ==> final(self).acked() == old(self).history()
+                + crate::framing::encoding(frame.header()) + frame.payload() + frame.checksum()
+                && final(self).stable() == final(self).history()
+                && final(self).acked_len() == t.end() && final(self).idle(),
+            !ok ==> *final(self) == *old(self),
+    {
+        proof { frame.canonical(); }
+        let ok = self.record_durable(t, frame.bytes());
+        proof {
+            assert((old(self).history() + (crate::framing::encoding(frame.header())
+                + frame.payload() + frame.checksum())) =~= (old(self).history()
+                + crate::framing::encoding(frame.header()) + frame.payload() + frame.checksum()));
+        }
+        ok
     }
 
     pub fn fail(&mut self)

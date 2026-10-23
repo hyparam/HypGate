@@ -58,3 +58,20 @@ fn durable_frame_commit_binds_one_complete_record_and_rejects_stale_tickets() {
     assert!(!gap.record_durable(&next, &vec![8]));
     assert!(!gap.sync_succeeded()); // rejected commit preserved the pending append
 }
+
+#[test]
+fn typed_frame_commits_only_the_reserved_complete_record() {
+    use gateway_core::framing::{Header, RecordBody};
+    let frame = RecordBody::new(Header { payload: 3, tenant: 1, request: 2, chunk: 3, direction: 0 },
+        &[4, 5, 6]).unwrap().seal(&[7; 32]);
+    let mut wrong = Journal::new();
+    let short = wrong.begin(frame.bytes().len() as u64 - 1).unwrap();
+    assert!(!wrong.record_durable_frame(&short, &frame));
+    let mut journal = Journal::new();
+    let ticket = journal.begin(frame.bytes().len() as u64).unwrap();
+    assert!(journal.record_durable_frame(&ticket, &frame));
+    assert!(!journal.record_durable_frame(&ticket, &frame));
+    let next = journal.begin(frame.bytes().len() as u64).unwrap();
+    journal.fail();
+    assert!(!journal.record_durable_frame(&next, &frame));
+}

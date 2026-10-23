@@ -2,7 +2,7 @@
 //! not verified. A single worker owns the file; requests never choose its path.
 use crate::transfer::{AuditLog, Direction, LogRecord};
 use gateway_core::journal::Journal;
-use gateway_core::framing::{self, Header};
+use gateway_core::framing::{self, Header, RecordBody, RecordFrame};
 use sha2::{Digest, Sha256};
 use std::{fs::{File, OpenOptions}, io::{self, Read, Write}, path::Path,
     sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}}, time::Duration};
@@ -13,7 +13,7 @@ const FILE_HEADER: usize = 56; // magic + random session ID + checksum
 const RECORD_HEADER: usize = 33; // magic + length + tenant + request + chunk + direction
 pub const MAX_RECORD_BYTES: usize = 1024 * 1024;
 
-struct Job { frame: Vec<u8>, done: oneshot::Sender<bool> }
+struct Job { frame: RecordFrame, done: oneshot::Sender<bool> }
 
 /// Clones share one bounded queue and one worker. Never create replacement workers
 /// to escape a stuck filesystem call. A timeout closes logging health permanently.
@@ -72,10 +72,10 @@ impl DiskLog {
             let _health_on_exit = UnhealthyOnExit(worker_health.clone());
             let mut journal = Journal::new();
             while let Some(job) = receiver.blocking_recv() {
-                let ok = worker_health.load(Ordering::Acquire) && match journal.begin(job.frame.len() as u64) {
-                    Some(ticket) => file.write_all(&job.frame).is_ok()
+                let ok = worker_health.load(Ordering::Acquire) && match journal.begin(job.frame.bytes().len() as u64) {
+                    Some(ticket) => file.write_all(job.frame.bytes()).is_ok()
                         && file.sync().is_ok()
-                        && journal.record_durable(&ticket, &job.frame),
+                        && journal.record_durable_frame(&ticket, &job.frame),
                     None => false,
                 };
                 if !ok { journal.fail(); worker_health.store(false, Ordering::Release); }
@@ -184,7 +184,7 @@ impl AuditLog for DiskLog {
                     io::ErrorKind::BrokenPipe
                 },
             })?;
-            let frame = encode(record);
+            let frame = encode_record(record);
             let (done, completion) = oneshot::channel();
             permit.send(Job { frame, done });
             completion
@@ -199,15 +199,18 @@ impl AuditLog for DiskLog {
     }
 }
 
-fn encode(record: LogRecord<'_>) -> Vec<u8> {
+fn encode_record(record: LogRecord<'_>) -> RecordFrame {
     // append checked the record bounds before queue reservation/allocation.
-    let mut frame = framing::encode_payload(Header { payload: record.bytes.len() as u32,
+    let frame = RecordBody::new(Header { payload: record.bytes.len() as u32,
         tenant: record.tenant, request: record.request, chunk: record.chunk,
         direction: match record.direction { Direction::Upload => 0, Direction::Download => 1 },
     }, record.bytes).expect("validated log record");
-    frame.extend_from_slice(&Sha256::digest(&frame));
-    frame
+    let checksum: [u8; 32] = Sha256::digest(frame.bytes()).into();
+    frame.seal(&checksum)
 }
+
+#[cfg(test)]
+fn encode(record: LogRecord<'_>) -> Vec<u8> { encode_record(record).bytes().clone() }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ScanError { Io, Incomplete, Corrupt }

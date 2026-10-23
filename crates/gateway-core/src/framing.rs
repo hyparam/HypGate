@@ -84,6 +84,68 @@ pub fn encode_payload(h: Header, payload: &[u8]) -> (out: Option<Vec<u8>>)
     Some(bytes)
 }
 
+// Private immutable containers keep canonical metadata and payload associated
+// while trusted code computes a checksum and queues the finished frame.
+pub struct RecordBody { bytes: Vec<u8>, header: Ghost<Header>, payload: Ghost<Seq<u8>> }
+pub struct RecordFrame {
+    bytes: Vec<u8>,
+    // Erased witnesses are read only by specifications.
+    #[allow(dead_code)] header: Ghost<Header>,
+    #[allow(dead_code)] payload: Ghost<Seq<u8>>,
+    #[allow(dead_code)] checksum: Ghost<Seq<u8>>,
+}
+impl RecordBody {
+    pub closed spec fn header(&self) -> Header { self.header@ }
+    pub closed spec fn payload(&self) -> Seq<u8> { self.payload@ }
+    pub closed spec fn valid(&self) -> bool {
+        valid(self.header@) && self.header@.payload == self.payload@.len()
+            && self.bytes@ == encoding(self.header@) + self.payload@
+    }
+    pub fn new(h: Header, payload: &[u8]) -> (out: Option<Self>)
+        ensures match out {
+            Some(body) => body.valid() && body.header() == h && body.payload() == payload@,
+            None => !valid(h) || h.payload != payload.len(),
+        },
+    {
+        let bytes = match encode_payload(h, payload) { Some(bytes) => bytes, None => return None };
+        Some(RecordBody { bytes, header: Ghost(h), payload: Ghost(payload@) })
+    }
+    pub fn bytes(&self) -> (out: &[u8])
+        requires self.valid(),
+        ensures out@ == encoding(self.header()) + self.payload(),
+    { self.bytes.as_slice() }
+
+    // Checksum computation is external; only its placement and byte identity
+    // are proved. Consuming self prevents mutation after checksum calculation.
+    pub fn seal(mut self, checksum: &[u8; 32]) -> (out: RecordFrame)
+        requires self.valid(),
+        ensures out.valid(), out.header() == self.header(), out.payload() == self.payload(),
+            out.checksum() == checksum@,
+    {
+        append(&mut self.bytes, checksum.as_slice());
+        RecordFrame { bytes: self.bytes, header: self.header, payload: self.payload,
+            checksum: Ghost(checksum@) }
+    }
+}
+impl RecordFrame {
+    pub closed spec fn header(&self) -> Header { self.header@ }
+    pub closed spec fn payload(&self) -> Seq<u8> { self.payload@ }
+    pub closed spec fn checksum(&self) -> Seq<u8> { self.checksum@ }
+    pub closed spec fn contents(&self) -> Seq<u8> { self.bytes@ }
+    pub closed spec fn valid(&self) -> bool {
+        valid(self.header@) && self.header@.payload == self.payload@.len()
+            && self.checksum@.len() == 32
+            && self.bytes@ == encoding(self.header@) + self.payload@ + self.checksum@
+    }
+    pub proof fn canonical(&self)
+        requires self.valid(),
+        ensures self.contents() == encoding(self.header()) + self.payload() + self.checksum(),
+    {}
+    pub fn bytes(&self) -> (out: &Vec<u8>)
+        ensures out@ == self.contents(),
+    { &self.bytes }
+}
+
 pub fn decode(bytes: &[u8]) -> (out: Option<Header>)
     ensures out == decoded(bytes@), match out { Some(h) => valid(h) && encoding(h) == bytes@, None => true },
 {

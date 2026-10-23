@@ -29,9 +29,11 @@ a separate obligation; the lemma does not assume or prove scanner correctness.
 
 ## Runtime correspondence and limits
 
-The worker reserves before writing, then calls `record_durable` only after both
+The worker reserves before writing, then calls `record_durable_frame` only after both
 `write_all` and `sync_all` succeed for that immutable frame. This verified operation
-composes `record_written`, `sync_succeeded`, and `acknowledge`. Success proves that
+uses `record_durable` to compose `record_written`, `sync_succeeded`, and
+`acknowledge`. The queued immutable `RecordFrame` binds that byte sequence to its
+canonical metadata, payload, and checksum. Success proves that
 the new acknowledged and stable histories equal the previous complete history
 followed by exactly the supplied frame bytes. It rejects stale tickets, incorrect
 lengths, failed journals, and an unacknowledged earlier record without changing state.

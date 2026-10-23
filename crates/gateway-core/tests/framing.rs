@@ -111,3 +111,21 @@ fn recovered_record_binds_header_payload_checksum_and_cursor() {
         }
     }
 }
+
+#[test]
+fn sealed_record_preserves_canonical_header_payload_and_checksum() {
+    use gateway_core::framing::RecordBody;
+    for length in [0, 1, 1048576] {
+        let payload = vec![17; length];
+        let header = || Header { payload: length as u32, tenant: 19, request: 29, chunk: 37, direction: 1 };
+        let body = RecordBody::new(header(), &payload).unwrap();
+        assert_eq!(&body.bytes()[..33], encode(header()).unwrap());
+        assert_eq!(&body.bytes()[33..], payload);
+        let frame = body.seal(&[23; 32]);
+        assert_eq!(frame.bytes().len(), length + 65);
+        assert_eq!(&frame.bytes()[..33], encode(header()).unwrap());
+        assert_eq!(&frame.bytes()[33..33 + length], payload);
+        assert_eq!(&frame.bytes()[33 + length..], &[23; 32]);
+        assert!(RecordBody::new(header(), &vec![0; length + 1]).is_none());
+    }
+}
