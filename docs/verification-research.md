@@ -3,6 +3,11 @@
 Research date: 2026-10-23. Recommendations are provisional. This is a source review,
 not a benchmark or a successful verification experiment.
 
+Subsequent decision: Rust and Verus are the active path. Perennial code was removed
+after evaluation; these comparisons remain as research. See the
+[viability follow-up](viability-followup.md) for results and the Git revision needed
+to recover its experiments.
+
 ## Agreed scope
 
 - Minimal forwarding, response streaming, and disk logging; no translation between

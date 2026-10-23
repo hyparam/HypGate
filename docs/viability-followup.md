@@ -3,6 +3,11 @@
 Date: 2026-10-23. This extends the [first experiments](experiment-results.md).
 It is a feasibility study, not a production gateway or a performance benchmark.
 
+Decision after evaluation: continue with Rust and Verus. Perennial's experimental
+code has been removed; its results and tradeoffs remain here for reference. To
+revisit or reproduce it, use a separate checkout of commit `7869347`, which contains
+the Go source, generated code, proofs, and runners.
+
 ## Verus: move from counters to bytes
 
 `experiments/verus/bytes.rs` owns a bounded byte vector and tracks its request
@@ -89,7 +94,9 @@ This is manageable, but requires familiarity with Rocq and Iris proof mode beyon
 ordinary Go development. The generated support and proof-skeleton helpers are
 different: the support compiled; the skeleton needed replacement.
 
-Reproduction in a dedicated writable checkout at the pinned Perennial revision:
+The following historical commands require a checkout of this project at `7869347`;
+the runners no longer exist on the active branch. Separately, prepare a dedicated
+writable checkout of the pinned upstream Perennial revision:
 install dependencies from its `perennial.opam`, activate that OPAM environment,
 set `PERENNIAL_ROOT` to the checkout, then run:
 
@@ -136,15 +143,15 @@ would add maintenance and cross-language contracts before demonstrating a need.
 
 ## Recommendation after this step
 
-**Use Rust plus Verus as the provisional implementation path.** It has now checked
+**Use Rust plus Verus as the active implementation path.** It has now checked
 both policy counters and an executable byte-preserving chunk abstraction, including
 negative checks that catch deliberately broken implementations. Its proof workflow
 has been more direct for the properties this minimal forwarding gateway needs.
 Next, integrate a bounded slice-based core with a minimal real streaming adapter,
 keeping source-to-socket and disk-acknowledgment contracts explicit.
 
-**Keep Perennial as a credible alternative if verified persistent storage becomes
-the main deliverable.** It is now a demonstrated proof path here, not merely a
+**Retain Perennial research for a possible revisit if verified persistent storage
+becomes the main deliverable.** It was a demonstrated proof path here, not merely a
 translator we managed to run. Its crash logic is a reason to invest further, but
 our three policy theorems do not yet demonstrate that benefit. A deciding storage
 experiment would prove recovery preserves acknowledged records using a specified
