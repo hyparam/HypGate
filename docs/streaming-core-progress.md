@@ -136,3 +136,28 @@ repeated release, stale write tickets, stale log acknowledgments after advancing
 and cancellation. Proof mutations remove the completion guard and retain the old
 payload; both must fail. This verifies safe logical release, not allocator behavior
 or a composed theorem about total process memory.
+
+## Conditional progress of core transitions
+
+The contracts specify rejection reasons in addition to preservation of safety:
+
+- `prepare` returns no ticket only when closed, already pending, asked for zero
+  bytes, out of generation IDs, or at the permitted forwarding boundary (the
+  durable offset in strict mode, otherwise the payload end).
+- `acknowledge` succeeds exactly for an open stream with healthy logging, matching
+  owner/chunk, and an offset between the existing durable prefix and payload end.
+- `complete` succeeds exactly for a matching pending ticket and a count within
+  its offered range. This includes an already-issued write completing after
+  cancellation. Positive counts advance by exactly that count; zero is permitted
+  by the state machine and is treated as a transfer failure by the async driver.
+- `advance` refuses only closed/pending/incomplete streams, oversized chunks, or
+  exhausted chunk IDs. A ready stream accepts a fitting next chunk.
+- `discard_completed` succeeds exactly for an open stream with no pending write
+  and every byte of its current payload completed.
+
+Five new mutations replace these operations with unconditional refusal. The
+stronger contracts reject all five: an implementation cannot satisfy the proofs
+merely by refusing all useful work. Executable behavior is unchanged. This is not
+a liveness proof of external operations: socket progress, truthful completion
+counts, durable-log acknowledgments, scheduler fairness, and finite input remain
+outside the synchronous core. Identifier exhaustion intentionally fails closed.

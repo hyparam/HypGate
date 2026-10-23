@@ -2,7 +2,7 @@
 
 | Milestone | Complete | Progress |
 | --- | :---: | --- |
-| 1. Verified streaming core | ☐ | ✓ Streaming and resource proofs; ✓ authorization/configuration proofs; ✓ tested request ownership; ✓ verified completed-chunk release; ✓ runtime retained-vector capacity checks; ✓ verified initial authority/slot/stream binding and admission/release non-rejection. Composed resource proofs and full buffer accounting remain. |
+| 1. Verified streaming core | ☐ | ✓ Streaming and resource proofs; ✓ authorization/configuration proofs; ✓ tested request ownership; ✓ verified completed-chunk release; ✓ runtime retained-vector capacity checks; ✓ verified initial authority/slot/stream binding and admission/release/stream non-rejection. Composed resource proofs and full buffer accounting remain. |
 | 2. Minimal working gateway | ✓ | Runnable HTTP/TLS/disk path, concurrent tenant isolation, disconnect/failure tests, and documented adapter audit. Production hardening and broader proofs remain in the other milestones. |
 | 3. Crash-safe logging | ☐ | ✓ Bounded disk writer, framing/scanner tests; ✓ Header/payload encoding, frame-extent, and recovery-cursor proofs; ✓ journal acknowledgment proof and conditional prefix-survival lemma. ✓ Process-kill recovery tests and storage contract; ✓ Scanner I/O faults at every record byte. Scanner refinement and storage-stack validation remain. |
 | 4. Availability hardening | ☐ | ✓ Admission/connection limits, bounded logging, network deadlines, health/readiness, and bounded connection drain. ✓ Audit-health/gap metrics; ✓ Incomplete-connection overload, pre-header/streaming disconnect, and shutdown tests; ✓ Bounded logger drain/join; ✓ Explicit HTTP input-frame limit. Full fault/load tests and shutdown/resource proofs remain. |

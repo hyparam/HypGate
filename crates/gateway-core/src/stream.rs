@@ -98,6 +98,8 @@ impl StreamChunk {
             final(self).pending() == old(self).pending(), final(self).end() == old(self).end(),
             ok ==> final(self).durable() == end && end >= old(self).durable()
                 && owner == old(self).owner() && chunk == old(self).chunk(),
+            ok == (!old(self).closed() && !old(self).failed() && owner == old(self).owner()
+                && chunk == old(self).chunk() && old(self).durable() <= end <= old(self).body().len()),
             !ok ==> *final(self) == *old(self),
     {
         if self.closed || self.failed || owner != self.owner || chunk != self.chunk
@@ -122,7 +124,9 @@ impl StreamChunk {
                     && final(self).end() > final(self).position()
                     && final(self).end() - final(self).position() <= max
                     && final(self).generation() == old(self).generation() + 1,
-                None => *final(self) == *old(self),
+                None => *final(self) == *old(self) && (old(self).closed() || old(self).pending()
+                    || max == 0 || old(self).generation() == u64::MAX
+                    || old(self).position() == (if old(self).strict() { old(self).durable() } else { old(self).body().len() })),
             },
     {
         if self.closed || self.pending || max == 0 || self.generation == u64::MAX {
@@ -169,6 +173,7 @@ impl StreamChunk {
                 && final(self).position() == old(self).position() + count
                 && final(self).completed() == old(self).completed()
                     + old(self).body().subrange(old(self).position() as int, (old(self).position() + count) as int),
+            ok == (old(self).matches(t) && count <= old(self).end() - old(self).position()),
             !ok ==> *final(self) == *old(self),
     {
         if !self.pending || t.owner != self.owner || t.generation != self.generation
@@ -198,7 +203,9 @@ impl StreamChunk {
                     && final(self).body() == bytes@ && final(self).input() == old(self).input() + bytes@
                     && final(self).position() == 0 && final(self).end() == 0
                     && final(self).durable() == 0 && !final(self).pending() && !final(self).closed(),
-                None => *final(self) == *old(self),
+                None => *final(self) == *old(self) && (old(self).closed() || old(self).pending()
+                    || old(self).position() != old(self).body().len()
+                    || bytes.len() > old(self).capacity() || old(self).chunk() == u64::MAX),
             },
     {
         if self.closed || self.pending || self.sent != self.bytes.len()
@@ -229,6 +236,7 @@ impl StreamChunk {
                 && old(self).position() == old(self).body().len()
                 && final(self).body().len() == 0 && final(self).position() == 0
                 && final(self).end() == 0 && final(self).durable() == 0,
+            ok == (!old(self).closed() && !old(self).pending() && old(self).position() == old(self).body().len()),
             !ok ==> *final(self) == *old(self),
     {
         if self.closed || self.pending || self.bytes.len() != self.sent { return false; }

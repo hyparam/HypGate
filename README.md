@@ -24,7 +24,7 @@ checked by Verus, conditional on the documented adapter contracts.
 | Cancellation and no replay | Cancellation prevents new submissions; uncertain effects, crashes, or failover never trigger automatic replay of a possibly executed generation. | Core cancellation/stale-event checks proved; transport has no replay path. Async cancellation and recovery composition remain unproved. |
 | Resource bounds and safe release | Slots, buffers, queues, and outstanding operations stay within explicit budgets; capacity cannot be reused while work retaining it remains alive. | Logical slot limits and ID isolation proved; ownership, queues, and deadlines tested. Full allocation accounting and composed release proofs remain open. |
 | Logging-mode separation | Availability mode may lose audit coverage but cannot relax authorization, routing, or tenant isolation; logging failure cannot create unbounded replacement work. | Core logging-mode transitions proved; bounded logger and failure handling tested. End-to-end composition remains open. |
-| Honest completion and conditional progress | Failed/truncated streams cannot masquerade as successful completion; under stated scheduler and I/O assumptions, admitted work terminates or times out and releases resources. | Core admission/release non-rejection proved; EOF/error behavior and deadlines tested. Async liveness and whole-system shutdown/resource-release proofs remain open. |
+| Honest completion and conditional progress | Failed/truncated streams cannot masquerade as successful completion; under stated scheduler and I/O assumptions, admitted work terminates or times out and releases resources. | Core admission/release and conditional streaming progress proved; EOF/error behavior and deadlines tested. Async liveness and whole-system shutdown/resource-release proofs remain open. |
 
 Verus does not verify Tokio, Hyper, rustls, the OS, DNS/PKI, or the filesystem for us.
 Availability also depends on deployment: an external load balancer must route around
@@ -94,7 +94,7 @@ VERUS=/path/to/verus python3 scripts/check_mutations.py
 ```
 
 Validation on 2026-10-23: 55 core verification checks passed, 76 workspace tests
-passed, and all 42 deliberate mutations failed their proof obligations.
+passed, and all 47 deliberate mutations failed their proof obligations.
 These counts are checks, not a count of independent security guarantees.
 
 [GitHub Actions CI](.github/workflows/ci.yml) runs on pushes, pull requests, and
