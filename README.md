@@ -79,7 +79,8 @@ commit `7869347`.
 
 ## Development
 
-The production core lives in `crates/gateway-core`; Cargo builds and Verus checks
+The production core lives in `crates/gateway-core`; the superseded experiment
+code is retained only in Git history (see the research notes). Cargo builds and Verus checks
 use the same source. Install Rust 1.99.1 and Verus release
 `0.2026.10.18.7d82994` (commit `7d829946231d6413a398f6e4160cdfe951261dad`),
 and put the release's `verus` and `cargo-verus` binaries on PATH.

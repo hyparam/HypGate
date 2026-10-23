@@ -8,6 +8,11 @@ code has been removed; its results and tradeoffs remain here for reference. To
 revisit or reproduce it, use a separate checkout of commit `7869347`, which contains
 the Go source, generated code, proofs, and runners.
 
+The Verus prototypes are now superseded by the production
+[stream core](../crates/gateway-core/src/stream.rs) and have been removed too.
+Their code and runners remain at Git commit `efe687426377ebfd39a1bbe7968fe176eac9817c`;
+commands in the Verus section below apply to a separate checkout of that revision.
+
 ## Verus: move from counters to bytes
 
 `experiments/verus/bytes.rs` owns a bounded byte vector and tracks its request

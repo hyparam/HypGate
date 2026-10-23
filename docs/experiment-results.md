@@ -3,6 +3,11 @@
 Date: 2026-10-23. These experiments compare a small offset-based policy core,
 not whole gateways. Rust and Verus are now the active implementation path.
 
+The Verus prototypes have also been removed: the production proofs now live in
+[crates/gateway-core](../crates/gateway-core/src/lib.rs), with mutation checks in
+[scripts/check_mutations.py](../scripts/check_mutations.py). The original Verus
+experiment sources and runners remain in Git at `efe687426377ebfd39a1bbe7968fe176eac9817c`.
+
 This records the first experiment. The [follow-up](viability-followup.md) now
 includes checked Perennial theorems and byte-level Verus proofs.
 Perennial results below are historical. Its code was removed after evaluation;
@@ -58,7 +63,9 @@ deployment must ensure all relevant actions use those transitions.
 
 Install the pinned Verus release and its required Rust toolchain using the
 [official instructions](https://github.com/verus-lang/verus/blob/main/INSTALL.md).
-Set `VERUS` to its executable path, then run:
+Use a separate historical checkout of `efe687426377ebfd39a1bbe7968fe176eac9817c` for the
+commands below; the experiment runner is no longer in the active tree. Set
+`VERUS` to its executable path, then run:
 
 ```sh
 python3 experiments/verus/check.py
