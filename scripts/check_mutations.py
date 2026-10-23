@@ -15,6 +15,8 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("resource.rs", "ignore_combined_budget", "total <= 134217728", "true"),
+    ("resource.rs", "allow_zero_request_budget", "requests == 0 || ", ""),
     ("resource.rs", "hide_active_requests", "(active, self.slots.len())", "(0, self.slots.len())"),
     ("resource.rs", "count_empty_slots", "if self.slots[i] != 0 { active = active + 1; }", "if self.slots[i] == 0 { active = active + 1; }"),
     ("stream.rs", "deny_valid_ack", "if self.closed || self.failed || owner != self.owner || chunk != self.chunk\n            || end < self.durable || end > self.bytes.len() { return false; }", "if true { return false; }"),

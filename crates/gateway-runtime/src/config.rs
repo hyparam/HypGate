@@ -120,10 +120,7 @@ impl GatewayConfig {
         if root.len() > MAX_CONFIG || candidate.len() > MAX_CONFIG { return Err(ConfigError::Limits); }
         let root: Root = serde_json::from_slice(root).map_err(|_| ConfigError::Syntax)?;
         let candidate: Candidate = serde_json::from_slice(candidate).map_err(|_| ConfigError::Syntax)?;
-        if root.limits.requests == 0 || root.limits.requests > 65536
-            || root.limits.chunk_bytes == 0 || root.limits.chunk_bytes > 1024 * 1024
-            || root.limits.requests.checked_mul(root.limits.chunk_bytes)
-                .is_none_or(|n| n > 128 * 1024 * 1024) {
+        if !gateway_core::resource::validate_limits(root.limits.requests, root.limits.chunk_bytes) {
             return Err(ConfigError::Limits);
         }
         let identities = root.identities.into_iter().map(|i| Ok(Identity {

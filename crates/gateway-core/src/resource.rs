@@ -4,6 +4,19 @@ use crate::stream::StreamChunk;
 
 verus! {
 
+// Normalized configuration limits; this budget covers one payload chunk per slot,
+// not HTTP/TLS/log queues, allocator overhead, or whole-process memory.
+pub fn validate_limits(requests: usize, chunk_bytes: usize) -> (ok: bool)
+    ensures ok == (0 < requests <= 65536 && 0 < chunk_bytes <= 1048576
+        && (requests as int) * (chunk_bytes as int) <= 134217728),
+{
+    if requests == 0 || requests > 65536 || chunk_bytes == 0 || chunk_bytes > 1048576 { return false; }
+    assert((requests as int) * (chunk_bytes as int) <= 68719476736) by(nonlinear_arith)
+        requires 0 <= requests <= 65536, 0 <= chunk_bytes <= 1048576;
+    let total = (requests as u64) * (chunk_bytes as u64);
+    total <= 134217728
+}
+
 pub open spec fn occupied(slots: Seq<u64>) -> nat
     decreases slots.len(),
 {

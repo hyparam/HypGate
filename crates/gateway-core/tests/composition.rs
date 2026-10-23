@@ -48,3 +48,17 @@ fn usage_counts_live_slots_including_holes_and_replacements() {
     assert_eq!(registry.usage(), (0, 3));
     assert_eq!(ResourceAdmission::new(0, 4).usage(), (0, 0));
 }
+
+
+#[test]
+fn normalized_limits_reject_overflow_and_enforce_combined_payload_budget() {
+    use gateway_core::resource::validate_limits;
+    for (requests, chunk, expected) in [
+        (0, 1, false), (1, 0, false), (1, 1, true),
+        (65536, 2048, true), (65536, 2049, false), (65537, 1, false),
+        (128, 1048576, true), (129, 1048576, false), (1, 1048577, false),
+        (usize::MAX, usize::MAX, false), (1, usize::MAX, false), (usize::MAX, 1, false),
+    ] {
+        assert_eq!(validate_limits(requests, chunk), expected, "{requests} slots of {chunk}");
+    }
+}

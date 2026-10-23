@@ -71,3 +71,19 @@ HTTP authentication header parsing and metadata filtering now exist in the
 [HTTP boundary](http-boundary.md). DNS and TLS validation, disk logging, and
 network-level IP restrictions are not implemented here. Approved destinations may
 resolve to private IPs: this is origin confinement, not an SSRF/IP-range theorem.
+
+## Verified normalized resource limits
+
+The JSON adapter now calls `resource::validate_limits` in the production core.
+Its result is true exactly when requests are between 1 and 65,536, chunk size is
+between 1 and 1,048,576 bytes, and their mathematical product is at most
+134,217,728 bytes (128 MiB). Guarded conversion and multiplication are proved safe;
+zero, excessive individual limits, and excessive combined allowance are rejected.
+The adapter still rejects these configurations before loading provider secrets.
+Tests cover exact boundaries, one-over-boundary values, and maximum machine integers.
+
+This preserves the existing configuration policy. It does not establish that
+process RSS is below 128 MiB: the allowance covers one payload chunk per admitted
+request. HTTP/TLS/log buffers, allocator overhead, and other runtime state require
+separate accounting. JSON parsing and the use of the validated values to construct
+the runtime registry remain trusted bindings.
