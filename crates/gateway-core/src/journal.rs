@@ -1,0 +1,123 @@
+use vstd::prelude::*;
+
+verus! {
+
+// One journal per exclusively owned file. Offsets exclude its already-synced
+// session header. Tickets never leave the single disk worker.
+pub struct Append { start: u64, end: u64 }
+impl Append {
+    pub closed spec fn start(&self) -> u64 { self.start }
+    pub closed spec fn end(&self) -> u64 { self.end }
+}
+pub struct Journal {
+    written: u64,
+    durable: u64,
+    acknowledged: u64,
+    pending: u64,
+    failed: bool,
+    bytes: Ghost<Seq<u8>>,
+}
+
+impl Journal {
+    pub closed spec fn written_len(&self) -> u64 { self.written }
+    pub closed spec fn acked_len(&self) -> u64 { self.acknowledged }
+    pub closed spec fn idle(&self) -> bool { self.pending == 0 }
+    pub closed spec fn valid(&self) -> bool {
+        self.acknowledged <= self.durable <= self.written
+        && self.bytes@.len() == self.written
+        && (self.pending == 0 || self.pending > self.written)
+    }
+    pub closed spec fn history(&self) -> Seq<u8> { self.bytes@ }
+    pub closed spec fn stable(&self) -> Seq<u8> { self.bytes@.subrange(0, self.durable as int) }
+    pub closed spec fn acked(&self) -> Seq<u8> { self.bytes@.subrange(0, self.acknowledged as int) }
+    pub closed spec fn failed(&self) -> bool { self.failed }
+    pub closed spec fn matches(&self, t: &Append) -> bool {
+        t.start == self.written && t.end == self.pending && t.end > t.start
+    }
+
+    pub fn new() -> (j: Self)
+        ensures j.valid(), j.history() == Seq::<u8>::empty(), j.acked() == Seq::<u8>::empty(), !j.failed(),
+    {
+        Journal { written: 0, durable: 0, acknowledged: 0, pending: 0, failed: false, bytes: Ghost(Seq::empty()) }
+    }
+
+    pub fn begin(&mut self, length: u64) -> (out: Option<Append>)
+        requires old(self).valid(),
+        ensures final(self).valid(), final(self).history() == old(self).history(),
+            final(self).stable() == old(self).stable(), final(self).acked() == old(self).acked(),
+            final(self).failed() == old(self).failed(),
+            match out { Some(t) => old(self).idle() && final(self).matches(&t) && t.end() - t.start() == length && !final(self).failed(),
+                None => *final(self) == *old(self) },
+    {
+        if self.failed || self.pending != 0 || length == 0 || length > u64::MAX - self.written { return None; }
+        self.pending = self.written + length;
+        Some(Append { start: self.written, end: self.pending })
+    }
+
+    // Called only after write_all successfully reports the exact frame written.
+    pub fn record_written(&mut self, t: &Append, bytes: &Vec<u8>) -> (ok: bool)
+        requires old(self).valid(),
+        ensures final(self).valid(), final(self).stable() == old(self).stable(),
+            final(self).acked() == old(self).acked(), final(self).failed() == old(self).failed(),
+            ok ==> old(self).matches(t) && final(self).history() == old(self).history() + bytes@
+                && final(self).written_len() == t.end() && final(self).idle() && !final(self).failed(),
+            !ok ==> *final(self) == *old(self),
+    {
+        if self.failed || t.start != self.written || t.end != self.pending
+            || t.end <= t.start || bytes.len() as u64 != t.end - t.start { return false; }
+        let ghost previous = self.bytes@;
+        self.bytes = Ghost(self.bytes@ + bytes@);
+        self.written = t.end;
+        self.pending = 0;
+        proof {
+            assert(self.bytes@.subrange(0, self.durable as int) =~= previous.subrange(0, self.durable as int));
+            assert(self.bytes@.subrange(0, self.acknowledged as int) =~= previous.subrange(0, self.acknowledged as int));
+        }
+        true
+    }
+
+    // This event asserts a successful sync syscall, not a theorem about the OS.
+    pub fn sync_succeeded(&mut self) -> (ok: bool)
+        requires old(self).valid(),
+        ensures final(self).valid(), final(self).history() == old(self).history(),
+            final(self).acked() == old(self).acked(), final(self).failed() == old(self).failed(),
+            ok ==> old(self).idle() && final(self).stable() == final(self).history() && !final(self).failed(),
+            !ok ==> *final(self) == *old(self),
+    {
+        if self.failed || self.pending != 0 { return false; }
+        self.durable = self.written;
+        true
+    }
+
+    pub fn acknowledge(&mut self, t: &Append) -> (ok: bool)
+        requires old(self).valid(),
+        ensures final(self).valid(), final(self).history() == old(self).history(),
+            final(self).stable() == old(self).stable(), final(self).failed() == old(self).failed(),
+            ok ==> final(self).acked_len() == t.end() && t.start() == old(self).acked_len()
+                && t.end() > t.start() && !final(self).failed(),
+            !ok ==> *final(self) == *old(self),
+    {
+        if self.failed || t.start != self.acknowledged || t.end <= t.start || self.durable < t.end { return false; }
+        self.acknowledged = t.end;
+        true
+    }
+
+    pub fn fail(&mut self)
+        requires old(self).valid(),
+        ensures final(self).valid(), final(self).failed(), final(self).history() == old(self).history(),
+            final(self).stable() == old(self).stable(), final(self).acked() == old(self).acked(),
+    { self.failed = true; }
+
+    // Conditional crash theorem: if the storage model preserves the synced byte
+    // prefix, every byte authorized for acknowledgment is preserved exactly.
+    // Scanner correctness and real storage behavior are separate obligations.
+    pub proof fn acknowledged_prefix_survives(&self, recovered: Seq<u8>)
+        requires self.valid(), recovered.len() >= self.stable().len(),
+            recovered.subrange(0, self.stable().len() as int) == self.stable(),
+        ensures recovered.len() >= self.acked().len(),
+            recovered.subrange(0, self.acked().len() as int) == self.acked(),
+    {
+        assert(recovered.subrange(0, self.acknowledged as int) =~= self.acked());
+    }
+}
+}

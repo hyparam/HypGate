@@ -1,6 +1,7 @@
 //! Bounded disk logging. Filesystem effects and checksum security are trusted,
 //! not verified. A single worker owns the file; requests never choose its path.
 use crate::transfer::{AuditLog, Direction, LogRecord};
+use gateway_core::journal::Journal;
 use sha2::{Digest, Sha256};
 use std::{fs::{File, OpenOptions}, io::{self, Read, Write}, path::Path,
     sync::{Arc, atomic::{AtomicBool, Ordering}}, time::Duration};
@@ -60,10 +61,17 @@ impl DiskLog {
         let healthy = Arc::new(AtomicBool::new(true));
         let worker_health = healthy.clone();
         std::thread::Builder::new().name("soundgate-audit".into()).spawn(move || {
+            let mut journal = Journal::new();
             while let Some(job) = receiver.blocking_recv() {
-                let ok = worker_health.load(Ordering::Acquire)
-                    && file.write_all(&job.frame).and_then(|()| file.sync()).is_ok();
-                if !ok { worker_health.store(false, Ordering::Release); }
+                let ok = worker_health.load(Ordering::Acquire) && match journal.begin(job.frame.len() as u64) {
+                    Some(ticket) => file.write_all(&job.frame).is_ok()
+                        && journal.record_written(&ticket, &job.frame)
+                        && file.sync().is_ok()
+                        && journal.sync_succeeded()
+                        && journal.acknowledge(&ticket),
+                    None => false,
+                };
+                if !ok { journal.fail(); worker_health.store(false, Ordering::Release); }
                 // A canceled caller may leave a durable but unsent record. It must
                 // never cause the worker to retry or the gateway to replay traffic.
                 let _ = job.done.send(ok);

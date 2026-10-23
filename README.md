@@ -20,7 +20,7 @@ checked by Verus, conditional on the documented adapter contracts.
 | Routing and configuration confinement | Candidate configuration and request fields cannot expand operator grants or change the authorized destination/credential binding. | Normalized configuration and route selection proved; URI, DNS, TLS, and actual dispatch remain trusted/tested. |
 | Byte integrity and ordering | Forwarded body bytes form an unchanged, ordered prefix of the input, across chunks and partial writes, without skipped or duplicated advancement. | Core byte-prefix and completion properties proved; async HTTP integration tested. Peer receipt is not proved. |
 | Strict audit-before-forwarding | Every submitted body range in strict mode is covered by a durable log acknowledgment for that request and chunk. | Core gate proved conditional on truthful acknowledgments; disk sync adapter tested. Filesystem crash guarantees remain open. |
-| Crash-safe recovery | Recovery exposes only complete records, and acknowledged records survive every crash in the specified storage model. | Framing/scanning and fault tests implemented. Crash model, recovery theorem, and process-kill validation remain open. |
+| Crash-safe recovery | Recovery exposes only complete records, and acknowledged records survive every crash in the specified storage model. | Journal acknowledgment ordering and conditional synced-prefix survival proved; framing/scanning tested. Scanner refinement, storage crash contract, and process-kill validation remain open. |
 | Cancellation and no replay | Cancellation prevents new submissions; uncertain effects, crashes, or failover never trigger automatic replay of a possibly executed generation. | Core cancellation/stale-event checks proved; transport has no replay path. Async cancellation and recovery composition remain unproved. |
 | Resource bounds and safe release | Slots, buffers, queues, and outstanding operations stay within explicit budgets; capacity cannot be reused while work retaining it remains alive. | Logical slot limits and ID isolation proved; ownership, queues, and deadlines tested. Full allocation accounting and composed release proofs remain open. |
 | Logging-mode separation | Availability mode may lose audit coverage but cannot relax authorization, routing, or tenant isolation; logging failure cannot create unbounded replacement work. | Core logging-mode transitions proved; bounded logger and failure handling tested. End-to-end composition remains open. |
@@ -52,6 +52,8 @@ The [async transfer driver](docs/async-transfer.md) connects the stream core to 
 reads/writes and an explicit durable-log contract, with cancellation tests.
 The [disk logger](docs/disk-logging.md) now implements that contract with a bounded
 worker, sync acknowledgments, and an incremental recovery scanner; crash proofs remain open.
+The [journal proof](docs/journal-proof.md) checks acknowledgment ordering and byte-prefix
+survival conditional on the storage preserving synced bytes.
 The [HTTPS upstream transport](docs/https-transport.md) now forwards opaque bodies
 over real TLS through the stream core. The [runnable gateway](docs/running.md)
 connects the inbound server, authorization, streaming, and disk logging.
@@ -81,8 +83,8 @@ cargo verus verify -p gateway-core --locked -- --triggers-mode silent
 VERUS=/path/to/verus python3 scripts/check_mutations.py
 ```
 
-Validation on 2026-10-23: 36 core verification checks passed, 51 workspace tests
-passed, and all 21 deliberate mutations failed their proof obligations.
+Validation on 2026-10-23: 43 core verification checks passed, 53 workspace tests
+passed, and all 25 deliberate mutations failed their proof obligations.
 These counts are checks, not a count of independent security guarantees.
 
 [GitHub Actions CI](.github/workflows/ci.yml) runs on pushes, pull requests, and

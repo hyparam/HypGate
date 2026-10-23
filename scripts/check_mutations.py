@@ -15,6 +15,10 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("journal.rs", "ack_before_sync", " || self.durable < t.end", ""),
+    ("journal.rs", "replace_pending_append", "self.failed || self.pending != 0 || length == 0", "self.failed || length == 0"),
+    ("journal.rs", "wrong_record_length", " || bytes.len() as u64 != t.end - t.start", ""),
+    ("journal.rs", "skip_synced_prefix", "self.durable = self.written;", "self.durable = 0;"),
     ("stream.rs", "wrong_log_payload", "{ self.bytes.as_slice() }", "{ slice_subrange(self.bytes.as_slice(), 0, 0) }"),
     ("stream.rs", "hide_closed_stream", "ensures out == self.closed(),\n    { self.closed }", "ensures out == self.closed(),\n    { false }"),
     ("stream.rs", "replace_unfinished", "self.sent != self.bytes.len()", "false"),

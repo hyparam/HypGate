@@ -1,8 +1,8 @@
 # Bounded disk logger and recovery scanner
 
-Status: implemented and tested, not formally verified. The production HTTP server
-is still missing. Seven logger tests, including a real-file test through the async
-transfer driver, bring the workspace to 37 passing tests.
+Status: the [journal acknowledgment state machine](journal-proof.md) is now formally
+verified and used by the disk worker. The filesystem adapter and scanner remain
+tested rather than verified. The production HTTP server integrates this logger.
 
 `DiskLog::create` creates a new operator-selected file and never overwrites or
 appends to an existing path. On Unix the requested mode is 0600. Startup writes a
