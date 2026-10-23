@@ -8,6 +8,10 @@ invariants. No production gateway or end-to-end guarantees yet.
 
 The [implementation milestones](docs/implementation-plan.md) are the active plan,
 starting with a bounded chunk interface and verified partial-write accounting.
+The [first streaming-core increment](docs/streaming-core-progress.md) records the
+current interface, checked behavior, and remaining milestone-one work.
+The [security contract](docs/security-contract.md) separates planned authorization
+and configuration guarantees from the streaming properties already proved.
 
 See [language and verification research](docs/verification-research.md) for the
 candidate comparison, agreed scope, proposed proof obligations, and next experiment.

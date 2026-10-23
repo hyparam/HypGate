@@ -1,10 +1,16 @@
 # Implementation milestones
 
-Status: approved direction is Rust plus Verus; milestone 1 is next.
+Status: approved direction is Rust plus Verus; milestone 1 is in progress.
+See the [streaming-core progress notes](streaming-core-progress.md) for the first increment.
 Scope: forward opaque HTTP request bodies and streaming responses, and log to disk.
 No provider translation, automatic generation replay, billing, or plugin system.
 Operators choose strict durable logging or forwarding with degraded audit coverage.
 An external load balancer handles failover between gateway instances.
+
+The [security contract](security-contract.md) specifies authorization, tenant and
+credential isolation, routing integrity, and adversarial configuration handling.
+Resource admission and stream tickets are not authorization. Implement and prove
+the synchronous authorization/token boundary before adding network dispatch.
 
 ## 1. Verified streaming core
 
@@ -30,6 +36,9 @@ Exit criteria:
 - Queue, buffer, and outstanding-operation limits have explicit accounting.
 - Mutation tests reject corruption, cross-request writes, duplicate advancement,
   capacity violations, and strict-mode forwarding before durability.
+- Verified security admission issues a private-constructor `AuthorizedRequest`
+  bound to identity, policy snapshot, origin, and credential handle; invalid
+  candidate configuration cannot expand the operator's root grants.
 
 First increment: a single bounded chunk with one outstanding write, a borrowed
 payload view, generation-tagged completion, and partial-write accounting. This is
@@ -46,6 +55,8 @@ and hop-by-hop headers correctly without interpreting provider JSON or SSE event
 Exit criteria:
 
 - Real request and response streaming use the core's authorization/completion path.
+- Every outbound dispatch consumes `AuthorizedRequest`; no raw-origin or credential
+  override path exists. Logging availability mode never bypasses security checks.
 - Integration tests preserve body bytes across fragmentation and simultaneous requests.
 - Routing and credential handling cannot redirect a request to a caller-chosen origin.
 - Error, disconnect, and cancellation paths stop work without synthesizing success.
