@@ -35,7 +35,9 @@ Rejection must identify a malformed header, payload-length mismatch, failed
 checksum result, wrong cursor/ticket state, or offset overflow. These are finite
 core transitions, not a promise that reads or checksum computation finish. File
 reads, checksum computation, session randomness/uniqueness, and conversion to the public runtime
-record remain trusted; full scanner refinement remains open. Checksums defend against accidental corruption, not malicious changes.
+record remain trusted. The [scanner refinement](recovery-proof.md) now proves
+per-step source correspondence under explicit adapter contracts; complete
+acknowledged-prefix reconstruction remains open. Checksums defend against accidental corruption, not malicious changes.
 EOF exactly at a record boundary cannot reveal whether later records were lost.
 
 Restart creates a new file and session ID. It never appends to an existing file,

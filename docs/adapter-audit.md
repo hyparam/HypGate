@@ -85,7 +85,7 @@ Audit files are operator-owned shared logs, not a tenant-facing log retrieval AP
 
 The tests are representative safety/failure checks, not exhaustive interleaving or
 load verification. Full process-memory accounting, stuck-I/O/shutdown proofs, power-loss validation,
-formal scanner refinement, broader benchmarks/deployment validation, and independent
+acknowledged-prefix reconstruction, broader benchmarks/deployment validation, and independent
 review remain open. The [resource inventory](resource-accounting.md) records the
 source-level budgets and excluded allocations; local benchmarks and proxy/process
 failover experiments are recorded separately. Live-provider compatibility

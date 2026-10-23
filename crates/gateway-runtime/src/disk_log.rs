@@ -10,8 +10,8 @@ use tokio::sync::{mpsc, oneshot};
 
 #[cfg(test)]
 const FILE_MAGIC: &[u8; 8] = b"SGLOG001";
+#[cfg(test)]
 const FILE_HEADER: usize = 56; // magic + random session ID + checksum
-const RECORD_HEADER: usize = 33; // magic + length + tenant + request + chunk + direction
 pub const MAX_RECORD_BYTES: usize = 1024 * 1024;
 
 struct Job { frame: RecordFrame, done: oneshot::Sender<Option<DurableFrame>> }
@@ -212,8 +212,7 @@ fn encode_record(record: LogRecord<'_>) -> RecordFrame {
 #[cfg(test)]
 fn encode(record: LogRecord<'_>) -> Vec<u8> { encode_record(record).bytes().clone() }
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum ScanError { Io, Incomplete, Corrupt }
+pub use gateway_core::recovery::ScanError;
 #[derive(Debug, PartialEq, Eq)]
 pub struct StoredRecord {
     pub tenant: u64,
@@ -223,53 +222,46 @@ pub struct StoredRecord {
     pub bytes: Vec<u8>,
 }
 
-/// Incremental, read-only recovery scanner. It never truncates files or replays
-/// traffic. After any malformed record it stops permanently at the valid prefix.
-pub struct LogReader<R> { reader: R, session: [u8; 16], cursor: framing::Cursor }
-impl<R: Read> LogReader<R> {
-    pub fn new(mut reader: R) -> Result<Self, ScanError> {
-        let mut header = [0; FILE_HEADER];
-        exact(&mut reader, &mut header)?;
-        let checksum_valid = Sha256::digest(&header[..24])[..] == header[24..];
-        let session = framing::decode_session(&header[..24], checksum_valid).ok_or(ScanError::Corrupt)?;
-        Ok(Self { reader, session, cursor: framing::Cursor::new(FILE_HEADER as u64) })
-    }
-    pub fn session(&self) -> [u8; 16] { self.session }
-    pub fn valid_end(&self) -> u64 { self.cursor.offset() }
-
-    pub fn next_record(&mut self) -> Result<Option<StoredRecord>, ScanError> {
-        let Some(ticket) = self.cursor.begin() else { return Ok(None); };
-        let mut header = [0u8; RECORD_HEADER];
-        loop {
-            match self.reader.read(&mut header[..1]) {
-                Ok(0) => return Ok(None),
-                Ok(_) => break,
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                Err(_) => return Err(ScanError::Io),
+// Trusted implementation of the verified scanner's sequential byte-stream and
+// checksum contracts. Verus does not verify std::io::Read or SHA-256.
+struct ReadSource<R: Read> { reader: R }
+impl<R: Read> gateway_core::recovery::Source for ReadSource<R> {
+    fn read_exact(&mut self, length: usize) -> Result<Vec<u8>, gateway_core::recovery::ReadError> {
+        use gateway_core::recovery::ReadError;
+        let mut bytes = vec![0; length]; let mut filled = 0;
+        while filled < length {
+            match self.reader.read(&mut bytes[filled..]) {
+                Ok(0) => return Err(if filled == 0 { ReadError::Eof } else { ReadError::Incomplete }),
+                Ok(count) => filled += count,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(_) => return Err(ReadError::Io),
             }
         }
-        exact(&mut self.reader, &mut header[1..])?;
-        let fields = framing::decode(&header).ok_or(ScanError::Corrupt)?;
-        let size = fields.payload as usize;
-        let mut bytes = vec![0; size];
-        exact(&mut self.reader, &mut bytes)?;
-        let mut checksum = [0u8; 32];
-        exact(&mut self.reader, &mut checksum)?;
-        let mut digest = Sha256::new(); digest.update(header); digest.update(&bytes);
-        let record = self.cursor.accept_record(ticket, &header, bytes,
-            digest.finalize()[..] == checksum).ok_or(ScanError::Corrupt)?;
+        Ok(bytes)
+    }
+    fn checksum_valid(&self, header: &[u8], payload: &[u8], checksum: &[u8]) -> bool {
+        let mut digest = Sha256::new(); digest.update(header); digest.update(payload);
+        digest.finalize()[..] == *checksum
+    }
+}
+
+/// Incremental, read-only recovery scanner. It never truncates files or replays
+/// traffic. The core owns parsing, stop state, and valid-prefix advancement.
+pub struct LogReader<R: Read> { scanner: gateway_core::recovery::Scanner<ReadSource<R>> }
+impl<R: Read> LogReader<R> {
+    pub fn new(reader: R) -> Result<Self, ScanError> {
+        Ok(Self { scanner: gateway_core::recovery::Scanner::new(ReadSource { reader })? })
+    }
+    pub fn session(&self) -> [u8; 16] { self.scanner.session() }
+    pub fn valid_end(&self) -> u64 { self.scanner.offset() }
+    pub fn next_record(&mut self) -> Result<Option<StoredRecord>, ScanError> {
+        let Some(record) = self.scanner.next_record()? else { return Ok(None); };
         let fields = record.header;
         Ok(Some(StoredRecord {
             tenant: fields.tenant, request: fields.request, chunk: fields.chunk,
             direction: if fields.direction == 0 { Direction::Upload } else { Direction::Download }, bytes: record.bytes,
         }))
     }
-}
-
-fn exact(reader: &mut impl Read, bytes: &mut [u8]) -> Result<(), ScanError> {
-    reader.read_exact(bytes).map_err(|e| if e.kind() == io::ErrorKind::UnexpectedEof {
-        ScanError::Incomplete
-    } else { ScanError::Io })
 }
 
 #[cfg(test)]

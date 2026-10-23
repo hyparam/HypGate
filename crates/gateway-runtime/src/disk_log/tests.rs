@@ -268,14 +268,15 @@ fn scanner_retries_interruptions_and_fragmented_reads_without_changing_records()
     for fragment in [1, 2, 7, 33, 128] {
         let source = FaultReader { bytes: Cursor::new(bytes.clone()), fail_at: None,
             interrupt_next: true, calls: Arc::default(), fragment };
+        let call_count = source.calls.clone();
         let mut scanner = LogReader::new(source).unwrap();
         assert_eq!(scanner.next_record().unwrap().unwrap().bytes, b"first");
         assert_eq!(scanner.next_record().unwrap().unwrap().bytes, b"second");
         assert!(scanner.next_record().unwrap().is_none());
         assert_eq!(scanner.valid_end(), bytes.len() as u64);
-        let calls = scanner.reader.calls.load(Ordering::Relaxed);
+        let calls = call_count.load(Ordering::Relaxed);
         assert!(scanner.next_record().unwrap().is_none());
-        assert_eq!(scanner.reader.calls.load(Ordering::Relaxed), calls);
+        assert_eq!(call_count.load(Ordering::Relaxed), calls);
     }
 }
 
@@ -288,6 +289,7 @@ fn scanner_io_error_at_every_record_byte_preserves_prefix_and_stops_reading() {
         let calls = Arc::default();
         let source = FaultReader { bytes: Cursor::new(bytes.clone()), fail_at: Some(fail_at),
             interrupt_next: true, calls, fragment: 7 };
+        let call_count = source.calls.clone();
         let mut scanner = LogReader::new(source).unwrap();
         assert_eq!(scanner.next_record().unwrap().unwrap().bytes, b"first");
         // A fault at the boundary after record two occurs on the following read.
@@ -297,9 +299,9 @@ fn scanner_io_error_at_every_record_byte_preserves_prefix_and_stops_reading() {
         } else { prefix };
         assert_eq!(scanner.next_record(), Err(ScanError::Io), "fault at {fail_at}");
         assert_eq!(scanner.valid_end(), expected_end);
-        let calls = scanner.reader.calls.load(Ordering::Relaxed);
+        let calls = call_count.load(Ordering::Relaxed);
         assert!(scanner.next_record().unwrap().is_none());
-        assert_eq!(scanner.reader.calls.load(Ordering::Relaxed), calls);
+        assert_eq!(call_count.load(Ordering::Relaxed), calls);
         assert_eq!(scanner.valid_end(), expected_end);
     }
 }

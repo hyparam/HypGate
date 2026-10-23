@@ -35,15 +35,16 @@ their formal scope.
 | Acknowledged bytes survive if the storage model preserves the synced prefix | Same module: `acknowledged_prefix_survives` | Preservation of synced bytes is an explicit precondition, not a proved filesystem or power-loss property. |
 | File-session header preserves its exact version and session identity | [framing.rs](../crates/gateway-core/src/framing.rs): `session_encoding`, `encode_session`, `decode_session` | Successful exact reads, checksum calculation/comparison, random-session generation, and session uniqueness remain trusted. The accepted marker is `SGLOG001`; this is not authenticity evidence. |
 | Header encode/decode roundtrips and payload framing preserves exact supplied bytes | [framing.rs](../crates/gateway-core/src/framing.rs): `valid`, `encoding`, `decoded`, `encode`, `decode`, `encode_payload`, `RecordBody::new`, `seal`, `RecordFrame::canonical` | SHA-256 calculation/comparison and syscall bindings remain trusted. Header identities are structural data, not authentication evidence. |
-| Recovery binds decoded metadata and exact payload to bounded cursor advancement, and defaults to stopped on a read attempt | Same module: `frame_end`, `Cursor::begin`, `Cursor::accept`, `Cursor::accept_record` | The runtime must truthfully report bytes read, supply a truthful checksum result to `accept_record`, and drop the local ticket on failure. Tickets cannot cross readers. Full scanner refinement remains open. |
+| Returned records equal complete checksum-valid source extents; EOF/errors preserve the preceding boundary, with justified rejection | [recovery.rs](../crates/gateway-core/src/recovery.rs): `Source`, `complete_record`, `Scanner::new`, `next_record` | Conditional on stable-source exact-read/error and digest contracts. The production adapter implements those contracts in trusted Rust. Full acknowledged-prefix reconstruction and initial-open liveness remain separate. |
+| Recovery binds decoded metadata and exact payload to bounded cursor advancement, and defaults to stopped on a read attempt | Same module: `frame_end`, `Cursor::begin`, `Cursor::accept`, `Cursor::accept_record` | The runtime must truthfully report bytes read, supply a truthful checksum result to `accept_record`, and drop the local ticket on failure. Tickets cannot cross readers. Source correspondence is checked by `recovery::Scanner` under explicit read/digest contracts. |
 
 ## End-to-end boundaries that remain unproved
 
 There is no single theorem establishing that every byte reaching a provider has
 an authorized tenant, correct credential, and durable audit record under every
 async interleaving and physical crash. The missing steps include complete mediation
-of network effects, async receipt delivery and journal/session ownership, scanner
-refinement, and the storage contract. The [security contract](security-contract.md)
+of network effects, async receipt delivery and journal/session ownership, full acknowledged-prefix
+reconstruction, and the storage contract. The [security contract](security-contract.md)
 and [storage contract](storage-crash-contract.md) specify those boundaries.
 
 There is also no whole-process memory theorem. Logical slot/chunk bounds and a conditional sum bound for mapped streams are

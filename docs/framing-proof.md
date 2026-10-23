@@ -78,8 +78,9 @@ It reads the entire payload and digest, validates SHA-256, and only then calls
 validates record bounds before calling the core payload encoder, then hashes its
 result and consumes it through the verified sealing operation. Those call-site bindings remain trusted Rust.
 
-Verus does not prove the `Read` implementation, exact-read
-helper, checksum implementation, scanner loop, or correspondence to physical disk.
+The [verified scanner](recovery-proof.md) composes these operations under an explicit
+source contract. Verus does not prove the runtime `Read` implementation, exact-read
+adapter, checksum implementation, or correspondence to physical disk.
 The extent theorem depends on the caller reporting bytes actually available; it
 cannot establish that fact from I/O. Checksums are not authentication against a
 writer who can modify the log and recompute them. Standard-library byte conversion

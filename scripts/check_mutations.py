@@ -15,6 +15,11 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("recovery.rs", "scanner_wrong_payload", "Some(record) => Ok(Some(record)),", "Some(mut record) => { record.bytes = Vec::new(); Ok(Some(record)) },"),
+    ("recovery.rs", "scanner_wrong_header_extent", "self.source.read_exact(33)", "self.source.read_exact(34)"),
+    ("recovery.rs", "scanner_ignores_checksum", "let checked = self.source.checksum_valid(header.as_slice(), bytes.as_slice(), checksum.as_slice());", "let checked = true;"),
+    ("recovery.rs", "scanner_ignores_session_checksum", "let checked = source.checksum_valid(prefix, empty.as_slice(), checksum);", "let checked = true;"),
+
     ("framing.rs", "session_wrong_identity", "let session = [bytes[8], bytes[9]", "let session = [bytes[9], bytes[9]"),
     ("framing.rs", "session_wrong_version", " || bytes[7] != 49", ""),
     ("framing.rs", "session_ignores_checksum", "if !checksum_valid || bytes.len() != 24", "if bytes.len() != 24"),

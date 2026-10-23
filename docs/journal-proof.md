@@ -52,7 +52,7 @@ ownership is an adapter obligation. Storage must preserve previously synced byte
 This proves acknowledgment ordering and conditional byte-prefix survival, not
 complete crash-safe logging. [Header and frame-extent proofs](framing-proof.md),
 a documented [storage contract](storage-crash-contract.md), and process-kill
-experiments now exist. Full scanner refinement, storage-stack validation, and
+experiments now exist. Full acknowledged-prefix reconstruction, storage-stack validation, and
 async receipt delivery and journal/session ownership remain trusted. No `assume` or external-body escape was introduced.
 
 ## Durable receipts and stream authorization
