@@ -1,0 +1,72 @@
+# Static configuration boundary
+
+The runtime now parses two separate JSON inputs: an operator-controlled root policy
+and an untrusted candidate route selection. It is a library interface, not yet a
+gateway executable. `GatewayConfig::from_json` also receives an operator-controlled
+secret resolver; the eventual executable will resolve named environment variables.
+Never permit a caller to supply root policy or the secret resolver.
+
+## Root policy format
+
+The root object has exactly these fields:
+
+- `identities`: records containing `tenant` (u64) and `sha256` (64 hexadecimal
+  characters encoding the hash of a high-entropy gateway token).
+- `destinations`: fixed HTTPS endpoint strings, indexed from zero. For example,
+  `https://api.openai.com/v1/responses` or
+  `https://api.anthropic.com/v1/messages`. Each includes its fixed native API path.
+- `credentials`: records containing `tenant`, `kind` (`bearer` or `api_key`), and
+  `env` (the name passed to the secret resolver). Secret values are not JSON fields.
+- `grants`: records containing `tenant`, `selector`, `origin` (destination index),
+  and `credential` (credential index).
+- `limits`: `requests` and `chunk_bytes`, both positive integers.
+- `logging`: `strict` or `availability`.
+
+The candidate object contains only `routes`, whose entries use exactly the grant
+record format. Every selected tuple must occur in the root grants and must satisfy
+the verified tenant, identity, and handle constraints. An empty route selection
+is allowed and grants no forwarding authority. No fallback or URL override exists.
+
+Input is bounded to one MiB per JSON document before parsing. Unknown and duplicate
+object fields are rejected. Limits allow at most 65,536 request slots and one MiB
+per chunk, with their product at most 128 MiB. This is a logical payload allowance,
+not a total memory guarantee or a recommended deployment setting.
+
+## Destination and credential binding
+
+Destination validation accepts conventional ASCII DNS names or bracketed IPv6
+addresses, HTTPS, optional nonzero valid ports, and fixed paths. It rejects
+userinfo, fragments, queries, backslashes, control characters, encoded authorities,
+ambiguous hosts, and paths starting with two slashes. No client path is joined onto
+this endpoint. New API paths need explicitly granted endpoints; this initial
+interface does not support dynamic query parameters.
+
+Admission hashes the supplied raw gateway token using SHA-256, invokes the verified
+policy admission path, then resolves the authorized handles within that same
+immutable configuration. A private-constructor `RoutedRequest` owns the admitted
+request and borrows its destination and credential; callers cannot replace them.
+Tokens are bounded to 512 bytes. Token entropy and secure provisioning are operator
+obligations; this is not a password authentication mechanism.
+
+Bearer credentials produce an `authorization` header; API-key credentials produce
+`x-api-key`. Loaded values must be nonempty visible ASCII without spaces, at most
+8,192 bytes. HTTP header values are marked sensitive. Credentials and routed
+requests have no Debug implementation, and configuration errors contain only
+categories, never input strings or secret values. Secret memory is not zeroized.
+
+## Evidence and remaining work
+
+Six configuration unit tests cover native provider endpoint/credential bindings,
+invalid authentication, forbidden routes, hostile destinations, invalid limits and
+digests, cross-tenant credentials, malformed schemas, and secret/header injection.
+All eighteen workspace tests passed on 2026-10-23. No live provider call was made;
+this does not establish provider compatibility.
+
+JSON parsing, URI validation, hashing, secret resolution, and the runtime mapping
+are trusted and tested, not formally verified. The core theorem still concerns
+normalized route handles. The HTTP adapter must consume `RoutedRequest`, strip
+gateway/client credential headers, construct Host from its fixed destination,
+disable redirects/proxies/retries, and retain request ownership during effects.
+DNS and TLS validation, HTTP authentication header parsing, disk logging, and
+network-level IP restrictions are not implemented here. Approved destinations may
+resolve to private IPs: this is origin confinement, not an SSRF/IP-range theorem.

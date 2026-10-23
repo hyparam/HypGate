@@ -21,16 +21,17 @@ The root grant includes the exact tenant, selector, origin, and credential tuple
 
 ## Assumptions and remaining obligations
 
-The planned HTTP shell hashes high-entropy gateway tokens with SHA-256 before
-authentication. Hashing, token provisioning, cryptographic security, and parsing
-authentication headers are not implemented or verified here. Digest comparison
+The runtime configuration layer now hashes gateway tokens with SHA-256 before
+authentication. This hashing and its cryptographic security are not verified.
+Secure token provisioning and HTTP authentication header parsing remain open. Digest comparison
 scans every byte but carries no constant-time theorem. Tests use synthetic digests.
 
 Origins and credentials are numeric handles, not URLs or secrets. The future
 transport must consume the authorized token and use the same immutable mapping
 snapshot, without accepting independent destination or credential overrides.
-URI validation, DNS, TLS, proxy/redirect disabling, header filtering, and secret
-confinement remain adapter obligations. Root-policy intent is a trusted input;
+Fixed endpoint URI validation and secret loading are now tested in the
+[configuration layer](configuration.md). DNS, TLS, proxy/redirect disabling, header
+filtering, and transport credential confinement remain adapter obligations. Root-policy intent is a trusted input;
 candidate configuration cannot enlarge that policy.
 
 Nonzero request IDs are not inherently unique. Composition with the resource

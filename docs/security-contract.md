@@ -27,10 +27,10 @@ and credential ownership mechanism must be settled before exposing an endpoint.
 | Authorization | Every upstream dispatch is justified by an authenticated principal's grant for that route and policy snapshot. Unknown identities, missing grants, and validation errors produce no dispatch. | Digest identity and tenant-scoped token issuance proved; HTTP authentication and dispatch binding remain open. |
 | Tenant isolation | A principal cannot select another tenant's credential, route grant, request state, or private audit destination. Async completion cannot attach to another live request. | Local owner/ticket checks and authenticated token tenant binding proved; global composition and audit isolation remain open. |
 | Credential confinement | Only the credential handle authorized for the tenant and exact origin may reach the secret-bearing transport operation. Gateway authentication material is never forwarded upstream; credential headers are excluded from client-visible metadata, audit metadata, and diagnostics. | Authorized handles satisfy tenant ownership and exact root grants; secret and header handling remain open. |
-| Routing integrity | Effective scheme, host, port, and route template come from validated policy, not arbitrary request fields, provider response headers, ambient proxy settings, or unvalidated configuration. | Normalized origin handles confined to root grants; URI parsing and network dispatch remain open. |
+| Routing integrity | Effective scheme, host, port, and route template come from validated policy, not arbitrary request fields, provider response headers, ambient proxy settings, or unvalidated configuration. | Normalized origin handles confined to root grants; Fixed HTTPS endpoint parsing is tested; network dispatch remains open. |
 | Security failure is closed | Authentication, authorization, destination validation, and credential selection failures never permit upstream dispatch. | Invalid core authentication/configuration cannot yield authority; actual dispatch mediation remains open. Distinct from logging policy. |
 | Logging policy | Strict mode gates write ranges on durable acknowledgments. Availability-first mode may forward without complete audit coverage but still requires all security checks. | Offset/byte gates proved conditional on truthful acknowledgments; disk guarantees remain open. |
-| Configuration confinement | For every candidate configuration, validation either rejects it or constructs routes whose tenant, origin, and credential bindings satisfy the root grants. | Proved for normalized tenant, selector, origin, and credential handles; textual configuration parsing remains open. |
+| Configuration confinement | For every candidate configuration, validation either rejects it or constructs routes whose tenant, origin, and credential bindings satisfy the root grants. | Proved for normalized tenant, selector, origin, and credential handles; textual configuration parsing is implemented and tested, not proved. |
 
 These properties cover gateway-controlled effects. An opaque body may contain a
 user-supplied secret, and an upstream may echo data it received. Preserving and
@@ -46,7 +46,9 @@ configuration, and root policy. Bind the token to the tenant, unique request
 identity, immutable policy snapshot, exact destination, and credential handle.
 Currently the token binds a nonzero request ID; uniqueness and resource ownership
 require composition with the registry. Destinations and credentials are handles;
-the adapter must preserve their immutable mapping to actual origins and secrets.
+the configuration layer now preserves their immutable mapping to actual endpoints
+and secrets in a routed request. Network dispatch must consume that wrapper.
+See [configuration](configuration.md) for tested parser scope and remaining obligations.
 Do not implement public deserialization, arbitrary constructors, or unrestricted
 cloning for the token.
 

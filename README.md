@@ -15,6 +15,8 @@ from remaining adapter obligations. The [authorization notes](docs/authorization
 describe digest authentication, tenant-scoped tokens, and configuration confinement.
 The [runtime ownership layer](docs/runtime-ownership.md) binds authorized requests
 to capacity leases; this composition is tested Rust, not yet a Verus theorem.
+The [configuration boundary](docs/configuration.md) now parses root policy and
+candidate routes, loads credentials, and binds admitted requests to fixed endpoints.
 
 See [language and verification research](docs/verification-research.md) for the
 candidate comparison, agreed scope, proposed proof obligations, and next experiment.

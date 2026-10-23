@@ -6,3 +6,7 @@ publish = false
 
 [dependencies]
 gateway-core = { path = "../gateway-core" }
+http = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"

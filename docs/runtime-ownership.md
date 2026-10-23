@@ -40,7 +40,8 @@ the disk adapter must correlate request and chunk identity before invoking them.
 Numeric request IDs are local to one admission instance and process lifetime;
 persistent log identities need a boot/session namespace. Network dispatch must
 consume the owned request and use the same immutable origin/secret snapshot as its
-authorization policy. Those mappings and the HTTP transport do not yet exist.
+authorization policy. The [configuration layer](configuration.md) now supplies those
+immutable mappings and owns the request in a routed wrapper. HTTP transport remains open.
 
 One stream currently serializes chunks. Concurrent upload/download would require
 separately owned directional streams and explicit shared budget accounting; it

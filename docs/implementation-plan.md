@@ -6,6 +6,8 @@ See the [streaming-core progress notes](streaming-core-progress.md) and
 The [runtime ownership layer](runtime-ownership.md) now ties authorization, a single
 stream, and slot release together in tested safe Rust. Composed resource proofs
 and accounting for adapter allocations remain open.
+Static JSON policy loading and immutable endpoint/credential mapping are implemented
+and tested; see [configuration](configuration.md). HTTP dispatch remains unimplemented.
 Scope: forward opaque HTTP request bodies and streaming responses, and log to disk.
 No provider translation, automatic generation replay, billing, or plugin system.
 Operators choose strict durable logging or forwarding with degraded audit coverage.
