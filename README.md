@@ -6,6 +6,9 @@ responses back, and record traffic to disk. No provider API translation.
 Status: early Rust and Verus experiments with machine-checked policy and byte-level
 invariants. No production gateway or end-to-end guarantees yet.
 
+The [implementation milestones](docs/implementation-plan.md) are the active plan,
+starting with a bounded chunk interface and verified partial-write accounting.
+
 See [language and verification research](docs/verification-research.md) for the
 candidate comparison, agreed scope, proposed proof obligations, and next experiment.
 
