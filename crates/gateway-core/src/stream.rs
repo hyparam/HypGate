@@ -29,6 +29,15 @@ impl Ticket {
 }
 
 impl StreamChunk {
+    // Read-only payload view for the logger; transport still needs a write ticket.
+    pub fn log_bytes(&self) -> (out: &[u8])
+        ensures out@ == self.body(),
+    { self.bytes.as_slice() }
+
+    pub fn is_closed(&self) -> (out: bool)
+        ensures out == self.closed(),
+    { self.closed }
+
     pub closed spec fn valid(&self) -> bool {
         self.sent <= self.offered <= self.bytes.len()
         && self.bytes.len() <= self.capacity

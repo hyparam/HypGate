@@ -19,6 +19,8 @@ The [configuration boundary](docs/configuration.md) now parses root policy and
 candidate routes, loads credentials, and binds admitted requests to fixed endpoints.
 The [HTTP metadata boundary](docs/http-boundary.md) validates gateway authentication
 and prepares fixed upstream requests with filtered headers; no network dispatch yet.
+The [async transfer driver](docs/async-transfer.md) connects the stream core to Tokio
+reads/writes and an explicit durable-log contract, with cancellation tests.
 
 See [language and verification research](docs/verification-research.md) for the
 candidate comparison, agreed scope, proposed proof obligations, and next experiment.
@@ -45,6 +47,6 @@ cargo verus verify -p gateway-core --locked -- --triggers-mode silent
 VERUS=/path/to/verus python3 scripts/check_mutations.py
 ```
 
-Validation on 2026-10-23: 34 core verification checks passed, six integration tests
-passed, and all 19 deliberate mutations failed their proof obligations.
+Validation on 2026-10-23: 36 core verification checks passed, 30 workspace tests
+passed, and all 21 deliberate mutations failed their proof obligations.
 These counts are checks, not a count of independent security guarantees.

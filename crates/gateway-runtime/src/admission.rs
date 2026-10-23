@@ -39,6 +39,8 @@ impl Drop for Lease<'_> {
 pub struct Request<'a> {
     authorized: AuthorizedRequest<'a>,
     stream: StreamChunk,
+    capacity: usize,
+    log_failed: bool,
     lease: Lease<'a>,
 }
 
@@ -60,7 +62,7 @@ impl Admission {
             .ok_or(AdmissionError::Unauthorized)?;
         let stream = StreamChunk::new(lease.key.owner(), Vec::new(), capacity, self.strict)
             .expect("empty chunk fits every capacity");
-        Ok(Request { authorized, stream, lease })
+        Ok(Request { authorized, stream, capacity, log_failed: false, lease })
     }
 }
 
@@ -74,6 +76,11 @@ impl<'a> Request<'a> {
     pub fn tenant_id(&self) -> u64 { self.authorized.tenant_id() }
     pub fn origin(&self) -> usize { self.authorized.origin() }
     pub fn credential(&self) -> usize { self.authorized.credential() }
+    pub(crate) fn capacity(&self) -> usize { self.capacity }
+    pub(crate) fn is_closed(&self) -> bool { self.stream.is_closed() }
+    pub(crate) fn log_bytes(&self) -> &[u8] { self.stream.log_bytes() }
+    pub(crate) fn log_failed(&self) -> bool { self.log_failed }
+    pub(crate) fn strict(&self) -> bool { self.lease.admission.strict }
 
     pub fn advance(&mut self, bytes: Vec<u8>) -> Option<u64> { self.stream.advance(bytes) }
     pub fn acknowledge(&mut self, chunk: u64, end: usize) -> bool {
@@ -91,5 +98,5 @@ impl<'a> Request<'a> {
         self.stream.complete(&ticket.core, count)
     }
     pub fn cancel(&mut self) { self.stream.cancel(); }
-    pub fn fail_log(&mut self) { self.stream.fail_log(); }
+    pub fn fail_log(&mut self) { self.log_failed = true; self.stream.fail_log(); }
 }
