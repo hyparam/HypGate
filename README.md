@@ -7,6 +7,29 @@ Status: a runnable prototype with Verus-checked authorization, configuration,
 streaming, and resource invariants. The network and disk adapters are tested;
 end-to-end formal guarantees and production hardening remain incomplete.
 
+## Why verify an AI gateway?
+
+For companies that depend on AI, the gateway is among their most critical pieces
+of infrastructure. It sits in the hot path of every AI request routed through it:
+if the gateway goes down, that AI work stops until failover or recovery. It also
+handles highly sensitive data, including proprietary code, customer information,
+internal prompts, and provider credentials. A compromise can expose that data or
+turn a shared gateway into a path across tenant boundaries.
+
+These risks are concrete. LiteLLM documented a
+[March 2026 supply-chain compromise](https://docs.litellm.ai/blog/security-townhall-updates)
+affecting its published Python packages, following compromise of a dependency in
+its release pipeline. That incident highlights the trust placed in gateway
+software and the importance of securing how it is built and delivered.
+
+Formal verification can help make this critical infrastructure more trustworthy:
+prove authorization, isolation, byte integrity, and resource invariants across all
+states covered by explicit models, rather than relying only on tested examples.
+This project keeps the gateway small enough to make those proofs practical.
+Proofs complement fault testing, operational redundancy, and secure builds; they
+do not by themselves prevent a compromised release pipeline from shipping different
+code. The proof targets and remaining trust assumptions are listed below.
+
 ## Important properties we aim to prove
 
 These are the project's proof targets, not a claim that the whole gateway already
