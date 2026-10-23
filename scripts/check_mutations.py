@@ -15,6 +15,10 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("framing.rs", "decode_wrong_request", "let request = u64_from_le_bytes(slice_subrange(bytes, 16, 24));", "let request = u64_from_le_bytes(slice_subrange(bytes, 8, 16));"),
+    ("framing.rs", "unbounded_payload", "if payload > 1048576 || request == 0 || direction > 1", "if request == 0 || direction > 1"),
+    ("framing.rs", "accept_incomplete_frame", "available < length || ", ""),
+    ("framing.rs", "skip_frame_byte", "Some(start + length)", "Some(start + length - 1)"),
     ("journal.rs", "ack_before_sync", " || self.durable < t.end", ""),
     ("journal.rs", "replace_pending_append", "self.failed || self.pending != 0 || length == 0", "self.failed || length == 0"),
     ("journal.rs", "wrong_record_length", " || bytes.len() as u64 != t.end - t.start", ""),

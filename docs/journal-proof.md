@@ -42,13 +42,14 @@ tickets from different journal instances with identical offsets. File/session
 ownership is an adapter obligation. Storage must preserve previously synced bytes.
 
 This proves acknowledgment ordering and conditional byte-prefix survival, not
-complete crash-safe logging. Formal framing/scanner refinement, a deployment
-filesystem crash contract, process-kill experiments, and record-identity/stream-ack
-composition remain open. No `assume` or external-body escape was introduced.
+complete crash-safe logging. [Header and frame-extent proofs](framing-proof.md),
+a documented [storage contract](storage-crash-contract.md), and process-kill
+experiments now exist. Full scanner refinement, storage-stack validation, and
+record-identity/stream-ack composition remain open. No `assume` or external-body escape was introduced.
 
 ## Validation
 
-The combined core passes 43 Verus checks and all 53 workspace tests pass. All 25
-deliberate mutations fail proof obligations. Four new mutations remove the sync
+The combined core passes 48 Verus checks and all 61 workspace tests pass. All 29
+deliberate mutations fail proof obligations. Four journal mutations remove the sync
 gate, replace a pending append, accept the wrong frame length, or regress the stable
 prefix. CI checks the same production sources and pinned toolchain.

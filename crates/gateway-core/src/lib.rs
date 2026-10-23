@@ -7,3 +7,4 @@ pub mod resource;
 pub mod stream;
 pub mod policy;
 pub mod journal;
+pub mod framing;

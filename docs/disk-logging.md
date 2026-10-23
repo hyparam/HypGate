@@ -1,8 +1,9 @@
 # Bounded disk logger and recovery scanner
 
 Status: the [journal acknowledgment state machine](journal-proof.md) is now formally
-verified and used by the disk worker. The filesystem adapter and scanner remain
-tested rather than verified. The production HTTP server integrates this logger.
+verified and used by the disk worker. The [framing core](framing-proof.md) verifies
+header encoding/decoding and frame extents. Filesystem operations, checksums, and
+the complete scanner loop remain tested rather than verified. The production HTTP server integrates this logger.
 
 `DiskLog::create` creates a new operator-selected file and never overwrites or
 appends to an existing path. On Unix the requested mode is 0600. Startup writes a

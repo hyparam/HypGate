@@ -2,13 +2,13 @@
 //! not verified. A single worker owns the file; requests never choose its path.
 use crate::transfer::{AuditLog, Direction, LogRecord};
 use gateway_core::journal::Journal;
+use gateway_core::framing::{self, Header};
 use sha2::{Digest, Sha256};
 use std::{fs::{File, OpenOptions}, io::{self, Read, Write}, path::Path,
     sync::{Arc, atomic::{AtomicBool, Ordering}}, time::Duration};
 use tokio::sync::{mpsc, oneshot};
 
 const FILE_MAGIC: &[u8; 8] = b"SGLOG001";
-const RECORD_MAGIC: &[u8; 4] = b"SGR1";
 const FILE_HEADER: usize = 56; // magic + random session ID + checksum
 const RECORD_HEADER: usize = 33; // magic + length + tenant + request + chunk + direction
 pub const MAX_RECORD_BYTES: usize = 1024 * 1024;
@@ -112,13 +112,12 @@ impl AuditLog for DiskLog {
 }
 
 fn encode(record: LogRecord<'_>) -> Vec<u8> {
-    let mut frame = Vec::with_capacity(RECORD_HEADER + record.bytes.len() + 32);
-    frame.extend_from_slice(RECORD_MAGIC);
-    frame.extend_from_slice(&(record.bytes.len() as u32).to_le_bytes());
-    frame.extend_from_slice(&record.tenant.to_le_bytes());
-    frame.extend_from_slice(&record.request.to_le_bytes());
-    frame.extend_from_slice(&record.chunk.to_le_bytes());
-    frame.push(match record.direction { Direction::Upload => 0, Direction::Download => 1 });
+    // append checked the record bounds before queue reservation/allocation.
+    let mut frame = framing::encode(Header { payload: record.bytes.len() as u32,
+        tenant: record.tenant, request: record.request, chunk: record.chunk,
+        direction: match record.direction { Direction::Upload => 0, Direction::Download => 1 },
+    }).expect("validated log record");
+    frame.reserve(record.bytes.len() + 32);
     frame.extend_from_slice(record.bytes);
     frame.extend_from_slice(&Sha256::digest(&frame));
     frame
@@ -164,24 +163,20 @@ impl<R: Read> LogReader<R> {
             }
         }
         exact(&mut self.reader, &mut header[1..])?;
-        let size = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
-        if &header[..4] != RECORD_MAGIC || size > MAX_RECORD_BYTES || header[32] > 1 {
-            return Err(ScanError::Corrupt);
-        }
+        let fields = framing::decode(&header).ok_or(ScanError::Corrupt)?;
+        let size = fields.payload as usize;
         let mut bytes = vec![0; size];
         exact(&mut self.reader, &mut bytes)?;
         let mut checksum = [0u8; 32];
         exact(&mut self.reader, &mut checksum)?;
         let mut digest = Sha256::new(); digest.update(header); digest.update(&bytes);
         if digest.finalize()[..] != checksum { return Err(ScanError::Corrupt); }
-        let request = u64::from_le_bytes(header[16..24].try_into().unwrap());
-        if request == 0 { return Err(ScanError::Corrupt); }
-        self.valid_end = self.valid_end.checked_add((RECORD_HEADER + size + 32) as u64).ok_or(ScanError::Corrupt)?;
+        self.valid_end = framing::frame_end(self.valid_end, fields.payload,
+            (header.len() + bytes.len() + checksum.len()) as u64).ok_or(ScanError::Corrupt)?;
         self.stopped = false;
         Ok(Some(StoredRecord {
-            tenant: u64::from_le_bytes(header[8..16].try_into().unwrap()), request,
-            chunk: u64::from_le_bytes(header[24..32].try_into().unwrap()),
-            direction: if header[32] == 0 { Direction::Upload } else { Direction::Download }, bytes,
+            tenant: fields.tenant, request: fields.request, chunk: fields.chunk,
+            direction: if fields.direction == 0 { Direction::Upload } else { Direction::Download }, bytes,
         }))
     }
 }
