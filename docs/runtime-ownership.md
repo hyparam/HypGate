@@ -6,7 +6,8 @@ stream transitions; their proofs do not automatically verify this composition.
 
 An `Admission` owns an immutable policy and a mutex-protected registry. `admit`
 authenticates a digest, reserves a slot, authorizes a tenant-scoped route using the
-new request ID, and constructs exactly one initially empty stream. A denied route
+new request ID, and calls the verified `authorized_stream` constructor for its
+initially empty stream. A denied route
 returns its reservation. Registry poisoning rejects new requests.
 
 The returned `Request` privately owns its authorization token, stream, and lease.
@@ -20,6 +21,26 @@ Runtime write tickets additionally borrow their admission instance. Pointer iden
 rejects tickets from another registry even when both registries issue the same
 numeric request ID. The borrowed payload cannot outlive its request; stale tickets
 can outlive the request but cannot expose bytes or advance a replacement request.
+
+## Verified initial composition
+
+`ResourceAdmission::authorized_stream` requires a valid authorization token and
+registry. It rejects a key whose request ID differs from the token, whose slot is
+not live, or whose initial stream has already been claimed. The key has a private,
+non-cloneable claimed bit. Successful construction proves stream validity, matching
+owner/token/key IDs, empty payload, the registry's per-request capacity, and the
+requested logging mode. The key's identity and slot remain unchanged. A failed
+construction leaves the key unchanged, allowing the correct token to be used later.
+The runtime creates its stream through this path after policy authorization.
+
+This is an initial composition theorem, not a proof of the whole Rust wrapper.
+Keys must remain scoped to their registry; identical numeric slots and IDs in
+independent registries are not globally distinct. The runtime lease binds that
+identity by ownership. The core still exposes lower-level constructors for other
+verified callers, so arbitrary trusted embedding code could bypass this path.
+Drop order, async effects, release timing, and whole-process budgets remain
+separate obligations. No proof claims that a slot cannot be released while an
+independently retained stream exists; the runtime wrapper prevents that extraction.
 
 ## Evidence and remaining gaps
 

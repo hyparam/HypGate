@@ -52,7 +52,7 @@ impl Admission {
 
     pub fn admit(&self, digest: &[u8], selector: u64) -> Result<Request<'_>, AdmissionError> {
         let identity = self.policy.authenticate(digest).ok_or(AdmissionError::Unauthorized)?;
-        let (lease, capacity) = {
+        let (mut lease, capacity) = {
             let mut registry = self.registry.lock().map_err(|_| AdmissionError::Unavailable)?;
             let key = registry.acquire().ok_or(AdmissionError::AtCapacity)?;
             let capacity = registry.capacity(&key).expect("fresh registry key");
@@ -61,8 +61,11 @@ impl Admission {
         // Any early return drops the lease, including failed route authorization.
         let authorized = identity.authorize(selector, lease.key.owner())
             .ok_or(AdmissionError::Unauthorized)?;
-        let stream = StreamChunk::new(lease.key.owner(), Vec::new(), capacity, self.strict)
-            .expect("empty chunk fits every capacity");
+        let stream = {
+            let registry = self.registry.lock().map_err(|_| AdmissionError::Unavailable)?;
+            registry.authorized_stream(&mut lease.key, &authorized, self.strict)
+                .ok_or(AdmissionError::Unavailable)?
+        };
         Ok(Request { authorized, stream, capacity, log_failed: false, lease })
     }
 }

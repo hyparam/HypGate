@@ -43,7 +43,8 @@ The [security contract](docs/security-contract.md) separates proved core propert
 from remaining adapter obligations. The [authorization notes](docs/authorization-core.md)
 describe digest authentication, tenant-scoped tokens, and configuration confinement.
 The [runtime ownership layer](docs/runtime-ownership.md) binds authorized requests
-to capacity leases; this composition is tested Rust, not yet a Verus theorem.
+to capacity leases. Initial stream creation is now verified against the authority
+and live slot; async ownership and release composition remain tested Rust.
 The [configuration boundary](docs/configuration.md) now parses root policy and
 candidate routes, loads credentials, and binds admitted requests to fixed endpoints.
 The [HTTP metadata boundary](docs/http-boundary.md) validates gateway authentication
@@ -92,8 +93,8 @@ cargo verus verify -p gateway-core --locked -- --triggers-mode silent
 VERUS=/path/to/verus python3 scripts/check_mutations.py
 ```
 
-Validation on 2026-10-23: 53 core verification checks passed, 72 workspace tests
-passed, and all 34 deliberate mutations failed their proof obligations.
+Validation on 2026-10-23: 54 core verification checks passed, 73 workspace tests
+passed, and all 37 deliberate mutations failed their proof obligations.
 These counts are checks, not a count of independent security guarantees.
 
 [GitHub Actions CI](.github/workflows/ci.yml) runs on pushes, pull requests, and

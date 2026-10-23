@@ -15,6 +15,9 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("resource.rs", "bind_wrong_authority", " || key.id != authority.request_id()", ""),
+    ("resource.rs", "duplicate_admitted_stream", "if key.stream_claimed || ", "if "),
+    ("resource.rs", "wrong_stream_owner", "StreamChunk::new(key.id, Vec::new(), capacity, strict)", "StreamChunk::new(0, Vec::new(), capacity, strict)"),
     ("stream.rs", "discard_unsent_payload", " || self.bytes.len() != self.sent", ""),
     ("stream.rs", "retain_completed_payload", "self.bytes = Vec::new();", ""),
     ("framing.rs", "restart_stopped_scan", "if self.stopped { return None; }", "if false { return None; }"),

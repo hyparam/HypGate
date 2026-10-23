@@ -1,9 +1,11 @@
 use vstd::prelude::*;
+use crate::policy::AuthorizedRequest;
+use crate::stream::StreamChunk;
 
 verus! {
 
 // Keys are scoped to one ResourceAdmission instance. Production will use one registry.
-pub struct RequestKey { slot: usize, id: u64 }
+pub struct RequestKey { slot: usize, id: u64, stream_claimed: bool }
 pub struct ResourceAdmission {
     slots: Vec<u64>,
     next: u64,
@@ -11,6 +13,7 @@ pub struct ResourceAdmission {
 }
 
 impl RequestKey {
+    pub closed spec fn stream_claimed(&self) -> bool { self.stream_claimed }
     pub closed spec fn slot(&self) -> nat { self.slot as nat }
     pub closed spec fn id(&self) -> u64 { self.id }
     pub fn owner(&self) -> (out: u64)
@@ -53,7 +56,7 @@ impl ResourceAdmission {
         ensures final(self).valid(), final(self).limit() == old(self).limit(),
             final(self).per_request() == old(self).per_request(),
             match out {
-                Some(key) => final(self).owns(&key) && key.id() == old(self).next_id()
+                Some(key) => final(self).owns(&key) && !key.stream_claimed() && key.id() == old(self).next_id()
                     && final(self).next_id() == old(self).next_id() + 1
                     && old(self).entries()[key.slot() as int] == 0
                     && (forall|i: int| 0 <= i < old(self).limit() && i != key.slot()
@@ -72,7 +75,7 @@ impl ResourceAdmission {
                 let id = self.next;
                 self.slots.set(i, id);
                 self.next = self.next + 1;
-                return Some(RequestKey { slot: i, id });
+                return Some(RequestKey { slot: i, id, stream_claimed: false });
             }
             i = i + 1;
         }
@@ -90,6 +93,31 @@ impl ResourceAdmission {
             return None;
         }
         Some(self.per_request)
+    }
+
+    // One initial stream per reserved key, bound to the authorized request ID.
+    pub fn authorized_stream(&self, key: &mut RequestKey, authority: &AuthorizedRequest, strict: bool)
+        -> (out: Option<StreamChunk>)
+        requires self.valid(), authority.valid(),
+        ensures final(key).slot() == old(key).slot(), final(key).id() == old(key).id(),
+            match out {
+                Some(stream) => self.owns(final(key)) && !old(key).stream_claimed()
+                    && final(key).stream_claimed() && stream.valid()
+                    && stream.owner() == authority.request() && stream.owner() == final(key).id()
+                    && stream.capacity() == self.per_request() && stream.body().len() == 0
+                    && stream.strict() == strict && !stream.closed() && !stream.pending(),
+                None => *final(key) == *old(key),
+            },
+    {
+        if key.stream_claimed || key.id != authority.request_id() { return None; }
+        match self.capacity(key) {
+            Some(capacity) => {
+                let stream = StreamChunk::new(key.id, Vec::new(), capacity, strict);
+                key.stream_claimed = true;
+                stream
+            },
+            None => None,
+        }
     }
 
     // The adapter must stop and dispose of request work before returning its credit.
