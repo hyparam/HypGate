@@ -622,6 +622,40 @@ new byte, and leaves zero queued ciphertext. This validates the guarded
 interleaving and recovery without depending on OS socket-buffer saturation;
 it does not enumerate all TLS control paths or prove an allocation bound.
 
+### Established-connection control paths
+
+The remaining read-side paths must be separated from plaintext writes. In the
+pinned TCP client state machines, the post-handshake branches are:
+
+| Incoming event | Output effect and limiting mechanism |
+| --- | --- |
+| TLS 1.3 application data | Stores plaintext and resets the consecutive key-update counter; emits no control response. |
+| TLS 1.3 NewSessionTicket | Inserts a session in the bounded shared cache; emits no response. Ticket parsing/insertion allocations remain accounted separately. |
+| TLS 1.3 KeyUpdate | May populate the single pending notification slot. `should_update_key` refuses to create another notification while that slot is occupied; this does not by itself limit already queued records. |
+| TLS 1.2 application data | Stores plaintext; emits no control response. |
+| TLS 1.2 HelloRequest | `process_main_protocol` checks the one-request renegotiation allowance before emitting `NoRenegotiation`. A second request errors before another warning is emitted. |
+| Peer close notification | `process_alert` marks received closure without emitting a reply. `process_new_packets` stops processing subsequent records after closure. Local shutdown is a separate path. |
+| Accepted peer warning | Consumes the four-warning allowance and emits no reply. Disallowed TLS 1.3 warnings may instead generate a fatal alert. |
+| Malformed/unexpected message | May enqueue a fatal alert; `process_new_packets` stores its error state. Subsequent calls return the stored error without reprocessing messages. |
+
+Source anchors are `client/tls13.rs::ExpectTraffic`,
+`client/tls12.rs::ExpectTraffic`, `CommonState::process_main_protocol`,
+`CommonState::process_alert`, and `ConnectionCore::process_new_packets`.
+In particular, `queue_tls_message` first transfers a pending key-update reply,
+so a fatal alert can add both that reply and its own record while output is
+stalled. The guard does not promise that read polls never grow the output queue.
+
+Local `send_close_notify` suppresses duplicate close notifications using
+`sent_fatal_alert`; tokio-rustls shutdown invokes it separately from reads.
+Automatic traffic-key refresh also has a separate output path:
+`ConnectionCommon::send_plaintext` invokes `maybe_refresh_traffic_keys`, which
+can emit a key-update request between application records. The gateway does not
+call manual refresh, but automatic refresh cannot be omitted from accounting.
+These finite state-machine paths narrow the remaining queue composition work;
+they are a source audit, not a proved sum of capacities. Initial handshake output,
+automatic refresh, alert/reply overlap, fragment storage and descriptor growth
+still need a combined bound before declaring TLS allocation accounting complete.
+
 ## Shared TLS session storage
 
 `HttpsTransport` explicitly selects `Resumption::in_memory_sessions(256)` and

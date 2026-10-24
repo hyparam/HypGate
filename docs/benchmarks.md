@@ -284,3 +284,12 @@ measurements, not a controlled performance comparison with previous runs.
 Both remained within this workload's observed range through the final waves.
 This does not establish leak freedom, adversarial-input bounds, or allocator/OS
 memory limits; the dependency and lifetime accounting obligations still apply.
+
+After the TLS drain-before-write safeguard, both healthy release TLS/disk
+workloads passed locally at `75190d0` on 2026-10-23. Each forwarded 32 requests
+at concurrency eight, with 8 KiB uploads and 64 KiB responses, zero rejections,
+and zero audit gaps. Strict mode completed in 1.302 seconds (24.58 requests/s,
+110.72 ms first-byte p95); availability mode completed in 1.314 seconds
+(24.35 requests/s, 115.79 ms first-byte p95). Exact payload/audit checks passed.
+This validates healthy operation after the scheduling change; it is not a
+controlled before/after performance comparison or a latency guarantee.
