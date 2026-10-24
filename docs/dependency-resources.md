@@ -594,6 +594,24 @@ permit equivalent repeated interleavings, including empty peer application
 records, or enforce an explicit queue bound at the TLS adapter. The consecutive
 key-update counter alone cannot discharge that obligation.
 
+The production HTTP transport now wraps the established TLS stream in
+`DrainBeforeWrite`. Both scalar and vectored plaintext writes first poll the
+TLS stream's flush and propagate pending/error without invoking its writer.
+In pinned tokio-rustls, flush drains `sendable_tls` without transferring the
+pending key-update slot. Thus a blocked ciphertext drain prevents successive
+plaintext-write calls from moving additional replies into that queue. Reads
+remain available while writes are blocked, preserving full-duplex progress.
+The adapter retains vectored writes and does not allocate a staging buffer.
+
+The adapter test covers repeated stalled scalar/vectored attempts, concurrent
+read progress, successful resumption, and flush-error propagation. Existing
+real TLS exchange tests exercise its production placement. This closes the
+specific repeated-write enqueue path demonstrated above, not the full TLS heap
+accounting obligation: direct control appends during reads, handshake state,
+record capacities/overhead, and maximum transient allocations still need
+composition. A hostile real-TLS stalled-output test of the wrapper remains to
+be added; the current counterexample exercises unguarded rustls directly.
+
 ## Shared TLS session storage
 
 `HttpsTransport` explicitly selects `Resumption::in_memory_sessions(256)` and

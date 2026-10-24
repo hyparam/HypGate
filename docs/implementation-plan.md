@@ -79,8 +79,9 @@ not milestone completion: multi-chunk scheduling and global resource budgets fol
 
 TLS control-queue follow-up: the dependency-level alternating key-update/data
 experiment exceeds the application buffer limit by 81,000 control bytes.
-Production scheduling reachability or adapter enforcement remains part of
-milestone 1; see [the resource audit](dependency-resources.md#control-traffic-is-not-covered-by-the-application-buffer-limit).
+The production TLS adapter now drains queued ciphertext before scalar/vectored
+plaintext writes, preventing repeated enqueue during stalled output. Full TLS
+allocation composition and hostile TLS adapter validation remain in milestone 1; see [the resource audit](dependency-resources.md#control-traffic-is-not-covered-by-the-application-buffer-limit).
 
 ## 2. Minimal working gateway
 
