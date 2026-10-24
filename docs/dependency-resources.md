@@ -62,6 +62,41 @@ any body is polled. The queue strategy additionally stops at 16 encoded buffers.
 These limits bound pending output, not all retained contents: a partially consumed
 queued Bytes still owns its complete original allocation.
 
+For the production **streaming** path, let H = 32768 and F = 16384. Inspection of
+`dispatch.rs::poll_write`, `conn.rs::{write_body,write_body_and_end,end_body}`,
+`encode.rs`, and `common/buf.rs::BufList::advance` gives these conditional bounds:
+
+| Quantity per Hyper writer | Source-derived bound | Scope |
+| --- | --- | --- |
+| Queued encoded body descriptors | 16 | `can_buffer` checks the count before the dispatcher obtains another body frame; each encode/end operation appends one descriptor. The serialized head is separate. |
+| Remaining encoded body bytes | H + F + 13 = 49,165 | One append may cross H. Ordinary chunk framing adds at most eight bytes; 13 also covers the combined chunk/end form. A standalone end marker is five bytes. |
+| Original payload bytes retained by those descriptors | H + 2F + 13 = 65,549, and at most 16F | Fully consumed front descriptors are immediately popped. Only the front can retain a consumed payload prefix, adding at most F beyond remaining bytes. |
+| Original payload bytes including our mailbox | min(17F, H + 3F + 13) = 81,933 | One additional application frame can wait outside Hyper. This term overlaps the existing application-channel budget and must not be added twice. |
+
+The queued flush path uses `chunks_vectored` followed by `advance`; it does not
+invoke `BufList::copy_to_bytes`, whose fallback would allocate copied storage.
+The 64-entry IoSlice array is fixed stack scratch and borrows existing buffers.
+
+These are payload/descriptor bounds under the pinned source behavior, not Verus
+proofs or allocator-byte bounds. They rely on opaque copied frames no larger than
+F, queue mode, no trailers/pipelining, and one exchange per connection. Forwarded
+Content-Length is removed by both header allowlists, so streamed output uses
+chunked or close-delimited encoding rather than `BufKind::Limited` retaining an
+unused suffix. Reintroducing Content-Length or arbitrary shared Bytes owners
+requires revisiting this argument. Generated fixed responses have a separate
+size obligation. Descriptor ABI size, VecDeque spare capacity/growth overlap,
+Bytes ownership metadata, serialized-head capacity, and allocator overhead remain
+outside these numeric payload bounds.
+
+`queued_hyper_partial_writes_bound_original_payload_owners` tracks destruction of
+original buffers through the real queued client dispatcher. It repeatedly grants
+zero, one, fractional-frame, and crossing-frame write budgets, for 1-, 1024-, and
+16384-byte frames. Over 64 rounds, cumulative traffic exceeds the bound while live
+original payloads remain below it; canceling releases every tracked owner. The
+probe counts original payload lengths, not only remaining Bytes views, so partial
+front-buffer retention is visible. This is regression evidence for the audited
+argument, not a measurement of total heap or RSS.
+
 The unused flatten mode has another distinction. `Cursor<Vec<u8>>::maybe_unshift` removes
 consumed prefix bytes only when spare capacity cannot fit the next encoded frame.
 The vector can therefore retain already-written bytes alongside remaining output;

@@ -177,6 +177,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn queued_hyper_partial_writes_bound_original_payload_owners() {
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        struct Payload { bytes: Vec<u8>, live: Arc<AtomicUsize> }
+        impl AsRef<[u8]> for Payload { fn as_ref(&self) -> &[u8] { &self.bytes } }
+        impl Drop for Payload { fn drop(&mut self) { self.live.fetch_sub(self.bytes.len(), Ordering::SeqCst); } }
+        struct BudgetIo(Arc<AtomicUsize>);
+        impl AsyncRead for BudgetIo {
+            fn poll_read(self: Pin<&mut Self>, _: &mut Context<'_>, _: &mut ReadBuf<'_>) -> Poll<io::Result<()>> { Poll::Pending }
+        }
+        impl AsyncWrite for BudgetIo {
+            fn poll_write(self: Pin<&mut Self>, _: &mut Context<'_>, bytes: &[u8]) -> Poll<io::Result<usize>> {
+                let n = bytes.len().min(self.0.load(Ordering::SeqCst));
+                if n == 0 { return Poll::Pending; }
+                self.0.fetch_sub(n, Ordering::SeqCst);
+                Poll::Ready(Ok(n))
+            }
+            fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> { Poll::Ready(Ok(())) }
+            fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> { Poll::Ready(Ok(())) }
+        }
+        for frame_size in [1, 1024, 16384] {
+            let budget = Arc::new(AtomicUsize::new(0));
+            let live = Arc::new(AtomicUsize::new(0));
+            let (mut sender, connection) = hyper::client::conn::http1::Builder::new().writev(true)
+                .max_buf_size(MAX_INPUT_FRAME).handshake(hyper_util::rt::TokioIo::new(BudgetIo(budget.clone()))).await.unwrap();
+            let (mut writer, body) = channel(frame_size);
+            let mut response = Box::pin(sender.send_request(http::Request::post("/").body(body).unwrap()));
+            let mut connection = Box::pin(connection);
+            let mut cx = Context::from_waker(std::task::Waker::noop());
+            // Queue threshold + crossing frame + partially consumed front owner
+            // + application mailbox. 13 covers even a combined chunk/end suffix.
+            let ceiling = (17 * frame_size).min(MAX_INPUT_FRAME + 3 * frame_size + 13);
+            let mut accepted = 0;
+            let mut peak = 0;
+            for round in 0..64 {
+                budget.store([0, 1, frame_size / 2, frame_size - 1, frame_size + 17][round % 5], Ordering::SeqCst);
+                for _ in 0..48 {
+                    tokio::task::yield_now().await;
+                    assert!(response.as_mut().poll(&mut cx).is_pending());
+                    assert!(connection.as_mut().poll(&mut cx).is_pending());
+                    match writer.sender.poll_send_with(&mut cx, || {
+                        live.fetch_add(frame_size, Ordering::SeqCst);
+                        Message::Data(Bytes::from_owner(Payload { bytes: vec![42; frame_size], live: live.clone() }))
+                    }) {
+                        Poll::Ready(Ok(())) => accepted += frame_size,
+                        Poll::Pending => {},
+                        Poll::Ready(Err(())) => panic!("unexpected channel closure"),
+                    }
+                    let retained = live.load(Ordering::SeqCst);
+                    peak = peak.max(retained);
+                    assert!(retained <= ceiling, "frame={frame_size}, retained={retained}, ceiling={ceiling}");
+                }
+            }
+            assert!(accepted > ceiling, "must exercise replacement, not just initial fill");
+            assert!(peak > frame_size);
+            drop(connection); drop(response); drop(sender); drop(writer);
+            assert_eq!(live.load(Ordering::SeqCst), 0, "all payload owners released on cancellation");
+        }
+    }
+
+    #[tokio::test]
     async fn canceled_sender_is_an_error_not_successful_eof() {
         let (mut writer, mut body) = channel(2);
         assert_eq!(writer.write(b"abcd").await.unwrap(), 2);
