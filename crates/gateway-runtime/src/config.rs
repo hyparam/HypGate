@@ -53,6 +53,7 @@ enum Logging { Strict, Availability }
 struct Credential { kind: CredentialKind, value: HeaderValue }
 
 pub struct GatewayConfig {
+    chunk_bytes: usize,
     admission: Admission,
     destinations: Vec<Uri>,
     credentials: Vec<Credential>,
@@ -107,6 +108,7 @@ fn digest(text: &str) -> Result<Vec<u8>, ConfigError> {
 }
 
 impl GatewayConfig {
+    pub fn chunk_bytes(&self) -> usize { self.chunk_bytes }
     pub(crate) fn admission_healthy(&self) -> bool { self.admission.healthy() }
     #[cfg(test)]
     pub(crate) fn poison_admission_for_test(&self) { self.admission.poison_for_test(); }
@@ -147,7 +149,7 @@ impl GatewayConfig {
             value.set_sensitive(true);
             credentials.push(Credential { kind: input.kind, value });
         }
-        Ok(Self { admission: Admission::new(policy, root.limits.requests, root.limits.chunk_bytes,
+        Ok(Self { chunk_bytes: root.limits.chunk_bytes, admission: Admission::new(policy, root.limits.requests, root.limits.chunk_bytes,
             matches!(root.logging, Logging::Strict)), destinations, credentials })
     }
 

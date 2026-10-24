@@ -26,3 +26,21 @@ fn frame_queue_preserves_records_and_completion_associations_through_rejection_a
     assert_eq!(queue.len(), 0); assert!(queue.pop().is_none());
     assert!(queue.push(returned).is_err()); assert!(queue.is_closed());
 }
+
+#[test]
+fn configured_payload_limit_rejects_oversize_without_losing_capacity_or_identity() {
+    for limit in [0, 1, 32768, 1048576] {
+        let mut queue = FrameQueue::with_payload_limit(1, limit);
+        if limit < 1048576 {
+            let extra = frame(&vec![7; limit + 1], 9);
+            let original = extra.bytes().clone();
+            let (returned, completion) = queue.push((extra, 99)).err().unwrap();
+            assert_eq!(returned.bytes(), &original); assert_eq!(completion, 99);
+            assert_eq!(queue.len(), 0); assert!(!queue.is_closed());
+        }
+        assert!(queue.push((frame(&vec![8; limit], 10), 100)).is_ok());
+        let (record, completion) = queue.pop().unwrap();
+        assert_eq!(record.bytes().len(), limit + 65); assert_eq!(completion, 100);
+        queue.close(); assert!(queue.push((record, completion)).is_err());
+    }
+}

@@ -15,7 +15,7 @@ async fn strict_transfer_and_real_disk_records_have_identical_payloads() {
     let admission = Admission::new(policy, 1, 3, true);
     let mut request = admission.admit(&[11; 32], 7).unwrap();
     let dir = TempDir::new(); let path = dir.0.join("transfer.log");
-    let mut log = DiskLog::create(&path, 1, Duration::from_secs(5)).unwrap();
+    let mut log = DiskLog::create_with_payload_limit(&path, 1, Duration::from_secs(5), 3).unwrap();
     let input = b"data: hello\n\ndata: [DONE]\n\n";
     let mut output = Vec::new();
     let stats = copy_body(&mut request, &mut &input[..], &mut output, &mut log, Direction::Download).await.unwrap();
@@ -435,4 +435,26 @@ async fn canceling_append_callers_does_not_release_queued_or_active_frame_credit
         assert_eq!(*bytes.lock().unwrap(), expected);
         assert_eq!(syncs.load(Ordering::Relaxed), 3);
     }).await.unwrap();
+}
+
+#[tokio::test]
+async fn configured_record_limit_is_shared_by_clones_and_rejects_before_queueing() {
+    let dir = TempDir::new(); let path = dir.0.join("limited.log");
+    for invalid in [0, MAX_RECORD_BYTES + 1] {
+        assert!(matches!(DiskLog::create_with_payload_limit(&path, 1, Duration::from_secs(5), invalid),
+            Err(error) if error.kind() == io::ErrorKind::InvalidInput));
+        assert!(!path.exists());
+    }
+    let log = DiskLog::create_with_payload_limit(&path, 1, Duration::from_secs(5), 3).unwrap();
+    let mut clone = log.clone();
+    assert!(matches!(clone.append(record(b"four", 1)).await,
+        Err(error) if error.kind() == io::ErrorKind::InvalidInput));
+    assert_eq!(log.queued_for_test(), 0); assert!(log.healthy());
+    drop(clone.append(record(b"abc", 2)).await.unwrap());
+    drop(clone);
+    log.shutdown(Duration::from_secs(5)).await.unwrap();
+    let mut reader = LogReader::new(File::open(&path).unwrap()).unwrap();
+    let recovered = reader.next_record().unwrap().unwrap();
+    assert_eq!(recovered.chunk, 2); assert_eq!(recovered.bytes, b"abc");
+    assert!(reader.next_record().unwrap().is_none());
 }

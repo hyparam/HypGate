@@ -35,8 +35,11 @@ channels, not the audit queue.
 retained frame is structurally valid. Exact tuple contracts preserve each frame's
 completion handle through enqueue, rejection, and dequeue. Its ghost frame
 projection supplies count and validity to the combined buffer theorem without
-another runtime collection. The unconditional queued-frame bound is Q times
-(1 MiB + 65); production K, encoding scratch, active frames, and receipt lifetimes
+another runtime collection. The queued-frame bound is Q times
+(the immutable queue payload limit + 65). The executable supplies configured K;
+append rejects excess before encoding, and verified insertion independently checks
+the bound while preserving the rejected frame/completion tuple. The default library
+constructor uses 1 MiB. Encoding scratch, active frames, and receipt lifetimes
 still require their separate correspondence arguments.
 
 `gateway-core/src/fixed_queue.rs` owns one vector of Q optional Job slots, a head

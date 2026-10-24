@@ -15,8 +15,9 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("frame_queue.rs", "frame_queue_ignores_payload_limit", "if item.0.bytes().len() > self.payload_limit + 65 { return Err(item); }", "if false { return Err(item); }"),
     ("frame_queue.rs", "frame_queue_snapshot_omits_records", "self.items().map(|i: int, item: (RecordFrame, T)| item.0)", "Seq::empty()"),
-    ("frame_queue.rs", "frame_queue_understates_overhead", "<= self.capacity() * (1048576 + 65),", "<= self.capacity() * (1048576 + 64),"),
+    ("frame_queue.rs", "frame_queue_understates_overhead", "<= self.capacity() * (self.payload_limit() + 65),", "<= self.capacity() * (self.payload_limit() + 64),"),
     ("frame_queue.rs", "frame_queue_loses_dequeued_job", "let out = self.queue.pop();", "let _out = self.queue.pop(); let out = None;"),
     ("frame_queue.rs", "frame_queue_denies_valid_job", "let out = self.queue.push(item);", "let out = Err(item);"),
     ("fixed_queue.rs", "queue_admits_after_close", "if self.closed || self.used == self.slots.len() { return Err(value); }", "if self.used == self.slots.len() { return Err(value); }"),

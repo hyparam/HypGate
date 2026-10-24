@@ -108,13 +108,13 @@ impl Buffers {
     }
 
     // Discharge queued count and frame validity from the actual production
-    // queue. The tighter production chunk limit and other category snapshots
+    // queue. Binding its configured limit to K and other category snapshots
     // remain explicit premises; no queue count is supplied independently.
     pub proof fn accounted_payload_with_queue<T>(&self, requests: nat, chunk: nat, connections: nat,
         queue: &crate::frame_queue::FrameQueue<T>)
         requires self.other_categories_valid(requests, chunk, connections), queue.valid(),
             self.queued_log == queue.frames(),
-            forall|i: int| 0 <= i < queue.frames().len() ==> #[trigger] queue.frames()[i].payload().len() <= chunk,
+            queue.payload_limit() <= chunk,
         ensures self.bytes() <= requests * chunk + 2 * requests * 32768
             + (connections + 2 * requests) * 16384 + (queue.capacity() + requests + 1) * (chunk + 65)
             + (requests + 1) * 33,

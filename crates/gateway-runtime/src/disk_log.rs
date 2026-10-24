@@ -30,6 +30,7 @@ pub struct DiskLog {
     healthy: Arc<AtomicBool>,
     deadline: Duration,
     session: [u8; 16],
+    payload_limit: usize,
 }
 
 struct Worker { queue: Arc<Queue>, thread: Option<std::thread::JoinHandle<()>> }
@@ -48,7 +49,13 @@ impl DiskLog {
     /// Startup operation: creates a new file, syncs its header and parent directory,
     /// then starts one worker. Existing paths are never overwritten or appended to.
     pub fn create(path: &Path, queue_capacity: usize, deadline: Duration) -> io::Result<Self> {
-        if queue_capacity == 0 || queue_capacity > 1024 || deadline.is_zero()
+        Self::create_with_payload_limit(path, queue_capacity, deadline, MAX_RECORD_BYTES)
+    }
+
+    /// Enforce the gateway's chunk budget before encoding any audit payload.
+    pub fn create_with_payload_limit(path: &Path, queue_capacity: usize, deadline: Duration, payload_limit: usize) -> io::Result<Self> {
+        if payload_limit == 0 || payload_limit > MAX_RECORD_BYTES
+            || queue_capacity == 0 || queue_capacity > 1024 || deadline.is_zero()
             || deadline > Duration::from_secs(300) {
             return Err(io::ErrorKind::InvalidInput.into());
         }
@@ -67,12 +74,17 @@ impl DiskLog {
         file.sync_all()?;
         let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
         File::open(parent)?.sync_all()?;
-        Self::start(file, queue_capacity, deadline, session)
+        Self::start_limited(file, queue_capacity, deadline, session, payload_limit)
     }
 
-    fn start<W: DurableWrite>(mut file: W, capacity: usize, deadline: Duration, session: [u8; 16]) -> io::Result<Self> {
-        if capacity == 0 || capacity > 1024 { return Err(io::ErrorKind::InvalidInput.into()); }
-        let queue = Arc::new(Queue::new(capacity));
+    #[cfg(test)]
+    fn start<W: DurableWrite>(file: W, capacity: usize, deadline: Duration, session: [u8; 16]) -> io::Result<Self> {
+        Self::start_limited(file, capacity, deadline, session, MAX_RECORD_BYTES)
+    }
+
+    fn start_limited<W: DurableWrite>(mut file: W, capacity: usize, deadline: Duration, session: [u8; 16], payload_limit: usize) -> io::Result<Self> {
+        if payload_limit == 0 || payload_limit > MAX_RECORD_BYTES || capacity == 0 || capacity > 1024 { return Err(io::ErrorKind::InvalidInput.into()); }
+        let queue = Arc::new(Queue::with_payload_limit(capacity, payload_limit));
         let receiver = queue.clone();
         let healthy = Arc::new(AtomicBool::new(true));
         let worker_health = healthy.clone();
@@ -94,7 +106,7 @@ impl DiskLog {
             }
         })?;
         Ok(Self { worker: Arc::new(Mutex::new(Worker { queue, thread: Some(thread) })),
-            healthy, deadline, session })
+            healthy, deadline, session, payload_limit })
     }
 
     pub fn healthy(&self) -> bool {
@@ -176,7 +188,7 @@ impl DiskLog {
 impl AuditLog for DiskLog {
     async fn append(&mut self, record: LogRecord<'_>) -> io::Result<DurableFrame> {
         if !self.healthy() { return Err(io::ErrorKind::BrokenPipe.into()); }
-        if record.bytes.len() > MAX_RECORD_BYTES || record.request == 0 {
+        if record.bytes.len() > self.payload_limit || record.request == 0 {
             return Err(io::ErrorKind::InvalidInput.into());
         }
         // Reserve queue space before allocating/copying a payload. Queued frames

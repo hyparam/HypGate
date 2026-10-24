@@ -7,8 +7,10 @@ pub(super) struct Queue { state: Mutex<FrameQueue<Completion>>, ready: Condvar }
 struct WakeOnDrop<'a>(&'a Condvar);
 impl Drop for WakeOnDrop<'_> { fn drop(&mut self) { self.0.notify_one(); } }
 impl Queue {
-    pub(super) fn new(capacity: usize) -> Self {
-        Self { state: Mutex::new(FrameQueue::new(capacity)), ready: Condvar::new() }
+    #[cfg(test)]
+    pub(super) fn new(capacity: usize) -> Self { Self::with_payload_limit(capacity, super::MAX_RECORD_BYTES) }
+    pub(super) fn with_payload_limit(capacity: usize, payload_limit: usize) -> Self {
+        Self { state: Mutex::new(FrameQueue::with_payload_limit(capacity, payload_limit)), ready: Condvar::new() }
     }
     pub(super) fn is_open(&self) -> bool {
         self.state.lock().map(|state| !state.is_closed()).unwrap_or(false)

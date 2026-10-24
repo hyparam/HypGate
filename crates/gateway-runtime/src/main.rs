@@ -26,7 +26,7 @@ async fn run() -> Result<(), &'static str> {
             .map_err(|_| "invalid configuration or missing credential")?
     }; // Source JSON buffers are startup scratch, not server-lifetime storage.
     let transport = HttpsTransport::new(Duration::from_secs(300)).map_err(|_| "cannot initialize transport")?;
-    let log = DiskLog::create(Path::new(&args[3]), 16, Duration::from_secs(2)).map_err(|_| "cannot create and sync new audit log")?;
+    let log = DiskLog::create_with_payload_limit(Path::new(&args[3]), 16, Duration::from_secs(2), config.chunk_bytes()).map_err(|_| "cannot create and sync new audit log")?;
     let listener = tokio::net::TcpListener::bind(address).await.map_err(|_| "cannot bind listener")?;
     eprintln!("soundgate listening on {}", listener.local_addr().map_err(|_| "cannot read listen address")?);
     let shutdown = async {
