@@ -106,6 +106,39 @@ async fn untrusted_certificate_is_rejected_before_http_credentials_are_sent() {
 }
 
 #[tokio::test]
+async fn trusted_certificate_with_large_wrong_purpose_list_is_rejected_before_upload() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        for count in [1, 4096] {
+            let mut params = rcgen::CertificateParams::new(vec!["localhost".into()]).unwrap();
+            params.extended_key_usages = (0..count)
+                .map(|_| rcgen::ExtendedKeyUsagePurpose::Other(vec![1, 2, 3])).collect();
+            let key = rcgen::KeyPair::generate().unwrap();
+            let cert = params.self_signed(&key).unwrap();
+            assert!(cert.der().len() < 32768);
+            let mut roots = RootCertStore::empty(); roots.add(cert.der().clone()).unwrap();
+            let server = ServerConfig::builder().with_no_client_auth()
+                .with_single_cert(vec![cert.der().clone()], PrivatePkcs8KeyDer::from(key.serialize_der()).into()).unwrap();
+            let acceptor = TlsAcceptor::from(Arc::new(server));
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let config = config(listener.local_addr().unwrap().port());
+            let provider = async {
+                let (tcp, _) = listener.accept().await.unwrap();
+                assert!(acceptor.accept(tcp).await.is_err());
+            };
+            let transport = HttpsTransport::with_roots(roots, Duration::from_secs(3)).unwrap();
+            let mut output = Output::new(); let mut log = Log::default();
+            let mut input = &b"secret body"[..];
+            let (result, ()) = tokio::join!(transport.exchange(prepare(&config), &mut input, &mut output, &mut log), provider);
+            assert!(matches!(result, Err(TransportError::Tls)));
+            assert_eq!(input, b"secret body");
+            assert!(output.status.is_none()); assert!(output.bytes.is_empty());
+            assert!(log.upload.is_empty()); assert!(log.download.is_empty());
+            assert_eq!(config.usage(), Some((0, 1)));
+        }
+    }).await.unwrap();
+}
+
+#[tokio::test]
 async fn oversized_handshake_is_rejected_from_its_length_before_upload() {
     use tokio::io::AsyncReadExt;
     tokio::time::timeout(Duration::from_secs(10), async {

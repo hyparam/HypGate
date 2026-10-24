@@ -20,6 +20,8 @@ The connection future runs inline alongside upload/response work, with no spawne
 connection task. One configurable total exchange deadline, at most one hour,
 covers DNS, connection, TLS, upload, and download. Timeout drops those futures and
 their connection before releasing request ownership. There is no transparent replay.
+The timeout is cooperative: synchronous TLS certificate verification must return
+from its poll before the runtime can enforce it. This is not a hard CPU deadline.
 Per-phase/idle deadlines and load-tested cancellation remain future hardening.
 
 The async transfer driver feeds upload bytes into a one-slot HTTP body channel,

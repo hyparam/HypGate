@@ -500,6 +500,48 @@ owned-chain conversions/clones, extension payloads, and verifier intermediates
 can overlap these arrays; this table is not their combined heap bound. Codec
 parsing and Vec capacity remain trusted source facts, not Verus proofs.
 
+### Certificate-verifier scratch and diagnostics
+
+The pinned rustls-webpki 0.103.16 verifier borrows the peer's DER when constructing
+`Cert` descriptors. `PartialPath` stores six optional intermediate descriptors in
+a fixed array plus a reference to the end entity. It rejects pushing a seventh
+intermediate. This bounds the selected path, not the number of supplied candidate
+certificates or all parser/signature-verifier scratch.
+
+Its per-verification `Budget` allows 100 signature checks, 200,000 path-building
+calls, and 250,000 name-constraint comparisons, returning errors when depleted.
+These are algorithm counters, not wall-clock deadlines or memory-byte bounds.
+Production supplies no CRLs, so rustls's collected CRL-reference vector is empty;
+the built-in roots and supported signature-algorithm list are configuration data.
+
+Failure diagnostics allocate too. With the enabled alloc feature,
+`KeyUsage::validate` accumulates presented, nonmatching EKU OIDs in a
+`Vec<Vec<usize>>`; rustls maps that error to `InvalidPurposeContext`, retaining
+the presented purposes. The transport eventually maps it to `TransportError::Tls`
+and drops the detailed error, but its transient allocations still count.
+For a certificate with at most D = 65,536 DER bytes, each parsed OID consumes at
+least two tag/length bytes (do not assume its content is nonempty), so there can
+be at most 32,768 entries. A nonempty OID with L content bytes decodes to at most
+L + 1 integer components; an empty one decodes to none. Thus the total decoded
+component count is at most D. The original pushed outer vector requests at most
+32,768 descriptor slots, while its inner vectors together request at most 2D
+usize slots under the pinned doubling/minimum-capacity policy. Descriptor sizes,
+conversion overlap, other certificate errors, and simultaneously retained path
+errors must still be added before claiming a verifier heap bound.
+
+`trusted_certificate_with_large_wrong_purpose_list_is_rejected_before_upload`
+uses a trusted self-signed localhost certificate with either one or 4,096 wrong
+purpose OIDs. Both handshakes fail before reading the request body, emit no audit
+or response data, and release admission. This exercises diagnostic construction
+and cleanup; it does not measure its private allocations or certify worst-case
+verification latency.
+
+TLS verification runs synchronously within the connector's poll. The executable
+uses a current-thread Tokio runtime, so a long verification poll can delay other
+requests and health checks. Tokio timeout cannot preempt that synchronous work.
+CPU isolation or a demonstrated worst-case scheduling bound remains availability
+work; these source budgets must not be described as proving deadline enforcement.
+
 ## Shared TLS session storage
 
 `HttpsTransport` explicitly selects `Resumption::in_memory_sessions(256)` and
