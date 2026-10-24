@@ -29,6 +29,38 @@ framing overhead, serialized headers, retained vector capacity, and allocator
 rounding are additional. Headers enter through a separate encoding path. Thus
 neither 32768 nor the one-slot application channel bounds all Hyper output storage.
 
+### Output backpressure and retained capacity
+
+The pinned dispatcher's `poll_write` checks `can_buffer_body` before polling the
+next body frame. With pipeline aggregation disabled, a data append therefore
+starts below the 32768-byte remaining-output threshold. Our largest data frame
+is 16384 bytes; chunked encoding adds at most eight bytes (four hexadecimal digits
+and two CRLF pairs). The separate chunked end marker is five bytes. Headers are
+encoded separately and must be budgeted separately, including configured URI and
+credential lengths; a large serialized head can exceed the body threshold before
+any body is polled. The queue strategy additionally stops at 16 encoded buffers.
+These limits bound pending output, not all retained contents: a partially consumed
+queued Bytes still owns its complete original allocation.
+
+Flatten mode has another distinction. `Cursor<Vec<u8>>::maybe_unshift` removes
+consumed prefix bytes only when spare capacity cannot fit the next encoded frame.
+The vector can therefore retain already-written bytes alongside remaining output;
+its length need not equal `WriteBuf::remaining()`. Capacity survives clearing,
+and vector growth can overlap old and new allocations. A complete backing-storage
+bound must account for initial capacity, largest serialized head, growth and
+compaction, rather than multiplying the pending-byte threshold by connections.
+
+`stalled_hyper_output_bounds_body_consumption_and_cancellation` runs the actual
+Hyper client dispatcher and production ChannelBody against an I/O adapter that
+never accepts a byte. It exercises both queue and flatten modes with 1-, 1024-,
+and 16384-byte frames. Accepted application payload stops within the 32768-byte
+threshold plus one crossing frame plus the one-slot application channel; queue
+mode also stays within 16 Hyper frames plus that channel. Sixteen further polls
+make no progress, with Tokio's cooperative budget renewed between polls so task
+budget exhaustion cannot produce a false plateau. Dropping the connection makes
+the blocked producer fail. This is dependency/backpressure regression evidence,
+not a heap bound, a partial-write capacity test, or a proof of the async runtime.
+
 Hyper's [body/chan.rs](https://docs.rs/crate/hyper/1.12.0/source/src/body/chan.rs)
 holds one data item, a separate pending error, and optional trailers. This adds a
 slot beyond our reader copy. That item can reference shared parser backing storage;

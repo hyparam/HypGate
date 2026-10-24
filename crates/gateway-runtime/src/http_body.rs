@@ -290,4 +290,59 @@ mod tests {
         assert_eq!(dropped.load(Ordering::SeqCst), 1);
     }
 
+    #[tokio::test]
+    async fn stalled_hyper_output_bounds_body_consumption_and_cancellation() {
+        // No socket/kernel queue: every write remains pending. Exercise both
+        // Hyper buffer strategies, including tiny chunks that hit the queue's
+        // entry limit before its byte threshold.
+        struct Stalled;
+        impl AsyncRead for Stalled {
+            fn poll_read(self: Pin<&mut Self>, _: &mut Context<'_>, _: &mut ReadBuf<'_>) -> Poll<io::Result<()>> { Poll::Pending }
+        }
+        impl AsyncWrite for Stalled {
+            fn poll_write(self: Pin<&mut Self>, _: &mut Context<'_>, _: &[u8]) -> Poll<io::Result<usize>> { Poll::Pending }
+            fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> { Poll::Pending }
+            fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> { Poll::Pending }
+            fn is_write_vectored(&self) -> bool { true }
+            fn poll_write_vectored(self: Pin<&mut Self>, _: &mut Context<'_>, _: &[io::IoSlice<'_>]) -> Poll<io::Result<usize>> { Poll::Pending }
+        }
+        for vectored in [false, true] {
+            for frame_size in [1, 1024, 16384] {
+                let (mut sender, connection) = hyper::client::conn::http1::Builder::new()
+                    .max_buf_size(MAX_INPUT_FRAME).writev(vectored)
+                    .handshake(hyper_util::rt::TokioIo::new(Stalled)).await.unwrap();
+                let (mut writer, body) = channel(frame_size);
+                let request = http::Request::post("/").body(body).unwrap();
+                let mut response = Box::pin(sender.send_request(request));
+                let mut connection = Box::pin(connection);
+                let mut context = Context::from_waker(std::task::Waker::noop());
+                let bytes = vec![42; frame_size];
+                let ceiling = MAX_INPUT_FRAME + 2 * frame_size;
+                let mut accepted = 0;
+                let mut stalled_polls = 0;
+                for _ in 0..ceiling / frame_size + 32 {
+                    // Renew Tokio's cooperative task budget so scheduling
+                    // exhaustion cannot masquerade as transport backpressure.
+                    tokio::task::yield_now().await;
+                    assert!(response.as_mut().poll(&mut context).is_pending());
+                    assert!(connection.as_mut().poll(&mut context).is_pending());
+                    match Pin::new(&mut writer).poll_write(&mut context, &bytes) {
+                        Poll::Ready(Ok(n)) => { assert_eq!(n, frame_size); accepted += n; stalled_polls = 0; }
+                        Poll::Pending => { stalled_polls += 1; }
+                        other => panic!("unexpected write result: {other:?}"),
+                    }
+                    // One threshold-crossing frame and one application-channel
+                    // frame are permitted. This is consumed payload, not heap.
+                    assert!(accepted <= ceiling, "vectored={vectored}, frame={frame_size}, accepted={accepted}");
+                    if stalled_polls == 16 { break; }
+                }
+                assert!(accepted > frame_size, "vectored={vectored}, frame={frame_size}, accepted={accepted}");
+                assert_eq!(stalled_polls, 16);
+                if vectored { assert!(accepted <= 17 * frame_size); }
+                drop(connection); drop(response); drop(sender);
+                assert_eq!(writer.write(&bytes).await.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
+            }
+        }
+    }
+
 }
