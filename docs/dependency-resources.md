@@ -249,7 +249,8 @@ their surviving owners; they do not add another copy of message payloads.
 Each HTTP channel now has one Arc-backed mutex state and one fixed one-element
 `Option<Message>` vector. The core's `FixedQueue` proves unchanged slot count,
 exact FIFO identity, and permanent closure. The trusted adapter stores at most
-two registered wakers and non-cloneable sender/receiver endpoints. Waker replacement
+two registered wakers and non-cloneable sender/receiver endpoints. Cloning and
+retirement occur outside the state lock, as do wake callbacks. Waker replacement
 and wake invocation have bounded temporary handles, separate from the two stored
 slots; underlying task allocations and arbitrary waker implementations remain
 trusted. ABI padding, Arc headers, allocator overhead, and the one-element Vec's

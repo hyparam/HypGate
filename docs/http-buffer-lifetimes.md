@@ -27,6 +27,15 @@ and empties the queue, drops its payload outside the lock, and wakes the writer.
 No send reservation escapes the lock, so no late payload can be published after
 receiver destruction. The sender-only control allocation can still outlive it.
 
+Waker clones are created before locking. Replaced or cleared wakers are moved
+out of the state and dropped after unlocking; explicit wakes also run after
+unlocking. This matters because a custom waker's clone/drop/wake hooks can execute
+code that re-enters the channel. A regression observed three under-lock waker
+drops before this fix and now verifies none during replacement, dequeue, and
+endpoint destruction. Notification guards also wake a blocked writer if dropping
+a queued payload panics during receiver destruction, without poisoning the mutex.
+These tests cover callback placement, not arbitrary callback termination.
+
 An encoding panic wakes a waiting reader after poisoning and unlocking the mutex;
 poisoned operations refuse resumption. Poisoned storage remains charged until
 final destruction. Waker clone/drop/wake behavior and mutex ordering remain trusted.
@@ -80,8 +89,8 @@ poison refusal, 10,000 ordered handoffs between two threads, and receiver destru
 behind in-progress construction followed by exact payload release. Release workload
 and isolated-memory regressions exercise both logging modes through this path.
 
-Validation on 2026-10-23: 150 regular workspace tests and five compile-fail doctests
-pass (the final receiver-drop race was rerun with all four slot tests). All six
+Validation on 2026-10-23: 152 regular workspace tests and five compile-fail doctests
+pass (the final payload-drop panic regression was rerun with all six slot tests). All six
 release load/fault workloads pass. A three-wave isolated process run in each mode
 also passes, with sampled peaks of 12,992,512 bytes in strict mode and 12,959,744
 bytes in availability mode on macOS. These observations are regression evidence,
