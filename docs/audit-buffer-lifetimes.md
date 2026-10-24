@@ -11,7 +11,7 @@ supply up to `MAX_RECORD_BYTES` and must account for retained receipts separatel
 | Stage | Owner and credit | Frame count charged |
 | --- | --- | --- |
 | Before reservation | `LogRecord` borrows the request's existing payload. No copied frame exists. | Already in the request chunk term |
-| Encoding | `Queue::push_with` calls verified `FrameQueue::reserve` while holding the queue mutex before invoking the encoding callback. That callback builds a `RecordBody` through verified `FrameQueue::encode_reserved`. The mutex excludes insertion and shutdown until the constructed Job is installed. | One of Q encoding/queued slots |
+| Encoding | `Queue::enqueue` uses private `push_with` to call verified `FrameQueue::reserve` while holding the queue mutex before invoking the encoding callback. That callback builds a `RecordBody` through verified `FrameQueue::encode_reserved`. The mutex excludes insertion and shutdown until the constructed Job is installed. | One of Q encoding/queued slots |
 | Queued | Verified `FrameQueue::finish_reserved` transfers the immutable frame and receipt sender into a fixed slot. The caller retains only the receipt receiver. | One of Q encoding/queued slots |
 | Writing/syncing/committing | The sole worker receives one Job and owns its frame until failure or journal commit. Dequeue returns queue credit, allowing another producer to encode. | One active frame in addition to Q |
 | Delivering | `commit_frame` moves the same frame into `DurableFrame`; no payload clone is made. Sending moves that receipt into the caller's oneshot. | Active-frame term until transfer, then receipt term |
@@ -59,9 +59,14 @@ preserves payload identity and adds the checksum. The typed combined theorems
 `accounted_payload_with_body` and `accounted_payload_with_sealed_frame` use those
 actual containers instead of an independently supplied encoding length.
 
-The adapter still establishes that it invokes encoding once per reservation and
-that the temporary is the only such owner. The immutable core encoder can be
-called repeatedly by other clients; its contract does not prove global uniqueness.
+The production queue now exposes `enqueue(record)`, not a callback or core queue
+reference. Its private callback receives a non-cloneable `EncodingPermit` whose
+`encode(self, record)` method consumes it. Only the queue module can mint that
+permit; encoding, sealing, and completion pairing occur together before insertion.
+This Rust ownership/privacy boundary prevents production callers from repeating
+encoding through a borrowed queue reference. The module's implementation and
+mutex scope remain trusted. Independent core-library clients can still call the
+immutable encoder repeatedly; its contract does not prove global uniqueness.
 Its payload bound does not account for Vec spare capacity or transient allocations
 inside encoding/checksum computation.
 

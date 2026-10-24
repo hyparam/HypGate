@@ -101,9 +101,12 @@ include the in-progress encoding in `queued_log` as well.
 Production now calls verified `encode_reserved` through the mutex-held callback;
 it checks the queue's own payload limit and reservation before building the body.
 The typed body/sealed-frame composition theorems derive encoding bytes from the
-actual container, including 33-byte body or 65-byte sealed overhead. Exactly one
-construction per reservation remains a source-level adapter obligation; the core
-constructor alone does not enforce call multiplicity. Allocation capacity/scratch,
+actual container, including 33-byte body or 65-byte sealed overhead. The production
+`enqueue(record)` boundary exposes no callback or core reference; its private
+callback consumes a non-cloneable encoding permit, then pairs the frame with its
+receipt channel. This ownership restriction supports the single-construction
+argument; the queue module and synchronization remain trusted. Independent users
+of the core constructor must still enforce call multiplicity. Allocation capacity/scratch,
 the active worker frame, and delivered receipts remain separate obligations.
 
 This is a size-composition proof, not proof that every async runtime state supplies

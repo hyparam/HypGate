@@ -16,7 +16,7 @@ another milestone or treat adapter assumptions as proved runtime behavior.
 | Mutation tests reject corruption, cross-request writes, duplicate advancement, capacity violations, and strict-mode forwarding before durability | All 131 mutations are rejected by proof obligations; the script verifies the unmodified library first. Named defects include wrong owner/generation, full-write substitution, omitted payload/receipt storage, queue overwrite/reopening, and advancing beyond durability. Mutations test the strength of specified contracts, not the completeness of the threat model. | Covered for listed defect classes |
 | Verified admission issues private authorization tied to identity/policy/origin/credential; candidate configuration cannot expand root grants | Policy validation, authentication, and tenant-scoped authorization establish those relationships. AuthorizedRequest construction is private and its policy borrow binds the immutable snapshot. Runtime dispatch consumes PreparedRequest; concrete URI/DNS/TLS/secret binding remains trusted and tested. | Covered at the verified admission boundary |
 
-The current workspace has 144 passing regular tests and five compile-fail doctests.
+The current workspace has 145 passing regular tests and five compile-fail doctests.
 The raw-construction, raw-claim, and raw-release negative examples require the
 private-method diagnostic; existing examples prohibit mutable stream extraction
 and completing a read while its mutable buffer borrow remains live. Low-level
@@ -35,8 +35,9 @@ without reopening the external API.
    subtotal and enforces its configured payload limit. The core also charges one
    encoding reservation against Q, and the combined theorem explicitly includes its
    byte snapshot. Production uses the verified reserved encoder, and typed
-   composition derives actual body/frame lengths; one construction per reservation
-   and snapshot completeness remain trusted. Startup binding to K and
+   composition derives actual body/frame lengths. Production enqueue hides the
+   callback/core reference and consumes a private single-use encoding permit. The
+   queue module, synchronization, and snapshot completeness remain trusted. Startup binding to K and
    the other snapshots remain explicit premises.
    Sealing raw constructors removes one external bypass; it does not prove
    registry identity, destructor timing, or snapshot completeness.

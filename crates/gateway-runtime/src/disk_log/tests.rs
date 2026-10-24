@@ -174,7 +174,7 @@ async fn poisoned_fixed_queue_refuses_logging_and_worker_can_shutdown() {
     let mut log = DiskLog::start(sink(), 1, Duration::from_secs(2), [0; 16]).unwrap();
     let queue = log.worker.lock().unwrap().queue.clone();
     assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _ = queue.push_with(|_| panic!("injected frame-construction panic"));
+        queue.panic_during_encoding();
     })).is_err());
     assert!(!log.healthy());
     assert!(matches!(log.append(record(b"refused", 1)).await, Err(error) if error.kind() == io::ErrorKind::BrokenPipe));

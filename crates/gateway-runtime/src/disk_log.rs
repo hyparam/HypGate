@@ -198,19 +198,10 @@ impl AuditLog for DiskLog {
             // Unlike an mpsc sender clone, this Arc cannot keep admission open
             // after Queue::close. Do not hold the worker mutex while encoding.
             let queue = self.worker.lock().map_err(|_| io::ErrorKind::BrokenPipe)?.queue.clone();
-            let mut completion = None;
-            queue.push_with(|state| {
-                let body = state.encode_reserved(record_header(&record), record.bytes)
-                    .expect("validated reserved audit record");
-                let frame = seal_record(body);
-                let (done, receive) = oneshot::channel();
-                completion = Some(receive);
-                (frame, done)
-            }).map_err(|error| {
+            queue.enqueue(record).map_err(|error| {
                 if error.kind() == io::ErrorKind::BrokenPipe { self.healthy.store(false, Ordering::Release); }
                 error
-            })?;
-            completion.expect("successful queue insertion constructed a job")
+            })?
         };
         match tokio::time::timeout(self.deadline, completion).await {
             Ok(Ok(Some(receipt))) => Ok(receipt),
