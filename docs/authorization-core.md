@@ -11,7 +11,15 @@ ownership. Candidate routes are untrusted. Validation rejects unknown tenants,
 invalid origin or credential indices, cross-tenant credentials, routes outside the
 root grants, and duplicate tenant/selector bindings. Identity digests must contain
 32 bytes; duplicate tenants or digests are rejected. A successful validation result
-preserves the supplied root snapshot and satisfies all of these constraints.
+preserves the supplied root snapshot in ghost state and satisfies all of these
+constraints. Root grants, origin count, and credential-owner indices are needed
+at validation time but not during runtime dispatch, so the validated `Policy`
+stores them as erased `Ghost` fields. Runtime policy storage retains only the
+identity table and selected routes. Validation still checks the actual input
+vectors before producing these snapshots; no assumed grant or ownership facts
+replace those checks. Authentication and authorization contracts are unchanged. Deliberate mutations
+that replace either ghost snapshot with an empty sequence are rejected by the
+proofs, in addition to mutations that bypass grant and credential validation.
 
 Authentication matches an input digest against the immutable identity table.
 Authorization then selects only that tenant's configured route and rejects a zero

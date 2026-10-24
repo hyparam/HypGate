@@ -1,9 +1,9 @@
 # Static configuration boundary
 
 The runtime now parses two separate JSON inputs: an operator-controlled root policy
-and an untrusted candidate route selection. It is a library interface, not yet a
-gateway executable. `GatewayConfig::from_json` also receives an operator-controlled
-secret resolver; the eventual executable will resolve named environment variables.
+and an untrusted candidate route selection. `GatewayConfig::from_json` receives an
+operator-controlled secret resolver; the executable resolves named environment
+variables. See [running](running.md) for the command-line interface.
 Never permit a caller to supply root policy or the secret resolver.
 
 ## Root policy format
@@ -87,3 +87,42 @@ process RSS is below 128 MiB: the allowance covers one payload chunk per admitte
 request. HTTP/TLS/log buffers, allocator overhead, and other runtime state require
 separate accounting. JSON parsing and the use of the validated values to construct
 the runtime registry remain trusted bindings.
+
+## Configuration storage and startup scratch
+
+Let I be the number of identities, A the selected route count, D the destination
+count, and C the credential count. The immutable configuration retains:
+
+- I identity structs with a 32-byte digest vector each.
+- A route structs. Root-grant structs, origin count, and credential-owner indices
+  are kept only as erased proof snapshots after successful core validation.
+- D parsed URI values and their backing strings.
+- C credential structs and header values. Each value holds at most 8,199 bytes
+  including the seven-byte bearer prefix (API keys need at most 8,192).
+- The request registry, with R `u64` slot entries and fixed-size metadata. The
+  server's separate worker registry has another R entries.
+
+If U denotes the total retained URI component bytes, a conservative logical
+variable-content subtotal is **32 × I + U + 8,199 × C** bytes, in addition to the
+struct arrays and registry entries. Counts are fixed after construction and
+bounded by the input documents; accepted decoded strings cannot expand beyond
+their JSON representation, apart from URI default-path representation. This is
+not a retained-allocation theorem: URI/HeaderValue shared backing, vector spare
+capacity, allocator rounding, and object metadata require separate accounting.
+The one-MiB input limit is not a one-MiB total configuration-memory limit.
+
+The executable scopes both source JSON vectors to configuration construction, so
+they are dropped before TLS, logger, listener, and server creation. Each file read
+accepts at most one MiB plus a sentinel byte before the parser's size check.
+Destination input strings are consumed during URI conversion, rather than retained
+through all credential loading. Identity/grant/candidate input vectors are consumed
+by normalization and validation; source grants and credential-owner vectors drop
+when core validation returns because their resulting policy fields are ghost-only.
+Successful construction owns all runtime data and borrows neither source JSON.
+
+Parsing can temporarily hold source documents, deserialized structs/strings, and
+normalized output simultaneously. The per-credential resolver can allocate its
+returned String before its 8,192-byte length is checked; caller-owned buffers and
+custom resolver behavior are outside the gateway's allocation guarantees. The CLI
+also inherits process environment storage, which is neither zeroized nor accounted
+by the per-request payload theorem. Failure-path cleanup relies on Rust ownership.

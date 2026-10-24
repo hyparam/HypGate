@@ -126,7 +126,7 @@ impl GatewayConfig {
         let identities = root.identities.into_iter().map(|i| Ok(Identity {
             tenant: i.tenant, digest: digest(&i.sha256)?,
         })).collect::<Result<Vec<_>, ConfigError>>()?;
-        let destinations = root.destinations.iter().map(|s| destination(s))
+        let destinations = root.destinations.into_iter().map(|s| destination(&s))
             .collect::<Result<Vec<_>, _>>()?;
         let owners = root.credentials.iter().map(|c| c.tenant).collect();
         let policy = Policy::validate(identities, root.grants.into_iter().map(RouteInput::core).collect(),

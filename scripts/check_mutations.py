@@ -129,6 +129,8 @@ MUTATIONS = [
     ("policy.rs", "unauthenticated_identity", "if digest_equal(self.identities[i].digest.as_slice(), digest) {", "if true {"),
     ("policy.rs", "cross_tenant_route", "if r.tenant == self.tenant && r.selector == selector {", "if r.selector == selector {"),
     ("policy.rs", "expand_root_grants", " || !root_contains(&grants, route)", ""),
+    ("policy.rs", "erase_validated_root_snapshot", "grants: Ghost(grants@)", "grants: Ghost(Seq::empty())"),
+    ("policy.rs", "erase_validated_credential_snapshot", "credential_tenants: Ghost(credential_tenants@)", "credential_tenants: Ghost(Seq::empty())"),
     ("policy.rs", "cross_tenant_credential", "credential_tenants[route.credential] != route.tenant", "false"),
     ("policy.rs", "unknown_origin", "route.origin >= origin_count", "false"),
     ("policy.rs", "wrong_dispatch_origin", "{ self.policy.routes[self.route].origin }", "{ 0 }") ,

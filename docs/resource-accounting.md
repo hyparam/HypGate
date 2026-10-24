@@ -83,8 +83,11 @@ identifies excluded metadata and active owners.
   waiter. Each `WorkerTask` additionally boxes its future to enforce safe drop order.
 - Tokio task/future state, task trackers, queue nodes, channel permits/oneshots,
   thread stacks, allocator rounding/fragmentation, and runtime bookkeeping.
-- Immutable policy, routes, credential strings, configuration parsing scratch,
-  metrics response strings, and error/header metadata.
+- Immutable identity/route tables, URI and credential storage, configuration
+  parsing scratch, metrics strings, and error/header metadata. The
+  [configuration inventory](configuration.md#configuration-storage-and-startup-scratch)
+  separates retained data from startup scratch: root proof snapshots are erased,
+  and the CLI drops its JSON input buffers before serving.
 - Filesystem page cache and storage-controller state. Audit-file disk usage grows
   with cumulative traffic; bounded in-memory queues do not bound disk usage.
 

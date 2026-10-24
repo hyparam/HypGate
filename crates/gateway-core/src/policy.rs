@@ -11,13 +11,13 @@ pub struct Route {
     pub credential: usize,
 }
 
-#[allow(dead_code)] // Root snapshot fields participate in proofs, not runtime dispatch.
+#[allow(dead_code)] // Ghost root snapshots are erased from runtime dispatch.
 pub struct Policy {
     identities: Vec<Identity>,
-    grants: Vec<Route>,
+    grants: Ghost<Seq<Route>>,
     routes: Vec<Route>,
-    origin_count: usize,
-    credential_tenants: Vec<u64>,
+    origin_count: Ghost<nat>,
+    credential_tenants: Ghost<Seq<u64>>,
 }
 
 // Neither token has a public constructor, deserializer, or Clone implementation.
@@ -103,7 +103,7 @@ impl Policy {
                 && self.identities@[i].digest@ != self.identities@[j].digest@)
         && (forall|i: int| 0 <= i < self.routes.len()
             ==> allowed(#[trigger] self.routes@[i], self.grants@,
-                self.origin_count as nat, self.credential_tenants@)
+                self.origin_count@, self.credential_tenants@)
                 && (exists|j: int| 0 <= j < self.identities.len() && self.identities@[j].tenant == self.routes@[i].tenant))
         && (forall|i: int, j: int| 0 <= i < j < self.routes.len()
             ==> self.routes@[i].tenant != self.routes@[j].tenant
@@ -112,7 +112,7 @@ impl Policy {
     pub closed spec fn roots(&self) -> Seq<Route> { self.grants@ }
     pub closed spec fn configured(&self) -> Seq<Route> { self.routes@ }
     pub closed spec fn identities(&self) -> Seq<Identity> { self.identities@ }
-    pub closed spec fn origins(&self) -> nat { self.origin_count as nat }
+    pub closed spec fn origins(&self) -> nat { self.origin_count@ }
     pub closed spec fn credentials(&self) -> Seq<u64> { self.credential_tenants@ }
 
     pub fn validate(identities: Vec<Identity>, grants: Vec<Route>, routes: Vec<Route>,
@@ -179,7 +179,8 @@ impl Policy {
             }
             r = r + 1;
         }
-        Some(Policy { identities, grants, routes, origin_count, credential_tenants })
+        Some(Policy { identities, grants: Ghost(grants@), routes,
+            origin_count: Ghost(origin_count as nat), credential_tenants: Ghost(credential_tenants@) })
     }
 
     pub fn authenticate<'a>(&'a self, digest: &[u8]) -> (out: Option<Authenticated<'a>>)

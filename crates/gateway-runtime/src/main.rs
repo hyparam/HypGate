@@ -19,9 +19,12 @@ async fn run() -> Result<(), &'static str> {
     if !(4..=5).contains(&args.len()) { return Err("usage: soundgate ROOT.json ROUTES.json NEW_LOG [127.0.0.1:8080]"); }
     let address: SocketAddr = args.get(4).map(String::as_str).unwrap_or("127.0.0.1:8080").parse().map_err(|_| "invalid listen address")?;
     if !address.ip().is_loopback() { return Err("listen address must be loopback; use a trusted TLS reverse proxy for remote clients"); }
-    let root = bounded_file(&args[1]).map_err(|_| "cannot read root policy")?;
-    let routes = bounded_file(&args[2]).map_err(|_| "cannot read candidate routes")?;
-    let config = GatewayConfig::from_json(&root, &routes, |name| std::env::var(name).ok()).map_err(|_| "invalid configuration or missing credential")?;
+    let config = {
+        let root = bounded_file(&args[1]).map_err(|_| "cannot read root policy")?;
+        let routes = bounded_file(&args[2]).map_err(|_| "cannot read candidate routes")?;
+        GatewayConfig::from_json(&root, &routes, |name| std::env::var(name).ok())
+            .map_err(|_| "invalid configuration or missing credential")?
+    }; // Source JSON buffers are startup scratch, not server-lifetime storage.
     let transport = HttpsTransport::new(Duration::from_secs(300)).map_err(|_| "cannot initialize TLS")?;
     let log = DiskLog::create(Path::new(&args[3]), 16, Duration::from_secs(2)).map_err(|_| "cannot create and sync new audit log")?;
     let listener = tokio::net::TcpListener::bind(address).await.map_err(|_| "cannot bind listener")?;
