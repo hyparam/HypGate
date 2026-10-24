@@ -230,6 +230,70 @@ closes the accumulation of detached DNS jobs across request timeouts and removes
 DNS from Tokio's shutdown wait, while leaving libc/NSS internal allocations and
 termination as explicit dependencies.
 
+## Channel control storage
+
+Payload limits exclude the storage that carries messages and their wakeups. The
+following counts apply to the production sequential driver, one server invocation,
+one shared logger, and one shared transport. R, C, and Q have the meanings in the
+[resource inventory](resource-accounting.md). They count channel allocations by
+their surviving owners; they do not add another copy of message payloads.
+
+| Control object | Conservative simultaneous count | Owner argument |
+| --- | ---: | --- |
+| HTTP body mpsc channels | C + 2R | Client receivers, client sender cleanup, and provider upload channels |
+| HTTP body drain oneshots | C + 2R | One per body channel, including either surviving endpoint |
+| Response-head oneshots | C + R | Waiting inbound service futures or surviving worker senders |
+| Audit completion oneshots | Q + 1 + R | Reserved/queued jobs, sole active worker, and live request receivers |
+| DNS completion oneshots | 32 + R | Credited lookup jobs or live request receivers after result handoff |
+| PollSender acquire futures | 2R | One client writer and one provider writer per credited worker/exchange |
+
+Tokio 1.54.1's `sync/mpsc/chan.rs` allocates one Arc-backed channel control object,
+with sender counters, receiver state, a semaphore, notification state, and padded
+wakers. Its linked message blocks in `sync/mpsc/block.rs` contain 32 message slots
+on supported 64-bit builds, even for a capacity-one channel, plus four
+pointer-sized header fields. On 32-bit builds there are 16 slots. The slots hold
+message representations such as Bytes handles, not 32 additional live payloads;
+the semaphore still bounds occupied messages. ABI padding/alignment and Arc headers
+must be included before converting these structural facts into byte allocations.
+
+Message-block counts cannot be equated with `ceil(capacity / 32)`: the sender and
+receiver can be on different blocks, consumed blocks await the source's release
+condition, and `list.rs::reclaim_block` tries up to three links before freeing or
+reusing a block. An allocation at a block boundary can coexist with old blocks.
+The production HTTP sender is exclusive through mutable Writer access; audit sends
+are serialized under the logger mutex. Those restrictions simplify a future
+peak-block proof but are not themselves such a proof. All blocks are freed when
+the last channel owner is destroyed, including the sender-only cleanup cases
+already tested in the HTTP lifetime audit.
+
+Tokio's `oneshot::Inner<T>` has one optional result slot, state flags, and sender/
+receiver task-waker slots in an Arc allocation. The result's variable storage is
+charged to its payload category. A closed receiver does not necessarily destroy
+the control allocation while its job still owns the sender, which is why the
+counts above include jobs after caller cancellation. DNS delivered address vectors
+likewise belong to waiting requests after lookup credit is returned.
+
+tokio-util 0.7.20's PollSender owns a ReusableBoxFuture for permit acquisition.
+The initial and replacement acquire futures use the same concrete async function
+and layout, allowing storage reuse. The semaphore waiter is embedded in that
+future, with intrusive links and a waker; it is not an independently unbounded
+queue of allocated waiters. Both the future allocation and the enclosing Writer
+state must be counted. Disk admission uses `try_reserve`, so it has no suspended
+permit-acquisition future. These source-derived object counts still exclude
+private ABI sizes, allocator bookkeeping, transient replacement allocations,
+and task references retained by wakeups.
+
+## Dedicated thread stacks
+
+The audit worker explicitly requests a 2 MiB stack, independent of the
+`RUST_MIN_STACK` environment default. Together with four resolver workers that
+also request 2 MiB each, one executable instance requests 10 MiB of background
+thread stacks. The executable's Tokio runtime uses the main thread; its stack,
+OS guards/rounding, committed pages, TLS/thread-local state, and kernel thread
+objects are additional. Requested stack reservation is not RSS or a verified
+bound on recursive execution. Library callers supplying a multithreaded runtime
+or additional gateway instances must add those resources separately.
+
 ## Remaining closure work
 
 The bounded counts above help identify retained allocations but cannot be summed

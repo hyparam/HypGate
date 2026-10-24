@@ -22,6 +22,10 @@ encoding derives 65 bytes of header/checksum overhead. The journal's byte histor
 and canonical-frame sequence are erased ghost state, not retained old payloads.
 Header encoding/comparison scratch is accounted separately. Channel nodes,
 oneshot state, allocator slack, and thread stacks are outside the frame-payload term.
+The worker explicitly requests a 2 MiB stack rather than inheriting the
+environment-dependent Rust default; reservation, committed pages, and OS overhead
+remain distinct. The [control-storage inventory](dependency-resources.md#channel-control-storage)
+counts completion oneshots and documents the pinned mpsc block layout separately.
 
 ## Pinned channel obligations
 
@@ -53,6 +57,9 @@ This is permitted logged-but-unsent data, not replay of a model generation.
 
 Existing tests separately exercise timeout poisoning, blocked shutdown, queue
 saturation, write/sync failures, and worker panic after caller cancellation.
+A maximum-record regression writes and scans a full 1 MiB payload through the
+production worker, rejects one byte over the limit without poisoning logging,
+then writes and recovers a subsequent record and checks the exact file extent.
 A timeout bounds caller waiting, not syscall duration. It never creates a new
 worker to bypass a blocked syscall. The combined stalled-log workload checks
 these effects with concurrent gateway requests and both logging policies.

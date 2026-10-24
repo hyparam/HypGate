@@ -128,6 +128,11 @@ identifies excluded metadata and active owners.
   waiter. Each `WorkerTask` additionally boxes its future to enforce safe drop order.
 - Tokio task/future state, task trackers, queue nodes, channel permits/oneshots,
   thread stacks, allocator rounding/fragmentation, and runtime bookkeeping.
+  The [channel inventory](dependency-resources.md#channel-control-storage) now
+  bounds control-object counts separately from variable payloads and identifies
+  mpsc block reuse as an outstanding peak-allocation obligation. The audit worker
+  requests a 2 MiB stack; with the four DNS workers, the executable requests
+  10 MiB of dedicated background stacks, excluding OS overhead and its main stack.
 - Immutable identity/route tables, URI and credential storage, configuration
   parsing scratch, metrics strings, and error/header metadata. The
   [configuration inventory](configuration.md#configuration-storage-and-startup-scratch)

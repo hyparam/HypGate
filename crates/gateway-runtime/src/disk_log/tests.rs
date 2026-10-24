@@ -47,6 +47,26 @@ impl TempDir {
 impl Drop for TempDir { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }
 
 #[tokio::test]
+async fn maximum_record_roundtrips_and_excess_is_rejected_without_poisoning() {
+    let dir = TempDir::new(); let path = dir.0.join("maximum.log");
+    let mut log = DiskLog::create(&path, 1, Duration::from_secs(5)).unwrap();
+    let payload: Vec<u8> = (0..MAX_RECORD_BYTES).map(|i| (i % 251) as u8).collect();
+    // Exercise the maximum supported frame on the production worker stack.
+    drop(log.append(record(&payload, 1)).await.unwrap());
+    let excess = vec![0; MAX_RECORD_BYTES + 1];
+    assert!(matches!(log.append(record(&excess, 2)).await, Err(error) if error.kind() == io::ErrorKind::InvalidInput));
+    assert!(log.healthy());
+    drop(log.append(record(b"after", 2)).await.unwrap());
+    log.shutdown(Duration::from_secs(5)).await.unwrap();
+    let mut reader = LogReader::new(File::open(&path).unwrap()).unwrap();
+    assert_eq!(reader.next_record().unwrap().unwrap().bytes, payload);
+    let next = reader.next_record().unwrap().unwrap();
+    assert_eq!(next.chunk, 2); assert_eq!(next.bytes, b"after");
+    assert!(reader.next_record().unwrap().is_none());
+    assert_eq!(reader.valid_end(), std::fs::metadata(path).unwrap().len());
+}
+
+#[tokio::test]
 async fn actual_file_acknowledgments_are_readable_and_existing_files_are_not_overwritten() {
     let dir = TempDir::new(); let path = dir.0.join("traffic.log");
     let mut log = DiskLog::create(&path, 2, Duration::from_secs(5)).unwrap();

@@ -13,6 +13,9 @@ const FILE_MAGIC: &[u8; 8] = b"SGLOG001";
 #[cfg(test)]
 const FILE_HEADER: usize = 56; // magic + random session ID + checksum
 pub const MAX_RECORD_BYTES: usize = 1024 * 1024;
+// Explicit reservation, independent of RUST_MIN_STACK. OS rounding, committed
+// pages, and thread-local/kernel storage remain separate resource categories.
+const WORKER_STACK_BYTES: usize = 2 * 1024 * 1024;
 
 struct Job { frame: RecordFrame, done: oneshot::Sender<Option<DurableFrame>> }
 
@@ -67,7 +70,7 @@ impl DiskLog {
         let (sender, mut receiver) = mpsc::channel::<Job>(capacity);
         let healthy = Arc::new(AtomicBool::new(true));
         let worker_health = healthy.clone();
-        let thread = std::thread::Builder::new().name("soundgate-audit".into()).spawn(move || {
+        let thread = std::thread::Builder::new().name("soundgate-audit".into()).stack_size(WORKER_STACK_BYTES).spawn(move || {
             let _health_on_exit = UnhealthyOnExit(worker_health.clone());
             let mut journal = Journal::new();
             while let Some(job) = receiver.blocking_recv() {
