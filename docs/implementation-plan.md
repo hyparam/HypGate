@@ -81,7 +81,9 @@ TLS control-queue follow-up: the dependency-level alternating key-update/data
 experiment exceeds the application buffer limit by 81,000 control bytes.
 The production TLS adapter now drains queued ciphertext before scalar/vectored
 plaintext writes, preventing repeated enqueue during stalled output. Full TLS
-allocation composition and hostile TLS adapter validation remain in milestone 1; see [the resource audit](dependency-resources.md#control-traffic-is-not-covered-by-the-application-buffer-limit).
+allocation composition remains in milestone 1. Real TLS with stalled output
+now validates stable queue length across 3,000 key-update/data rounds and exact
+byte delivery after resumption; see [the resource audit](dependency-resources.md#control-traffic-is-not-covered-by-the-application-buffer-limit).
 
 ## 2. Minimal working gateway
 

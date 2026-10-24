@@ -609,8 +609,18 @@ real TLS exchange tests exercise its production placement. This closes the
 specific repeated-write enqueue path demonstrated above, not the full TLS heap
 accounting obligation: direct control appends during reads, handshake state,
 record capacities/overhead, and maximum transient allocations still need
-composition. A hostile real-TLS stalled-output test of the wrapper remains to
-be added; the current counterexample exercises unguarded rustls directly.
+composition.
+
+`tls_drain_guard_holds_control_queue_stable_and_resumes_exact_bytes` exercises
+this wrapper around real tokio-rustls TLS 1.3 over loopback TCP. A synthetic
+write gate below TLS stops all outgoing ciphertext after handshake while the
+client holds a full application buffer. Across 3,000 peer key-update/data
+rounds, alternating scalar and vectored write polls remain pending and the
+queued ciphertext length stays exactly at its initial value. Reads continue.
+Opening the gate delivers the complete original 65,536 bytes followed by the
+new byte, and leaves zero queued ciphertext. This validates the guarded
+interleaving and recovery without depending on OS socket-buffer saturation;
+it does not enumerate all TLS control paths or prove an allocation bound.
 
 ## Shared TLS session storage
 

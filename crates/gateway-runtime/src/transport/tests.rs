@@ -138,6 +138,74 @@ async fn trusted_certificate_with_large_wrong_purpose_list_is_rejected_before_up
     }).await.unwrap();
 }
 
+#[tokio::test]
+async fn tls_drain_guard_holds_control_queue_stable_and_resumes_exact_bytes() {
+    use tokio::io::{AsyncReadExt, ReadBuf};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct Gated { tcp: TcpStream, blocked: Arc<AtomicBool> }
+    impl AsyncRead for Gated {
+        fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, out: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.tcp).poll_read(cx, out)
+        }
+    }
+    impl AsyncWrite for Gated {
+        fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, bytes: &[u8]) -> Poll<io::Result<usize>> {
+            // The fixture explicitly repolls after unblocking; no task waits
+            // for this synthetic gate to wake it.
+            if self.blocked.load(Ordering::SeqCst) { return Poll::Pending; }
+            Pin::new(&mut self.tcp).poll_write(cx, bytes)
+        }
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.tcp).poll_flush(cx)
+        }
+        fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.tcp).poll_shutdown(cx)
+        }
+    }
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let (listener, acceptor, roots) = tls().await;
+        let blocked = Arc::new(AtomicBool::new(false));
+        let connector = TlsConnector::from(Arc::new(ClientConfig::builder().with_root_certificates(roots).with_no_client_auth()));
+        let connect = async {
+            let tcp = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+            tcp.set_nodelay(true).unwrap();
+            connector.connect(ServerName::try_from("localhost").unwrap(), Gated { tcp, blocked: blocked.clone() }).await.unwrap()
+        };
+        let accept = async {
+            let (tcp, _) = listener.accept().await.unwrap(); tcp.set_nodelay(true).unwrap();
+            acceptor.accept(tcp).await.unwrap()
+        };
+        let (mut client, mut server) = tokio::join!(connect, accept);
+        assert_eq!(client.get_ref().1.protocol_version(), Some(tokio_rustls::rustls::ProtocolVersion::TLSv1_3));
+        client.get_mut().1.set_buffer_limit(Some(TLS_APPLICATION_BUFFER));
+        blocked.store(true, Ordering::SeqCst);
+        let initial = vec![7; TLS_APPLICATION_BUFFER];
+        assert_eq!(std::io::Write::write(&mut client.get_mut().1.writer(), &initial).unwrap(), initial.len());
+        let baseline = client.get_mut().1.process_new_packets().unwrap().tls_bytes_to_write();
+        let mut client = tls_io::DrainBeforeWrite(client);
+        for round in 0..3000 {
+            server.get_mut().1.refresh_traffic_keys().unwrap();
+            server.write_all(b"x").await.unwrap(); server.flush().await.unwrap();
+            let mut byte = [0]; client.read_exact(&mut byte).await.unwrap(); assert_eq!(&byte, b"x");
+            let pending = std::future::poll_fn(|cx| {
+                let result = if round % 2 == 0 { Pin::new(&mut client).poll_write(cx, b"y") }
+                    else { Pin::new(&mut client).poll_write_vectored(cx, &[io::IoSlice::new(b"y")]) };
+                Poll::Ready(result.is_pending())
+            }).await;
+            assert!(pending);
+            assert_eq!(client.0.get_mut().1.process_new_packets().unwrap().tls_bytes_to_write(), baseline);
+        }
+        blocked.store(false, Ordering::SeqCst);
+        let send = async { client.write_all(b"y").await.unwrap(); client.flush().await.unwrap(); };
+        let receive = async {
+            let mut actual = vec![0; initial.len() + 1]; server.read_exact(&mut actual).await.unwrap();
+            assert_eq!(&actual[..initial.len()], initial.as_slice()); assert_eq!(actual[initial.len()], b'y');
+        };
+        tokio::join!(send, receive);
+        assert_eq!(client.0.get_mut().1.process_new_packets().unwrap().tls_bytes_to_write(), 0);
+    }).await.unwrap();
+}
+
 // Dependency-level counterexample, not a production HTTP scheduling test.
 #[test]
 fn tls_control_replies_can_exceed_application_buffer_limit() {
