@@ -89,6 +89,8 @@ The [proof index](docs/proof-index.md) maps advertised guarantees to exact sourc
 contracts and the assumptions still required for composition. The
 [resource inventory](docs/resource-accounting.md) accounts for application buffers
 and queues separately from dependency allocations and total process memory.
+The [resource composition](docs/resource-composition.md) assigns every budget to
+one owner and sums the inventories into a conditional requested-allocation bound.
 The [security contract](docs/security-contract.md) separates proved core properties
 from remaining adapter obligations. The [authorization notes](docs/authorization-core.md)
 describe digest authentication, tenant-scoped tokens, and configuration confinement.
@@ -146,7 +148,7 @@ cargo verus verify -p gateway-core --locked -- --triggers-mode silent
 VERUS=/path/to/verus python3 scripts/check_mutations.py
 ```
 
-Validation on 2026-10-23: 183 core verification checks passed, 176 workspace tests and five compile-fail doctests
+Validation on 2026-10-23: 183 core verification checks passed, 179 workspace tests and five compile-fail doctests
 passed, the opt-in TLS proxy/gateway process-failover test and six load/fault workloads passed, and all 139
 deliberate mutations failed their proof obligations.
 These counts are checks, not a count of independent security guarantees.

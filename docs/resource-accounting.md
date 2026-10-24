@@ -27,6 +27,7 @@ at most 32 KiB of frame data into its own bounded copy. One DiskLog owns one dis
 | Inbound connection tasks | At most C live connection leases across one Gateway, including canceled-parent tails | A separate verified registry is shared by every serve invocation on that Gateway. A boxed connection future drops before its credit. Each invocation also caps its JoinSet at C, including completed-but-unreaped entries. Listener/accept-loop and completed task metadata remain per invocation. |
 | Server request workers, including rejection and cleanup | At most R worker leases | A separate verified `ResourceAdmission` registry issues a private key before response allocation or spawning. `WorkerTask` drops the entire boxed task future before its lease; the lease drops tracking before returning the key. Registry transitions are verified; mutex serialization, Rust field drop order, and Tokio cancellation remain trusted. |
 | Admitted exchanges and upstream connections | At most R live leases; one upstream connection per exchange | Verified slot transitions plus trusted ownership. The outer exchange owns admission while the timed TCP/TLS/HTTP future borrows it, so network-future cleanup precedes request release. No pooling, replay, or detached upstream connection task. Failed authentication can still create a tracked server worker without a lease. |
+| TLS handshakes | Four dedicated threads; at most 32 queued/running jobs per transport | Separate verified registry credit survives cancellation until handshake work is destroyed. Each job owns one socket and TLS handshake state; completed replies belong to the waiting request. See [TLS scheduling](https-transport.md#tls-scheduling-isolation). |
 | DNS lookups | Four dedicated threads; at most 32 queued/running jobs per transport | Jobs retain separate verified registry credit across request cancellation. Returned address vectors contain at most 64 addresses. System-resolver internal allocations remain trusted; see [DNS accounting](dns-resources.md). |
 | Disk operations | One worker, one sequential write/sync operation | A timeout bounds caller waiting, not syscall duration. Outstanding work retains its frame until completion or process exit. |
 
@@ -190,8 +191,8 @@ identifies excluded metadata and active owners.
   fixed HTTP slots and their two registered wakers; the former mpsc block-reuse obligation no longer applies. The disk
   queue instead requests one fixed Q-element vector of optional Jobs; checked
   FIFO operations preserve its slot count without resizing. The audit worker
-  requests a 2 MiB stack; with the four DNS workers, the executable requests
-  10 MiB of dedicated background stacks, excluding OS overhead and its main stack.
+  requests a 2 MiB stack; with four DNS and four TLS handshake workers, the executable requests
+  18 MiB of dedicated background stacks, excluding OS overhead and its main stack.
 - Immutable identity/route tables, URI and credential storage, configuration
   parsing scratch, metrics strings, and error/header metadata. The
   [configuration inventory](configuration.md#configuration-storage-and-startup-scratch)
@@ -245,3 +246,6 @@ fixture measures three paced waves per logging mode, with an extended 100-wave
 workload in a dedicated CI job. Both exclude provider/client memory and check
 audit coverage and clean shutdown; see the [benchmark notes](benchmarks.md#isolated-gateway-process-memory). Until the remaining obligations are resolved,
 neither the subtotal nor the core's 128 MiB allowance is a whole-process guarantee.
+The [resource composition](resource-composition.md) assigns each budget above to
+one owner, maps the theorem categories to production owners, and sums these
+inventories into a conditional requested-allocation bound with explicit assumptions.

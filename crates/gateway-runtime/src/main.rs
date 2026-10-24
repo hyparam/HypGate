@@ -29,6 +29,11 @@ async fn run() -> Result<(), &'static str> {
     let log = DiskLog::create_with_payload_limit(Path::new(&args[3]), 16, Duration::from_secs(2), config.chunk_bytes()).map_err(|_| "cannot create and sync new audit log")?;
     let listener = tokio::net::TcpListener::bind(address).await.map_err(|_| "cannot bind listener")?;
     eprintln!("soundgate listening on {}", listener.local_addr().map_err(|_| "cannot read listen address")?);
+    let budget = gateway_runtime::budget::compose(gateway_runtime::budget::Limits {
+        requests: config.request_limit(), chunk_bytes: config.chunk_bytes(), connections: 128, queue: 16,
+    }).ok_or("allocation budget overflow")?;
+    // Informational only: a closed stderr must not stop the server.
+    let _ = writeln!(io::stderr().lock(), "soundgate requested-allocation budget {} bytes under docs/resource-composition.md assumptions", budget.total);
     let shutdown = async {
         #[cfg(unix)] {
             if let Ok(mut terminate) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {

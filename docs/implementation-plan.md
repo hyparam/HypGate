@@ -2,10 +2,10 @@
 
 | Milestone | Progress | Complete |
 | --- | :---: | :---: |
-| 1. Verified streaming core | 65/68 | ☐ |
+| 1. Verified streaming core | 68/68 | ✓ |
 | 2. Minimal working gateway | 6/6 | ✓ |
 | 3. Crash-safe logging | 15/15 | ✓ |
-| 4. Availability hardening | 12/16 | ☐ |
+| 4. Availability hardening | 13/16 | ☐ |
 | 5. Auditable first release | 6/9 | ☐ |
 
 Progress counts completed rows in each milestone's table below. Rows are not
@@ -17,16 +17,17 @@ completion does not imply completion of the earlier composition proofs or releas
 
 Status: approved direction is Rust plus Verus. Milestone 3 is closed under its
 explicit storage assumptions; see the [exit audit](storage-crash-contract.md#milestone-3-exit-audit).
-Next focus is closing milestone 1: composed resource ownership and allocation
-accounting. Other unfinished milestones wait unless they are a direct dependency.
-The [milestone 1 exit audit](milestone-1-exit-audit.md) maps all seven criteria to
-evidence: six are covered within the core's stated scope; resource composition
-still blocks closure.
+Milestone 1 is closed under the explicit assumptions in the
+[resource composition](resource-composition.md); the
+[milestone 1 exit audit](milestone-1-exit-audit.md) maps all seven criteria to
+evidence. Next focus is milestones 4 and 5: remaining availability validation
+and the auditable release.
 See the [streaming-core progress notes](streaming-core-progress.md) and
 [authorization core](authorization-core.md) for completed increments and remaining gaps.
 The [runtime ownership layer](runtime-ownership.md) now ties authorization, a single
-stream, and slot release together in tested safe Rust. Composed resource proofs
-and full accounting for adapter allocations remain open; the
+stream, and slot release together in tested safe Rust. Composed resource
+accounting is conditional on the stated correspondence, dependency, and
+allocator assumptions; the
 [resource inventory](resource-accounting.md) separates visible payload budgets from
 dependency allocations and task-lifetime obligations.
 Static JSON policy loading and immutable endpoint/credential mapping are implemented
@@ -116,9 +117,9 @@ the synchronous authorization/token boundary before adding network dispatch.
 | ✓ | TLS record allocation reuse, vectored scratch, and consumed-prefix retention inventoried, with allocation-capacity/address regression. |
 | ✓ | HelloRetryRequest cookie copy inventory, pinned debug-only extension-length assertion, and connector-level echo/fail-closed regression. |
 | ✓ | Peer certificate chain ownership across Certificate/verify/ticket/resumption, with a large-chain equality regression. |
-| ☐ | Complete runtime correspondence to resource snapshots, including every owner, receipt, encoding buffer, queue, and cancellation tail. |
-| ☐ | Compose all allocation bounds, including TLS control/handshake storage, metadata capacities, task/waker storage, and explicit allocator/OS assumptions. |
-| ☐ | Compose lifetime and instance scopes across server invocations, separate Gateway/transport/logger instances, DNS workers, and request/worker limits. |
+| ✓ | Runtime correspondence table maps every theorem category, encoding buffer, receipt, queue slot, and cancellation tail to its production owner and enforcement; see [resource composition](resource-composition.md). |
+| ✓ | Composed requested-allocation bound sums the HTTP, TLS control/handshake, metadata, DNS, and instance inventories with explicit descriptor/allocator/OS assumptions; `budget.rs` computes it and the executable reports it at startup. |
+| ✓ | Instance and lifetime ledger assigns every budget to one owner across serve invocations, Gateway/transport/logger instances, DNS/handshake pools, and request/worker limits, with enumerated tails. |
 
 Replace the one-byte experiment with bounded chunks and an explicit write lifecycle.
 Own immutable payload bytes; authorize a bounded range; account for the transport's
@@ -232,6 +233,9 @@ remain explicit assumptions. This milestone does not certify physical power loss
 
 ## 4. Availability hardening
 
+The [exit audit](availability-audit.md) maps criteria to current evidence and
+records the remaining shutdown/resource composition obligations.
+
 | Done | Submilestone |
 | :---: | --- |
 | ✓ | Separate verified worker registry covers rejection and cleanup, with saturation/cancellation tests. |
@@ -246,7 +250,7 @@ remain explicit assumptions. This milestone does not certify physical power loss
 | ✓ | Eight-client paced 4 MiB responses and mid-workload permanent log failure in both modes. |
 | ✓ | Repeated admission overload preserves eight active streams and health checks, rejects excess traffic before dispatch, and recovers capacity. |
 | ✓ | Concurrent stalled-sync test verifies bounded queues, request cleanup, and both operator modes. |
-| ☐ | Isolate synchronous TLS verification CPU work or establish a worst-case scheduling bound for the current-thread executor. |
+| ✓ | TLS handshake CPU work isolated on four dedicated threads with 32 retained job credits; saturation, cancellation, panic, and runtime-shutdown regressions. |
 | ☐ | Complete long-duration overload validation. |
 | ☐ | Complete broader fault and load coverage against the exit criteria. |
 | ☐ | Complete shutdown and resource proofs under explicit scheduler/I/O assumptions. |

@@ -1,10 +1,14 @@
 # Milestone 1 exit audit
 
 Audited on 2026-10-23 against the seven exit criteria in the implementation plan,
-including the sealed raw-stream APIs. **Milestone 1 remains open.** Six criteria
-are covered within the synchronous core's stated preconditions; the complete
-resource-accounting criterion is partial. This does not move unfinished work to
-another milestone or treat adapter assumptions as proved runtime behavior.
+including the sealed raw-stream APIs, and re-audited on 2026-10-24 after the
+resource composition. **Milestone 1 is closed under the explicit assumptions in
+the [resource composition](resource-composition.md).** Six criteria are covered
+within the synchronous core's stated preconditions; the resource-accounting
+criterion is covered conditionally on the runtime-correspondence, pinned
+dependency, and allocator/OS assumptions listed there. This does not move
+unfinished work to another milestone or treat adapter assumptions as proved
+runtime behavior; the assumptions remain visible obligations.
 
 | Exit criterion | Evidence and scope | Status |
 | --- | --- | --- |
@@ -12,11 +16,11 @@ another milestone or treat adapter assumptions as proved runtime behavior.
 | Partial, zero-progress, invalid, and stale completions have specified behavior | `StreamChunk::{prepare,pending_bytes,complete}` specifies exact matching owner/generation, permitted byte ranges, accepted partial counts, and unchanged state on rejection. Streaming/composition tests and deliberate completion defects exercise the compiled path. A reported write count still assumes truthful I/O. | Covered for the core |
 | Cancellation prevents new writes while accounting for an already issued write | `cancel` closes the stream; `prepare` and `pending_bytes` refuse further submissions. `complete` can account for the matching already-issued range without granting a new range. OwnedStream preserves those contracts. Actual future cancellation and effect termination are separate adapter obligations. | Covered for the core |
 | Multiple chunks and requests preserve ordering and cannot mix identities | Chunk rollover preserves the byte-prefix history, request ownership, and monotonic offsets; tickets bind owner and generation and reject exhaustion. OwnedStream consumes its unique key and cannot expose a mutable or owned raw stream externally. Numeric identities remain scoped to a registry, which the runtime lease must bind correctly. | Covered within one correctly bound registry |
-| Queue, buffer, and outstanding-operation limits have explicit accounting | Verified admission, owned stream/read bounds, fixed audit FIFO/closure and actual queued-frame byte bound, conditional buffer subtotal, and source inventories cover substantial parts. Complete runtime-to-snapshot correspondence and allocation composition remain unresolved, as detailed below. | **Partial: blocks closure** |
+| Queue, buffer, and outstanding-operation limits have explicit accounting | Verified admission, owned stream/read bounds, fixed audit FIFO/closure and actual queued-frame byte bound, and the conditional buffer subtotal cover the visible payload. The [resource composition](resource-composition.md) maps every theorem category and cancellation tail to its production owner, assigns every budget to one instance, and sums the dependency inventories into a requested-allocation bound that `budget.rs` computes. Descriptor sizes, allocator/OS behavior, and the async correspondence are explicit assumptions. | Covered conditionally |
 | Mutation tests reject corruption, cross-request writes, duplicate advancement, capacity violations, and strict-mode forwarding before durability | All 139 mutations are rejected by proof obligations; the script verifies the unmodified library first. Named defects include wrong owner/generation, full-write substitution, omitted payload/receipt storage, queue overwrite/reopening, and advancing beyond durability. Mutations test the strength of specified contracts, not the completeness of the threat model. | Covered for listed defect classes |
 | Verified admission issues private authorization tied to identity/policy/origin/credential; candidate configuration cannot expand root grants | Policy validation, authentication, and tenant-scoped authorization establish those relationships. AuthorizedRequest construction is private and its policy borrow binds the immutable snapshot. Runtime dispatch consumes PreparedRequest; concrete URI/DNS/TLS/secret binding remains trusted and tested. | Covered at the verified admission boundary |
 
-The current workspace has 176 passing regular tests and five compile-fail doctests.
+The current workspace has 179 passing regular tests and five compile-fail doctests.
 All five CI jobs passed at `b72c839` in
 [run 40061075707](https://github.com/platypii/LogGate/actions/runs/40061075707):
 183 production proof checks, all 139 rejected mutations, Rust tests, Linux ext4,
@@ -28,88 +32,43 @@ and completing a read while its mutable buffer borrow remains live. Low-level
 adversarial stream tests now run inside the core crate, retaining their coverage
 without reopening the external API.
 
-## Remaining work for criterion five
+## Closure evidence for criterion five
 
-1. **Complete runtime ownership correspondence.** The owner-map lemmas preserve
-   initialization, reservation, claim, replacement, and retirement. Their global
-   bound still takes a complete snapshot as a premise. The runtime must account
-   for every live owner, encoding frame, delivered receipt, channel endpoint, and
-   cleanup tail at each relevant transition. Rust privacy and field drop order
-   support that argument but are not a mechanically checked async refinement.
-   The actual frame queue now supplies queued count and structural validity to the
-   subtotal and enforces its configured payload limit. The core also charges one
-   encoding reservation against Q, and the combined theorem explicitly includes its
-   byte snapshot. Production uses the verified reserved encoder, and typed
-   composition derives actual body/frame lengths. Production enqueue hides the
-   callback/core reference and consumes a private single-use encoding permit. The
-   queue module, synchronization, and snapshot completeness remain trusted. Startup binding to K and
-   the other snapshots remain explicit premises.
-   Sealing raw constructors removes one external bypass; it does not prove
-   registry identity, destructor timing, or snapshot completeness.
-2. **Finish allocation accounting beyond logical payloads.** The disk queue now
-   requests a fixed Q-slot vector with verified unchanged slot count. Audit encoding
-   requests P + 65 frame bytes plus 33 header scratch bytes; boundary tests check
-   reported capacity and unchanged allocation across sealing. These are allocation
-   requests and regression evidence, not a proof of allocator overhead. HTTP channels now use a verified inline mailbox and bounded registered wakers, removing
-   linked-block growth/reuse overlap and the separate slot allocation. Endpoint
-   closure/extraction is verified. Explicit Hyper queue strategy excludes body
-   flattening; partial non-vectored fallback preserves both request/response bytes.
-   The pinned-source queued-output audit now bounds retained original streaming
-   payloads including the partial front, with allocation-lifetime regression
-   coverage. Destination inputs are now capped at 8 KiB, and a serialized-head
-   inventory plus maximum-input wire test bounds request/response heads below
-   64 KiB, including the server-generated interim response. Serializer reservation
-   requests have also been inventoried. Pinned Rust/bytes source now bounds each
-   header/parser backing allocation request at 128 KiB, with 192 KiB allowed for
-   a unique-buffer replacement. These exclude allocator overhead and do not
-   by themselves bound the count of shared parser allocations. A separate
-   four-location ownership audit now budgets 512 KiB of parser backing requests
-   per live exchange (576 KiB during replacement), including delayed channel
-   cleanup. Trailer assembly now has a separate 32 KiB capacity inventory
-   and real parser boundary regression; trailer-map/control storage and
-   composition across connection/task lifetimes,
-   metadata collections, TLS handshake/cache active owners, task/waker storage,
-   and allocator/OS storage remain outside the subtotal. The TLS deframer byte
-   vector now has a pinned-source 128 KiB capacity/192 KiB replacement allowance,
-   with an early oversized-handshake rejection regression; other TLS allocations
-   are not included in that allowance. Active retrieved/new session values now
-   have a separate two-per-connection ownership inventory and logical-content
-   subtotal, with a live resumed-connection eviction regression; decoded
-   messages, peer-certificate copies, and session/control capacities remain.
-   TLS certificate decompression is explicitly disabled, and parsed certificate
-   lists now have entry-count/capacity inventories; descriptor ABI sizes and
-   simultaneous owned-chain/verifier allocations remain to compose. Verifier
-   path/work counters and EKU diagnostic element counts are now inventoried,
-   with trusted-but-wrong-purpose rejection/cleanup coverage. HelloRetryRequest
-   cookie copies are inventoried (about six at peak, three retained until the
-   ServerHello), the pinned debug-only extension-length assertion is documented,
-   and the production connector echoes a maximal cookie then fails closed. Peer
-   certificate chain copies are inventoried through Certificate, verification,
-   ticket cloning, and resumption, with a large-chain equality regression. These counters
-   do not bound synchronous verification wall time. The TLS control-traffic
-   audit identifies direct queue appends outside the application-byte cap;
-   key-update burst/cleanup tests cover the consecutive limit, while queue
-   composition across application-data resets remains open. A dependency-level
-   regression now demonstrates 81,000 extra queued control bytes despite full
-   application buffers. The production TLS adapter now drains ciphertext before
-   further plaintext writes. Real TLS with gated output holds the queue stable
-   across 3,000 key-update/data rounds and resumes exact bytes; full
-   control/read-path allocation composition remains unresolved. The dependency audit
-   distinguishes known control-object counts and stack reservations from unresolved
-   peak allocations. No RSS plateau substitutes for these obligations.
-3. **Compose the lifetime scopes.** Connection credits now belong to one Gateway and
-   remain charged through connection-task destruction, including aborted-server
-   tails. Listener/JoinSet/completed-task metadata remains per invocation;
-   separate Gateway instances still require separate budgets. Worker/request budgets belong
-   to their registries, DNS jobs to their transport, and audit jobs to their logger.
-   A complete bound must state the instance/lifetime assumptions and count those
-   tails before combining categories. It cannot reclaim an operation's resources
-   merely because its caller timed out.
+The three items that previously blocked closure are discharged in the
+[resource composition](resource-composition.md), which the earlier increments
+recorded in this section now support:
 
-The next closure review should discharge these items against the actual production
-owners and the combined theorem, then rerun the required checks. It should not
-close the milestone by counting additional lemmas, passing more examples, or
-renaming an unresolved resource obligation.
+1. **Runtime ownership correspondence.** A table maps each category of
+   `Buffers::accounted_payload_bound` (chunks, readers, output queues, queued
+   log, encoding snapshot, active log, receipts, headers) to the production
+   owner type, the event that inserts it, the event that removes it, and the
+   mechanism that enforces its count. Cancellation tails are enumerated so no
+   snapshot entry is dropped from the sum. The verified transitions, Rust field
+   drop order, and the lifetime regressions support that table; a mechanized
+   async refinement is not claimed and is the first listed assumption.
+2. **Allocation accounting beyond logical payloads.** The HTTP, TLS deframer,
+   transcript, HelloRetryRequest, queued-ciphertext, peer-chain, session,
+   verifier, metadata, DNS, configuration, stack, and cache inventories are
+   summed into B(R, K, C, Q). The queued-ciphertext window composes the control
+   audit with the production drain guard. `gateway-runtime/src/budget.rs`
+   computes the figure with checked arithmetic, pins the documented constants
+   and the executable example (about 441.1 MB for R = 32, K = 16 KiB, C = 128,
+   Q = 16), and the executable prints it at startup. Objects whose sizes are
+   private ABI facts are listed with bounded counts as assumptions.
+3. **Lifetime and instance scopes.** Every budget is assigned to one owner
+   (`GatewayConfig`, `Gateway`, a `serve` invocation, `HttpsTransport`,
+   `DiskLog`, an admitted exchange, an inbound connection task) with its
+   lifetime and the tails that outlive callers. Instances compose additively;
+   no path reclaims resources because a caller timed out.
+
+The composed figure is a conservative requested-allocation ceiling under seven
+explicit assumptions: runtime correspondence, pinned dependency source,
+allocator/OS behavior, fixed-size descriptors, one instance of each owner,
+the protocol scope, and honest effects. It is far above measured RSS by design,
+because it charges every owner at its replacement peak simultaneously. Closing
+the milestone on this basis does not certify total process memory; it certifies
+that no queue, buffer, or outstanding operation in the production path is
+unaccounted within those assumptions.
 
 See the [resource inventory](resource-accounting.md),
 [runtime ownership](runtime-ownership.md), [audit ownership](audit-buffer-lifetimes.md),

@@ -19,6 +19,7 @@ pub struct Admission {
     registry: Mutex<ResourceAdmission>,
     policy: Policy,
     strict: bool,
+    requests: usize,
 }
 
 enum LeaseState { Reserved(RequestKey), Streaming(OwnedStream) }
@@ -65,8 +66,9 @@ impl Admission {
     }
     pub(crate) fn requires_audit(&self) -> bool { self.strict }
     pub fn new(policy: Policy, requests: usize, chunk_bytes: usize, strict: bool) -> Self {
-        Self { registry: Mutex::new(ResourceAdmission::new(requests, chunk_bytes)), policy, strict }
+        Self { registry: Mutex::new(ResourceAdmission::new(requests, chunk_bytes)), policy, strict, requests }
     }
+    pub fn request_limit(&self) -> usize { self.requests }
 
     pub fn admit(&self, digest: &[u8], selector: u64) -> Result<Request<'_>, AdmissionError> {
         let identity = self.policy.authenticate(digest).ok_or(AdmissionError::Unauthorized)?;

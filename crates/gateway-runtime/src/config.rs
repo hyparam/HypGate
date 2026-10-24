@@ -111,6 +111,8 @@ fn digest(text: &str) -> Result<Vec<u8>, ConfigError> {
 
 impl GatewayConfig {
     pub fn chunk_bytes(&self) -> usize { self.chunk_bytes }
+    /// Configured request slots, independent of registry health.
+    pub fn request_limit(&self) -> usize { self.admission.request_limit() }
     pub(crate) fn admission_healthy(&self) -> bool { self.admission.healthy() }
     #[cfg(test)]
     pub(crate) fn poison_admission_for_test(&self) { self.admission.poison_for_test(); }
