@@ -638,3 +638,51 @@ async fn inbound_wire_head_and_header_count_limits_apply_before_health_dispatch(
         shutdown.send(()).unwrap(); gateway.await.unwrap().unwrap();
     }).await.unwrap();
 }
+
+#[tokio::test]
+async fn aborting_server_drops_connections_and_recovers_worker_credit_across_restarts() {
+    use tokio::io::AsyncReadExt;
+    tokio::time::timeout(Duration::from_secs(15), async {
+        for availability in [false, true] {
+            let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let dir = TempDir::new();
+            let app = Gateway::new(config(upstream.local_addr().unwrap().port(), availability),
+                HttpsTransport::with_roots(RootCertStore::empty(), Duration::from_secs(60)).unwrap(),
+                DiskLog::create(&dir.0.join("abort.log"), 2, Duration::from_secs(1)).unwrap());
+            for _ in 0..16 {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let gateway = tokio::spawn(serve(listener, app.clone(), 1, Duration::from_secs(60), std::future::pending()));
+                let mut client = TcpStream::connect(address).await.unwrap();
+                client.write_all(b"POST /routes/7 HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer gateway\r\nContent-Length: 0\r\n\r\n").await.unwrap();
+                let (mut provider, _) = upstream.accept().await.unwrap();
+                // Observe the TLS ClientHello, then withhold the handshake.
+                // Both deadlines are longer than the whole test's timeout.
+                let mut first = [0; 5]; provider.read_exact(&mut first).await.unwrap();
+                assert_eq!(first[0], 22);
+                assert_eq!(app.config.usage(), Some((1, 1)));
+                assert_eq!(app.worker_slots.usage(), Some((1, 1)));
+                assert_eq!(app.workers.len(), 1);
+                gateway.abort();
+                assert!(gateway.await.unwrap_err().is_cancelled());
+                // JoinSet Drop requests cancellation; joining serve alone does
+                // not imply its children have finished their destructors.
+                let mut tail = Vec::new();
+                provider.read_to_end(&mut tail).await.unwrap();
+                let mut response = Vec::new();
+                client.read_to_end(&mut response).await.unwrap();
+                assert!(response.is_empty());
+                while !app.workers.is_empty() || app.worker_slots.usage() != Some((0, 1)) {
+                    tokio::task::yield_now().await;
+                }
+                assert_eq!(app.config.usage(), Some((0, 1)));
+                assert!(TcpStream::connect(address).await.is_err());
+                assert!(app.log.healthy());
+            }
+            // Aborting serve bypasses its explicit logger shutdown. Its owner
+            // must still shut down the shared logger after the final restart.
+            app.log.shutdown(Duration::from_secs(1)).await.unwrap();
+            assert_eq!(app.audit_gaps(), 0);
+        }
+    }).await.unwrap();
+}

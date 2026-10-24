@@ -194,6 +194,10 @@ impl AsyncWrite for Output {
 
 /// Admission bounds live requests; this separate limit bounds unauthenticated
 /// connections and header parsing. Excess accepted sockets are immediately closed.
+/// Signal `shutdown` and await this function to drain and join children and close
+/// the logger. Dropping this future only requests child cancellation: cleanup
+/// may outlive it, and the shared logger's explicit shutdown is skipped. The
+/// connection limit is per invocation, not shared across concurrent restarts.
 pub async fn serve(listener: TcpListener, app: Arc<Gateway>, connections: usize,
     connection_deadline: Duration, shutdown: impl Future<Output = ()>) -> io::Result<()> {
     if connections == 0 || connections > 65536 || connection_deadline.is_zero()

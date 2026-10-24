@@ -34,6 +34,38 @@ The [HTTP buffer lifetime audit](http-buffer-lifetimes.md) follows reservations,
 receiver closure, sender cleanup, and End acknowledgment. Its conservative channel
 count includes cleanup after a client connection has gone away.
 
+### Connection-task lifetime boundary
+
+The inbound C bound belongs to one `serve` invocation. Its accept loop is the
+only producer of connection tasks and checks `JoinSet::len()` before spawning.
+Tokio 1.54.1 keeps completed entries until `poll_join_next` removes their ready
+JoinHandle; completion alone cannot make the set undercount outstanding tasks.
+The biased select reaps ready entries before accepting another connection. The
+single accepted socket before the limit check is additional to those C entries.
+
+Normal shutdown stops accepting, drains or aborts and joins the entire set, then
+waits for request workers and shuts down the logger. Dropping/aborting `serve`
+instead runs JoinSet's destructor, which requests abort for each entry but does
+not await child destruction. Child sockets and request cancellation guards can
+therefore remain alive after the `serve` task itself has been joined. Worker
+credits still cover their associated work until actual destruction; an aborted
+invocation's connections are not charged to a newly created invocation's C.
+Concurrent invocations and overlapping cancellation tails must be counted
+separately. Library callers should use the shutdown future and await `serve`
+when they require a completed drain and logger shutdown.
+
+The repeated-abort regression withholds the provider's TLS handshake, then aborts
+the actual server future in each of 16 waves per logging mode. It checks client
+and provider socket closure, listener closure, zero worker/request occupancy,
+and reuse of the same one-slot gateway on the next wave. The test explicitly
+waits for child cleanup before restarting; it does not claim that joining the
+aborted parent synchronously joins its descendants. The shared logger remains
+healthy across these cancellations and is explicitly shut down at the end.
+Removing `AbortOnDrop`'s worker abort makes this regression hit its deadline,
+confirming that it detects a detached worker still waiting on the handshake.
+These are trusted Tokio/Rust lifecycle facts and adapter tests, not a new formal
+task-liveness or whole-process allocation proof.
+
 A conservative **visible payload subtotal**, under the ownership relationships
 above, is:
 
