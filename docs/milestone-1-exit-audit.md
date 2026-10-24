@@ -21,11 +21,10 @@ runtime behavior; the assumptions remain visible obligations.
 | Verified admission issues private authorization tied to identity/policy/origin/credential; candidate configuration cannot expand root grants | Policy validation, authentication, and tenant-scoped authorization establish those relationships. AuthorizedRequest construction is private and its policy borrow binds the immutable snapshot. Runtime dispatch consumes PreparedRequest; concrete URI/DNS/TLS/secret binding remains trusted and tested. | Covered at the verified admission boundary |
 
 The current workspace has 179 passing regular tests and five compile-fail doctests.
-All five CI jobs passed at `b72c839` in
-[run 40061075707](https://github.com/platypii/LogGate/actions/runs/40061075707):
+All five CI jobs passed at `154ef03`, the closing commit, in
+[run 40068082114](https://github.com/platypii/LogGate/actions/runs/40068082114):
 183 production proof checks, all 139 rejected mutations, Rust tests, Linux ext4,
-proxy failover, and the 100-wave memory soak. That run predates the additional
-trailer-parser regression; the local count above includes subsequent runtime regressions.
+proxy failover, and the 100-wave memory soak.
 The raw-construction, raw-claim, and raw-release negative examples require the
 private-method diagnostic; existing examples prohibit mutable stream extraction
 and completing a read while its mutable buffer borrow remains live. Low-level
