@@ -576,6 +576,24 @@ the application's read/write interleavings, backpressure, queued record owners,
 and counter-reset behavior; alternating control and application traffic must not
 be justified by the consecutive-burst test alone.
 
+The dependency-level regression
+`tls_control_replies_can_exceed_application_buffer_limit` makes this limitation
+concrete using authenticated TLS 1.3 client/server connections. After filling the
+client's 65,536-byte application allowance, it stops draining client ciphertext.
+For 3,000 rounds the server sends a key update followed by one application byte;
+the client consumes that byte and attempts another application write. Every
+attempt accepts zero application bytes, yet moves a pending key-update reply
+into the ciphertext queue. The observed queued length increases by exactly
+81,000 bytes (3,000 times 27), exceeding twice the configured limit.
+
+This is a counterexample to treating the rustls application setting as a total
+ciphertext-queue bound. It is not a production gateway exploit: the fixture
+explicitly schedules reads and writes, without Hyper or tokio-rustls. The next
+obligation is to establish whether production polling and body backpressure
+permit equivalent repeated interleavings, including empty peer application
+records, or enforce an explicit queue bound at the TLS adapter. The consecutive
+key-update counter alone cannot discharge that obligation.
+
 ## Shared TLS session storage
 
 `HttpsTransport` explicitly selects `Resumption::in_memory_sessions(256)` and

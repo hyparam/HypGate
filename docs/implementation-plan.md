@@ -77,6 +77,11 @@ First increment: a single bounded chunk with one outstanding write, a borrowed
 payload view, generation-tagged completion, and partial-write accounting. This is
 not milestone completion: multi-chunk scheduling and global resource budgets follow.
 
+TLS control-queue follow-up: the dependency-level alternating key-update/data
+experiment exceeds the application buffer limit by 81,000 control bytes.
+Production scheduling reachability or adapter enforcement remains part of
+milestone 1; see [the resource audit](dependency-resources.md#control-traffic-is-not-covered-by-the-application-buffer-limit).
+
 ## 2. Minimal working gateway
 
 Wrap the same verified core in a narrow Rust HTTP/TLS adapter. Evaluate

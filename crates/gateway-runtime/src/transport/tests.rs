@@ -138,6 +138,48 @@ async fn trusted_certificate_with_large_wrong_purpose_list_is_rejected_before_up
     }).await.unwrap();
 }
 
+// Dependency-level counterexample, not a production HTTP scheduling test.
+#[test]
+fn tls_control_replies_can_exceed_application_buffer_limit() {
+    use std::io::{Read, Write};
+    use tokio_rustls::rustls::{ClientConnection, ServerConnection};
+    let cert = generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let mut roots = RootCertStore::empty(); roots.add(cert.cert.der().clone()).unwrap();
+    let server_config = ServerConfig::builder().with_no_client_auth().with_single_cert(
+        vec![cert.cert.der().clone()], PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()).into()).unwrap();
+    let client_config = ClientConfig::builder().with_root_certificates(roots).with_no_client_auth();
+    let mut client = ClientConnection::new(Arc::new(client_config), ServerName::try_from("localhost").unwrap()).unwrap();
+    let mut server = ServerConnection::new(Arc::new(server_config)).unwrap();
+    for _ in 0..10 {
+        let mut wire = Vec::new(); client.write_tls(&mut wire).unwrap();
+        if !wire.is_empty() { server.read_tls(&mut &wire[..]).unwrap(); server.process_new_packets().unwrap(); }
+        let mut wire = Vec::new(); server.write_tls(&mut wire).unwrap();
+        if !wire.is_empty() { client.read_tls(&mut &wire[..]).unwrap(); client.process_new_packets().unwrap(); }
+        if !client.is_handshaking() && !server.is_handshaking() && !client.wants_write() && !server.wants_write() { break; }
+    }
+    assert!(!client.is_handshaking() && !server.is_handshaking());
+    assert!(!client.wants_write() && !server.wants_write());
+    assert_eq!(client.protocol_version(), Some(tokio_rustls::rustls::ProtocolVersion::TLSv1_3));
+    let limit = 65536;
+    client.set_buffer_limit(Some(limit));
+    assert_eq!(client.writer().write(&vec![0; limit]).unwrap(), limit);
+    let baseline = client.process_new_packets().unwrap().tls_bytes_to_write();
+    // Do not drain client ciphertext: model a stalled outbound socket while
+    // reads and attempted application writes continue. Each peer byte resets
+    // the consecutive key-update counter and is consumed before the next round.
+    for _ in 0..3000 {
+        server.refresh_traffic_keys().unwrap();
+        server.writer().write_all(b"x").unwrap();
+        let mut wire = Vec::new(); server.write_tls(&mut wire).unwrap();
+        client.read_tls(&mut &wire[..]).unwrap(); client.process_new_packets().unwrap();
+        let mut byte = [0]; client.reader().read_exact(&mut byte).unwrap(); assert_eq!(&byte, b"x");
+        assert_eq!(client.writer().write(b"y").unwrap(), 0);
+    }
+    let queued = client.process_new_packets().unwrap().tls_bytes_to_write();
+    assert_eq!(queued, baseline + 3000 * 27);
+    assert!(queued > 2 * limit);
+}
+
 #[tokio::test]
 async fn tls_key_update_burst_limit_rejects_without_response_or_replay() {
     use tokio::io::AsyncReadExt;
