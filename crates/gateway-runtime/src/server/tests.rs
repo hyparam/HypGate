@@ -562,3 +562,5 @@ async fn worker_budget_covers_cleanup_without_consuming_request_slots() {
         shutdown.send(()).unwrap(); gateway.await.unwrap().unwrap();
     }).await.unwrap();
 }
+
+mod memory;

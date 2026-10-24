@@ -155,3 +155,46 @@ write occurs once health has failed.
 This is deterministic fault injection into a synchronous writer, not an actual
 filesystem hang, long-duration soak, memory measurement, or proof of OS scheduling
 and syscall cancellation. It complements the smaller disk-worker timeout tests.
+
+## Isolated gateway process memory
+
+`server::tests::memory::isolated_gateway_memory_in_both_logging_modes` launches a
+separate gateway runtime child. The provider, clients, and RSS sampler run in the
+parent and are excluded from the measured PID. The child is the debug test binary
+using a fixture CA, not the release CLI. It runs one Tokio runtime thread and the
+real disk worker, with eight request slots, 16 KiB chunks, a 16-record disk queue,
+and a 128-connection limit.
+
+Each mode runs three waves of eight requests. Providers stream 1 MiB per response
+in 16 KiB frames, paced by 2 ms sleeps; clients delay 3 ms between received frames.
+The fixture checks exact response bytes, all 24 requests' audit byte totals and
+response contents, no audit gaps or failed exchanges, zero active requests/workers,
+and graceful server/logger shutdown. It reads logs after shutdown without storing
+all response payloads. RSS is sampled about every 50 ms; Linux additionally reads
+`VmHWM` from the child's proc status. macOS reports sampled RSS only, which can miss
+brief peaks. Run it with:
+
+```sh
+cargo test -p gateway-runtime --locked --lib isolated_gateway_memory -- --ignored --nocapture
+```
+
+CI runs this fixture on Ubuntu 24.04 and emits JSON with baseline, sampled peak,
+kernel high-water mark where available, settled RSS after each wave, and sample
+count. This is a measurement, not an asserted universal memory limit. Three waves
+do not establish long-duration stability or leak freedom. Settled RSS can include
+allocator caches, TLS sessions, and retained dependency capacities. The workload
+does not exercise maximum header sizes, handshake attacks, all configured request
+limits, or kernel/filesystem memory. The [dependency audit](dependency-resources.md)
+remains relevant even when the observed resident set is small.
+
+Local macOS arm64 result on 2026-10-23 (debug test profile, 21.74 seconds for both
+modes combined; 181 periodic samples per mode, plus final sampling):
+
+| Mode | Baseline RSS bytes | Sampled peak RSS bytes | Settled RSS bytes after waves 1 / 2 / 3 |
+| --- | ---: | ---: | --- |
+| Strict | 6,914,048 | 12,746,752 | 12,402,688 / 12,615,680 / 12,746,752 |
+| Availability | 6,914,048 | 12,763,136 | 12,435,456 / 12,632,064 / 12,763,136 |
+
+Both runs passed all correctness and shutdown checks. RSS rose between waves;
+these samples do not establish a plateau. Linux high-water evidence is pending
+the new CI step's first completed run.
