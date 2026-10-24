@@ -295,7 +295,34 @@ This validates healthy operation after the scheduling change; it is not a
 controlled before/after performance comparison or a latency guarantee.
 
 
-## Sustained admission overload
+## Shutdown while the disk worker remains blocked
+
+The regular workspace test
+`shutdown_with_blocked_disk_returns_error_without_replacement_or_replay` repeats
+the concurrent stalled-log workload in both modes, then signals server shutdown
+before releasing the disk gate. Server shutdown must return the logger's timeout
+within the test's four-second observation window; the listener must be closed,
+request occupancy and worker tracking must be zero, and the same two queued jobs
+and one write call must remain. Only then does the fixture release and join the
+logger, checking that no queued write or replay occurs. Both modes passed locally
+after introducing the bounded TLS handshake pool. The gate models a syscall that
+remains blocked through shutdown; it does not prove kernel cancellation behavior.
+
+
+After moving TLS handshakes onto the bounded dedicated pool, the short isolated
+memory fixture passed locally in both modes (macOS arm64, debug profile, three
+waves and 24 one-MiB responses per mode). Strict mode completed in 10.911 seconds,
+with baseline RSS 7,700,480 bytes and sampled peak 14,434,304 bytes. Availability
+mode completed in 11.075 seconds, with baseline 7,667,712 bytes and sampled peak
+14,483,456 bytes. Exact response/audit contents, released credits, and graceful
+shutdown passed. This run overlapped the sustained overload fixture in another
+process, so timing is not a controlled comparison. The initial sandboxed attempt
+could not execute the RSS sampler; these measurements came from the successful
+unsandboxed rerun. Thread stack reservations are virtual capacity requests, not
+an assertion that all stack pages are resident.
+
+
+## Sustained admission overload and final fault workloads
 
 After TLS scheduling isolation, the ten-minute overload fixture passed locally:
 each mode kept eight TLS responses open for five minutes, repeatedly rejected
@@ -312,4 +339,47 @@ The fixture pauses 20 ms between waves. These maxima include local scheduling an
 other concurrently running checks, not just gateway processing. There is no
 latency SLA assertion. This is sustained admission overload, not saturation of
 the distinct inbound-connection cap or an indefinitely running experiment. A
-separate CI job reproduces five minutes per mode.
+separate CI job reproduces five minutes per mode. The final shutdown changes passed a second full-duration run and the separate
+shutdown tests.
+
+The six release-mode workloads also passed after admission closure and shared
+worker cancellation were added (114.15 seconds combined). Healthy strict and
+availability completion p95 were 355.20 and 350.51 ms. Paced 4 MiB response p95
+were 13,984.23 and 14,496.39 ms respectively, with 32 exact responses and no audit
+gaps per mode. Permanent logging failure forwarded eight/rejected 24 in strict
+mode; availability forwarded all 32 with exactly 24 audit gaps. The process-proxy
+failover fixture passed with local HAProxy 3.2.0, verifying truncated interrupted
+streams, no automatic replay, and a fresh request handled by standby.
+
+
+The final repeated overload run after shared worker shutdown changes passed in
+600.53 seconds, including all exact-byte, audit, capacity-reuse, and shutdown
+checks. It overlapped the isolated memory soak and some proof/mutation checks;
+these are local workload observations, not controlled performance comparisons.
+
+| Mode | Duration (s) | Excess requests rejected | Maximum observed health request (ms) | Maximum rejected-wave completion (ms) |
+| --- | ---: | ---: | ---: | ---: |
+| Strict | 300.020 | 355,584 | 21.303 | 23.663 |
+| Availability | 300.024 | 353,696 | 37.210 | 53.027 |
+
+Together the two runs rejected 1,428,736 excess requests, while preserving all
+held streams and allowing a fresh admitted request after each overload phase.
+
+
+The final 100-wave isolated memory soak also passed after shared worker shutdown
+and the separate handshake-tail budget were in place. Each gateway child served
+800 requests and 800 MiB of response payload; exact responses, recovered audit
+contents, zero live request/worker credits, and graceful shutdown all passed.
+Both modes together took 785.23 seconds on local macOS arm64, debug profile.
+
+| Mode | Elapsed (s) | Baseline RSS bytes | Sampled peak RSS bytes | Final 20 settled RSS range, bytes | Samples |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Strict | 393.180 | 7,782,400 | 15,220,736 | 14,958,592–15,220,736 | 6,604 |
+| Availability | 392.024 | 7,766,016 | 14,811,136 | 14,811,136–14,811,136 | 6,664 |
+
+The soak overlapped overload and proof/mutation workloads in other processes.
+Samples measure only the gateway child; macOS does not supply the Linux kernel
+high-water metric. The final availability samples plateaued, while strict samples
+still varied. These finite observations establish neither leak freedom nor a
+universal RSS bound. They provide the repeated load measurement required for
+milestone 4 alongside the separate sustained-overload latency results.

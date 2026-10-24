@@ -68,9 +68,9 @@ checked by Verus, conditional on the documented adapter contracts.
 | Strict audit-before-forwarding | Every submitted body range in strict mode is covered by a durable log acknowledgment for that request and chunk. | Core gate and exact journal-receipt/stream binding proved; disk sync adapter tested. Filesystem crash guarantees remain open. |
 | Crash-safe recovery | Recovery exposes only complete records, and acknowledged records survive every crash in the specified storage model. | Journal acknowledgment ordering and conditional synced-prefix survival proved; header/payload encoding, header decoding, frame extents, and scanner cursor transitions proved; scanner I/O tested. Process-kill recovery tested and storage assumptions documented; conditional scanner steps proved; acknowledged-prefix reconstruction proved under preserved-byte/read/checksum assumptions. Linux ext4 error/process-death tests passed; physical power-loss validation remains open. |
 | Cancellation and no replay | Cancellation prevents new submissions; uncertain effects, crashes, or failover never trigger automatic replay of a possibly executed generation. | Core cancellation/stale-event checks proved; transport has no replay path. Async cancellation and recovery composition remain unproved. |
-| Resource bounds and safe release | Slots, buffers, queues, and outstanding operations stay within explicit budgets; capacity cannot be reused while work retaining it remains alive. | Logical slot limits, ID isolation, and combined payload bound under an explicit stream-to-slot mapping proved; fixed disk-FIFO order, slot capacity, permanent closure, and actual queued-frame byte bound proved; HTTP mailbox occupancy and endpoint closure proved; ownership and deadlines tested. Full allocation accounting and composed release proofs remain open. |
+| Resource bounds and safe release | Slots, buffers, queues, and outstanding operations stay within explicit budgets; capacity cannot be reused while work retaining it remains alive. | Logical slot limits, ID isolation, and combined payload bound under an explicit stream-to-slot mapping proved; fixed disk-FIFO order, slot capacity, permanent closure, and actual queued-frame byte bound proved; HTTP mailbox occupancy and endpoint closure proved; ownership and deadlines tested. Conditional allocation composition and shutdown/release arguments are documented; mechanized async refinement remains open. |
 | Logging-mode separation | Availability mode may lose audit coverage but cannot relax authorization, routing, or tenant isolation; logging failure cannot create unbounded replacement work. | Core logging-mode transitions proved; bounded logger and failure handling tested. End-to-end composition remains open. |
-| Honest completion and conditional progress | Failed/truncated streams cannot masquerade as successful completion; under stated scheduler and I/O assumptions, admitted work terminates or times out and releases resources. | Core admission/release and conditional streaming progress proved; EOF/error behavior and deadlines tested. Async liveness and whole-system shutdown/resource-release proofs remain open. |
+| Honest completion and conditional progress | Failed/truncated streams cannot masquerade as successful completion; under stated scheduler and I/O assumptions, admitted work terminates or times out and releases resources. | Core admission/release and conditional streaming progress proved; EOF/error behavior and deadlines tested. Permanent worker closure and drain rank are proved; the conditional shutdown/resource argument is documented. Mechanized async liveness verification remains open. |
 
 Verus does not verify Tokio, Hyper, rustls, the OS, DNS/PKI, or the filesystem for us.
 Availability also depends on deployment: an external load balancer must route around
@@ -117,6 +117,9 @@ over real TLS through the stream core. The [runnable gateway](docs/running.md)
 connects the inbound server, authorization, streaming, and disk logging.
 The [deployment example](docs/deployment.md) adds TLS termination and readiness-based
 standby routing with proxy retries disabled.
+Milestone 4 is complete under the [availability exit audit](docs/availability-audit.md)
+and [conditional shutdown proof](docs/shutdown-proof.md), including TLS CPU isolation,
+shared-listener shutdown, sustained overload, and repeated isolated-memory validation.
 The [local benchmark](docs/benchmarks.md) measures both logging modes through TLS
 and real disk logging, with explicit workload and memory-accounting limits.
 The [adapter audit](docs/adapter-audit.md) maps runtime trust obligations to effect
@@ -148,9 +151,11 @@ cargo verus verify -p gateway-core --locked -- --triggers-mode silent
 VERUS=/path/to/verus python3 scripts/check_mutations.py
 ```
 
-Validation on 2026-10-23: 183 core verification checks passed, 179 workspace tests and five compile-fail doctests
-passed, the opt-in TLS proxy/gateway process-failover test and six load/fault workloads passed, and all 139
+Validation on 2026-10-23: 191 core verification checks passed, 188 workspace tests and five compile-fail doctests
+passed, the opt-in TLS proxy/gateway process-failover test and six load/fault workloads passed, and all 144
 deliberate mutations failed their proof obligations.
+Two ten-minute overload runs and the final 100-wave-per-mode isolated memory soak
+also passed; measurements and limits are in the benchmark notes.
 These counts are checks, not a count of independent security guarantees.
 
 [Automated checks](.github/workflows/ci.yml) reproduce the tests and proofs on Linux.

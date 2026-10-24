@@ -5,7 +5,7 @@
 | 1. Verified streaming core | 68/68 | ✓ |
 | 2. Minimal working gateway | 6/6 | ✓ |
 | 3. Crash-safe logging | 15/15 | ✓ |
-| 4. Availability hardening | 15/16 | ☐ |
+| 4. Availability hardening | 16/16 | ✓ |
 | 5. Auditable first release | 6/9 | ☐ |
 
 Progress counts completed rows in each milestone's table below. Rows are not
@@ -20,8 +20,8 @@ explicit storage assumptions; see the [exit audit](storage-crash-contract.md#mil
 Milestone 1 is closed under the explicit assumptions in the
 [resource composition](resource-composition.md); the
 [milestone 1 exit audit](milestone-1-exit-audit.md) maps all seven criteria to
-evidence. Next focus is milestones 4 and 5: remaining availability validation
-and the auditable release.
+evidence. Milestone 4 is closed under its [availability audit](availability-audit.md)
+and explicit scheduler/I/O assumptions. Next focus is milestone 5, the auditable release.
 See the [streaming-core progress notes](streaming-core-progress.md) and
 [authorization core](authorization-core.md) for completed increments and remaining gaps.
 The [runtime ownership layer](runtime-ownership.md) now ties authorization, a single
@@ -234,7 +234,8 @@ remain explicit assumptions. This milestone does not certify physical power loss
 ## 4. Availability hardening
 
 The [exit audit](availability-audit.md) maps criteria to current evidence and
-records the remaining shutdown/resource composition obligations.
+records the conditional shutdown/resource proof, validation results, and explicit
+scheduler/I/O assumptions.
 
 | Done | Submilestone |
 | :---: | --- |
@@ -252,7 +253,7 @@ records the remaining shutdown/resource composition obligations.
 | ✓ | Concurrent stalled-sync test verifies bounded queues, request cleanup, and both operator modes. |
 | ✓ | TLS handshake CPU work isolated on four dedicated threads with 32 retained job credits; saturation, cancellation, panic, and runtime-shutdown regressions. |
 | ✓ | Two ten-minute overload runs, each five minutes per logging mode, preserve active streams and health while rejecting over 1.4 million total excess requests; dedicated CI soak. |
-| ☐ | Complete broader fault and load coverage against the exit criteria. |
+| ✓ | Complete exit-criterion fault/load matrix: six release workloads, proxy/process failure, stalled writes/logging, shared-listener shutdown, and 100-wave isolated-memory validation in both modes. |
 | ✓ | Verified permanent worker-admission closure and drain rank, with a conditional shutdown/resource composition argument and shared-listener cancellation regressions under explicit scheduler/I/O assumptions. |
 
 Enforce global and per-request limits, backpressure, admission control, deadlines,

@@ -3,11 +3,18 @@ use super::*;
 #[tokio::test]
 async fn stalled_log_under_load_preserves_health_deadlines_and_mode_policy() {
     tokio::time::timeout(Duration::from_secs(20), async {
-        for availability in [false, true] { exercise(availability).await; }
+        for availability in [false, true] { exercise(availability, false).await; }
     }).await.unwrap();
 }
 
-async fn exercise(availability: bool) {
+#[tokio::test]
+async fn shutdown_with_blocked_disk_returns_error_without_replacement_or_replay() {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        for availability in [false, true] { exercise(availability, true).await; }
+    }).await.unwrap();
+}
+
+async fn exercise(availability: bool, shutdown_blocked: bool) {
     const SLOTS: usize = 8;
     let cert = generate_simple_self_signed(vec!["localhost".into()]).unwrap();
     let mut roots = RootCertStore::empty(); roots.add(cert.cert.der().clone()).unwrap();
@@ -86,11 +93,28 @@ async fn exercise(availability: bool) {
     assert_eq!(connections.load(Ordering::Relaxed), if availability { 2 * SLOTS } else { SLOTS });
     assert_eq!(app.audit_gaps(), if availability { (2 * SLOTS) as u64 } else { 0 });
     assert_eq!(writes.load(Ordering::Relaxed), 1); // No replacement writer or retry.
+    stop_provider.send(()).unwrap(); provider.await.unwrap();
+    if shutdown_blocked {
+        shutdown.send(()).unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(4), gateway).await.unwrap().unwrap();
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
+        assert!(app.workers.is_empty());
+        assert_eq!(app.config.usage(), Some((0, SLOTS)));
+        assert_eq!(writes.load(Ordering::Relaxed), 1);
+        assert_eq!(app.log.queued_for_test(), 2);
+        assert!(!app.log.healthy());
+        assert!(tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_err());
+    } else {
+        release.send(()).unwrap();
+        app.log.shutdown(Duration::from_secs(1)).await.unwrap();
+        shutdown.send(()).unwrap(); gateway.await.unwrap().unwrap();
+        assert_eq!(writes.load(Ordering::Relaxed), 1);
+        assert!(app.workers.is_empty());
+        return;
+    }
     release.send(()).unwrap();
     app.log.shutdown(Duration::from_secs(1)).await.unwrap();
     assert_eq!(writes.load(Ordering::Relaxed), 1); // Queued jobs fail after timeout.
-    stop_provider.send(()).unwrap(); provider.await.unwrap();
-    shutdown.send(()).unwrap(); gateway.await.unwrap().unwrap();
     assert!(app.workers.is_empty());
 }
 
