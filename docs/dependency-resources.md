@@ -542,6 +542,40 @@ requests and health checks. Tokio timeout cannot preempt that synchronous work.
 CPU isolation or a demonstrated worst-case scheduling bound remains availability
 work; these source budgets must not be described as proving deadline enforcement.
 
+### Control traffic is not covered by the application buffer limit
+
+In `common_state.rs`, ordinary application encryption consults the sendable-byte
+limit, but `queue_tls_message` appends encoded control records directly.
+`ChunkVecBuffer::append` does not enforce its configured byte limit itself.
+Therefore the 64 KiB application setting cannot be used as a bound for all
+outgoing TLS records or their descriptor storage.
+
+The pinned `TemperCounters` admits at most 32 consecutive peer key-update
+messages, four warning alerts, one renegotiation request, and two TLS 1.3
+middlebox ChangeCipherSpec messages. The key-update allowance resets when
+application data is received, including an empty application payload; it is not
+a connection-lifetime traffic allowance. These other counters do not reset there.
+
+Key-update replies have a separate `Option<Vec<u8>>` slot. While occupied,
+another request does not generate a second pending notification. For the pinned
+ring TLS 1.3 suites its encoded record contains 27 bytes: five handshake bytes,
+one inner content type, sixteen authentication-tag bytes, and five record-header
+bytes. This is logical encoded length, not total allocation capacity.
+`perhaps_write_key_update` moves that notification into `sendable_tls`, including
+before `buffer_plaintext` checks application capacity. The pending slot then
+becomes reusable. A single pending slot consequently does not establish a
+one-record bound for notifications already transferred to the output queue.
+
+`tls_key_update_burst_limit_rejects_without_response_or_replay` uses a real TLS
+1.3 provider to emit 32 or 33 key updates without intervening application data.
+At 32 the gateway forwards and audits the exact subsequent response; at 33 it
+fails before response headers/body, releases admission, and opens no second
+provider connection during the observation window. This validates the burst
+counter, not a global control-buffer ceiling. A complete queue bound still needs
+the application's read/write interleavings, backpressure, queued record owners,
+and counter-reset behavior; alternating control and application traffic must not
+be justified by the consecutive-burst test alone.
+
 ## Shared TLS session storage
 
 `HttpsTransport` explicitly selects `Resumption::in_memory_sessions(256)` and

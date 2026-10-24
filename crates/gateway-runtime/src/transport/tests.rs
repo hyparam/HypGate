@@ -139,6 +139,49 @@ async fn trusted_certificate_with_large_wrong_purpose_list_is_rejected_before_up
 }
 
 #[tokio::test]
+async fn tls_key_update_burst_limit_rejects_without_response_or_replay() {
+    use tokio::io::AsyncReadExt;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        for updates in [32, 33] {
+            let (listener, acceptor, roots) = tls().await;
+            let config = config(listener.local_addr().unwrap().port());
+            let provider = async {
+                let (tcp, _) = listener.accept().await.unwrap();
+                let mut socket = acceptor.accept(tcp).await.unwrap();
+                assert_eq!(socket.get_ref().1.protocol_version(), Some(tokio_rustls::rustls::ProtocolVersion::TLSv1_3));
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    request.push(socket.read_u8().await.unwrap());
+                    assert!(request.len() < 8192);
+                }
+                if String::from_utf8(request).unwrap().to_ascii_lowercase().contains("transfer-encoding: chunked") {
+                    let mut end = [0; 5]; socket.read_exact(&mut end).await.unwrap();
+                    assert_eq!(&end, b"0\r\n\r\n");
+                }
+                for _ in 0..updates { socket.get_mut().1.refresh_traffic_keys().unwrap(); }
+                let _ = socket.flush().await;
+                let response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+                let _ = socket.write_all(response).await;
+                let _ = socket.shutdown().await;
+                assert!(tokio::time::timeout(Duration::from_millis(20), listener.accept()).await.is_err());
+            };
+            let transport = HttpsTransport::with_roots(roots, Duration::from_secs(3)).unwrap();
+            let mut output = Output::new(); let mut log = Log::default(); let mut input = &b""[..];
+            let (result, ()) = tokio::join!(transport.exchange(prepare(&config), &mut input, &mut output, &mut log), provider);
+            if updates == 32 {
+                result.unwrap(); assert_eq!(output.status, Some(StatusCode::OK));
+                assert_eq!(output.bytes, b"ok"); assert_eq!(log.download, b"ok");
+            } else {
+                assert!(matches!(result, Err(TransportError::Http)));
+                assert!(output.status.is_none()); assert!(output.bytes.is_empty());
+                assert!(log.download.is_empty());
+            }
+            assert_eq!(config.usage(), Some((0, 1)));
+        }
+    }).await.unwrap();
+}
+
+#[tokio::test]
 async fn oversized_handshake_is_rejected_from_its_length_before_upload() {
     use tokio::io::AsyncReadExt;
     tokio::time::timeout(Duration::from_secs(10), async {

@@ -103,7 +103,9 @@ and prepares fixed upstream requests with filtered headers.
 The [async transfer driver](docs/async-transfer.md) connects the stream core to Tokio
 reads/writes and an explicit durable-log contract, with cancellation tests.
 The [disk logger](docs/disk-logging.md) now implements that contract with a bounded
-worker, sync acknowledgments, and an incremental recovery scanner; crash proofs remain open.
+worker, sync acknowledgments, and an incremental recovery scanner. The crash-safe
+logging milestone is complete under the [documented storage/read/checksum assumptions](docs/storage-crash-contract.md#milestone-3-exit-audit);
+physical power-loss validation remains open.
 The [journal proof](docs/journal-proof.md) checks acknowledgment ordering and byte-prefix
 survival conditional on the storage preserving synced bytes.
 The [framing proof](docs/framing-proof.md) checks header roundtrips, bounded payload
@@ -144,7 +146,7 @@ cargo verus verify -p gateway-core --locked -- --triggers-mode silent
 VERUS=/path/to/verus python3 scripts/check_mutations.py
 ```
 
-Validation on 2026-10-23: 183 core verification checks passed, 166 workspace tests and five compile-fail doctests
+Validation on 2026-10-23: 183 core verification checks passed, 167 workspace tests and five compile-fail doctests
 passed, the opt-in TLS proxy/gateway process-failover test and six load/fault workloads passed, and all 139
 deliberate mutations failed their proof obligations.
 These counts are checks, not a count of independent security guarantees.
