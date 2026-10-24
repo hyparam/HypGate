@@ -17,7 +17,8 @@ impl<T> FrameQueue<T> {
     pub closed spec fn valid(&self) -> bool {
         self.payload_limit <= 1048576 && self.queue.valid()
             && (!self.reserved || self.items().len() < self.capacity()) && (forall|i: int| 0 <= i < self.items().len()
-            ==> (#[trigger] self.items()[i].0.valid() && self.items()[i].0.payload().len() <= self.payload_limit()))
+            ==> { let item = #[trigger] self.items()[i];
+                item.0.valid() && item.0.payload().len() <= self.payload_limit() })
     }
     pub fn new(capacity: usize) -> (out: Self)
         requires capacity > 0,
@@ -42,6 +43,22 @@ impl<T> FrameQueue<T> {
         if self.reserved || self.queue.is_closed() || self.queue.is_full() { return false; }
         self.reserved = true;
         true
+    }
+    // The trusted adapter invokes this once per synchronous reservation, under
+    // its mutex. This contract bounds the returned body, not callback multiplicity.
+    pub fn encode_reserved(&self, header: crate::framing::Header, payload: &[u8])
+        -> (out: Option<crate::framing::RecordBody>)
+        requires self.valid(),
+        ensures match out {
+            Some(body) => self.reserved() && !self.closed() && body.valid()
+                && body.header() == header && body.payload() == payload@
+                && body.payload().len() <= self.payload_limit(),
+            None => !self.reserved() || self.closed() || payload.len() > self.payload_limit()
+                || !crate::framing::valid(header) || header.payload != payload.len(),
+        },
+    {
+        if !self.reserved || self.queue.is_closed() || payload.len() > self.payload_limit { return None; }
+        crate::framing::RecordBody::new(header, payload)
     }
     pub fn finish_reserved(&mut self, item: (RecordFrame, T)) -> (out: Result<(), (RecordFrame, T)>)
         requires old(self).valid(), old(self).reserved(), item.0.valid(),
@@ -145,6 +162,7 @@ impl<T> FrameQueue<T> {
             assert(old(self).items()[i + 1].0.valid());
             assert(self.items()[i] == old(self).items()[i + 1]);
         }
+        assert(self.valid());
         out
     }
     // Projects the actual retained frames, without another runtime collection or

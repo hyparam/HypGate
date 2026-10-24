@@ -98,9 +98,13 @@ separate encoding byte sequence, under the same published subtotal. A coverage
 lemma and omission mutation prevent silently dropping that sequence. The
 queue-only theorem is the empty-encoding specialization. The snapshot must not
 include the in-progress encoding in `queued_log` as well.
-The adapter binds that reservation to the temporary frame under its mutex; encoding
-allocation capacity/scratch, the active worker frame, and delivered receipts remain
-separate obligations.
+Production now calls verified `encode_reserved` through the mutex-held callback;
+it checks the queue's own payload limit and reservation before building the body.
+The typed body/sealed-frame composition theorems derive encoding bytes from the
+actual container, including 33-byte body or 65-byte sealed overhead. Exactly one
+construction per reservation remains a source-level adapter obligation; the core
+constructor alone does not enforce call multiplicity. Allocation capacity/scratch,
+the active worker frame, and delivered receipts remain separate obligations.
 
 This is a size-composition proof, not proof that every async runtime state supplies
 those snapshots. The verified owner now enforces exclusive accounting of each request's stream body

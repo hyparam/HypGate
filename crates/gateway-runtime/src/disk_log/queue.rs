@@ -15,7 +15,7 @@ impl Queue {
     pub(super) fn is_open(&self) -> bool {
         self.state.lock().map(|state| !state.is_closed()).unwrap_or(false)
     }
-    pub(super) fn push_with(&self, make: impl FnOnce() -> Job) -> io::Result<()> {
+    pub(super) fn push_with(&self, make: impl FnOnce(&FrameQueue<Completion>) -> Job) -> io::Result<()> {
         // If construction panics, wake the worker after the mutex is poisoned
         // so it can observe failure instead of sleeping until shutdown.
         let _wake = WakeOnDrop(&self.ready);
@@ -25,7 +25,8 @@ impl Queue {
         // Capacity is reserved before allocating the frame, under the same lock
         // as insertion and shutdown. A panic leaves the reservation charged
         // in poisoned state, which is never recovered for new admission.
-        if state.finish_reserved(make()).is_err() {
+        let job = make(&state);
+        if state.finish_reserved(job).is_err() {
             state.close();
             self.ready.notify_all();
             return Err(io::ErrorKind::BrokenPipe.into());
@@ -68,10 +69,10 @@ mod tests {
     #[test]
     fn full_and_closed_queues_never_construct_rejected_jobs_and_close_drains() {
         let queue = Queue::new(1);
-        queue.push_with(|| job(1)).unwrap();
-        assert_eq!(queue.push_with(|| panic!("full queue allocated a job")).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        queue.push_with(|_| job(1)).unwrap();
+        assert_eq!(queue.push_with(|_| panic!("full queue allocated a job")).unwrap_err().kind(), io::ErrorKind::WouldBlock);
         queue.close();
-        assert_eq!(queue.push_with(|| panic!("closed queue allocated a job")).unwrap_err().kind(), io::ErrorKind::BrokenPipe);
+        assert_eq!(queue.push_with(|_| panic!("closed queue allocated a job")).unwrap_err().kind(), io::ErrorKind::BrokenPipe);
         assert!(queue.recv().is_some()); assert!(queue.recv().is_none());
         assert!(!queue.is_open()); assert_eq!(queue.len(), 0);
     }
@@ -79,7 +80,7 @@ mod tests {
     async fn worker_exit_discards_queued_receipt_senders() {
         let queue = Queue::new(1);
         let (done, receive) = tokio::sync::oneshot::channel();
-        queue.push_with(|| { let (frame, _) = job(1); (frame, done) }).unwrap();
+        queue.push_with(|_| { let (frame, _) = job(1); (frame, done) }).unwrap();
         queue.abort();
         assert!(receive.await.is_err());
         assert!(queue.recv().is_none()); assert_eq!(queue.len(), 0);
@@ -91,7 +92,7 @@ mod tests {
         let (entered, inside) = mpsc::channel();
         let (release, wait) = mpsc::channel();
         let producer_queue = queue.clone();
-        let producer = std::thread::spawn(move || producer_queue.push_with(|| {
+        let producer = std::thread::spawn(move || producer_queue.push_with(|_| {
             entered.send(()).unwrap(); wait.recv().unwrap(); job(1)
         }));
         inside.recv_timeout(Duration::from_secs(2)).unwrap();
@@ -107,17 +108,17 @@ mod tests {
         producer.join().unwrap().unwrap();
         complete.recv_timeout(Duration::from_secs(2)).unwrap(); closer.join().unwrap();
         assert!(!queue.is_open()); assert_eq!(queue.len(), 1);
-        assert_eq!(queue.push_with(|| panic!("post-close construction")).unwrap_err().kind(), io::ErrorKind::BrokenPipe);
+        assert_eq!(queue.push_with(|_| panic!("post-close construction")).unwrap_err().kind(), io::ErrorKind::BrokenPipe);
         assert!(queue.recv().is_some()); assert!(queue.recv().is_none());
     }
     #[test]
     fn construction_panic_permanently_closes_queue_admission() {
         let queue = Queue::new(1);
         assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = queue.push_with(|| panic!("injected encoding panic"));
+            let _ = queue.push_with(|_| panic!("injected encoding panic"));
         })).is_err());
         assert!(!queue.is_open());
-        assert_eq!(queue.push_with(|| panic!("poisoned queue constructed a job")).unwrap_err().kind(), io::ErrorKind::BrokenPipe);
+        assert_eq!(queue.push_with(|_| panic!("poisoned queue constructed a job")).unwrap_err().kind(), io::ErrorKind::BrokenPipe);
         assert!(queue.recv().is_none());
     }
 }

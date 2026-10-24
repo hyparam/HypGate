@@ -85,3 +85,25 @@ fn dequeue_does_not_release_an_unfinished_encoding_reservation() {
     assert_eq!(queue.pop().unwrap().1, 2);
     assert!(queue.reserve());
 }
+
+#[test]
+fn reserved_encoder_checks_admission_limit_and_exact_header_before_building() {
+    let mut queue = FrameQueue::<usize>::with_payload_limit(1, 3);
+    let header = || Header { payload: 3, tenant: 7, request: 8, chunk: 9, direction: 1 };
+    assert!(queue.encode_reserved(header(), b"abc").is_none());
+    assert!(queue.reserve());
+    let mut oversized = header(); oversized.payload = 4;
+    assert!(queue.encode_reserved(oversized, b"abcd").is_none());
+    assert!(queue.encode_reserved(header(), b"ab").is_none());
+    let mut invalid = header(); invalid.request = 0;
+    assert!(queue.encode_reserved(invalid, b"abc").is_none());
+    let body = queue.encode_reserved(header(), b"abc").unwrap();
+    assert_eq!(body.bytes().len(), 36); assert_eq!(&body.bytes()[33..], b"abc");
+    let sealed = body.seal(&[9; 32]);
+    assert_eq!(sealed.bytes().len(), 68);
+    assert!(queue.finish_reserved((sealed, 42)).is_ok());
+    assert!(queue.encode_reserved(header(), b"abc").is_none());
+    assert_eq!(queue.pop().unwrap().1, 42);
+    assert!(queue.reserve()); queue.close();
+    assert!(queue.encode_reserved(header(), b"abc").is_none());
+}

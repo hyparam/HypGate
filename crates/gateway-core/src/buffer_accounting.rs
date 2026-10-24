@@ -158,6 +158,33 @@ impl Buffers {
             == (queue.capacity() + requests + 1) * (chunk + 65)) by(nonlinear_arith);
     }
 
+    pub proof fn accounted_payload_with_body<T>(&self, requests: nat, chunk: nat, connections: nat,
+        queue: &crate::frame_queue::FrameQueue<T>, body: &crate::framing::RecordBody)
+        requires self.other_categories_valid(requests, chunk, connections), queue.valid(), queue.reserved(),
+            self.queued_log == queue.frames(), queue.payload_limit() <= chunk,
+            body.valid(), body.payload().len() <= queue.payload_limit(),
+        ensures self.bytes_with_encoding(body.contents()) <= requests * chunk + 2 * requests * 32768
+            + (connections + 2 * requests) * 16384 + (queue.capacity() + requests + 1) * (chunk + 65)
+            + (requests + 1) * 33,
+    {
+        body.retained_size();
+        self.accounted_payload_with_encoding(requests, chunk, connections, queue, body.contents());
+    }
+
+    pub proof fn accounted_payload_with_sealed_frame<T>(&self, requests: nat, chunk: nat, connections: nat,
+        queue: &crate::frame_queue::FrameQueue<T>, frame: &RecordFrame)
+        requires self.other_categories_valid(requests, chunk, connections), queue.valid(), queue.reserved(),
+            self.queued_log == queue.frames(), queue.payload_limit() <= chunk,
+            frame.valid(), frame.payload().len() <= queue.payload_limit(),
+        ensures self.bytes_with_encoding(frame.contents()) <= requests * chunk + 2 * requests * 32768
+            + (connections + 2 * requests) * 16384 + (queue.capacity() + requests + 1) * (chunk + 65)
+            + (requests + 1) * 33,
+    {
+        frame.canonical();
+        crate::framing::encoded_header_roundtrip(frame.header());
+        self.accounted_payload_with_encoding(requests, chunk, connections, queue, frame.contents());
+    }
+
     // Guard against accidentally dropping a category from the modeled total.
     pub proof fn covers_categories(&self)
         ensures self.bytes() >= byte_sum(self.chunks), self.bytes() >= byte_sum(self.readers),

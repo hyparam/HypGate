@@ -155,6 +155,11 @@ pub struct RecordFrame {
     #[allow(dead_code)] checksum: Ghost<Seq<u8>>,
 }
 impl RecordBody {
+    pub closed spec fn contents(&self) -> Seq<u8> { self.bytes@ }
+    pub proof fn retained_size(&self)
+        requires self.valid(),
+        ensures self.contents().len() == self.payload().len() + 33,
+    { encoded_header_roundtrip(self.header()); }
     pub closed spec fn header(&self) -> Header { self.header@ }
     pub closed spec fn payload(&self) -> Seq<u8> { self.payload@ }
     pub closed spec fn valid(&self) -> bool {
@@ -172,7 +177,7 @@ impl RecordBody {
     }
     pub fn bytes(&self) -> (out: &[u8])
         requires self.valid(),
-        ensures out@ == encoding(self.header()) + self.payload(),
+        ensures out@ == self.contents(), out@ == encoding(self.header()) + self.payload(),
     { self.bytes.as_slice() }
 
     // Checksum computation is external; only its placement and byte identity

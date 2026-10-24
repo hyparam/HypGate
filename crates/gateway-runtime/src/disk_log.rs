@@ -199,8 +199,10 @@ impl AuditLog for DiskLog {
             // after Queue::close. Do not hold the worker mutex while encoding.
             let queue = self.worker.lock().map_err(|_| io::ErrorKind::BrokenPipe)?.queue.clone();
             let mut completion = None;
-            queue.push_with(|| {
-                let frame = encode_record(record);
+            queue.push_with(|state| {
+                let body = state.encode_reserved(record_header(&record), record.bytes)
+                    .expect("validated reserved audit record");
+                let frame = seal_record(body);
                 let (done, receive) = oneshot::channel();
                 completion = Some(receive);
                 (frame, done)
@@ -220,14 +222,17 @@ impl AuditLog for DiskLog {
     }
 }
 
+fn record_header(record: &LogRecord<'_>) -> Header {
+    Header { payload: record.bytes.len() as u32, tenant: record.tenant, request: record.request,
+        chunk: record.chunk, direction: match record.direction { Direction::Upload => 0, Direction::Download => 1 } }
+}
+fn seal_record(body: RecordBody) -> RecordFrame {
+    let checksum: [u8; 32] = Sha256::digest(body.bytes()).into();
+    body.seal(&checksum)
+}
+#[cfg(test)]
 fn encode_record(record: LogRecord<'_>) -> RecordFrame {
-    // append checked the record bounds before queue reservation/allocation.
-    let frame = RecordBody::new(Header { payload: record.bytes.len() as u32,
-        tenant: record.tenant, request: record.request, chunk: record.chunk,
-        direction: match record.direction { Direction::Upload => 0, Direction::Download => 1 },
-    }, record.bytes).expect("validated log record");
-    let checksum: [u8; 32] = Sha256::digest(frame.bytes()).into();
-    frame.seal(&checksum)
+    seal_record(RecordBody::new(record_header(&record), record.bytes).expect("valid test record"))
 }
 
 #[cfg(test)]
