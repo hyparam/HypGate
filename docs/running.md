@@ -85,7 +85,10 @@ The executable currently uses 128 connection slots, a 10-second header deadline,
 and a 310-second connection deadline. It serves one request per HTTP/1 connection.
 Excess connections are closed; authorized request capacity is separately configured
 in root policy. The logger uses 16 queued records and a two-second acknowledgment
-deadline. These operational defaults are not yet CLI/config options.
+deadline. These operational defaults are not yet CLI/config options. Library
+callers bind the connection limit on the first serve call for a Gateway; later
+calls must use the same limit and share its capacity, including canceled
+connections awaiting cleanup. Changing the limit requires a new Gateway instance.
 
 SIGINT or SIGTERM stops acceptance and allows up to ten seconds for connections to
 drain, then aborts them and waits for tracked request workers to drop. A stuck disk

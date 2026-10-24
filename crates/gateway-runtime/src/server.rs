@@ -15,6 +15,8 @@ use tokio_util::task::TaskTracker;
 
 mod workers;
 use workers::WorkerSlots;
+mod connections;
+use connections::ConnectionSlots;
 
 pub struct Gateway {
     config: Arc<GatewayConfig>,
@@ -22,6 +24,7 @@ pub struct Gateway {
     log: DiskLog,
     workers: TaskTracker,
     worker_slots: Arc<WorkerSlots>,
+    connection_slots: std::sync::OnceLock<Arc<ConnectionSlots>>,
     audit_gaps: AtomicU64,
     failed_exchanges: AtomicU64,
 }
@@ -29,6 +32,7 @@ impl Gateway {
     pub fn new(config: GatewayConfig, transport: HttpsTransport, log: DiskLog) -> Arc<Self> {
         let limit = config.usage().map(|(_, limit)| limit).unwrap_or(0);
         Arc::new(Self { worker_slots: WorkerSlots::new(limit), config: Arc::new(config), transport, log, workers: TaskTracker::new(),
+            connection_slots: std::sync::OnceLock::new(),
             audit_gaps: AtomicU64::new(0), failed_exchanges: AtomicU64::new(0) })
     }
     pub fn audit_gaps(&self) -> u64 { self.audit_gaps.load(Ordering::Relaxed) }
@@ -197,11 +201,14 @@ impl AsyncWrite for Output {
 /// Signal `shutdown` and await this function to drain and join children and close
 /// the logger. Dropping this future only requests child cancellation: cleanup
 /// may outlive it, and the shared logger's explicit shutdown is skipped. The
-/// connection limit is per invocation, not shared across concurrent restarts.
+/// first invocation fixes the connection limit for this Gateway. Later invocations
+/// must use the same limit and share credits, including canceled-task cleanup.
 pub async fn serve(listener: TcpListener, app: Arc<Gateway>, connections: usize,
     connection_deadline: Duration, shutdown: impl Future<Output = ()>) -> io::Result<()> {
     if connections == 0 || connections > 65536 || connection_deadline.is_zero()
         || connection_deadline > Duration::from_secs(3600) { return Err(io::ErrorKind::InvalidInput.into()); }
+    let slots = app.connection_slots.get_or_init(|| ConnectionSlots::new(connections)).clone();
+    if slots.limit() != connections { return Err(io::ErrorKind::InvalidInput.into()); }
     let mut tasks = JoinSet::new();
     tokio::pin!(shutdown);
     let result = loop {
@@ -212,8 +219,9 @@ pub async fn serve(listener: TcpListener, app: Arc<Gateway>, connections: usize,
             accepted = listener.accept() => {
                 let (socket, _) = match accepted { Ok(v) => v, Err(e) => break Err(e) };
                 if tasks.len() >= connections { drop(socket); continue; }
+                let Some(lease) = slots.acquire() else { drop(socket); continue; };
                 let app = app.clone();
-                tasks.spawn(async move {
+                tasks.spawn(lease.task(async move {
                     let service = service_fn(move |request| app.clone().handle(request));
                     let mut builder = hyper::server::conn::http1::Builder::new();
                     // Keep bounded body frames in Hyper's queue strategy.
@@ -221,7 +229,7 @@ pub async fn serve(listener: TcpListener, app: Arc<Gateway>, connections: usize,
                         .max_header_size(http_boundary::MAX_HEADER_BYTES).max_buf_size(http_body::MAX_INPUT_FRAME)
                         .timer(TokioTimer::new()).header_read_timeout(Duration::from_secs(10));
                     let _ = tokio::time::timeout(connection_deadline, builder.serve_connection(TokioIo::new(crate::http_io::ReadLimited::new(socket)), service)).await;
-                });
+                }));
             }
         }
     };

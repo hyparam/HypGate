@@ -672,7 +672,8 @@ async fn aborting_server_drops_connections_and_recovers_worker_credit_across_res
                 let mut response = Vec::new();
                 client.read_to_end(&mut response).await.unwrap();
                 assert!(response.is_empty());
-                while !app.workers.is_empty() || app.worker_slots.usage() != Some((0, 1)) {
+                while !app.workers.is_empty() || app.worker_slots.usage() != Some((0, 1))
+                    || app.connection_slots.get().unwrap().usage() != Some((0, 1)) {
                     tokio::task::yield_now().await;
                 }
                 assert_eq!(app.config.usage(), Some((0, 1)));
@@ -684,5 +685,52 @@ async fn aborting_server_drops_connections_and_recovers_worker_credit_across_res
             app.log.shutdown(Duration::from_secs(1)).await.unwrap();
             assert_eq!(app.audit_gaps(), 0);
         }
+    }).await.unwrap();
+}
+
+#[tokio::test]
+async fn serve_invocations_share_connection_credit_and_reject_limit_changes() {
+    use tokio::io::AsyncReadExt;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let dir = TempDir::new();
+        let app = Gateway::new(config(443, false),
+            HttpsTransport::with_roots(RootCertStore::empty(), Duration::from_secs(60)).unwrap(),
+            DiskLog::create(&dir.0.join("connections.log"), 2, Duration::from_secs(1)).unwrap());
+        let first = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let first_address = first.local_addr().unwrap();
+        let first_task = tokio::spawn(serve(first, app.clone(), 1, Duration::from_secs(60), std::future::pending()));
+        let mut held = TcpStream::connect(first_address).await.unwrap();
+        held.write_all(b"GET /healthz HTTP/1.1\r\n").await.unwrap();
+        while app.connection_slots.get().and_then(|slots| slots.usage()) != Some((1, 1)) {
+            tokio::task::yield_now().await;
+        }
+        let second = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = second.local_addr().unwrap().port();
+        let second_task = tokio::spawn(serve(second, app.clone(), 1, Duration::from_secs(60), std::future::pending()));
+        let mut excess = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let mut byte = [0];
+        match excess.read(&mut byte).await {
+            Ok(0) => (),
+            Err(e) if e.kind() == io::ErrorKind::ConnectionReset => (),
+            other => panic!("excess connection was not closed: {other:?}"),
+        }
+        assert_eq!(app.connection_slots.get().unwrap().usage(), Some((1, 1)));
+        let changed = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        assert_eq!(serve(changed, app.clone(), 2, Duration::from_secs(60), std::future::pending())
+            .await.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        first_task.abort(); assert!(first_task.await.unwrap_err().is_cancelled());
+        while app.connection_slots.get().unwrap().usage() != Some((0, 1)) {
+            tokio::task::yield_now().await;
+        }
+        let (response, driver) = send(port, "/healthz", "", "GET").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.collect().await.unwrap().to_bytes(), "ok\n");
+        driver.await.unwrap();
+        second_task.abort(); assert!(second_task.await.unwrap_err().is_cancelled());
+        while app.connection_slots.get().unwrap().usage() != Some((0, 1)) {
+            tokio::task::yield_now().await;
+        }
+        assert!(app.log.healthy());
+        app.log.shutdown(Duration::from_secs(1)).await.unwrap();
     }).await.unwrap();
 }

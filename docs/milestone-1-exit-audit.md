@@ -16,12 +16,12 @@ another milestone or treat adapter assumptions as proved runtime behavior.
 | Mutation tests reject corruption, cross-request writes, duplicate advancement, capacity violations, and strict-mode forwarding before durability | All 139 mutations are rejected by proof obligations; the script verifies the unmodified library first. Named defects include wrong owner/generation, full-write substitution, omitted payload/receipt storage, queue overwrite/reopening, and advancing beyond durability. Mutations test the strength of specified contracts, not the completeness of the threat model. | Covered for listed defect classes |
 | Verified admission issues private authorization tied to identity/policy/origin/credential; candidate configuration cannot expand root grants | Policy validation, authentication, and tenant-scoped authorization establish those relationships. AuthorizedRequest construction is private and its policy borrow binds the immutable snapshot. Runtime dispatch consumes PreparedRequest; concrete URI/DNS/TLS/secret binding remains trusted and tested. | Covered at the verified admission boundary |
 
-The current workspace has 161 passing regular tests and five compile-fail doctests.
+The current workspace has 164 passing regular tests and five compile-fail doctests.
 All five CI jobs passed at `b72c839` in
 [run 40061075707](https://github.com/platypii/LogGate/actions/runs/40061075707):
 183 production proof checks, all 139 rejected mutations, Rust tests, Linux ext4,
 proxy failover, and the 100-wave memory soak. That run predates the additional
-trailer-parser regression; the 161-test count above is the subsequent local run.
+trailer-parser regression; the local count above includes subsequent runtime regressions.
 The raw-construction, raw-claim, and raw-release negative examples require the
 private-method diagnostic; existing examples prohibit mutable stream extraction
 and completing a read while its mutable buffer borrow remains live. Low-level
@@ -72,8 +72,10 @@ without reopening the external API.
    and allocator/OS storage remain outside the subtotal. The dependency audit
    distinguishes known control-object counts and stack reservations from unresolved
    peak allocations. No RSS plateau substitutes for these obligations.
-3. **Compose the lifetime scopes.** Connection budgets are per server invocation;
-   aborted invocation tails can outlive that parent. Worker/request budgets belong
+3. **Compose the lifetime scopes.** Connection credits now belong to one Gateway and
+   remain charged through connection-task destruction, including aborted-server
+   tails. Listener/JoinSet/completed-task metadata remains per invocation;
+   separate Gateway instances still require separate budgets. Worker/request budgets belong
    to their registries, DNS jobs to their transport, and audit jobs to their logger.
    A complete bound must state the instance/lifetime assumptions and count those
    tails before combining categories. It cannot reclaim an operation's resources

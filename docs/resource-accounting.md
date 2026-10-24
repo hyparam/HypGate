@@ -24,7 +24,7 @@ at most 32 KiB of frame data into its own bounded copy. One DiskLog owns one dis
 | Active disk frame | One additional frame of at most K + 65 bytes | The worker owns the job after receiving it, through write, sync, and acknowledgment. Cancellation of its caller does not reclaim or duplicate that frame. A stalled worker is never replaced. |
 | Delivered durable receipts | At most one frame of at most K + 65 bytes per admitted exchange | The job oneshot transfers its owned frame to the waiting request. Exact receipt validation then drops it; cancellation drops undelivered receipts. The worker can advance to another job before delivery is consumed. Custom library callers retaining receipts must budget separately. |
 | Encoding/comparison scratch | One 33-byte header vector per logger encoder plus one per validating request | `framing::encode_payload` copies a canonical header into the reserved frame; header encoding requests exactly 33 bytes up front. Receipt validation also encodes the expected 33-byte header, then compares payload slices without copying the payload. SHA-256 state and the 32-byte digest are additional fixed-size implementation state. |
-| Inbound connection tasks | At most C entries in the server JoinSet | Admission checks the set before spawning; completed-but-unreaped entries also consume the limit. Excess accepted sockets are closed. The listener and one just-accepted socket are additional objects. |
+| Inbound connection tasks | At most C live connection leases across one Gateway, including canceled-parent tails | A separate verified registry is shared by every serve invocation on that Gateway. A boxed connection future drops before its credit. Each invocation also caps its JoinSet at C, including completed-but-unreaped entries. Listener/accept-loop and completed task metadata remain per invocation. |
 | Server request workers, including rejection and cleanup | At most R worker leases | A separate verified `ResourceAdmission` registry issues a private key before response allocation or spawning. `WorkerTask` drops the entire boxed task future before its lease; the lease drops tracking before returning the key. Registry transitions are verified; mutex serialization, Rust field drop order, and Tokio cancellation remain trusted. |
 | Admitted exchanges and upstream connections | At most R live leases; one upstream connection per exchange | Verified slot transitions plus trusted ownership. The outer exchange owns admission while the timed TCP/TLS/HTTP future borrows it, so network-future cleanup precedes request release. No pooling, replay, or detached upstream connection task. Failed authentication can still create a tracked server worker without a lease. |
 | DNS lookups | Four dedicated threads; at most 32 queued/running jobs per transport | Jobs retain separate verified registry credit across request cancellation. Returned address vectors contain at most 64 addresses. System-resolver internal allocations remain trusted; see [DNS accounting](dns-resources.md). |
@@ -36,27 +36,44 @@ count includes cleanup after a client connection has gone away.
 
 ### Connection-task lifetime boundary
 
-The inbound C bound belongs to one `serve` invocation. Its accept loop is the
-only producer of connection tasks and checks `JoinSet::len()` before spawning.
-Tokio 1.54.1 keeps completed entries until `poll_join_next` removes their ready
-JoinHandle; completion alone cannot make the set undercount outstanding tasks.
-The biased select reaps ready entries before accepting another connection. The
-single accepted socket before the limit check is additional to those C entries.
+The first validated `serve` invocation fixes C in a OnceLock on its Gateway.
+Later invocations must request the same C or fail with InvalidInput before
+acceptance. Each accepted socket must obtain a private lease from the shared
+`ConnectionSlots` registry before spawning. The same verified `ResourceAdmission`
+transitions used for request/worker admission enforce this count; connection keys
+never create streams. Poison prevents new credits and is not recovered on drop.
 
-Normal shutdown stops accepting, drains or aborts and joins the entire set, then
-waits for request workers and shuts down the logger. Dropping/aborting `serve`
-instead runs JoinSet's destructor, which requests abort for each entry but does
-not await child destruction. Child sockets and request cancellation guards can
-therefore remain alive after the `serve` task itself has been joined. Worker
-credits still cover their associated work until actual destruction; an aborted
-invocation's connections are not charged to a newly created invocation's C.
-Concurrent invocations and overlapping cancellation tails must be counted
-separately. Library callers should use the shutdown future and await `serve`
-when they require a completed drain and logger shutdown.
+`ConnectionTask` owns the boxed connection future before its lease in field drop
+order. Socket, parser, service, and response-body captures are therefore destroyed
+before registry release, including never-polled cancellation and panic. Mutex
+serialization, Rust destruction, OnceLock initialization, and Tokio scheduling
+remain trusted; no async refinement theorem is claimed. The registry itself
+retains C fixed u64 slots plus its control fields, for the Gateway lifetime.
+
+Each invocation also checks JoinSet length before spawning. Completed-but-unreaped
+entries remain counted by that local cap, and biased selection reaps them before
+acceptance. Multiple invocations share live connection capacity but still have
+separate listeners, one just-accepted socket each, and JoinSet/completed-task
+metadata. A whole-process bound must count those invocation objects separately.
+
+Normal shutdown drains/joins its connection set, then waits for shared request
+workers and shuts down the logger. Aborting `serve` only requests child abort;
+joining the parent does not imply completed child destruction. Its connection
+leases remain charged against the same Gateway's C during that cleanup, preventing
+restarts from multiplying live connection budgets. Worker tails retain separate
+R credits. Library callers should use graceful shutdown and await `serve` when
+they require completed cleanup; concurrent graceful shutdown still affects the
+shared worker tracker/logger and is not an independent multi-listener lifecycle.
+
+The shared-listener regression fills C = 1 through one listener, verifies closure
+of an excess socket at a second listener, rejects changing C, aborts the first
+server, then serves health traffic through the second after credit is reclaimed.
+Lease tests check capture-before-credit destruction on success, cancellation
+before/after polling, and panic, plus fail-closed behavior after registry poison.
 
 The repeated-abort regression withholds the provider's TLS handshake, then aborts
 the actual server future in each of 16 waves per logging mode. It checks client
-and provider socket closure, listener closure, zero worker/request occupancy,
+and provider socket closure, listener closure, zero connection/worker/request occupancy,
 and reuse of the same one-slot gateway on the next wave. The test explicitly
 waits for child cleanup before restarting; it does not claim that joining the
 aborted parent synchronously joins its descendants. The shared logger remains
