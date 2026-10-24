@@ -144,7 +144,9 @@ identifies excluded metadata and active owners.
 
 
 - Hyper parser and output buffers, incoming-body channels, HTTP headers and URIs,
-  and data frames already consumed from our channels. The
+  and data frames already consumed from our channels. Production now explicitly
+  selects Hyper queue mode on both sides, excluding body flattening into the
+  serialized-head vector; header and parser backing capacities remain separate. The
   [HTTP metadata boundary](http-boundary.md#metadata-ownership-and-allocation)
   now detaches bounded allowed values and drops original Parts before awaits;
   its copied-value subtotal and inserted Host/credential data remain separate

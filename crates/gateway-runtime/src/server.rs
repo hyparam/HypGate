@@ -216,7 +216,8 @@ pub async fn serve(listener: TcpListener, app: Arc<Gateway>, connections: usize,
                 tasks.spawn(async move {
                     let service = service_fn(move |request| app.clone().handle(request));
                     let mut builder = hyper::server::conn::http1::Builder::new();
-                    builder.keep_alive(false).max_headers(http_boundary::MAX_HEADER_VALUES)
+                    // Keep bounded body frames in Hyper's queue strategy.
+                    builder.keep_alive(false).writev(true).max_headers(http_boundary::MAX_HEADER_VALUES)
                         .max_header_size(http_boundary::MAX_HEADER_BYTES).max_buf_size(http_body::MAX_INPUT_FRAME)
                         .timer(TokioTimer::new()).header_read_timeout(Duration::from_secs(10));
                     let _ = tokio::time::timeout(connection_deadline, builder.serve_connection(TokioIo::new(crate::http_io::ReadLimited::new(socket)), service)).await;

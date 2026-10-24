@@ -121,6 +121,62 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test]
+    async fn queued_hyper_output_preserves_duplex_bytes_with_short_nonvectored_writes() {
+        use hyper_util::rt::TokioIo;
+        struct ShortWrites(tokio::io::DuplexStream);
+        impl AsyncRead for ShortWrites {
+            fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, out: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+                Pin::new(&mut self.0).poll_read(cx, out)
+            }
+        }
+        impl AsyncWrite for ShortWrites {
+            fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, bytes: &[u8]) -> Poll<io::Result<usize>> {
+                Pin::new(&mut self.0).poll_write(cx, &bytes[..bytes.len().min(7)])
+            }
+            fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> { Pin::new(&mut self.0).poll_flush(cx) }
+            fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> { Pin::new(&mut self.0).poll_shutdown(cx) }
+            // Use AsyncWrite's default non-vectored fallback deliberately.
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let expected: Vec<u8> = (0..65537).map(|i| (i % 251) as u8).collect();
+            let (client, server) = tokio::io::duplex(257);
+            let client = ShortWrites(client);
+            assert!(!client.is_write_vectored());
+            let server_task = tokio::spawn(async move {
+                let (done, completed) = oneshot::channel();
+                let done = std::sync::Mutex::new(Some(done));
+                let service = hyper::service::service_fn(move |request: hyper::Request<hyper::body::Incoming>| {
+                    let done = done.lock().unwrap().take().expect("one exchange");
+                    async move {
+                        let bytes = request.into_body().collect().await.unwrap().to_bytes();
+                        let (mut writer, body) = channel(16384);
+                        tokio::spawn(async move {
+                            writer.write_all(&bytes).await.unwrap(); writer.shutdown().await.unwrap();
+                            done.send(()).unwrap();
+                        });
+                        Ok::<_, std::convert::Infallible>(hyper::Response::new(body))
+                    }
+                });
+                hyper::server::conn::http1::Builder::new().keep_alive(false).writev(true)
+                    .max_buf_size(MAX_INPUT_FRAME).serve_connection(TokioIo::new(ShortWrites(server)), service).await.unwrap();
+                completed.await.unwrap();
+            });
+            let (mut sender, connection) = hyper::client::conn::http1::Builder::new().writev(true)
+                .max_buf_size(MAX_INPUT_FRAME).handshake(TokioIo::new(client)).await.unwrap();
+            let driver = tokio::spawn(connection);
+            let (mut writer, body) = channel(16384);
+            let request = hyper::Request::builder().method("POST").uri("/").header("host", "localhost").body(body).unwrap();
+            let upload = async { writer.write_all(&expected).await.unwrap(); writer.shutdown().await.unwrap(); };
+            let response = async {
+                sender.send_request(request).await.unwrap().into_body().collect().await.unwrap().to_bytes()
+            };
+            let ((), received) = tokio::join!(upload, response);
+            assert_eq!(received.as_ref(), expected);
+            drop(sender); driver.await.unwrap().unwrap(); server_task.await.unwrap();
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn canceled_sender_is_an_error_not_successful_eof() {
         let (mut writer, mut body) = channel(2);
         assert_eq!(writer.write(b"abcd").await.unwrap(), 2);

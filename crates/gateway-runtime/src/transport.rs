@@ -65,8 +65,9 @@ impl HttpsTransport {
         let tls = self.connector.connect_with(server, tcp, |connection| {
             connection.set_buffer_limit(Some(TLS_APPLICATION_BUFFER));
         }).await.map_err(|_| TransportError::Tls)?;
+        // Explicit queue strategy keeps body-buffer accounting stable across TLS adapters.
         let (mut sender, connection) = hyper::client::conn::http1::Builder::new()
-            .max_headers(crate::http_boundary::MAX_HEADER_VALUES)
+            .writev(true).max_headers(crate::http_boundary::MAX_HEADER_VALUES)
             .max_header_size(crate::http_boundary::MAX_HEADER_BYTES)
             .max_buf_size(http_body::MAX_INPUT_FRAME).handshake(TokioIo::new(crate::http_io::ReadLimited::new(tls))).await.map_err(|_| TransportError::Http)?;
         let (mut body_writer, body) = http_body::channel(16 * 1024);

@@ -9,9 +9,12 @@ buffers and the number of live connections and requests.
 ## HTTP/1 storage
 
 Both production builders explicitly set `max_buf_size(32768)`,
-`max_header_size(32768)`, and `max_headers(100)`; the inbound builder disables
+`max_header_size(32768)`, `max_headers(100)`, and `writev(true)`; the inbound builder disables
 keep-alive. The upstream performs one exchange
-per connection. Neither enables pipelined flush aggregation.
+per connection. Neither enables pipelined flush aggregation. Explicit `writev(true)` selects
+Hyper's queue strategy on both sides, including TLS, instead of allowing adapter
+capabilities to choose the buffering representation. Standard non-vectored I/O
+still works through its vectored-write fallback.
 
 In Hyper's [h1/io.rs](https://docs.rs/crate/hyper/1.12.0/source/src/proto/h1/io.rs),
 `set_max_buf_size` sets both the adaptive read strategy maximum and the write
@@ -59,13 +62,15 @@ any body is polled. The queue strategy additionally stops at 16 encoded buffers.
 These limits bound pending output, not all retained contents: a partially consumed
 queued Bytes still owns its complete original allocation.
 
-Flatten mode has another distinction. `Cursor<Vec<u8>>::maybe_unshift` removes
+The unused flatten mode has another distinction. `Cursor<Vec<u8>>::maybe_unshift` removes
 consumed prefix bytes only when spare capacity cannot fit the next encoded frame.
 The vector can therefore retain already-written bytes alongside remaining output;
 its length need not equal `WriteBuf::remaining()`. Capacity survives clearing,
 and vector growth can overlap old and new allocations. A complete backing-storage
-bound must account for initial capacity, largest serialized head, growth and
-compaction, rather than multiplying the pending-byte threshold by connections.
+bound for that mode would need initial capacity, largest serialized head, growth
+and compaction. Production now excludes body flattening by selecting queue mode;
+serialized-head vector capacity, queued frame owners/control storage, and parser
+storage still require their own accounting.
 
 `stalled_hyper_output_bounds_body_consumption_and_cancellation` runs the actual
 Hyper client dispatcher and production ChannelBody against an I/O adapter that
@@ -77,6 +82,14 @@ make no progress, with Tokio's cooperative budget renewed between polls so task
 budget exhaustion cannot produce a false plateau. Dropping the connection makes
 the blocked producer fail. This is dependency/backpressure regression evidence,
 not a heap bound, a partial-write capacity test, or a proof of the async runtime.
+
+`queued_hyper_output_preserves_duplex_bytes_with_short_nonvectored_writes`
+forces queue mode in both client and server over a 257-byte duplex pipe. Its I/O
+wrapper reports no native vectored support and accepts at most seven bytes per
+write. A 65,537-byte opaque upload and streamed echo response survive exactly,
+including End acknowledgments and completed connection tasks. This exercises
+partial vectored fallback through chunk headers, payload, and terminators. It is
+byte/lifecycle regression evidence, not a retained-capacity theorem.
 
 Hyper's [body/chan.rs](https://docs.rs/crate/hyper/1.12.0/source/src/body/chan.rs)
 holds one data item, a separate pending error, and optional trailers. This adds a
