@@ -92,6 +92,12 @@ requires the queue limit to be at most K instead of a premise for every frame.
 Other category snapshots and the trusted startup configuration binding remain.
 `encoding_and_queued_bound` charges one in-progress encoding together with queued
 frames to Q, using the actual reservation bit and an explicit encoding-size premise.
+`Buffers::accounted_payload_with_encoding` composes this with every other category:
+its `bytes_with_encoding` total includes the retained-queue snapshot plus the
+separate encoding byte sequence, under the same published subtotal. A coverage
+lemma and omission mutation prevent silently dropping that sequence. The
+queue-only theorem is the empty-encoding specialization. The snapshot must not
+include the in-progress encoding in `queued_log` as well.
 The adapter binds that reservation to the temporary frame under its mutex; encoding
 allocation capacity/scratch, the active worker frame, and delivered receipts remain
 separate obligations.

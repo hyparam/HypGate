@@ -49,8 +49,11 @@ inserts the exact frame/completion tuple or returns it unchanged if closed or
 oversized. Close and dequeue preserve the reservation. The invariant bounds
 queued count plus the reservation by Q. `encoding_and_queued_bound` includes one
 in-progress encoding in the same Q-frame subtotal, conditional on its bytes
-fitting the configured limit plus framing overhead. The actual temporary byte
-owner and its size correspondence remain adapter obligations.
+fitting the configured limit plus framing overhead. `Buffers::accounted_payload_with_encoding` lifts this to the combined subtotal,
+adding a separate encoding byte snapshot to the queued projection. It requires
+that snapshot to be empty without a reservation and to fit the configured limit
+plus overhead; the actual temporary byte owner and its size correspondence remain
+adapter obligations.
 
 A construction panic leaves the reservation charged in poisoned queue state;
 the adapter never recovers that state to admit more work. This deliberately avoids

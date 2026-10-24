@@ -119,9 +119,43 @@ impl Buffers {
             + (connections + 2 * requests) * 16384 + (queue.capacity() + requests + 1) * (chunk + 65)
             + (requests + 1) * 33,
     {
-        queue.frame_layout();
-        assert(self.valid(requests, chunk, connections, queue.capacity()));
-        self.accounted_payload_bound(requests, chunk, connections, queue.capacity());
+        self.accounted_payload_with_encoding(requests, chunk, connections, queue, Seq::empty());
+    }
+
+    // Encoding is outside the queue's retained-frame projection until insertion.
+    // This snapshot counts it explicitly while the reservation shares Q slots.
+    pub open spec fn bytes_with_encoding(&self, encoding: Seq<u8>) -> nat {
+        self.bytes() + encoding.len()
+    }
+    pub proof fn covers_encoding(&self, encoding: Seq<u8>)
+        ensures self.bytes_with_encoding(encoding) == self.bytes() + encoding.len(),
+            self.bytes_with_encoding(encoding) >= encoding.len(),
+    {}
+
+    pub proof fn accounted_payload_with_encoding<T>(&self, requests: nat, chunk: nat, connections: nat,
+        queue: &crate::frame_queue::FrameQueue<T>, encoding: Seq<u8>)
+        requires self.other_categories_valid(requests, chunk, connections), queue.valid(),
+            self.queued_log == queue.frames(), queue.payload_limit() <= chunk,
+            encoding.len() <= queue.payload_limit() + 65,
+            !queue.reserved() ==> encoding.len() == 0,
+        ensures self.bytes_with_encoding(encoding) <= requests * chunk + 2 * requests * 32768
+            + (connections + 2 * requests) * 16384 + (queue.capacity() + requests + 1) * (chunk + 65)
+            + (requests + 1) * 33,
+    {
+        queue.encoding_and_queued_bound(encoding.len());
+        bounded_sum(self.chunks, requests, chunk);
+        bounded_sum(self.readers, 2 * requests, 32768);
+        bounded_sum(self.output_queues, connections + 2 * requests, 16384);
+        bounded_frames(self.active_log, 1, chunk);
+        bounded_receipts(self.receipts, requests, chunk);
+        bounded_sum(frame_bytes(self.active_log), 1, chunk + 65);
+        bounded_sum(receipt_bytes(self.receipts), requests, chunk + 65);
+        bounded_sum(self.headers, requests + 1, 33);
+        assert(queue.capacity() * (queue.payload_limit() + 65)
+            <= queue.capacity() * (chunk + 65)) by(nonlinear_arith)
+            requires queue.payload_limit() <= chunk;
+        assert(queue.capacity() * (chunk + 65) + (chunk + 65) + requests * (chunk + 65)
+            == (queue.capacity() + requests + 1) * (chunk + 65)) by(nonlinear_arith);
     }
 
     // Guard against accidentally dropping a category from the modeled total.

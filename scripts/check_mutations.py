@@ -15,6 +15,8 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("buffer_accounting.rs", "omit_in_progress_encoding", "self.bytes() + encoding.len()\n", "self.bytes()\n"),
+    ("buffer_accounting.rs", "unreserved_encoding_in_combined_bound", "!queue.reserved() ==> encoding.len() == 0,", "true,"),
     ("frame_queue.rs", "queue_reservation_not_charged", "self.reserved = true;", "self.reserved = false;"),
     ("frame_queue.rs", "queue_push_steals_reserved_slot", "if self.reserved { return Err(item); }", "if false { return Err(item); }"),
     ("frame_queue.rs", "queue_finish_leaks_reservation", "self.reserved = false;", "self.reserved = true;"),
