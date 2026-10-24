@@ -15,6 +15,14 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("mailbox.rs", "mailbox_sends_after_receiver_close", "if !self.sender_open || !self.receiver_open || self.value.is_some()", "if !self.sender_open || self.value.is_some()"),
+    ("mailbox.rs", "mailbox_overwrites_full_slot", "if !self.sender_open || !self.receiver_open || self.value.is_some()", "if !self.sender_open || !self.receiver_open"),
+    ("mailbox.rs", "mailbox_denies_valid_send", "if !self.sender_open || !self.receiver_open || self.value.is_some()", "if true"),
+    ("mailbox.rs", "mailbox_loses_received_item", "core::mem::swap(&mut value, &mut self.value);", "let _discarded = self.value.take();"),
+    ("mailbox.rs", "mailbox_reopens_sender", "{ self.sender_open = false; }", "{ self.sender_open = true; }"),
+    ("mailbox.rs", "mailbox_close_keeps_pending_item", "let value = self.pop();", "let value = None;"),
+    ("mailbox.rs", "mailbox_hides_sender_closure", "{ !self.sender_open || !self.receiver_open }", "{ !self.receiver_open }"),
+    ("mailbox.rs", "mailbox_count_omits_live_item", "if self.item().is_some() { 1 } else { 0 }", "0"),
     ("frame_queue.rs", "encode_without_reservation", "if !self.reserved || self.queue.is_closed() || payload.len() > self.payload_limit", "if self.queue.is_closed() || payload.len() > self.payload_limit"),
     ("frame_queue.rs", "encode_above_queue_limit", "if !self.reserved || self.queue.is_closed() || payload.len() > self.payload_limit", "if !self.reserved || self.queue.is_closed()"),
     ("framing.rs", "understate_record_body_size", "self.contents().len() == self.payload().len() + 33,", "self.contents().len() == self.payload().len() + 32,"),

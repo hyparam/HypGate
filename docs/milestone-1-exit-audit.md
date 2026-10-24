@@ -8,15 +8,15 @@ another milestone or treat adapter assumptions as proved runtime behavior.
 
 | Exit criterion | Evidence and scope | Status |
 | --- | --- | --- |
-| Compiled executable core and checked proofs cover every public transition | Cargo compiles the same `gateway-core` sources checked by the unfiltered `cargo verus verify -p gateway-core` invocation: 175 checks pass. Production core sources contain no `assume` or external-body escape. The proof index identifies contracts and external interfaces; runtime adapters and vstd contracts remain trusted. Raw stream construction/claim/release is crate-private, so external code must use OwnedStream. | Covered for the core |
+| Compiled executable core and checked proofs cover every public transition | Cargo compiles the same `gateway-core` sources checked by the unfiltered `cargo verus verify -p gateway-core` invocation: 183 checks pass. Production core sources contain no `assume` or external-body escape. The proof index identifies contracts and external interfaces; runtime adapters and vstd contracts remain trusted. Raw stream construction/claim/release is crate-private, so external code must use OwnedStream. | Covered for the core |
 | Partial, zero-progress, invalid, and stale completions have specified behavior | `StreamChunk::{prepare,pending_bytes,complete}` specifies exact matching owner/generation, permitted byte ranges, accepted partial counts, and unchanged state on rejection. Streaming/composition tests and deliberate completion defects exercise the compiled path. A reported write count still assumes truthful I/O. | Covered for the core |
 | Cancellation prevents new writes while accounting for an already issued write | `cancel` closes the stream; `prepare` and `pending_bytes` refuse further submissions. `complete` can account for the matching already-issued range without granting a new range. OwnedStream preserves those contracts. Actual future cancellation and effect termination are separate adapter obligations. | Covered for the core |
 | Multiple chunks and requests preserve ordering and cannot mix identities | Chunk rollover preserves the byte-prefix history, request ownership, and monotonic offsets; tickets bind owner and generation and reject exhaustion. OwnedStream consumes its unique key and cannot expose a mutable or owned raw stream externally. Numeric identities remain scoped to a registry, which the runtime lease must bind correctly. | Covered within one correctly bound registry |
 | Queue, buffer, and outstanding-operation limits have explicit accounting | Verified admission, owned stream/read bounds, fixed audit FIFO/closure and actual queued-frame byte bound, conditional buffer subtotal, and source inventories cover substantial parts. Complete runtime-to-snapshot correspondence and allocation composition remain unresolved, as detailed below. | **Partial: blocks closure** |
-| Mutation tests reject corruption, cross-request writes, duplicate advancement, capacity violations, and strict-mode forwarding before durability | All 131 mutations are rejected by proof obligations; the script verifies the unmodified library first. Named defects include wrong owner/generation, full-write substitution, omitted payload/receipt storage, queue overwrite/reopening, and advancing beyond durability. Mutations test the strength of specified contracts, not the completeness of the threat model. | Covered for listed defect classes |
+| Mutation tests reject corruption, cross-request writes, duplicate advancement, capacity violations, and strict-mode forwarding before durability | All 139 mutations are rejected by proof obligations; the script verifies the unmodified library first. Named defects include wrong owner/generation, full-write substitution, omitted payload/receipt storage, queue overwrite/reopening, and advancing beyond durability. Mutations test the strength of specified contracts, not the completeness of the threat model. | Covered for listed defect classes |
 | Verified admission issues private authorization tied to identity/policy/origin/credential; candidate configuration cannot expand root grants | Policy validation, authentication, and tenant-scoped authorization establish those relationships. AuthorizedRequest construction is private and its policy borrow binds the immutable snapshot. Runtime dispatch consumes PreparedRequest; concrete URI/DNS/TLS/secret binding remains trusted and tested. | Covered at the verified admission boundary |
 
-The current workspace has 152 passing regular tests and five compile-fail doctests.
+The current workspace has 154 passing regular tests and five compile-fail doctests.
 The raw-construction, raw-claim, and raw-release negative examples require the
 private-method diagnostic; existing examples prohibit mutable stream extraction
 and completing a read while its mutable buffer borrow remains live. Low-level
@@ -45,8 +45,9 @@ without reopening the external API.
    requests a fixed Q-slot vector with verified unchanged slot count. Audit encoding
    requests P + 65 frame bytes plus 33 header scratch bytes; boundary tests check
    reported capacity and unchanged allocation across sealing. These are allocation
-   requests and regression evidence, not a proof of allocator overhead. HTTP channels now use one fixed slot and bounded registered wakers, removing
-   linked-block growth/reuse overlap; Hyper parser/output backing capacity,
+   requests and regression evidence, not a proof of allocator overhead. HTTP channels now use a verified inline mailbox and bounded registered wakers, removing
+   linked-block growth/reuse overlap and the separate slot allocation. Endpoint
+   closure/extraction is verified; Hyper parser/output backing capacity,
    metadata collections, TLS handshake/cache active owners, task/waker storage,
    and allocator/OS storage remain outside the subtotal. The dependency audit
    distinguishes known control-object counts and stack reservations from unresolved

@@ -1,12 +1,10 @@
-//! Single-producer/single-consumer adapter with one fixed verified queue slot.
+//! Single-producer/single-consumer adapter with one inline verified mailbox.
 //! Mutex ordering, waker behavior, and destruction remain trusted Rust.
-use gateway_core::fixed_queue::FixedQueue;
+use gateway_core::mailbox::Mailbox;
 use std::{sync::{Arc, Mutex}, task::{Context, Poll, Waker}};
 
 struct State<T> {
-    queue: FixedQueue<T>,
-    sender_open: bool,
-    receiver_open: bool,
+    queue: Mailbox<T>,
     reader: Option<Waker>,
     writer: Option<Waker>,
 }
@@ -14,8 +12,7 @@ pub(super) struct Sender<T> { state: Arc<Mutex<State<T>>> }
 pub(super) struct Receiver<T> { state: Arc<Mutex<State<T>>> }
 
 pub(super) fn channel<T>() -> (Sender<T>, Receiver<T>) {
-    let state = Arc::new(Mutex::new(State { queue: FixedQueue::new(1),
-        sender_open: true, receiver_open: true, reader: None, writer: None }));
+    let state = Arc::new(Mutex::new(State { queue: Mailbox::new(), reader: None, writer: None }));
     (Sender { state: state.clone() }, Receiver { state })
 }
 // Only pointer/vtable comparison and moves occur while locked. Cloning and
@@ -35,7 +32,7 @@ impl<T> Sender<T> {
         let mut notify = WakeOnDrop(None);
         let mut incoming = Some(cx.waker().clone());
         let mut state = match self.state.lock() { Ok(state) => state, Err(_) => return Poll::Ready(Err(())) };
-        if !state.receiver_open { return Poll::Ready(Err(())); }
+        if state.queue.is_closed() { return Poll::Ready(Err(())); }
         if state.queue.is_full() {
             let retired = register(&mut state.writer, &mut incoming);
             drop(state);
@@ -66,7 +63,7 @@ impl<T> Receiver<T> {
             drop(notify);
             return Poll::Ready(Some(value));
         }
-        if !state.sender_open { return Poll::Ready(None); }
+        if state.queue.is_closed() { return Poll::Ready(None); }
         let retired = register(&mut state.reader, &mut incoming);
         drop(state);
         drop(retired);
@@ -76,8 +73,7 @@ impl<T> Receiver<T> {
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
         let (reader, retired) = if let Ok(mut state) = self.state.lock() {
-            state.sender_open = false;
-            state.queue.close();
+            state.queue.close_sender();
             (state.reader.take(), state.writer.take())
         } else { (None, None) };
         let notify = WakeOnDrop(reader);
@@ -88,9 +84,8 @@ impl<T> Drop for Sender<T> {
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
         let (writer, retired, pending) = if let Ok(mut state) = self.state.lock() {
-            state.receiver_open = false;
-            state.queue.close();
-            (state.writer.take(), state.reader.take(), state.queue.pop())
+            let pending = state.queue.close_receiver();
+            (state.writer.take(), state.reader.take(), pending)
         } else { (None, None, None) };
         // Drop callbacks and wake outside the lock. Even if a payload/drop
         // callback panics, the waiting writer must observe receiver closure.

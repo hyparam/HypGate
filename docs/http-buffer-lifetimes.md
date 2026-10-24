@@ -2,16 +2,21 @@
 
 This is the production `http_body.rs` correspondence audit for the reader and
 output-channel terms in `Buffers::accounted_payload_bound`. The channel uses a
-verified `FixedQueue` under a trusted Rust mutex/waker adapter; Tokio oneshots
+verified inline `Mailbox` under a trusted Rust mutex/waker adapter; Tokio oneshots
 acknowledge End. Rust destruction, wakeups, and async scheduling remain trusted.
 
 ## Writer queue and pending operations
 
-Each channel owns one fixed queue slot, one Arc/mutex control allocation, and at
-most two registered wakers. `http_body/slot.rs` exposes non-cloneable sender and
+Each channel owns one inline optional message, one Arc/mutex control allocation,
+and at most two registered wakers. `http_body/slot.rs` exposes non-cloneable sender and
 receiver endpoints. There are no linked message blocks, semaphore permits, or
-PollSender acquisition futures. Queue initialization requests one `Option<Message>`
-element; verified push/pop preserve slot count and exact FIFO identity.
+PollSender acquisition futures. The message is stored directly in the mailbox, with no separate slot vector.
+Verified push/pop preserve exact item identity and reject full-slot overwrite.
+The core owns both endpoint-open flags: sender closure preserves the item for
+draining, receiver closure returns the item and clears the slot, and neither
+endpoint can reopen. `close_receiver` transfers ownership to the adapter for
+payload destruction outside the mutex. The retained-item count is always at most
+one, and zero whenever the receiver is closed.
 
 Production writers copy at most 16 KiB per data message. `poll_send_with` checks
 receiver liveness and queue capacity while holding the mutex, then constructs and
@@ -89,8 +94,8 @@ poison refusal, 10,000 ordered handoffs between two threads, and receiver destru
 behind in-progress construction followed by exact payload release. Release workload
 and isolated-memory regressions exercise both logging modes through this path.
 
-Validation on 2026-10-23: 152 regular workspace tests and five compile-fail doctests
-pass (the final payload-drop panic regression was rerun with all six slot tests). All six
+Validation on 2026-10-23: 154 regular workspace tests and five compile-fail doctests
+pass, including all six slot-adapter tests and both core mailbox ownership tests. All six
 release load/fault workloads pass. A three-wave isolated process run in each mode
 also passes, with sampled peaks of 12,992,512 bytes in strict mode and 12,959,744
 bytes in availability mode on macOS. These observations are regression evidence,

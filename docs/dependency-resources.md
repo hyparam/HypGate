@@ -246,15 +246,16 @@ their surviving owners; they do not add another copy of message payloads.
 | Audit completion oneshots | Q + 1 + R | Encoding/queued jobs, sole active worker, and live request receivers |
 | DNS completion oneshots | 32 + R | Credited lookup jobs or live request receivers after result handoff |
 
-Each HTTP channel now has one Arc-backed mutex state and one fixed one-element
-`Option<Message>` vector. The core's `FixedQueue` proves unchanged slot count,
-exact FIFO identity, and permanent closure. The trusted adapter stores at most
+Each HTTP channel now has one Arc-backed mutex state containing an inline
+`Mailbox<Message>`, with no separate slot allocation. The core proves exact
+item identity, full-slot refusal, sender-close preservation, receiver-close
+extraction, and permanent closure of both endpoints. The trusted adapter stores at most
 two registered wakers and non-cloneable sender/receiver endpoints. Cloning and
 retirement occur outside the state lock, as do wake callbacks. Waker replacement
 and wake invocation have bounded temporary handles, separate from the two stored
 slots; underlying task allocations and arbitrary waker implementations remain
-trusted. ABI padding, Arc headers, allocator overhead, and the one-element Vec's
-backing capacity must still be distinguished from logical payload size.
+trusted. ABI padding, Arc headers, allocator overhead, and underlying task storage
+must still be distinguished from logical payload size.
 
 The prior Tokio mpsc linked-block growth/reuse obligation is removed from this
 production path. No semaphore permit or PollSender acquisition future remains.
