@@ -71,12 +71,52 @@ fn message_data(message: Message) -> Option<Bytes> {
     match message { Message::Data(frame) => Some(Bytes::from(frame.into_vec())), Message::Probe(bytes) => Some(bytes), Message::End => None }
 }
 pub(crate) struct Writer { sender: slot::Sender<Message>, max_frame: usize, ended: bool, drained: oneshot::Receiver<()>, complete: bool }
-pub(crate) struct ChannelBody { receiver: slot::Receiver<Message>, ended: bool, drained: Option<oneshot::Sender<()>> }
+pub(crate) struct ChannelBody {
+    receiver: Option<slot::Receiver<Message>>, ended: bool, drained: Option<oneshot::Sender<()>>,
+    response: Option<ResponseOwnership>,
+}
+
+// Cloning the issuer does not clone a permit: the checked slot issues once.
+#[derive(Clone)]
+pub(crate) struct ConnectionResponses(std::sync::Arc<std::sync::Mutex<gateway_core::http_connection::ResponseSlot>>);
+struct ResponseOwnership {
+    issuer: ConnectionResponses,
+    permit: gateway_core::http_connection::ResponsePermit,
+}
+impl ConnectionResponses {
+    pub(crate) fn reserve(key: gateway_core::resource::RequestKey) -> (Self, gateway_core::task_credit::TaskCredit) {
+        let (slot, task) = gateway_core::http_connection::ResponseSlot::reserve(key);
+        (Self(std::sync::Arc::new(std::sync::Mutex::new(slot))), task)
+    }
+    pub(crate) fn channel(&self, max_frame: usize) -> Option<(Writer, ChannelBody)> {
+        let permit = self.0.lock().ok()?.issue()?;
+        let (writer, mut body) = channel(max_frame);
+        body.response = Some(ResponseOwnership { issuer: self.clone(), permit });
+        Some((writer, body))
+    }
+    pub(crate) fn release_task(&self, task: gateway_core::task_credit::TaskCredit,
+        registry: &mut gateway_core::resource::ResourceAdmission) -> bool
+    {
+        self.0.lock().is_ok_and(|mut slot| slot.release_task(task, registry))
+    }
+}
+impl Drop for ChannelBody {
+    fn drop(&mut self) {
+        // Explicit normal-return boundary: a panic must not return the permit
+        // through automatic field cleanup while payload destruction unwinds.
+        drop(self.receiver.take());
+        if let Some(response) = self.response.take() {
+            if let Ok(mut slot) = response.issuer.0.lock() {
+                assert!(slot.finish(response.permit), "response belongs to connection");
+            }
+        }
+    }
+}
 pub(crate) fn channel(max_frame: usize) -> (Writer, ChannelBody) {
     let (sender, receiver) = slot::channel();
     let (done, drained) = oneshot::channel();
     (Writer { sender, max_frame, ended: false, drained, complete: false },
-        ChannelBody { receiver, ended: false, drained: Some(done) })
+        ChannelBody { receiver: Some(receiver), ended: false, drained: Some(done), response: None })
 }
 impl AsyncWrite for Writer {
     fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, bytes: &[u8]) -> Poll<io::Result<usize>> {
@@ -122,7 +162,7 @@ impl Body for ChannelBody {
     fn poll_frame(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Result<Frame<Bytes>, io::Error>>> {
         let this = self.get_mut();
         if this.ended { return Poll::Ready(None); }
-        match this.receiver.poll_recv(cx) {
+        match this.receiver.as_mut().expect("live receiver").poll_recv(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Some(message)) => {
                 if let Some(data) = message_data(message) { return Poll::Ready(Some(Ok(Frame::data(data)))); }
@@ -145,6 +185,23 @@ mod tests {
     use super::*;
     use http_body_util::BodyExt;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn panicking_response_payload_strands_its_connection_permit() {
+        struct Payload;
+        impl AsRef<[u8]> for Payload { fn as_ref(&self) -> &[u8] { b"data" } }
+        impl Drop for Payload { fn drop(&mut self) { panic!("injected response cleanup panic"); } }
+        let mut registry = gateway_core::resource::ResourceAdmission::new(1, 0);
+        let (responses, task) = ConnectionResponses::reserve(registry.acquire().unwrap());
+        let (mut writer, body) = responses.channel(4).unwrap();
+        let mut context = Context::from_waker(std::task::Waker::noop());
+        assert!(matches!(writer.sender.poll_send_with(&mut context,
+            || Message::Probe(Bytes::from_owner(Payload))), Poll::Ready(Ok(()))));
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(body))).is_err());
+        assert!(!responses.release_task(task, &mut registry));
+        assert!(registry.acquire().is_none());
+        assert!(responses.channel(4).is_none());
+    }
 
     #[tokio::test]
     async fn output_copy_enforces_core_limit_even_for_oversized_configuration() {

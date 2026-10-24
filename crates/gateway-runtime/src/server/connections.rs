@@ -4,13 +4,14 @@ use std::{future::Future, sync::{Arc, Mutex}};
 use super::leased_task::{LeasedTask, TaskLease};
 
 pub(super) struct ConnectionSlots { registry: Mutex<ResourceAdmission>, limit: usize }
-pub(super) struct ConnectionLease { slots: Arc<ConnectionSlots>, credit: Option<TaskCredit> }
+pub(super) struct ConnectionLease { slots: Arc<ConnectionSlots>, credit: Option<TaskCredit>, responses: crate::http_body::ConnectionResponses }
 
 impl TaskLease for ConnectionLease {
     fn credit(&mut self) -> &mut TaskCredit { self.credit.as_mut().expect("live connection lease") }
 }
 
 impl ConnectionLease {
+    pub(super) fn responses(&self) -> crate::http_body::ConnectionResponses { self.responses.clone() }
     pub(super) fn task<F: Future<Output = ()>>(self, work: F) -> impl Future<Output = ()> {
         LeasedTask::new(work, self)
     }
@@ -19,9 +20,8 @@ impl Drop for ConnectionLease {
     fn drop(&mut self) {
         if let Ok(mut registry) = self.slots.registry.lock() {
             let credit = self.credit.take().expect("live connection lease");
-            let ready = credit.can_release();
-            let released = credit.release(&mut registry);
-            debug_assert_eq!(released, ready, "connection credit must own its registry slot");
+            // A retained or leaked response body independently forbids reuse.
+            self.responses.release_task(credit, &mut registry);
         }
     }
 }
@@ -32,7 +32,8 @@ impl ConnectionSlots {
     pub(super) fn limit(&self) -> usize { self.limit }
     pub(super) fn acquire(self: &Arc<Self>) -> Option<ConnectionLease> {
         let key = self.registry.lock().ok()?.acquire()?;
-        Some(ConnectionLease { slots: self.clone(), credit: Some(TaskCredit::new(key)) })
+        let (responses, credit) = crate::http_body::ConnectionResponses::reserve(key);
+        Some(ConnectionLease { slots: self.clone(), credit: Some(credit), responses })
     }
     #[cfg(test)]
     pub(super) fn usage(&self) -> Option<(usize, usize)> {
@@ -43,6 +44,37 @@ impl ConnectionSlots {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn response_cleanup_gates_connection_reuse_and_prevents_late_issuance() {
+        let slots = ConnectionSlots::new(1);
+        let lease = slots.acquire().unwrap();
+        let responses = lease.responses();
+        let (writer, body) = responses.channel(4).unwrap();
+        assert!(responses.channel(4).is_none());
+        let task = lease.task(async move { drop(body); });
+        drop(task); // never polled; the actual body returns its permit
+        assert_eq!(slots.usage(), Some((0, 1)));
+        assert!(responses.channel(4).is_none());
+        // An empty sender tail does not retain the receiver's connection credit.
+        drop(writer);
+        assert!(slots.acquire().is_some());
+    }
+
+    #[test]
+    fn escaped_response_strands_connection_even_after_task_cleanup() {
+        let slots = ConnectionSlots::new(1);
+        let lease = slots.acquire().unwrap();
+        let responses = lease.responses();
+        let (writer, body) = responses.channel(4).unwrap();
+        drop(lease.task(async {}));
+        assert_eq!(slots.usage(), Some((1, 1)));
+        assert!(slots.acquire().is_none());
+        drop(body);
+        drop(writer);
+        assert!(slots.acquire().is_none());
+        assert!(responses.channel(4).is_none());
+    }
 
     #[test]
     fn panicking_capture_strands_connection_credit() {

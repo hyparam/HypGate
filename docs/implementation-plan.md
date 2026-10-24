@@ -465,6 +465,21 @@ tests and six compile-fail doctests pass; all 220 deliberate mutations are rejec
 by proof. Global HTTP owner counts and cross-owner lifecycle preservation remain
 open, so milestone 6 remains 6/8 complete.
 
+Connection response-permit checkpoint: production connection admission now
+consumes its key into a paired task credit and `ResponseSlot`. The checked slot
+issues at most one non-cloneable response permit, and retires permanently when
+the connection attempts release. `Gateway::handle` constructs its response channel
+only through that issuer; `ChannelBody` returns the permit only after receiver
+destruction returns normally. Connection release rejects an active response or
+foreign task, even if the task's future cleanup has completed. Escaped bodies,
+cleanup panics, and poisoned locks strand capacity. Tests cover normal unpolled
+cleanup, a body escaping task ownership, panic, foreign identities, and late
+issuance; the worker-cancellation regression uses this production permit path.
+Validation: 258 Verus checks, 238 workspace tests and six compile-fail doctests
+pass; all 227 deliberate mutations are rejected by proof.
+The global registry-to-response map and worker-side reader/upload/tail counts
+still need a composed preservation proof; neither remaining row is closed.
+
 Start with the shared wrapper to reduce duplicated trusted lifetime logic. Preserve
 the existing task-capture destruction tests for both lease types and their
 poison, tracker-registration, and drain behavior. Generalize ownership mechanics

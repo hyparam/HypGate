@@ -83,13 +83,14 @@ mod tests {
 
     #[tokio::test]
     async fn canceled_worker_response_stays_owned_by_connection_until_its_cleanup() {
-        use crate::{http_body, server::connections::ConnectionSlots};
+        use crate::server::connections::ConnectionSlots;
         use http_body_util::BodyExt;
         use tokio::io::AsyncWriteExt;
         let workers = WorkerSlots::new(1);
         let connections = ConnectionSlots::new(1);
         let tracker = TaskTracker::new();
-        let (mut writer, mut body) = http_body::channel(4);
+        let connection_lease = connections.acquire().unwrap();
+        let (mut writer, mut body) = connection_lease.responses().channel(4).unwrap();
         let (sent, queued) = tokio::sync::oneshot::channel();
         let (release, drain) = tokio::sync::oneshot::channel();
         let (received, observed) = tokio::sync::oneshot::channel();
@@ -99,7 +100,7 @@ mod tests {
             std::future::pending::<()>().await;
             drop(writer);
         });
-        let connection = tokio::spawn(connections.acquire().unwrap().task(async move {
+        let connection = tokio::spawn(connection_lease.task(async move {
             drain.await.unwrap();
             let frame = body.frame().await.unwrap().unwrap().into_data().unwrap();
             assert_eq!(frame.as_ref(), b"data");

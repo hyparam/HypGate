@@ -16,6 +16,13 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("http_connection.rs", "response_duplicate_issuance", "if self.issued || self.retired", "if self.retired"),
+    ("http_connection.rs", "response_late_issuance", "if self.issued || self.retired", "if self.issued"),
+    ("http_connection.rs", "response_wrong_permit_owner", "ResponsePermit { owner: self.owner }", "ResponsePermit { owner: 0 }"),
+    ("http_connection.rs", "response_foreign_cleanup", "if !self.active || permit.owner != self.owner", "if !self.active"),
+    ("http_connection.rs", "response_release_with_live_body", "if self.active || self.owner != task.owner_id()", "if self.owner != task.owner_id()"),
+    ("http_connection.rs", "response_release_foreign_task", "if self.active || self.owner != task.owner_id()", "if self.active"),
+    ("http_connection.rs", "response_release_allows_late_issue", "self.retired = true;", "self.retired = false;"),
     ("task_credit.rs", "task_cleanup_accepts_unfinished_owner", "if !cleanup.cleanup.is_finished() || cleanup.owner != self.key.owner()", "if cleanup.owner != self.key.owner()"),
     ("task_credit.rs", "task_cleanup_accepts_foreign_owner", "if !cleanup.cleanup.is_finished() || cleanup.owner != self.key.owner()", "if !cleanup.cleanup.is_finished()"),
     ("task_credit.rs", "task_cleanup_issues_wrong_identity", "TaskCleanup { owner: self.key.owner(),", "TaskCleanup { owner: 0,"),

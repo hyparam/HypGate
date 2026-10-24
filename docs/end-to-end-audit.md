@@ -370,3 +370,16 @@ the cleanup charge until reported completed destruction. The runtime adapter's
 mutex, wakers, destruction, and Hyper handoff correspondence remain trusted.
 The global HTTP owner-count mapping and cross-owner lifecycle theorem remain
 unfinished; these per-mailbox results do not close either remaining milestone row.
+
+### Connection response ownership checkpoint
+
+`ConnectionLease` now reserves a checked `ResponseSlot` together with its task
+credit. The consumed admission key binds the two; `Gateway::handle` can construct
+only one client response channel through its issuer. `ChannelBody::drop` destroys
+the actual receiver before reporting permit completion. A live permit prevents
+connection release even after task cleanup, and retirement prohibits late channel
+creation. Foreign permits/tasks, escaped receivers, and destructor panics cannot
+return capacity. Registry identity, Rust ownership, mutex ordering, and truthful
+normal-destructor reporting remain adapter assumptions. This closes the local
+connection/response release gate; the aggregate HTTP owner map and whole-runtime
+lifecycle composition remain unfinished.

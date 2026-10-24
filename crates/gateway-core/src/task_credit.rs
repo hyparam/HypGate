@@ -105,6 +105,10 @@ impl TaskCredit {
         self.finish_cleanup()
     }
 
+    pub fn owner_id(&self) -> (out: u64)
+        ensures out == self.key().id(),
+    { self.key.owner() }
+
     pub fn can_release(&self) -> (ok: bool)
         ensures ok == self.releasable(),
     { matches!(self.phase, Phase::Reserved | Phase::Cleaned | Phase::HandedOff(_)) }

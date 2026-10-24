@@ -41,7 +41,7 @@ impl Gateway {
     pub fn audit_gaps(&self) -> u64 { self.audit_gaps.load(Ordering::Relaxed) }
     pub fn failed_exchanges(&self) -> u64 { self.failed_exchanges.load(Ordering::Relaxed) }
 
-    async fn handle(self: Arc<Self>, request: Request<Incoming>) -> Result<Response<GatewayBody>, Infallible> {
+    async fn handle(self: Arc<Self>, request: Request<Incoming>, responses: http_body::ConnectionResponses) -> Result<Response<GatewayBody>, Infallible> {
         if request.method() == http::Method::GET && request.uri().path() == "/metrics" {
             let mut text = format!("soundgate_audit_gap_requests_total {}\nsoundgate_failed_exchanges_total {}\nsoundgate_audit_healthy {}\n",
                 self.audit_gaps(), self.failed_exchanges(), u8::from(self.log.healthy()));
@@ -71,7 +71,9 @@ impl Gateway {
         };
         let (parts, input) = request.into_parts();
         let (head, headers) = oneshot::channel();
-        let (writer, body) = http_body::channel(16 * 1024);
+        let Some((writer, body)) = responses.channel(16 * 1024) else {
+            return Ok(fixed(StatusCode::SERVICE_UNAVAILABLE, "response unavailable\n"));
+        };
         let app = self.clone();
         let cancel = self.cancel_workers.clone();
         let task = lease.spawn(async move {
@@ -235,8 +237,9 @@ pub async fn serve(listener: TcpListener, app: Arc<Gateway>, connections: usize,
                 if tasks.len() >= connections { drop(socket); continue; }
                 let Some(lease) = slots.acquire() else { drop(socket); continue; };
                 let app = app.clone();
+                let responses = lease.responses();
                 tasks.spawn(lease.task(async move {
-                    let service = service_fn(move |request| app.clone().handle(request));
+                    let service = service_fn(move |request| app.clone().handle(request, responses.clone()));
                     let mut builder = hyper::server::conn::http1::Builder::new();
                     // Keep bounded body frames in Hyper's queue strategy.
                     builder.keep_alive(false).writev(true).max_headers(http_boundary::MAX_HEADER_VALUES)
