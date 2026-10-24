@@ -24,6 +24,25 @@ pub struct StreamChunk {
     history: Ghost<Seq<u8>>,
 }
 
+// Abstract stream state. Transition postconditions equate whole views, so the
+// fields a transition leaves alone are stated once by struct update.
+pub struct Model {
+    pub owner: u64,
+    pub capacity: nat,
+    pub strict: bool,
+    pub chunk: u64,
+    pub body: Seq<u8>,
+    pub input: Seq<u8>,
+    pub completed: Seq<u8>,
+    pub position: nat,
+    pub end: nat,
+    pub durable: nat,
+    pub generation: u64,
+    pub pending: bool,
+    pub closed: bool,
+    pub failed: bool,
+}
+
 impl Ticket {
     pub closed spec fn owner(&self) -> u64 { self.owner }
     pub closed spec fn generation(&self) -> u64 { self.generation }
@@ -41,14 +60,9 @@ impl StreamChunk {
         -> (out: Option<(Header, &'a [u8])>)
         requires self.valid(), authority.valid(),
         ensures match out {
-            Some((h, bytes)) => crate::framing::valid(h) && h.tenant == authority.tenant()
-                && h.request == authority.request() && h.request == self.owner()
-                && h.chunk == self.chunk() && h.direction == direction
-                && h.payload == self.body().len() && bytes@ == self.body()
-                && !self.closed() && !self.failed(),
-            None => self.closed() || self.failed() || self.owner() == 0
-                || self.owner() != authority.request() || self.body().len() > 1048576
-                || direction > 1,
+            Some((h, bytes)) => self.auditable(authority, direction) && crate::framing::valid(h)
+                && h == self.audit_header(authority.tenant(), direction) && bytes@ == self.body(),
+            None => !self.auditable(authority, direction),
         },
     {
         if self.closed || self.failed || self.owner == 0
@@ -94,32 +108,103 @@ impl StreamChunk {
             self.strict() ==> self.end() <= self.durable(),
     {}
 
-    pub closed spec fn chunk(&self) -> u64 { self.chunk }
-    pub closed spec fn capacity(&self) -> nat { self.capacity as nat }
-    pub closed spec fn input(&self) -> Seq<u8> { self.prefix@ + self.bytes@ }
-    pub closed spec fn completed(&self) -> Seq<u8> { self.history@ }
-    pub closed spec fn body(&self) -> Seq<u8> { self.bytes@ }
-    pub closed spec fn position(&self) -> nat { self.sent as nat }
-    pub closed spec fn end(&self) -> nat { self.offered as nat }
-    pub closed spec fn durable(&self) -> nat { self.durable as nat }
-    pub closed spec fn owner(&self) -> u64 { self.owner }
-    pub closed spec fn generation(&self) -> u64 { self.generation }
-    pub closed spec fn pending(&self) -> bool { self.pending }
-    pub closed spec fn closed(&self) -> bool { self.closed }
-    pub closed spec fn strict(&self) -> bool { self.strict }
-    pub closed spec fn failed(&self) -> bool { self.failed }
-    pub closed spec fn matches(&self, t: &Ticket) -> bool {
-        self.pending && t.owner == self.owner && t.generation == self.generation
+    pub closed spec fn model(&self) -> Model {
+        Model { owner: self.owner, capacity: self.capacity as nat, strict: self.strict, chunk: self.chunk,
+            body: self.bytes@, input: self.prefix@ + self.bytes@, completed: self.history@,
+            position: self.sent as nat, end: self.offered as nat, durable: self.durable as nat,
+            generation: self.generation, pending: self.pending, closed: self.closed, failed: self.failed }
+    }
+    pub open spec fn chunk(&self) -> u64 { self.model().chunk }
+    pub open spec fn capacity(&self) -> nat { self.model().capacity }
+    pub open spec fn input(&self) -> Seq<u8> { self.model().input }
+    pub open spec fn completed(&self) -> Seq<u8> { self.model().completed }
+    pub open spec fn body(&self) -> Seq<u8> { self.model().body }
+    pub open spec fn position(&self) -> nat { self.model().position }
+    pub open spec fn end(&self) -> nat { self.model().end }
+    pub open spec fn durable(&self) -> nat { self.model().durable }
+    pub open spec fn owner(&self) -> u64 { self.model().owner }
+    pub open spec fn generation(&self) -> u64 { self.model().generation }
+    pub open spec fn pending(&self) -> bool { self.model().pending }
+    pub open spec fn closed(&self) -> bool { self.model().closed }
+    pub open spec fn strict(&self) -> bool { self.model().strict }
+    pub open spec fn failed(&self) -> bool { self.model().failed }
+    pub open spec fn matches(&self, t: &Ticket) -> bool {
+        self.pending() && t.owner() == self.owner() && t.generation() == self.generation()
+    }
+
+    // The current chunk may be audited for this authority in this direction.
+    pub open spec fn auditable(&self, authority: &AuthorizedRequest, direction: u8) -> bool {
+        !self.closed() && !self.failed() && self.owner() != 0 && self.owner() == authority.request()
+            && self.body().len() <= 1048576 && direction <= 1
+    }
+    pub open spec fn audit_header(&self, tenant: u64, direction: u8) -> Header {
+        Header { payload: self.body().len() as u32, tenant, request: self.owner(), chunk: self.chunk(), direction }
+    }
+    // The canonical record for the current chunk, as a journal receipt must carry it.
+    pub open spec fn audit_frame(&self, tenant: u64, direction: u8, checksum: Seq<u8>) -> Seq<u8> {
+        crate::framing::encoding(self.audit_header(tenant, direction)) + self.body() + checksum
+    }
+
+    // Transition relations shared by this core and the owning wrapper.
+    pub open spec fn acknowledged(pre: Self, post: Self, owner: u64, chunk: u64, end: nat, ok: bool) -> bool {
+        ok == (!pre.closed() && !pre.failed() && owner == pre.owner() && chunk == pre.chunk()
+            && pre.durable() <= end <= pre.body().len())
+        && if ok { post.model() == Model { durable: end, ..pre.model() } } else { post == pre }
+    }
+    pub open spec fn receipt_acknowledged(pre: Self, post: Self, authority: &AuthorizedRequest,
+        journal: &crate::journal_binding::JournalBinding, direction: u8, receipt: &crate::journal::DurableFrame, ok: bool) -> bool
+    {
+        ok == (journal.session() == Some(receipt.session()) && pre.auditable(authority, direction)
+            && receipt.record() == pre.audit_frame(authority.tenant(), direction, receipt.checksum()))
+        && if ok {
+            post.model() == Model { durable: pre.body().len(), ..pre.model() }
+                && receipt.acknowledged() == receipt.prefix() + pre.audit_frame(authority.tenant(), direction, receipt.checksum())
+        } else { post == pre }
+    }
+    pub open spec fn prepared(pre: Self, post: Self, max: usize, out: Option<Ticket>) -> bool {
+        match out {
+            Some(t) => !pre.pending() && !pre.closed() && post.matches(&t)
+                && pre.position() < post.end() <= pre.position() + max
+                && post.model() == Model { end: post.end(), generation: (pre.generation() + 1) as u64, pending: true, ..pre.model() },
+            None => post == pre && (pre.closed() || pre.pending() || max == 0 || pre.generation() == u64::MAX
+                || pre.position() == (if pre.strict() { pre.durable() } else { pre.body().len() })),
+        }
+    }
+    pub open spec fn completed_write(pre: Self, post: Self, t: &Ticket, count: usize, ok: bool) -> bool {
+        ok == (pre.matches(t) && count <= pre.end() - pre.position())
+        && if ok {
+            post.model() == Model { position: (pre.position() + count) as nat, end: (pre.position() + count) as nat, pending: false,
+                completed: pre.completed() + pre.body().subrange(pre.position() as int, (pre.position() + count) as int),
+                ..pre.model() }
+        } else { post == pre }
+    }
+    pub open spec fn advanced(pre: Self, post: Self, bytes: Seq<u8>, out: Option<u64>) -> bool {
+        match out {
+            Some(chunk) => !pre.pending() && !pre.closed() && pre.position() == pre.body().len()
+                && chunk == pre.chunk() + 1
+                && post.model() == Model { chunk, body: bytes, input: pre.input() + bytes,
+                    position: 0, end: 0, durable: 0, ..pre.model() },
+            None => post == pre && (pre.closed() || pre.pending() || pre.position() != pre.body().len()
+                || bytes.len() > pre.capacity() || pre.chunk() == u64::MAX),
+        }
+    }
+    pub open spec fn discarded(pre: Self, post: Self, ok: bool) -> bool {
+        ok == (!pre.closed() && !pre.pending() && pre.position() == pre.body().len())
+        && if ok { post.model() == Model { body: Seq::empty(), position: 0, end: 0, durable: 0, ..pre.model() } }
+        else { post == pre }
+    }
+    pub open spec fn cancelled(pre: Self, post: Self) -> bool {
+        post.model() == Model { closed: true, ..pre.model() }
+    }
+    pub open spec fn log_failed(pre: Self, post: Self) -> bool {
+        post.model() == Model { failed: true, closed: pre.closed() || pre.strict(), ..pre.model() }
     }
 
     pub(crate) fn new(owner: u64, bytes: Vec<u8>, capacity: usize, strict: bool) -> (out: Option<Self>)
         ensures match out {
-            Some(s) => s.valid() && s.body() == bytes@ && s.body().len() <= capacity
-                && s.capacity() == capacity && s.chunk() == 0
-                && s.input() == bytes@ && s.completed() == Seq::<u8>::empty()
-                && s.position() == 0 && s.end() == 0 && s.durable() == 0
-                && s.generation() == 0 && s.owner() == owner && s.strict() == strict
-                && !s.pending() && !s.closed() && !s.failed(),
+            Some(s) => s.valid() && s.model() == Model { owner, capacity: capacity as nat, strict, chunk: 0,
+                body: bytes@, input: bytes@, completed: Seq::empty(), position: 0, end: 0, durable: 0,
+                generation: 0, pending: false, closed: false, failed: false },
             None => bytes.len() > capacity,
         },
     {
@@ -133,20 +218,7 @@ impl StreamChunk {
     // The adapter must supply a truthful durable-prefix acknowledgment for this owner.
     pub fn acknowledge(&mut self, owner: u64, chunk: u64, end: usize) -> (ok: bool)
         requires old(self).valid(),
-        ensures final(self).valid(),
-            final(self).body() == old(self).body(),
-            final(self).chunk() == old(self).chunk(), final(self).capacity() == old(self).capacity(),
-            final(self).input() == old(self).input(),
-            final(self).completed() == old(self).completed(), final(self).owner() == old(self).owner(),
-            final(self).position() == old(self).position(), final(self).strict() == old(self).strict(),
-            final(self).generation() == old(self).generation(),
-            final(self).closed() == old(self).closed(), final(self).failed() == old(self).failed(),
-            final(self).pending() == old(self).pending(), final(self).end() == old(self).end(),
-            ok ==> final(self).durable() == end && end >= old(self).durable()
-                && owner == old(self).owner() && chunk == old(self).chunk(),
-            ok == (!old(self).closed() && !old(self).failed() && owner == old(self).owner()
-                && chunk == old(self).chunk() && old(self).durable() <= end <= old(self).body().len()),
-            !ok ==> *final(self) == *old(self),
+        ensures final(self).valid(), Self::acknowledged(*old(self), *final(self), owner, chunk, end as nat, ok),
     {
         if self.closed || self.failed || owner != self.owner || chunk != self.chunk
             || end < self.durable || end > self.bytes.len() { return false; }
@@ -158,55 +230,24 @@ impl StreamChunk {
         receipt: &crate::journal::DurableFrame) -> (ok: bool)
         requires old(self).valid(), authority.valid(), receipt.valid(),
         ensures final(self).valid(),
-            ok == (journal.session() == Some(receipt.session()) && !old(self).closed() && !old(self).failed() && old(self).owner() != 0
-                && old(self).owner() == authority.request() && old(self).body().len() <= 1048576
-                && direction <= 1 && receipt.record() == crate::framing::encoding(Header {
-                    payload: old(self).body().len() as u32, tenant: authority.tenant(),
-                    request: old(self).owner(), chunk: old(self).chunk(), direction })
-                    + old(self).body() + receipt.checksum()),
-            final(self).body() == old(self).body(), final(self).owner() == old(self).owner(),
-            final(self).chunk() == old(self).chunk(), final(self).input() == old(self).input(),
-            final(self).completed() == old(self).completed(), final(self).position() == old(self).position(),
-            final(self).end() == old(self).end(), final(self).pending() == old(self).pending(),
-            final(self).generation() == old(self).generation(), final(self).strict() == old(self).strict(),
-            final(self).closed() == old(self).closed(), final(self).failed() == old(self).failed(),
-            final(self).capacity() == old(self).capacity(),
-            ok ==> final(self).durable() == old(self).body().len()
-                && receipt.acknowledged() == receipt.prefix()
-                    + crate::framing::encoding(Header { payload: old(self).body().len() as u32,
-                        tenant: authority.tenant(), request: old(self).owner(),
-                        chunk: old(self).chunk(), direction })
-                    + old(self).body() + receipt.checksum(),
-            !ok ==> *final(self) == *old(self),
+            Self::receipt_acknowledged(*old(self), *final(self), authority, journal, direction, receipt, ok),
     {
         if !journal.accepts(receipt) { return false; }
         let (header, bytes) = match self.audit_record(authority, direction) {
             Some(record) => record, None => return false,
         };
         if !receipt.matches_record(header, bytes) { return false; }
+        proof {
+            assert(receipt.prefix() + self.audit_frame(authority.tenant(), direction, receipt.checksum())
+                =~= receipt.prefix() + crate::framing::encoding(header) + bytes@ + receipt.checksum());
+        }
         self.acknowledge(self.owner, self.chunk, self.bytes.len())
     }
 
     // A reservation does not advance the completed offset.
     pub fn prepare(&mut self, max: usize) -> (out: Option<Ticket>)
         requires old(self).valid(),
-        ensures final(self).valid(), final(self).body() == old(self).body(),
-            final(self).chunk() == old(self).chunk(), final(self).capacity() == old(self).capacity(),
-            final(self).input() == old(self).input(),
-            final(self).completed() == old(self).completed(),
-            final(self).position() == old(self).position(), final(self).owner() == old(self).owner(),
-            final(self).strict() == old(self).strict(),
-            final(self).durable() == old(self).durable(),
-            final(self).closed() == old(self).closed(), final(self).failed() == old(self).failed(),
-            match out {
-                Some(t) => final(self).matches(&t) && !old(self).pending() && !old(self).closed()
-                    && final(self).end() > final(self).position()
-                    && final(self).end() - final(self).position() <= max
-                    && final(self).generation() == old(self).generation() + 1,
-                None => *final(self) == *old(self) && (old(self).closed() || old(self).pending()
-                    || max == 0 || old(self).generation() == u64::MAX
-                    || old(self).position() == (if old(self).strict() { old(self).durable() } else { old(self).body().len() })),
-            },
+        ensures final(self).valid(), Self::prepared(*old(self), *final(self), max, out),
     {
         if self.closed || self.pending || max == 0 || self.generation == u64::MAX {
             return None;
@@ -240,20 +281,7 @@ impl StreamChunk {
     // Completion remains valid after cancellation for an already issued write.
     pub fn complete(&mut self, t: &Ticket, count: usize) -> (ok: bool)
         requires old(self).valid(),
-        ensures final(self).valid(), final(self).body() == old(self).body(),
-            final(self).chunk() == old(self).chunk(), final(self).capacity() == old(self).capacity(),
-            final(self).input() == old(self).input(),
-            final(self).owner() == old(self).owner(), final(self).strict() == old(self).strict(),
-            final(self).closed() == old(self).closed(), final(self).failed() == old(self).failed(),
-            final(self).durable() == old(self).durable(),
-            final(self).generation() == old(self).generation(),
-            ok ==> old(self).matches(t) && !final(self).pending()
-                && count <= old(self).end() - old(self).position()
-                && final(self).position() == old(self).position() + count
-                && final(self).completed() == old(self).completed()
-                    + old(self).body().subrange(old(self).position() as int, (old(self).position() + count) as int),
-            ok == (old(self).matches(t) && count <= old(self).end() - old(self).position()),
-            !ok ==> *final(self) == *old(self),
+        ensures final(self).valid(), Self::completed_write(*old(self), *final(self), t, count, ok),
     {
         if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent { return false; }
@@ -270,22 +298,7 @@ impl StreamChunk {
     // Only a fully completed chunk can be replaced. Ticket generations never reset.
     pub fn advance(&mut self, bytes: Vec<u8>) -> (out: Option<u64>)
         requires old(self).valid(),
-        ensures final(self).valid(), final(self).owner() == old(self).owner(),
-            final(self).strict() == old(self).strict(), final(self).failed() == old(self).failed(),
-            final(self).capacity() == old(self).capacity(),
-            final(self).generation() == old(self).generation(),
-            final(self).completed() == old(self).completed(),
-            match out {
-                Some(chunk) => chunk == final(self).chunk() && chunk == old(self).chunk() + 1
-                    && old(self).position() == old(self).body().len()
-                    && !old(self).pending() && !old(self).closed()
-                    && final(self).body() == bytes@ && final(self).input() == old(self).input() + bytes@
-                    && final(self).position() == 0 && final(self).end() == 0
-                    && final(self).durable() == 0 && !final(self).pending() && !final(self).closed(),
-                None => *final(self) == *old(self) && (old(self).closed() || old(self).pending()
-                    || old(self).position() != old(self).body().len()
-                    || bytes.len() > old(self).capacity() || old(self).chunk() == u64::MAX),
-            },
+        ensures final(self).valid(), Self::advanced(*old(self), *final(self), bytes@, out),
     {
         if self.closed || self.pending || self.sent != self.bytes.len()
             || bytes.len() > self.capacity || self.chunk == u64::MAX { return None; }
@@ -305,18 +318,7 @@ impl StreamChunk {
     // Release completed payload storage before allocating the next input chunk.
     pub fn discard_completed(&mut self) -> (ok: bool)
         requires old(self).valid(),
-        ensures final(self).valid(),
-            final(self).owner() == old(self).owner(), final(self).capacity() == old(self).capacity(),
-            final(self).chunk() == old(self).chunk(), final(self).generation() == old(self).generation(),
-            final(self).strict() == old(self).strict(), final(self).failed() == old(self).failed(),
-            final(self).closed() == old(self).closed(), final(self).pending() == old(self).pending(),
-            final(self).input() == old(self).input(), final(self).completed() == old(self).completed(),
-            ok ==> !old(self).closed() && !old(self).pending()
-                && old(self).position() == old(self).body().len()
-                && final(self).body().len() == 0 && final(self).position() == 0
-                && final(self).end() == 0 && final(self).durable() == 0,
-            ok == (!old(self).closed() && !old(self).pending() && old(self).position() == old(self).body().len()),
-            !ok ==> *final(self) == *old(self),
+        ensures final(self).valid(), Self::discarded(*old(self), *final(self), ok),
     {
         if self.closed || self.pending || self.bytes.len() != self.sent { return false; }
         proof { assert(self.bytes@.subrange(0, self.sent as int) =~= self.bytes@); }
@@ -330,30 +332,12 @@ impl StreamChunk {
 
     pub fn cancel(&mut self)
         requires old(self).valid(),
-        ensures final(self).valid(), final(self).closed(),
-            final(self).body() == old(self).body(),
-            final(self).chunk() == old(self).chunk(), final(self).capacity() == old(self).capacity(),
-            final(self).input() == old(self).input(),
-            final(self).completed() == old(self).completed(), final(self).owner() == old(self).owner(),
-            final(self).position() == old(self).position(), final(self).strict() == old(self).strict(),
-            final(self).pending() == old(self).pending(), final(self).end() == old(self).end(),
-            final(self).durable() == old(self).durable(), final(self).failed() == old(self).failed(),
-            final(self).generation() == old(self).generation(),
+        ensures final(self).valid(), Self::cancelled(*old(self), *final(self)),
     { self.closed = true; }
 
     pub fn fail_log(&mut self)
         requires old(self).valid(),
-        ensures final(self).valid(), final(self).failed(),
-            final(self).body() == old(self).body(),
-            final(self).chunk() == old(self).chunk(), final(self).capacity() == old(self).capacity(),
-            final(self).input() == old(self).input(),
-            final(self).completed() == old(self).completed(), final(self).owner() == old(self).owner(),
-            final(self).position() == old(self).position(), final(self).strict() == old(self).strict(),
-            final(self).pending() == old(self).pending(), final(self).end() == old(self).end(),
-            final(self).durable() == old(self).durable(),
-            final(self).generation() == old(self).generation(),
-            old(self).strict() ==> final(self).closed(),
-            !old(self).strict() ==> final(self).closed() == old(self).closed(),
+        ensures final(self).valid(), Self::log_failed(*old(self), *final(self)),
     {
         self.failed = true;
         if self.strict { self.closed = true; }

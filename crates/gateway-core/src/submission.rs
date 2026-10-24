@@ -40,7 +40,7 @@ impl AuthorizedWrite {
         if stream.stream().requires_audit() && (!stream.is_audited_for(authority, journal) || stream.recorded_direction() != direction) { return None; }
         let ticket = match stream.prepare(max) { Some(ticket) => ticket, None => return None };
         let route = authority.route();
-        proof { stream.state().payload_within_capacity(); }
+        proof { stream.payload_bound(); stream.state().payload_within_capacity(); }
         Some(Self { ticket, route, request: authority.request_id(), direction })
     }
     pub fn bytes<'a>(&self, owner: &'a OwnedStream, authority: &AuthorizedRequest, journal: &crate::journal_binding::JournalBinding, direction: u8)
