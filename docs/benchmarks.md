@@ -227,11 +227,18 @@ behaves differently:
 | 4 | Strict | 45.4 / 45.6 / 45.4 | 89 / 88 / 89 | 38.6 |
 | 8 | Strict | 86.4 / 86.2 / 86.8 | 93 / 93 / 92 | 38.1 |
 | 16 | Strict | 156.1 / 158.9 / 155.8 | 103 / 101 / 103 | 35.0 |
+| 32 (after the queue change, `033a922`) | Strict | 239.9 / 258.2 / 260.1 | 133 / 124 / 123 | 40.6 |
 
 Availability rows were within a few percent of strict at every level. There,
 throughput scales linearly with concurrency and completion stays near 85 to 100 ms
 regardless of level, so the single-threaded TLS and HTTP work, not the disk, sets
-the per-request time. The eight 32 MiB streams finished in 32.97 s (strict) and
+the per-request time. The 32-concurrent row comes from
+[run 40114340604](https://github.com/platypii/LogGate/actions/runs/40114340604)
+at `033a922`, after appends were made to wait for a queue slot: on this runner the
+16-record queue costs about 30 ms of completion latency at twice its depth, and the
+128-request contention workload completed every request in 0.55 s (strict, 234
+requests per second) and 0.52 s (availability, 247 per second) with no failed
+exchange and no gap. That run's other workloads matched the numbers below. The eight 32 MiB streams finished in 32.97 s (strict) and
 32.95 s (availability), matching their 15 ms pacing with a 20 ms p99 frame gap, and
 the 1 MiB uploads completed in 1.14 and 1.20 s (about 1,800 synced records per
 second). A hosted virtual disk may acknowledge a sync before data reaches durable
