@@ -31,6 +31,33 @@ impl<T> TaskCleanup<T> {
     { self.cleanup.finish() }
 }
 
+/// The actual result value stays paired with its source task until adoption.
+/// ```compile_fail,E0451
+/// let _ = gateway_core::task_credit::TaskResult { source: 1, value: vec![7] };
+/// ```
+pub struct TaskResult<T> { source: u64, value: T }
+impl<T> TaskResult<T> {
+    pub closed spec fn source(&self) -> u64 { self.source }
+    pub closed spec fn value(&self) -> T { self.value }
+    pub fn adopt(self, credit: &mut TaskCredit, registry: &ResourceAdmission,
+        owner: &crate::owned_stream::OwnedStream) -> (out: Result<T, Self>)
+        requires registry.valid(), owner.valid(),
+        ensures final(credit).key() == old(credit).key(),
+            out.is_ok() == (self.source() == old(credit).key().id()
+                && old(credit).phase() == Phase::AwaitingAdoption
+                && registry.owns(&owner.key()) && !owner.state().closed()),
+            match out {
+                Ok(value) => value == self.value() && final(credit).phase() == Phase::HandedOff(owner.key().id())
+                    && final(credit).releasable() && registry.owns(&owner.key()),
+                Err(returned) => returned == self && *final(credit) == *old(credit),
+            },
+    {
+        if self.source != credit.owner_id() { return Err(self); }
+        if !credit.handoff_to(registry, owner) { return Err(self); }
+        Ok(self.value)
+    }
+}
+
 pub struct TaskCredit { key: RequestKey, phase: Phase }
 impl TaskCredit {
     pub closed spec fn key(&self) -> RequestKey { self.key }
@@ -128,6 +155,19 @@ impl TaskCredit {
         if !matches!(self.phase, Phase::Running) { return false; }
         self.phase = Phase::AwaitingAdoption;
         true
+    }
+
+    pub fn finish_work_with<T>(&mut self, value: T) -> (out: Result<TaskResult<T>, T>)
+        ensures final(self).key() == old(self).key(),
+            out.is_ok() == (old(self).phase() == Phase::Running),
+            match out {
+                Ok(result) => result.source() == old(self).key().id() && result.value() == value
+                    && final(self).phase() == Phase::AwaitingAdoption && final(self).retaining(),
+                Err(returned) => returned == value && *final(self) == *old(self),
+            },
+    {
+        if !self.finish_work() { return Err(value); }
+        Ok(TaskResult { source: self.key.owner(), value })
     }
 
     /// Move result accounting to an actually live admitted stream before the

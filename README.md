@@ -69,7 +69,7 @@ checked by Verus, conditional on the documented adapter contracts.
 | Crash-safe recovery | Recovery exposes only complete records, and acknowledged records survive every crash in the specified storage model. | Journal acknowledgment ordering and conditional synced-prefix survival proved; header/payload encoding, header decoding, frame extents, and scanner cursor transitions proved; scanner I/O tested. Process-kill recovery tested and storage assumptions documented; conditional scanner steps proved; acknowledged-prefix reconstruction proved under preserved-byte/read/checksum assumptions. Linux ext4 error/process-death tests passed; physical power-loss validation remains open. |
 | Cancellation and no replay | Cancellation prevents new submissions; uncertain effects, crashes, or failover never trigger automatic replay of a possibly executed generation. | Core cancellation/stale-event checks proved; transport has no replay path. Async cancellation and recovery composition remain unproved. |
 | Resource bounds and safe release | Slots, buffers, queues, and outstanding operations stay within explicit budgets; capacity cannot be reused while work retaining it remains alive. | Logical slot limits, ID isolation, and combined payload bound under an explicit stream-to-slot mapping proved; fixed disk-FIFO order, slot capacity, permanent closure, and actual queued-frame byte bound proved; HTTP mailbox occupancy and endpoint closure proved; ownership and deadlines tested. Conditional allocation composition and shutdown/release arguments are documented; mechanized async refinement remains open. |
-| Logging-mode separation | Availability mode may lose audit coverage but cannot relax authorization, routing, or tenant isolation; logging failure cannot create unbounded replacement work. | Core logging-mode transitions proved; bounded logger and failure handling tested. End-to-end composition remains open. |
+| Logging-mode separation | Availability mode may lose audit coverage but cannot relax authorization, routing, or tenant isolation; logging failure cannot create unbounded replacement work. | Core logging-mode transitions proved; bounded logger and failure handling tested. Submission and lifecycle composition are checked under the documented adapter assumptions. |
 | Honest completion and conditional progress | Failed/truncated streams cannot masquerade as successful completion; under stated scheduler and I/O assumptions, admitted work terminates or times out and releases resources. | Core admission/release and conditional streaming progress proved; EOF/error behavior and deadlines tested. Permanent worker closure and drain rank are proved; the conditional shutdown/resource argument is documented. Mechanized async liveness verification remains open. |
 
 Verus does not verify Tokio, Hyper, rustls, the OS, DNS/PKI, or the filesystem for us.
@@ -82,10 +82,9 @@ opaque body contents or survival of permanent storage loss.
 ## Implementation progress
 
 The [implementation milestones](docs/implementation-plan.md) are the active plan,
-with milestones 1–5 complete and [milestone 6: async ownership and effect
-composition](docs/implementation-plan.md#6-async-ownership-and-effect-composition)
-at 7/8. HTTP ownership counts and cleanup are proved under the documented adapter
-assumptions; whole-runtime lifecycle composition remains open.
+with all six complete under their documented assumptions. The [milestone 6 exit
+audit](docs/milestone-6-exit-audit.md) records the composed ownership and submission
+proofs, production correspondence, and remaining trusted boundaries.
 The [first streaming-core increment](docs/streaming-core-progress.md) records the
 current interface, checked behavior, and remaining milestone-one work.
 The [proof index](docs/proof-index.md) maps advertised guarantees to exact source
@@ -160,14 +159,16 @@ cargo verus verify -p gateway-core --locked -- --triggers-mode silent
 VERUS=/path/to/verus python3 scripts/check_mutations.py
 ```
 
-Validation on 2026-10-24: 293 core verification checks passed, 247 workspace tests and six compile-fail doctests
-passed, and all 248 deliberate mutations failed their proof obligations. The opt-in TLS proxy/gateway
+Validation on 2026-10-24: 298 core verification checks passed, 249 workspace tests and seven compile-fail doctests
+passed, and all 253 deliberate mutations failed their proof obligations. The opt-in TLS proxy/gateway
 process-failover test and six load/fault workloads passed on 2026-10-23.
 Two ten-minute overload runs and the final 100-wave-per-mode isolated memory soak
 also passed; measurements and limits are in the benchmark notes.
 These counts are checks, not a count of independent security guarantees.
 
-[Automated checks](.github/workflows/ci.yml) reproduce the tests and proofs on Linux.
+[Automated checks](.github/workflows/ci.yml) are configured to reproduce the tests and proofs on Linux.
+Current GitHub Actions runs cannot start because of an account billing/spending-limit
+restriction; the local milestone-6 checks passed, but remote CI is not green.
 `bash scripts/check_deployment.sh` reproduces the documented deployment from a clean
 checkout, and `deploy/Dockerfile` repeats the build, tests, proofs, and that check in
 a digest-pinned container; see [clean-environment reproduction](docs/deployment.md#clean-environment-reproduction).

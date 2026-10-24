@@ -2,9 +2,9 @@
 
 The production gateway now derives its HTTP owner counts from the same verified
 registries that admit and release workers and connections. The HTTP cleanup-tail
-row of milestone 6 is complete under the adapter assumptions below. Whole-runtime
-composition with request chunks, receipts, disk jobs, DNS, and TLS remains the
-separate final milestone row.
+row of milestone 6 is complete under the adapter assumptions below. The completed
+[lifecycle composition audit](milestone-6-exit-audit.md) connects this row to request,
+disk, DNS, and TLS ownership.
 
 ## Actual owners and charges
 

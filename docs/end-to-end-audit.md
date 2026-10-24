@@ -1,5 +1,9 @@
 # End-to-end audit: authorization through network and disk effects
 
+Current milestone 6 status: complete under the [final exit audit](milestone-6-exit-audit.md).
+Historical follow-ups below retain their original checkpoint gaps; the exit audit
+supersedes those status statements and maps the current production paths.
+
 This audit follows one request through the production source at `8102eba`,
 from the inbound socket to the exact upstream TCP/TLS/HTTP calls and the exact
 audit-file write/sync calls, then through every failure exit and graceful
@@ -406,3 +410,15 @@ independent count premises. The private gateway path passes its worker context
 through `exchange_with_http`; the public embedding transport API remains outside
 this gateway count claim. The remaining milestone row is whole-runtime lifecycle
 composition across request, worker, connection, HTTP, disk, DNS, and TLS owners.
+
+### Final lifecycle composition
+
+`lifecycle_composition::cleanup_before_reuse` combines the actual production
+release predicates. HTTP registry transitions preserve unrelated live slot
+identities, and `TaskResult<T>` now binds the actual DNS/TLS reply value to its
+source credit. `Reply::adopt` obtains that exact value through the checked live
+request handoff, or restores the unchanged result for credited cleanup. The
+cross-owner cancellation regression retains connection response, background
+work, and disk work independently after worker cancellation. All original
+milestone 6 exit criteria and the remaining trusted joins are checked in the
+[final exit audit](milestone-6-exit-audit.md).

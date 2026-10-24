@@ -104,6 +104,9 @@ impl WorkerRegistry {
                 Some((task, issuer)) => !old(self).closed() && final(self).owns_task(&task)
                     && task.key().slot() == issuer.index() && task.key().id() == issuer.owner()
                     && task.phase() == crate::task_credit::Phase::Reserved
+                    && (forall|i: int| 0 <= i < old(self).limit() && i != issuer.index()
+                        ==> #[trigger] final(self).slots()[i] == old(self).slots()[i]
+                            && final(self).entries()[i] == old(self).entries()[i])
                     && (forall|r: nat| r < 4 ==> final(self).can_issue(&issuer, r)),
                 None => *final(self) == *old(self),
             },
@@ -153,6 +156,9 @@ impl WorkerRegistry {
         ensures final(self).valid(), final(self).limit() == old(self).limit(),
             old(self).closed() ==> final(self).closed(), !ok ==> final(self).closed(),
             ok == old(self).can_release(&task), ok ==> !final(self).owns_task(&task),
+            forall|i: int| 0 <= i < old(self).limit() && i != task.key().slot()
+                ==> #[trigger] final(self).slots()[i] == old(self).slots()[i]
+                    && final(self).entries()[i] == old(self).entries()[i],
             !ok ==> final(self).entries() == old(self).entries(),
             forall|i: int, r: int| 0 <= i < old(self).limit() && 0 <= r < 4
                 ==> #[trigger] final(self).slots()[i].active(r) == old(self).slots()[i].active(r),
@@ -179,6 +185,18 @@ impl WorkerRegistry {
         requires self.valid(),
         ensures out.0 == crate::resource::occupied(self.entries()), out.1 == self.limit(), out.0 <= out.1,
     { self.admission.usage() }
+    pub proof fn retained_permit_blocks_release(&self, task: &TaskCredit, permit: &HttpPermit)
+        requires self.valid(), self.owns_permit(permit),
+            permit.index() == task.key().slot(), permit.owner() == task.key().id(),
+        ensures self.owns_task(task), !self.can_release(task),
+            self.entries()[task.key().slot() as int] == task.key().id(), task.key().id() != 0,
+    {
+        let i = permit.index() as int;
+        assert(self.slots@[i].any_active());
+        self.admission.state().layout();
+        self.admission.state().entry_owns(&task.key());
+    }
+
     pub fn role_usage(&self, role: usize) -> (out: usize)
         requires self.valid(), role < 4,
         ensures out == role_count(self.slots(), role as int), out <= self.limit(),

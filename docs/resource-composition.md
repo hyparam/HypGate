@@ -218,5 +218,6 @@ the receiver's connection credit remains occupied and its queued frame remains
 intact. Canceling and joining that connection then returns its credit. A second
 regression checks actual Reader destruction before worker-slot/tracker release,
 including a retained partial frame. This strengthens the production correspondence
-evidence above; it does not change the conditional snapshot theorem into the
-still-pending milestone 6 lifecycle/composition theorem.
+evidence above. The [milestone 6 exit audit](milestone-6-exit-audit.md) now records
+the checked lifecycle composition. The older allocation snapshot theorem retains
+its stated correspondence and allocator assumptions.

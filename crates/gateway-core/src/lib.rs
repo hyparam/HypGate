@@ -26,6 +26,7 @@ pub mod http_message;
 pub mod http_connection;
 pub mod http_worker;
 pub mod http_accounting;
+pub mod lifecycle_composition;
 pub mod buffer_accounting;
 pub mod owned_accounting;
 

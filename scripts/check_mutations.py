@@ -16,6 +16,11 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("task_credit.rs", "task_result_accepts_foreign_source", "if self.source != credit.owner_id() { return Err(self); }", ""),
+    ("task_credit.rs", "task_result_skips_destination_handoff", "if !credit.handoff_to(registry, owner) { return Err(self); }", ""),
+    ("task_credit.rs", "task_result_issues_wrong_source", "TaskResult { source: self.key.owner(), value }", "TaskResult { source: 0, value }"),
+    ("task_credit.rs", "task_result_issues_without_completed_work", "if !self.finish_work() { return Err(value); }", ""),
+    ("task_credit.rs", "task_result_denies_valid_handoff", "Ok(self.value)", "Err(self)"),
     ("http_worker.rs", "worker_http_duplicate_role", " || self.slots[issuer.index].issued[role]", ""),
     ("http_worker.rs", "worker_http_late_issuance", "self.slots[issuer.index].retired || ", ""),
     ("http_worker.rs", "worker_http_foreign_issuer", " || self.slots[issuer.index].owner != issuer.owner", ""),

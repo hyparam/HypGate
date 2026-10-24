@@ -1,6 +1,6 @@
 //! Verified credits follow background work through queued replies. The request
 //! adopts a successful result before its independent background credit returns.
-use gateway_core::{resource::{RequestKey, ResourceAdmission}, task_credit::TaskCredit};
+use gateway_core::{resource::{RequestKey, ResourceAdmission}, task_credit::{TaskCredit, TaskResult}};
 use std::{io, sync::{Arc, Mutex}};
 use tokio::sync::oneshot;
 
@@ -18,30 +18,44 @@ impl Drop for Credit {
 
 /// Owns a result still charged to its background registry. There is no raw value
 /// extraction in production: adoption requires a live admitted request.
-pub(crate) struct Reply<T> { value: Option<T>, credit: Option<Credit> }
+enum Payload<T> { Direct(T), Credited(TaskResult<T>) }
+pub(crate) struct Reply<T> { value: Option<Payload<T>>, credit: Option<Credit> }
 impl<T> std::fmt::Debug for Reply<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("CreditedReply") }
 }
 impl<T> Reply<T> {
     // Literal IP resolution performs no background work and creates one address
     // directly in the caller's request future, already charged to that request.
-    pub(crate) fn direct(value: T) -> Self { Self { value: Some(value), credit: None } }
+    pub(crate) fn direct(value: T) -> Self { Self { value: Some(Payload::Direct(value)), credit: None } }
     pub(crate) fn adopt(mut self, request: &mut crate::admission::Request<'_>) -> io::Result<T> {
-        if let Some(credit) = self.credit.as_mut() {
-            if !request.adopt_background(credit.state.as_mut().expect("live reply credit")) {
-                return Err(io::ErrorKind::BrokenPipe.into());
-            }
-        }
-        let value = self.value.take().expect("owned reply value");
+        let value = match self.value.take().expect("owned reply value") {
+            Payload::Direct(value) => value,
+            Payload::Credited(value) => {
+                let credit = self.credit.as_mut().expect("credited reply source");
+                match request.adopt_background(credit.state.as_mut().expect("live reply credit"), value) {
+                    Ok(value) => value,
+                    Err(value) => {
+                        self.value = Some(Payload::Credited(value));
+                        return Err(io::ErrorKind::BrokenPipe.into());
+                    },
+                }
+            },
+        };
         // The exclusive request borrow is still live at the checked handoff.
         // Its outer owner outlives this synchronous transfer and subsequent I/O.
         drop(self.credit.take());
         Ok(value)
     }
     #[cfg(test)]
-    pub(crate) fn into_inner_for_test(mut self) -> T {
-        // Unit tests own the result directly, outside production request budgets.
-        self.value.take().expect("test reply value")
+    pub(crate) fn into_inner_for_test(self) -> T {
+        // Exercise the production handoff even when tests own the result directly.
+        use gateway_core::policy::{Identity, Policy, Route};
+        let route = || Route { tenant: 1, selector: 7, origin: 0, credential: 0 };
+        let policy = Policy::validate(vec![Identity { tenant: 1, digest: vec![11; 32] }],
+            vec![route()], vec![route()], 1, vec![1]).unwrap();
+        let admission = crate::admission::Admission::new(policy, 1, 4, false);
+        let mut request = admission.admit(&[11; 32], 7).unwrap();
+        self.adopt(&mut request).expect("test request adopts reply")
     }
 }
 impl<T> Drop for Reply<T> {
@@ -69,9 +83,9 @@ impl<T: Send + 'static, F: FnOnce(&mut Sender<T>) -> Option<io::Result<T>> + Sen
         let result = work(self.send.as_mut().expect("job reply sender"));
         match result {
             Some(Ok(value)) => {
-                assert!(self.credit.as_mut().unwrap().state.as_mut().unwrap().finish_work(),
-                    "work and captures finished before creating reply");
-                let reply = Reply { value: Some(value), credit: self.credit.take() };
+                let value = self.credit.as_mut().unwrap().state.as_mut().unwrap().finish_work_with(value)
+                    .unwrap_or_else(|_| panic!("work and captures finished before creating reply"));
+                let reply = Reply { value: Some(Payload::Credited(value)), credit: self.credit.take() };
                 let _ = self.send.take().unwrap().send(Ok(reply));
             }
             Some(Err(error)) => { let _ = self.send.take().unwrap().send(Err(error)); }

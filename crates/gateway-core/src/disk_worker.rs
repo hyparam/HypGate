@@ -79,8 +79,9 @@ impl DiskWorker {
     pub fn is_busy(&self) -> (out: bool)
         ensures out == self.busy(),
     { self.busy }
+    pub open spec fn available(&self) -> bool { !self.busy() && self.next() < u64::MAX }
     pub fn can_take(&self) -> (out: bool)
-        ensures out == (!self.busy() && self.next() < u64::MAX),
+        ensures out == self.available(),
     { !self.busy && self.next < u64::MAX }
 
     pub fn take<C>(&mut self, queue: &mut FrameQueue<C>) -> (out: Option<ActiveAppend<C>>)

@@ -139,3 +139,43 @@ fn abandoned_task_cleanup_strands_its_registry_slot() {
     assert!(!credit.release(&mut registry));
     assert!(registry.acquire().is_none());
 }
+
+#[test]
+fn actual_background_result_checks_source_and_target_before_release() {
+    use gateway_core::{owned_stream::OwnedStream, policy::{Identity, Policy, Route}};
+    let route = || Route { tenant: 1, selector: 7, origin: 0, credential: 0 };
+    let policy = Policy::validate(vec![Identity { tenant: 1, digest: vec![9; 32] }],
+        vec![route()], vec![route()], 1, vec![1]).unwrap();
+    for canceled in [false, true] {
+        let mut requests = ResourceAdmission::new(1, 4);
+        let key = requests.acquire().unwrap();
+        let authority = policy.authenticate(&[9; 32]).unwrap().authorize(7, key.owner()).unwrap();
+        let mut owner = OwnedStream::claim(&requests, key, &authority, false).ok().unwrap();
+        let mut jobs = ResourceAdmission::new(2, 0);
+        let mut first = TaskCredit::new(jobs.acquire().unwrap());
+        let mut second = TaskCredit::new(jobs.acquire().unwrap());
+        assert_eq!(first.finish_work_with(vec![0]).err().unwrap(), vec![0]);
+        assert!(first.start()); assert!(second.start());
+        let result = first.finish_work_with(vec![1, 2, 3]).ok().unwrap();
+        let other = second.finish_work_with(vec![4, 5]).ok().unwrap();
+        let result = result.adopt(&mut second, &requests, &owner).err().unwrap();
+        assert!(!first.can_release()); assert!(!second.can_release());
+        assert_eq!(other.adopt(&mut second, &requests, &owner).ok().unwrap(), vec![4, 5]);
+        assert!(second.release(&mut jobs));
+        if canceled {
+            owner.cancel();
+            let result = result.adopt(&mut first, &requests, &owner).err().unwrap();
+            assert!(!first.can_release());
+            let mut cleanup = first.begin_cleanup_with(result).ok().unwrap();
+            drop(cleanup.take());
+            assert!(cleanup.finish());
+            assert!(first.finish_cleanup_with(&cleanup));
+        } else {
+            assert_eq!(result.adopt(&mut first, &requests, &owner).ok().unwrap(), vec![1, 2, 3]);
+        }
+        assert!(first.release(&mut jobs));
+        assert_eq!(jobs.usage(), (0, 2));
+        assert_eq!(requests.usage(), (1, 1));
+        assert!(owner.retire(&mut requests));
+    }
+}

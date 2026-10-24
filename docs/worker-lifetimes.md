@@ -86,8 +86,10 @@ existing registry acquisition contract. Seven mutations cover early release,
 invalid cleanup transitions, denied cleanup completion, and overwriting a live
 slot. The runtime tests exercise correspondence to actual destruction; that
 correspondence remains trusted. The gate does not verify Rust destructors, Tokio,
-or independent HTTP, disk, DNS, and TLS cleanup tails. Full ownership snapshot
-composition and dependency allocation accounting remain open.
+or dependency internals. Independent HTTP, disk, DNS, and TLS cleanup is now
+composed through their production gates and checked source-bound handoffs; see
+the [milestone 6 exit audit](milestone-6-exit-audit.md). Whole-process allocation
+and complete async-runtime refinement remain outside that claim.
 
 Graceful shutdown permanently closes worker admission across all listeners sharing
 the Gateway. Closure serializes with acquisition through tracker registration;

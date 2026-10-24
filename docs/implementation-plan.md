@@ -7,7 +7,7 @@
 | 3. Crash-safe logging | 15/15 | ✓ |
 | 4. Availability hardening | 16/16 | ✓ |
 | 5. Auditable first release | 9/9 | ✓ |
-| [6. Async ownership and effect composition](#6-async-ownership-and-effect-composition) | 7/8 | ☐ |
+| [6. Async ownership and effect composition](#6-async-ownership-and-effect-composition) | 8/8 | ✓ |
 
 Progress counts completed rows in each milestone's table below. Rows are not
 weighted estimates of effort or proof coverage; an open row can still block the
@@ -29,7 +29,7 @@ is scripted and reproduced in CI and a pinned container, and the
 [broader benchmarks](benchmarks.md#broader-workloads) and
 [operational limits](operational-limits.md) close the last row. Every milestone
 row in milestones 1–5 is now checked under its documented assumptions; milestone 6
-tracks the next refactor and composition proofs. Other open obligations are listed
+is complete under the [final lifecycle and effect audit](milestone-6-exit-audit.md). Other open obligations are listed
 in the [security contract](security-contract.md) and each exit audit.
 See the [streaming-core progress notes](streaming-core-progress.md) and
 [authorization core](authorization-core.md) for completed increments and remaining gaps.
@@ -319,8 +319,11 @@ Exit criteria:
 | ✓ | DNS jobs after request cancellation: production `CreditedJob` and `Reply` retain verified `TaskCredit` through queued/running lookup work and unread results; cleanup gates release, or `handoff_to` checks a live admitted owner before result adoption. Blocked/canceled lookup, queued cancellation, panic, reply retention, and adoption regressions pass. Rust destruction/channel behavior and registry identity remain explicit adapter assumptions. |
 | ✓ | TLS jobs after request cancellation: the same credited job/reply path retains handshake state and sockets through blocked polls and unread replies; verified handoff transfers successful results to a live request before releasing pool capacity. Queued cancellation, blocked polls, panic, runtime shutdown, and actual TLS exchange regressions pass under the same adapter assumptions. |
 | ✓ | HTTP cleanup tails: production `WorkerRegistry` and `ResponseRegistry` preserve active HTTP ownership through allocation, cancellation, cleanup, and slot reuse. Each worker issues at most one permit for each reader, upload channel, and response writer; each connection issues one response permit. Actual Reader/Writer/ChannelBody destructors retain these charges through buffer destruction, including shared upload endpoint cleanup and panic. `http_owner_bounds` derives the two-reader and C+2R queue bounds from the production registries. Rust/Arc ownership, mutex identity, truthful destruction, and dependency-buffer accounting remain explicit assumptions; see the [HTTP ownership audit](http-ownership.md). |
-| ☐ | Compose cleanup-before-capacity-reuse across all owners: connect the worker, connection, HTTP, disk, DNS, and TLS lifecycles to production ownership across cancellation, normal completion, panic, and shutdown. |
+| ✓ | Cleanup-before-capacity-reuse composition: `lifecycle_composition::cleanup_before_reuse` combines production HTTP-parent, background-task, and disk release gates; registry transitions preserve unrelated live identities. Actual task captures use `TaskCleanup`, and DNS/TLS results use source-bound `TaskResult` with checked live-request adoption. The cross-owner cancellation regression and [exit audit](milestone-6-exit-audit.md) trace request, worker, connection, HTTP, disk, DNS, and TLS ownership across all exits, with explicit Rust/destructor/registry/I/O assumptions. |
 | ✓ | Upstream mediation: production HTTPS transfers call `ResolvedRoute::write_bytes` through their privately paired resolved route and request. The checked composition ties policy-authorized destination/credential handles to exact live write ranges and, in strict mode, exact tenant/request/chunk/direction receipts from the designated journal session. Availability retains authorization/routing checks. Concrete table selection is verified; parsing, secret provisioning, initial logger/file identity, Rust ownership, actual writer correspondence, and I/O truth remain explicit adapter assumptions. |
+
+Current status: all eight rows are complete; see the [exit audit](milestone-6-exit-audit.md).
+The checkpoint notes below are historical and retain their then-current counts and gaps.
 
 DNS/TLS checkpoint validation: the locked workspace suite and five compile-fail
 doctests pass (opt-in workloads excluded); the pinned Cargo/Verus check reports
@@ -508,6 +511,18 @@ joins. Validation: 293 Verus checks, 247 tests including the new targeted
 escaped-owner regression, six compile-fail doctests, and 248 rejected mutations.
 The HTTP row is complete; milestone 6 is 7/8. The remaining row must compose these
 HTTP lifecycles with worker/connection, request, disk, DNS, and TLS ownership.
+
+Final composition checkpoint: actual background values now use source-bound
+`TaskResult<T>` and a checked live-request handoff. The product lifecycle theorem
+uses the actual production release gates; HTTP acquire/release contracts also
+preserve unrelated slot identities. The cancellation regression demonstrates
+worker reuse while independent response, background, and disk owners remain
+retained, then complete separately. The [exit audit](milestone-6-exit-audit.md)
+checks every original criterion and records trusted joins. Validation: 298 proof
+checks, 249 workspace tests, seven compile-fail doctests, 253 rejected mutations,
+and both additional failed-log TLS workloads pass locally. Remote CI cannot start
+because of the GitHub account's billing/spending-limit restriction. Milestone 6
+is 8/8 complete under the documented adapter assumptions.
 
 Start with the shared wrapper to reduce duplicated trusted lifetime logic. Preserve
 the existing task-capture destruction tests for both lease types and their

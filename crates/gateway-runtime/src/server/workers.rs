@@ -181,6 +181,82 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn cancellation_preserves_independent_response_background_and_disk_owners() {
+        use crate::{credited_job::CreditedJob, disk_log::DiskLog, server::connections::ConnectionSlots,
+            transfer::{AuditLog, Direction, LogRecord}};
+        use gateway_core::resource::ResourceAdmission;
+        use http_body_util::BodyExt;
+        use tokio::io::AsyncWriteExt;
+        use std::time::Duration;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let workers = WorkerSlots::new(1);
+            let connections = ConnectionSlots::new(1);
+            let tracker = TaskTracker::new();
+            let background = Arc::new(Mutex::new(ResourceAdmission::new(1, 0)));
+            struct ResultOwner(Arc<Mutex<ResourceAdmission>>);
+            impl Drop for ResultOwner {
+                fn drop(&mut self) {
+                    let mut registry = self.0.lock().unwrap();
+                    assert_eq!(registry.usage(), (1, 1));
+                    assert!(registry.acquire().is_none());
+                }
+            }
+            let (entered, running) = tokio::sync::oneshot::channel();
+            let (release_job, wait_job) = std::sync::mpsc::channel();
+            let key = background.lock().unwrap().acquire().unwrap();
+            let result_owner = ResultOwner(background.clone());
+            let (job, receive) = CreditedJob::new(background.clone(), key, move |_| {
+                entered.send(()).unwrap();
+                wait_job.recv_timeout(Duration::from_secs(5)).unwrap();
+                Some(Ok(result_owner))
+            });
+            let thread = std::thread::spawn(move || job.run());
+            let (log, syncing, release_disk, writes) = DiskLog::stalled_for_test(1, Duration::from_secs(5));
+            let mut append_log = log.clone();
+            let worker_lease = workers.acquire(&tracker).unwrap();
+            let connection_lease = connections.acquire().unwrap();
+            let (writer, mut body) = connection_lease.responses().channel(4).unwrap();
+            let mut writer = worker_lease.http().response_writer(writer).unwrap();
+            let (drain, drain_now) = tokio::sync::oneshot::channel();
+            let connection = tokio::spawn(connection_lease.task(async move {
+                drain_now.await.unwrap();
+                let data = body.frame().await.unwrap().unwrap().into_data().unwrap();
+                assert_eq!(data.as_ref(), b"data");
+                assert_eq!(body.frame().await.unwrap().unwrap_err().kind(), std::io::ErrorKind::UnexpectedEof);
+            }));
+            let worker = worker_lease.spawn(async move {
+                writer.write_all(b"data").await.unwrap();
+                let append = append_log.append(LogRecord { tenant: 1, request: 1, chunk: 1,
+                    direction: Direction::Upload, bytes: b"record" });
+                let _ = tokio::join!(receive, append);
+            });
+            running.await.unwrap();
+            syncing.await.unwrap();
+            worker.abort();
+            assert!(worker.await.unwrap_err().is_cancelled());
+            assert!(tracker.is_empty());
+            assert_eq!(workers.usage(), Some((0, 1)));
+            let replacement = workers.acquire(&tracker).unwrap();
+            assert!(connections.acquire().is_none());
+            assert!(background.lock().unwrap().acquire().is_none());
+            assert_eq!(writes.load(std::sync::atomic::Ordering::Relaxed), 1);
+            assert_eq!(log.shutdown(Duration::from_millis(10)).await.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+            release_job.send(()).unwrap();
+            thread.join().unwrap();
+            assert_eq!(background.lock().unwrap().usage(), (0, 1));
+            assert!(connections.acquire().is_none());
+            drain.send(()).unwrap();
+            connection.await.unwrap();
+            assert_eq!(connections.usage(), Some((0, 1)));
+            release_disk.send(()).unwrap();
+            log.shutdown(Duration::from_secs(1)).await.unwrap();
+            assert_eq!(writes.load(std::sync::atomic::Ordering::Relaxed), 1);
+            drop(replacement);
+            assert_eq!(workers.usage(), Some((0, 1)));
+        }).await.unwrap();
+    }
+
     #[test]
     fn escaped_http_owners_keep_worker_capacity_after_task_cleanup() {
         use bytes::Bytes;
