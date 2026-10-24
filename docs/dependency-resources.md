@@ -644,14 +644,30 @@ and decrypts to the exact accepted prefix. The fixture certificate is ECDSA;
 RSA-authenticated TLS 1.2 suites use the same record ciphers but are not separately
 exercised by this test.
 
-Automatic key refresh must still be added to a complete buffered-writer bound.
-`send_plaintext` may call `buffer_plaintext` again after refreshing keys; its
-output is not just one invocation of the ordinary encryption function.
-Pinned ring TCP confidentiality limits are at least 2^24 records, so the
-fresh key budget is much larger than one four-record application batch, but
-sequence-boundary control records and pending-reply ordering remain part of
-the composed bound. Neither the record-length test nor this logical subtotal
-bounds Vec capacity, descriptor storage, allocator overhead, or total TLS heap.
+For automatic refresh, `send_plaintext` can call `buffer_plaintext` again after
+`maybe_refresh_traffic_keys`; it is not just one ordinary encryption call.
+`send_appdata_encrypt` stops at a record boundary before the key-limit record,
+then the key schedule emits a 27-byte request, installs fresh keys, and clears
+the refresh flag. Pinned ring TCP confidentiality limits are at least 2^24
+records, much larger than one four-record application batch. At most one such
+refresh is needed within that batch; splitting at a fragment boundary does not
+create an extra partial application fragment. Subsequent application acceptance
+rechecks available ciphertext capacity, including the update already queued.
+For an initially empty output queue without a pending reply, a conservative
+TLS 1.3 buffered-write subtotal is 65,651 logical bytes: 65,536 plaintext, four
+22-byte application-record overheads, and one 27-byte automatic request.
+
+`tls_automatic_refresh_bounds_records_at_each_batch_boundary` exercises the
+actual buffered writer and key schedule with real AES-GCM, lowering only the
+test suite's confidentiality limit to eight records. All eight starting positions
+are checked before a 65,537-byte input write. Each accepts at most 65,536 bytes,
+produces at most four application records and one key-update record, matches the
+exact byte accounting, and decrypts to the exact accepted prefix. Several cases
+cross the refresh boundary. Production cipher limits are unchanged. The test
+validates the low-threshold mechanism; the pinned-source argument relates that
+mechanism to production limits. Neither this test nor the subtotal accounts for
+pending-reply/control overlap, handshake output, Vec capacities, descriptor
+storage, allocator overhead, or total TLS heap.
 
 ### Established-connection control paths
 

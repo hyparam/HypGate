@@ -273,6 +273,76 @@ fn tls_application_write_fragment_overhead_is_bounded_for_pinned_suites() {
     assert_eq!(exercised, 12);
 }
 
+// Lower only the test suite's refresh threshold, retaining real AES-GCM and
+// key scheduling. Production uses ring's unmodified confidentiality limits.
+#[test]
+fn tls_automatic_refresh_bounds_records_at_each_batch_boundary() {
+    use std::io::{Read, Write};
+    use tokio_rustls::rustls::{ClientConnection, ServerConnection, SupportedCipherSuite, Tls13CipherSuite, CipherSuiteCommon};
+    static SHORT_KEYS: std::sync::LazyLock<Tls13CipherSuite> = std::sync::LazyLock::new(|| {
+        let base = tokio_rustls::rustls::crypto::ring::cipher_suite::TLS13_AES_128_GCM_SHA256.tls13().unwrap();
+        Tls13CipherSuite {
+            common: CipherSuiteCommon { suite: base.common.suite, hash_provider: base.common.hash_provider, confidentiality_limit: 8 },
+            hkdf_provider: base.hkdf_provider, aead_alg: base.aead_alg, quic: None,
+        }
+    });
+    let mut observed_refreshes = 0;
+    for warmup in 0..8 {
+        let cert = generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let mut roots = RootCertStore::empty(); roots.add(cert.cert.der().clone()).unwrap();
+        let mut crypto = tokio_rustls::rustls::crypto::ring::default_provider();
+        crypto.cipher_suites = vec![SupportedCipherSuite::Tls13(&SHORT_KEYS)]; let crypto = Arc::new(crypto);
+        let server_config = ServerConfig::builder_with_provider(crypto.clone())
+            .with_protocol_versions(&[&tokio_rustls::rustls::version::TLS13]).unwrap()
+            .with_no_client_auth().with_single_cert(vec![cert.cert.der().clone()], PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()).into()).unwrap();
+        let client_config = ClientConfig::builder_with_provider(crypto)
+            .with_protocol_versions(&[&tokio_rustls::rustls::version::TLS13]).unwrap()
+            .with_root_certificates(roots).with_no_client_auth();
+        let mut client = ClientConnection::new(Arc::new(client_config), ServerName::try_from("localhost").unwrap()).unwrap();
+        let mut server = ServerConnection::new(Arc::new(server_config)).unwrap();
+        for _ in 0..10 {
+            let mut wire = Vec::new(); client.write_tls(&mut wire).unwrap();
+            if !wire.is_empty() { server.read_tls(&mut &wire[..]).unwrap(); server.process_new_packets().unwrap(); }
+            let mut wire = Vec::new(); server.write_tls(&mut wire).unwrap();
+            if !wire.is_empty() { client.read_tls(&mut &wire[..]).unwrap(); client.process_new_packets().unwrap(); }
+            if !client.is_handshaking() && !server.is_handshaking() && !client.wants_write() && !server.wants_write() { break; }
+        }
+        assert!(!client.is_handshaking() && !server.is_handshaking());
+        assert!(!client.wants_write() && !server.wants_write());
+        for _ in 0..warmup {
+            client.writer().write_all(b"w").unwrap();
+            let mut wire = Vec::new(); client.write_tls(&mut wire).unwrap();
+            server.read_tls(&mut &wire[..]).unwrap(); server.process_new_packets().unwrap();
+            let mut byte = [0]; server.reader().read_exact(&mut byte).unwrap(); assert_eq!(&byte, b"w");
+        }
+        client.set_buffer_limit(Some(TLS_APPLICATION_BUFFER));
+        let payload = vec![42; TLS_APPLICATION_BUFFER + 1];
+        let accepted = client.writer().write(&payload).unwrap();
+        assert!(accepted > 0 && accepted <= TLS_APPLICATION_BUFFER);
+        let mut wire = Vec::new(); client.write_tls(&mut wire).unwrap();
+        let mut offset = 0; let mut app_records = 0; let mut updates = 0;
+        while offset < wire.len() {
+            assert_eq!(wire[offset], 23); // TLS 1.3 encrypted outer type.
+            let len = u16::from_be_bytes([wire[offset + 3], wire[offset + 4]]) as usize + 5;
+            if len == 27 { updates += 1; } else { app_records += 1; }
+            offset += len;
+        }
+        assert_eq!(offset, wire.len()); assert!(app_records <= 4); assert!(updates <= 1);
+        assert_eq!(wire.len(), accepted + app_records * 22 + updates * 27);
+        assert!(wire.len() <= TLS_APPLICATION_BUFFER + 4 * 22 + 27);
+        observed_refreshes += updates;
+        let mut incoming = &wire[..]; let mut actual = Vec::new();
+        while !incoming.is_empty() {
+            assert!(server.read_tls(&mut incoming).unwrap() > 0);
+            let available = server.process_new_packets().unwrap().plaintext_bytes_to_read();
+            let start = actual.len(); actual.resize(start + available, 0);
+            server.reader().read_exact(&mut actual[start..]).unwrap();
+        }
+        assert_eq!(actual, payload[..accepted]);
+    }
+    assert!(observed_refreshes >= 4);
+}
+
 // Dependency-level counterexample, not a production HTTP scheduling test.
 #[test]
 fn tls_control_replies_can_exceed_application_buffer_limit() {
