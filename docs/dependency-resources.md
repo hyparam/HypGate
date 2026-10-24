@@ -669,6 +669,49 @@ mechanism to production limits. Neither this test nor the subtotal accounts for
 pending-reply/control overlap, handshake output, Vec capacities, descriptor
 storage, allocator overhead, or total TLS heap.
 
+### Outgoing record allocation and vectored scratch
+
+The pinned ring TLS 1.2 AES-GCM/ChaCha and TLS 1.3 encrypters allocate a
+`PrefixedPayload` sized to the final ciphertext payload plus the five-byte
+record header. Plaintext is copied from borrowed fragments into that allocation
+and encrypted in place. Nonce/inner-type/tag appends fit the original reservation.
+`OutboundOpaqueMessage::encode` writes into the reserved header and moves the
+same Vec; `queue_tls_message` and `ChunkVecBuffer::append` move it again without
+copying record bytes. Thus those paths do not require an additional full-record
+copy or geometric growth of each ciphertext vector. Requested record capacity
+matches final encoded length under the pinned allocation model; allocator
+rounding and cryptographic key/scratch objects remain separate.
+
+`tls_record_encoding_reuses_exact_sized_encryption_allocation` checks TLS 1.3
+AES-256-GCM and ChaCha20-Poly1305 with payload lengths 0, 1, 5, 16,383, and
+16,384, represented by one-byte slices. It verifies exact Vec capacity and that
+encoding retains the original allocation address. This is pinned-dependency
+regression evidence, not a portability guarantee about arbitrary allocators.
+TLS 1.2 and AES-128 follow the audited analogous source paths but are not
+separately covered by this allocation-address test.
+
+Hyper passes at most 64 `IoSlice`s per queued vectored call. Rustls's
+`PlaintextSink::write_vectored` collects the borrowed slice references into a
+`Vec<&[u8]>` for two or more slices. The pinned exact-size collection path requests
+at most 64 fat-pointer entries (1,024 bytes on the supported 64-bit ABI).
+`OutboundChunks` borrows those references and does not clone their payloads.
+The Vec exists only during that synchronous writer call. Hyper and rustls each
+also use a 64-entry `IoSlice` stack array, and these can overlap during the nested
+write; count both (2,048 bytes on the same ABI), separately from heap storage and
+other stack frames. The test with 65,537 slices deliberately bypasses Hyper and
+therefore does not represent production descriptor usage.
+
+`ChunkVecBuffer::len` subtracts `prefix_used`, while its first Vec keeps the
+entire original allocation until `consume` pops that record. Consequently a
+bound on remaining ciphertext bytes needs an additional consumed-prefix
+allowance of up to one original record (conservatively 16,413 bytes for the
+pinned default fragment size and ring suites) when bounding retained record
+allocations. The drain-before-write guard empties old records before new
+application writes, but read-side alerts can still overlap a partly sent front
+record. VecDeque descriptor capacity and replacement overlap depend on the
+maximum simultaneous record count over the whole connection, including its
+handshake; those are still required for the total allocation bound.
+
 ### Established-connection control paths
 
 The remaining read-side paths must be separated from plaintext writes. In the

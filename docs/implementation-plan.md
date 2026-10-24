@@ -86,7 +86,8 @@ now validates stable queue length across 3,000 key-update/data rounds and exact
 byte delivery after resumption. Ordinary application-record overhead is now
 checked for six cipher suites with scalar/vectored writes. Automatic refresh
 is exercised at eight starting positions with a test-only shortened key limit;
-pending-reply/control/handshake allocation composition remains open. See [the resource audit](dependency-resources.md#control-traffic-is-not-covered-by-the-application-buffer-limit).
+record allocation reuse, vectored scratch, and consumed-prefix retention are
+now inventoried. Pending-reply/control/handshake allocation composition remains open. See [the resource audit](dependency-resources.md#control-traffic-is-not-covered-by-the-application-buffer-limit).
 
 ## 2. Minimal working gateway
 

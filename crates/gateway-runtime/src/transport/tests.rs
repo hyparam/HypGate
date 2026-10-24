@@ -343,6 +343,31 @@ fn tls_automatic_refresh_bounds_records_at_each_batch_boundary() {
     assert!(observed_refreshes >= 4);
 }
 
+#[test]
+fn tls_record_encoding_reuses_exact_sized_encryption_allocation() {
+    use tokio_rustls::rustls::{ContentType, ProtocolVersion};
+    use tokio_rustls::rustls::crypto::cipher::{AeadKey, Iv, OutboundPlainMessage, OutboundChunks};
+    use tokio_rustls::rustls::crypto::ring::cipher_suite::{TLS13_AES_256_GCM_SHA384, TLS13_CHACHA20_POLY1305_SHA256};
+    for suite in [TLS13_AES_256_GCM_SHA384, TLS13_CHACHA20_POLY1305_SHA256] {
+        // Synthetic keys never leave this unit test. Increasing sequence numbers
+        // ensure each record uses a distinct nonce under its test key.
+        let mut encrypter = suite.tls13().unwrap().aead_alg.encrypter(AeadKey::from([0; 32]), Iv::new([0; 12]));
+        for (seq, length) in [0, 1, 5, 16383, 16384].into_iter().enumerate() {
+            let input = vec![42; length];
+            let chunks: Vec<&[u8]> = input.chunks(1).collect();
+            let encrypted = encrypter.encrypt(OutboundPlainMessage {
+                typ: ContentType::ApplicationData, version: ProtocolVersion::TLSv1_2,
+                payload: OutboundChunks::new(&chunks),
+            }, seq as u64).unwrap();
+            let payload_address = encrypted.payload.as_ref().as_ptr();
+            let encoded = encrypted.encode();
+            assert_eq!(encoded.len(), length + 22);
+            assert_eq!(encoded.capacity(), encoded.len());
+            assert_eq!(encoded.as_ptr().wrapping_add(5), payload_address);
+        }
+    }
+}
+
 // Dependency-level counterexample, not a production HTTP scheduling test.
 #[test]
 fn tls_control_replies_can_exceed_application_buffer_limit() {
