@@ -28,8 +28,8 @@ oneshot state, allocator slack, and thread stacks are outside the frame-payload 
 The worker explicitly requests a 2 MiB stack rather than inheriting the
 environment-dependent Rust default; reservation, committed pages, and OS overhead
 remain distinct. The [control-storage inventory](dependency-resources.md#channel-control-storage)
-counts completion oneshots separately; dynamic mpsc blocks now apply to HTTP body
-channels, not the audit queue.
+counts completion oneshots separately; both HTTP body channels and the audit
+queue now use fixed-slot storage.
 
 ## Verified fixed queue and synchronization obligations
 

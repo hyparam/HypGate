@@ -2,9 +2,9 @@
 use bytes::{Buf, Bytes};
 use http_body::{Body, Frame};
 use std::{io, pin::Pin, task::{Context, Poll}};
-use tokio::{io::{AsyncRead, AsyncWrite, ReadBuf}, sync::{mpsc, oneshot}};
+use tokio::{io::{AsyncRead, AsyncWrite, ReadBuf}, sync::oneshot};
 use std::future::Future;
-use tokio_util::sync::PollSender;
+mod slot;
 
 // Matches the inbound and upstream HTTP/1 parser buffer limits. This bounds
 // the reader-owned copy. Hyper's own parser/body allocations remain separate.
@@ -48,12 +48,12 @@ impl<B: Body<Data = Bytes> + Unpin> AsyncRead for Reader<B> {
 }
 
 enum Message { Data(Bytes), End }
-pub(crate) struct Writer { sender: PollSender<Message>, max_frame: usize, ended: bool, drained: oneshot::Receiver<()>, complete: bool }
-pub(crate) struct ChannelBody { receiver: mpsc::Receiver<Message>, ended: bool, drained: Option<oneshot::Sender<()>> }
+pub(crate) struct Writer { sender: slot::Sender<Message>, max_frame: usize, ended: bool, drained: oneshot::Receiver<()>, complete: bool }
+pub(crate) struct ChannelBody { receiver: slot::Receiver<Message>, ended: bool, drained: Option<oneshot::Sender<()>> }
 pub(crate) fn channel(max_frame: usize) -> (Writer, ChannelBody) {
-    let (sender, receiver) = mpsc::channel(1);
+    let (sender, receiver) = slot::channel();
     let (done, drained) = oneshot::channel();
-    (Writer { sender: PollSender::new(sender), max_frame, ended: false, drained, complete: false },
+    (Writer { sender, max_frame, ended: false, drained, complete: false },
         ChannelBody { receiver, ended: false, drained: Some(done) })
 }
 impl AsyncWrite for Writer {
@@ -61,14 +61,11 @@ impl AsyncWrite for Writer {
         let this = self.get_mut();
         if this.ended || this.max_frame == 0 { return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into())); }
         if bytes.is_empty() { return Poll::Ready(Ok(0)); }
-        match this.sender.poll_reserve(cx) {
+        let n = bytes.len().min(this.max_frame);
+        match this.sender.poll_send_with(cx, || Message::Data(Bytes::copy_from_slice(&bytes[..n]))) {
             Poll::Pending => Poll::Pending,
-            Poll::Ready(Err(_)) => Poll::Ready(Err(io::ErrorKind::BrokenPipe.into())),
-            Poll::Ready(Ok(())) => {
-                let n = bytes.len().min(this.max_frame);
-                let result = this.sender.send_item(Message::Data(Bytes::copy_from_slice(&bytes[..n])));
-                Poll::Ready(result.map(|()| n).map_err(|_| io::ErrorKind::BrokenPipe.into()))
-            }
+            Poll::Ready(Ok(())) => Poll::Ready(Ok(n)),
+            Poll::Ready(Err(())) => Poll::Ready(Err(io::ErrorKind::BrokenPipe.into())),
         }
     }
     fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -79,12 +76,11 @@ impl AsyncWrite for Writer {
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         if this.complete { return Poll::Ready(Ok(())); }
-        if !this.ended { match this.sender.poll_reserve(cx) {
+        if !this.ended { match this.sender.poll_send_with(cx, || Message::End) {
             Poll::Pending => return Poll::Pending,
             Poll::Ready(Err(_)) => return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into())),
             Poll::Ready(Ok(())) => {
                 this.ended = true;
-                if this.sender.send_item(Message::End).is_err() { return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into())); }
             }
         } }
         match Pin::new(&mut this.drained).poll(cx) {
@@ -267,7 +263,7 @@ mod tests {
 
 
     #[test]
-    fn reserved_send_after_receiver_drop_retains_payload_until_sender_cleanup() {
+    fn receiver_drop_discards_queued_payload_and_prevents_late_construction() {
         use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
         struct Payload { bytes: [u8; 4], dropped: Arc<AtomicUsize> }
         impl AsRef<[u8]> for Payload { fn as_ref(&self) -> &[u8] { &self.bytes } }
@@ -275,17 +271,13 @@ mod tests {
         let dropped = Arc::new(AtomicUsize::new(0));
         let (mut writer, body) = channel(4);
         let mut context = Context::from_waker(std::task::Waker::noop());
-        assert!(matches!(writer.sender.poll_reserve(&mut context), Poll::Ready(Ok(()))));
-        // Model receiver destruction on another executor thread between the
-        // Writer's reservation and send. No new reservation follows closure.
+        assert!(matches!(writer.sender.poll_send_with(&mut context, || Message::Data(Bytes::from_owner(Payload {
+            bytes: *b"data", dropped: dropped.clone(),
+        }))), Poll::Ready(Ok(()))));
         drop(body);
-        assert!(writer.sender.send_item(Message::Data(Bytes::from_owner(Payload {
-            bytes: *b"late", dropped: dropped.clone(),
-        }))).is_ok());
-        assert_eq!(dropped.load(Ordering::SeqCst), 0);
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        assert!(matches!(writer.sender.poll_send_with(&mut context, || panic!("late allocation")), Poll::Ready(Err(()))));
         assert!(matches!(Pin::new(&mut writer).poll_write(&mut context, b"more"), Poll::Ready(Err(_))));
-        // PollSender still owns a sender reference even after observing closure.
-        assert_eq!(dropped.load(Ordering::SeqCst), 0);
         drop(writer);
         assert_eq!(dropped.load(Ordering::SeqCst), 1);
     }
