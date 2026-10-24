@@ -2,6 +2,59 @@
 use vstd::prelude::*;
 
 verus! {
+// Receiver closure transfers the charge as well as the value. Reporting actual
+// destruction remains an adapter obligation; extracting the value is not cleanup.
+pub struct Cleanup<T> {
+    value: Option<T>,
+    started: bool,
+    finished: bool,
+    occupied: bool,
+    original: Ghost<Option<T>>,
+}
+impl<T> Cleanup<T> {
+    pub closed spec fn original(&self) -> Option<T> { self.original@ }
+    pub closed spec fn started(&self) -> bool { self.started }
+    pub closed spec fn finished(&self) -> bool { self.finished }
+    pub closed spec fn valid(&self) -> bool {
+        self.occupied == self.original().is_some()
+            && (self.finished ==> self.started)
+            && (if self.started { self.value.is_none() } else { self.value == self.original() })
+    }
+    pub closed spec fn charged(&self) -> nat {
+        if self.occupied && !self.finished { 1 } else { 0 }
+    }
+    pub fn retained_count(&self) -> (out: usize)
+        ensures out == self.charged(),
+    { if self.occupied && !self.finished { 1 } else { 0 } }
+    pub fn begin(&mut self) -> (out: Option<T>)
+        requires old(self).valid(),
+        ensures final(self).valid(), final(self).started(),
+            final(self).original() == old(self).original(),
+            final(self).finished() == old(self).finished(),
+            final(self).charged() == old(self).charged(),
+            out == (if old(self).started() { None } else { old(self).original() }),
+    {
+        self.started = true;
+        let mut out = None;
+        core::mem::swap(&mut out, &mut self.value);
+        out
+    }
+    // Invoke only after the extracted payload's destructor has returned.
+    // Panicking destruction must skip this report and strand the enclosing credit.
+    pub fn finish(&mut self) -> (ok: bool)
+        requires old(self).valid(),
+        ensures final(self).valid(),
+            final(self).original() == old(self).original(),
+            final(self).started() == old(self).started(),
+            ok == (old(self).started() && !old(self).finished()),
+            ok ==> final(self).finished() && final(self).charged() == 0,
+            !ok ==> *final(self) == *old(self),
+    {
+        if !self.started || self.finished { return false; }
+        self.finished = true;
+        true
+    }
+}
 pub struct Mailbox<T> { value: Option<T>, sender_open: bool, receiver_open: bool }
 impl<T> Mailbox<T> {
     pub closed spec fn item(&self) -> Option<T> { self.value }
@@ -57,6 +110,18 @@ impl<T> Mailbox<T> {
         let value = self.pop();
         self.receiver_open = false;
         value
+    }
+    pub fn close_receiver_charged(&mut self) -> (out: Cleanup<T>)
+        requires old(self).valid(),
+        ensures final(self).valid(), !final(self).receiver_open(), final(self).item().is_none(),
+            final(self).sender_open() == old(self).sender_open(),
+            out.valid(), !out.started(), !out.finished(), out.original() == old(self).item(),
+            final(self).retained_count() + out.charged() == old(self).retained_count(),
+    {
+        let value = self.close_receiver();
+        let occupied = value.is_some();
+        let ghost original = value;
+        Cleanup { value, occupied, started: false, finished: false, original: Ghost(original) }
     }
     pub proof fn slot_bound(&self)
         requires self.valid(),

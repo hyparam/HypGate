@@ -84,13 +84,17 @@ impl<T> Drop for Sender<T> {
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
         let (writer, retired, pending) = if let Ok(mut state) = self.state.lock() {
-            let pending = state.queue.close_receiver();
-            (state.writer.take(), state.reader.take(), pending)
+            let pending = state.queue.close_receiver_charged();
+            (state.writer.take(), state.reader.take(), Some(pending))
         } else { (None, None, None) };
         // Drop callbacks and wake outside the lock. Even if a payload/drop
         // callback panics, the waiting writer must observe receiver closure.
         let notify = WakeOnDrop(writer);
-        drop(pending);
+        if let Some(mut cleanup) = pending {
+            let payload = cleanup.begin();
+            drop(payload);
+            assert!(cleanup.finish());
+        }
         drop(retired);
         drop(notify);
     }

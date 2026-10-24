@@ -14,9 +14,19 @@ PollSender acquisition futures. The message is stored directly in the mailbox, w
 Verified push/pop preserve exact item identity and reject full-slot overwrite.
 The core owns both endpoint-open flags: sender closure preserves the item for
 draining, receiver closure returns the item and clears the slot, and neither
-endpoint can reopen. `close_receiver` transfers ownership to the adapter for
-payload destruction outside the mutex. The retained-item count is always at most
-one, and zero whenever the receiver is closed.
+endpoint can reopen. Production receiver destruction uses
+`close_receiver_charged`, which transfers the exact pending value into a private
+`Cleanup` owner. Its postcondition conserves the combined mailbox-plus-cleanup
+item charge. The mailbox is empty after closure, but a pending payload's charge
+remains in the cleanup owner. `Cleanup::begin` extracts the exact value once
+without releasing its charge; `finish` requires cleanup to have begun and marks
+it complete once. The adapter calls `finish` only after dropping the extracted
+payload outside the mutex. A panicking payload destructor skips that report.
+The enclosing task cleanup gate likewise cannot finish when future destruction
+panics. Rust destruction and truthful completion reporting remain trusted joins;
+these transitions do not themselves prove the global owner-count mapping.
+The mailbox's retained count is at most one and zero after receiver closure;
+the transferred cleanup charge must also be counted until destruction completes.
 
 Production writers copy at most 16 KiB per data message. `poll_send_with` checks
 receiver liveness and queue capacity while holding the mutex, then constructs and

@@ -228,3 +228,19 @@ grep -rn --include='*.rs' -E 'unsafe|assume\(|external_body' crates/gateway-core
 
 Proofs and deliberate defects are checked by the commands in the
 [README](../README.md); CI runs them with the pinned toolchain.
+
+
+## Milestone 6 HTTP ownership follow-up
+
+The production reader now stores `ReadBuffer`, whose checked transitions retain
+the full copied payload charge through partial consumption and return exact read
+ranges. Production mailbox receiver destruction now uses
+`Mailbox::close_receiver_charged`: clearing the mailbox transfers both the exact
+pending item and its charge to `Cleanup`. Extracting it for destruction preserves
+the charge; the adapter reports completion only after its destructor returns.
+A panic skips that report and the enclosing leased task's completion report.
+These changes strengthen the HTTP steps above without changing the historical
+line references. Rust destructor behavior, mutex serialization, and the mapping
+from HTTP owners to admitted worker/connection slots remain explicit trusted or
+unfinished composition joins. Dequeued frames handed to Hyper remain in the
+separate dependency allocation account.

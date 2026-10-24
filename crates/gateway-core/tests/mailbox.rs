@@ -38,3 +38,43 @@ fn receiver_closure_returns_ownership_without_running_the_payload_destructor() {
     drop(returned);
     assert_eq!(dropped.load(Ordering::SeqCst), 1);
 }
+
+#[test]
+fn receiver_cleanup_keeps_charge_after_extraction_until_reported_destruction() {
+    let mut slot = Mailbox::new();
+    assert_eq!(slot.push(vec![7; 16_384]), Ok(()));
+    slot.close_sender();
+    let mut cleanup = slot.close_receiver_charged();
+    assert!(!slot.is_full());
+    assert_eq!(cleanup.retained_count(), 1);
+    assert!(!cleanup.finish());
+    let payload = cleanup.begin().unwrap();
+    assert_eq!(payload, vec![7; 16_384]);
+    assert_eq!(cleanup.retained_count(), 1);
+    assert!(cleanup.begin().is_none());
+    assert_eq!(cleanup.retained_count(), 1);
+    assert!(slot.push(vec![8]).is_err());
+    let mut repeated_close = slot.close_receiver_charged();
+    assert_eq!(repeated_close.retained_count(), 0);
+    assert!(repeated_close.begin().is_none());
+    assert!(repeated_close.finish());
+    assert_eq!(cleanup.retained_count(), 1);
+    drop(payload);
+    assert!(cleanup.finish());
+    assert_eq!(cleanup.retained_count(), 0);
+    assert!(!cleanup.finish());
+}
+
+#[test]
+fn panicking_payload_destruction_never_reports_cleanup_completion() {
+    struct Panics;
+    impl Drop for Panics { fn drop(&mut self) { panic!("payload destructor"); } }
+    let mut slot = Mailbox::new();
+    assert!(slot.push(Panics).is_ok());
+    let mut cleanup = slot.close_receiver_charged();
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        drop(cleanup.begin());
+        assert!(cleanup.finish());
+    })).is_err());
+    assert_eq!(cleanup.retained_count(), 1);
+}
