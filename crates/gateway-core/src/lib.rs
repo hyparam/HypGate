@@ -3,30 +3,26 @@
 #[allow(unused_imports)]
 use vstd::prelude::*;
 
-pub mod resource;
-pub mod drain;
-pub mod task_credit;
-pub mod disk_worker;
-pub mod stream;
 pub mod policy;
+pub mod resolved_route;
+pub mod resource;
+pub mod stream;
+pub mod owned_stream;
+pub mod submission;
 pub mod journal;
 pub mod journal_binding;
-pub mod submission;
-pub mod resolved_route;
-pub mod framing;
-
-pub mod recovery;
 pub mod audit_journal;
-
-pub mod owned_stream;
-
-pub mod buffer_accounting;
-
-pub mod owned_accounting;
-pub mod mailbox;
-pub mod read_buffer;
+pub mod framing;
+pub mod recovery;
 pub mod fixed_queue;
 pub mod frame_queue;
+pub mod disk_worker;
+pub mod drain;
+pub mod task_credit;
+pub mod mailbox;
+pub mod read_buffer;
+pub mod buffer_accounting;
+pub mod owned_accounting;
 
 #[cfg(test)]
 #[path = "tests/streaming.rs"]

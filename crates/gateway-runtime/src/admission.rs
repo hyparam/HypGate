@@ -128,8 +128,6 @@ impl<'a> Request<'a> {
     }
     pub fn request_id(&self) -> u64 { self.authorized.request_id() }
     pub fn tenant_id(&self) -> u64 { self.authorized.tenant_id() }
-    pub fn origin(&self) -> usize { self.authorized.origin() }
-    pub fn credential(&self) -> usize { self.authorized.credential() }
     pub(crate) fn capacity(&self) -> usize { self.capacity }
     pub(crate) fn is_closed(&self) -> bool { self.stream().is_closed() }
     pub(crate) fn log_failed(&self) -> bool { self.log_failed }

@@ -1,4 +1,5 @@
 use vstd::prelude::*;
+use crate::framing::equal_bytes;
 
 verus! {
 
@@ -41,25 +42,6 @@ pub open spec fn allowed(r: Route, grants: Seq<Route>, origins: nat, credentials
     r.origin < origins && r.credential < credentials.len()
     && credentials[r.credential as int] == r.tenant
     && exists|i: int| 0 <= i < grants.len() && grants[i] == r
-}
-
-// No early mismatch exit. This is a functional equality proof, not a constant-time proof.
-fn digest_equal(a: &[u8], b: &[u8]) -> (equal: bool)
-    ensures equal == (a@ == b@),
-{
-    if a.len() != b.len() { return false; }
-    let mut i: usize = 0;
-    let mut equal = true;
-    while i < a.len()
-        invariant i <= a.len(), a.len() == b.len(),
-            equal == (forall|j: int| 0 <= j < i ==> #[trigger] a@[j] == b@[j]),
-        decreases a.len() - i,
-    {
-        equal = equal & (a[i] == b[i]);
-        i = i + 1;
-    }
-    proof { if equal { assert(a@ =~= b@); } }
-    equal
 }
 
 fn root_contains(grants: &Vec<Route>, route: &Route) -> (found: bool)
@@ -142,7 +124,7 @@ impl Policy {
                 decreases i - j,
             {
                 if identities[j].tenant == identities[i].tenant
-                    || digest_equal(identities[j].digest.as_slice(), identities[i].digest.as_slice()) {
+                    || equal_bytes(identities[j].digest.as_slice(), identities[i].digest.as_slice()) {
                     return None;
                 }
                 j = j + 1;
@@ -197,7 +179,7 @@ impl Policy {
                 forall|j: int| 0 <= j < i ==> #[trigger] self.identities@[j].digest@ != digest@,
             decreases self.identities.len() - i,
         {
-            if digest_equal(self.identities[i].digest.as_slice(), digest) {
+            if equal_bytes(self.identities[i].digest.as_slice(), digest) {
                 return Some(Authenticated { policy: self, tenant: self.identities[i].tenant,
                     digest: Ghost(digest@) });
             }
@@ -268,16 +250,6 @@ impl<'a> AuthorizedRequest<'a> {
         && self.binding().tenant == self.tenant
         && self.grants(self.binding())
     }
-    pub fn origin(&self) -> (out: usize)
-        requires self.valid(),
-        ensures out == self.binding().origin,
-    { self.policy.routes[self.route].origin }
-
-    pub fn credential(&self) -> (out: usize)
-        requires self.valid(),
-        ensures out == self.binding().credential,
-    { self.policy.routes[self.route].credential }
-
     pub fn tenant_id(&self) -> (out: u64)
         requires self.valid(),
         ensures out == self.tenant(),

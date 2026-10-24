@@ -215,8 +215,8 @@ impl StreamChunk {
             history: Ghost(Seq::empty()) })
     }
 
-    // The adapter must supply a truthful durable-prefix acknowledgment for this owner.
-    pub fn acknowledge(&mut self, owner: u64, chunk: u64, end: usize) -> (ok: bool)
+    // Adapters acknowledge only through journal receipts; the raw transition stays crate-private.
+    pub(crate) fn acknowledge(&mut self, owner: u64, chunk: u64, end: usize) -> (ok: bool)
         requires old(self).valid(),
         ensures final(self).valid(), Self::acknowledged(*old(self), *final(self), owner, chunk, end as nat, ok),
     {

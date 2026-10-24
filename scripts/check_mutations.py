@@ -233,15 +233,15 @@ MUTATIONS = [
         }""", """if key.slot >= self.slots.len() || key.id == 0 {
             return false;
         }"""),
-    ("policy.rs", "unauthenticated_identity", "if digest_equal(self.identities[i].digest.as_slice(), digest) {", "if true {"),
+    ("policy.rs", "unauthenticated_identity", "if equal_bytes(self.identities[i].digest.as_slice(), digest) {", "if true {"),
     ("policy.rs", "cross_tenant_route", "if r.tenant == self.tenant && r.selector == selector {", "if r.selector == selector {"),
     ("policy.rs", "expand_root_grants", " || !root_contains(&grants, route)", ""),
     ("policy.rs", "erase_validated_root_snapshot", "grants: Ghost(grants@)", "grants: Ghost(Seq::empty())"),
     ("policy.rs", "erase_validated_credential_snapshot", "credential_tenants: Ghost(credential_tenants@)", "credential_tenants: Ghost(Seq::empty())"),
     ("policy.rs", "cross_tenant_credential", "credential_tenants[route.credential] != route.tenant", "false"),
     ("policy.rs", "unknown_origin", "route.origin >= origin_count", "false"),
-    ("policy.rs", "wrong_dispatch_origin", "{ self.policy.routes[self.route].origin }", "{ 0 }") ,
-    ("policy.rs", "ambiguous_identity", "|| digest_equal(identities[j].digest.as_slice(), identities[i].digest.as_slice())", ""),
+    ("policy.rs", "wrong_dispatch_origin", "Route { tenant: r.tenant, selector: r.selector, origin: r.origin, credential: r.credential }", "Route { tenant: r.tenant, selector: r.selector, origin: 0, credential: r.credential }"),
+    ("policy.rs", "ambiguous_identity", "|| equal_bytes(identities[j].digest.as_slice(), identities[i].digest.as_slice())", ""),
 ]
 
 

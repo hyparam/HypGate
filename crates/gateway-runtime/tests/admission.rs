@@ -15,7 +15,7 @@ fn authorization_failures_return_capacity_and_drop_reclaims_it() {
     assert!(matches!(a.admit(&[11; 32], 99), Err(AdmissionError::Unauthorized)));
     let r = a.admit(&[11; 32], 7).unwrap();
     let old_id = r.request_id();
-    assert_eq!((r.tenant_id(), r.origin(), r.credential()), (1, 0, 0));
+    assert_eq!(r.tenant_id(), 1);
     assert!(matches!(a.admit(&[11; 32], 7), Err(AdmissionError::AtCapacity)));
     drop(r);
     assert!(a.admit(&[11; 32], 7).unwrap().request_id() > old_id);

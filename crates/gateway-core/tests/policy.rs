@@ -27,8 +27,8 @@ fn authentication_and_tenant_scoped_dispatch() {
     assert!(one.authorize(99, 1).is_none());
     let a = one.authorize(7, 41).unwrap();
     let b = two.authorize(7, 42).unwrap();
-    assert_eq!((a.origin(), a.credential(), a.tenant_id(), a.request_id()), (0, 0, 1, 41));
-    assert_eq!((b.origin(), b.credential(), b.tenant_id(), b.request_id()), (1, 1, 2, 42));
+    assert_eq!((a.route().origin, a.route().credential, a.tenant_id(), a.request_id()), (0, 0, 1, 41));
+    assert_eq!((b.route().origin, b.route().credential, b.tenant_id(), b.request_id()), (1, 1, 2, 42));
 }
 
 #[test]

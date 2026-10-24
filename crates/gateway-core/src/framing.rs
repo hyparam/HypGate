@@ -128,21 +128,25 @@ pub proof fn encoded_header_roundtrip(h: Header)
     assert(bytes.subrange(24, 32) =~= spec_u64_to_le_bytes(h.chunk));
 }
 
-fn equal_bytes(a: &[u8], b: &[u8]) -> (out: bool)
-    ensures out == (a@ == b@),
+// No early mismatch exit, so digest comparison does not leak the matching prefix
+// length through control flow. This is a functional equality proof, not a
+// constant-time proof.
+pub(crate) fn equal_bytes(a: &[u8], b: &[u8]) -> (equal: bool)
+    ensures equal == (a@ == b@),
 {
     if a.len() != b.len() { return false; }
     let mut i: usize = 0;
+    let mut equal = true;
     while i < a.len()
         invariant i <= a.len(), a.len() == b.len(),
-            forall|j: int| 0 <= j < i ==> #[trigger] a@[j] == b@[j],
+            equal == (forall|j: int| 0 <= j < i ==> #[trigger] a@[j] == b@[j]),
         decreases a.len() - i,
     {
-        if a[i] != b[i] { return false; }
-        i += 1;
+        equal = equal & (a[i] == b[i]);
+        i = i + 1;
     }
-    proof { assert(a@ =~= b@); }
-    true
+    proof { if equal { assert(a@ =~= b@); } }
+    equal
 }
 
 // Private immutable containers keep canonical metadata and payload associated
