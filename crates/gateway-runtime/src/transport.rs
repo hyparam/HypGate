@@ -26,8 +26,9 @@ const TLS_SESSION_CACHE: usize = 256;
 
 mod resolver;
 mod tls_io;
+mod handshake;
 
-pub struct HttpsTransport { connector: TlsConnector, deadline: Duration, resolver: resolver::Resolver }
+pub struct HttpsTransport { connector: TlsConnector, deadline: Duration, resolver: resolver::Resolver, handshakes: handshake::Pool }
 impl HttpsTransport {
     pub fn new(deadline: Duration) -> io::Result<Self> {
         let roots = RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -41,11 +42,12 @@ impl HttpsTransport {
         // Keep optional certificate decompression outside the transport even if
         // another dependency enables additional rustls codec features.
         config.cert_decompressors.clear();
-        Ok(Self { connector: TlsConnector::from(Arc::new(config)), deadline, resolver: resolver::Resolver::new()? })
+        Ok(Self { connector: TlsConnector::from(Arc::new(config)), deadline, resolver: resolver::Resolver::new()?, handshakes: handshake::Pool::new()? })
     }
 
     /// Consumes authority and retains its lease through all response processing.
-    /// The connection future is polled inline, never spawned or transparently retried.
+    /// The HTTP connection future is polled inline, never spawned or transparently retried.
+    /// TLS handshakes run on a separately credited, bounded dedicated pool.
     pub async fn exchange<R: AsyncRead + Unpin, W: ResponseSink, L: AuditLog>(
         &self, mut prepared: PreparedRequest<'_>, input: &mut R, output: &mut W, log: &mut L,
     ) -> Result<ExchangeStats, TransportError> {
@@ -66,8 +68,11 @@ impl HttpsTransport {
             let addresses = self.resolver.resolve(host.clone(), port).await.map_err(|_| TransportError::Connect)?;
             TcpStream::connect(addresses.as_slice()).await.map_err(|_| TransportError::Connect)?
         };
-        let tls = self.connector.connect_with(server, tcp, |connection| {
-            connection.set_buffer_limit(Some(TLS_APPLICATION_BUFFER));
+        let connector = self.connector.clone();
+        let tls = self.handshakes.run(async move {
+            connector.connect_with(server, tcp, |connection| {
+                connection.set_buffer_limit(Some(TLS_APPLICATION_BUFFER));
+            }).await
         }).await.map_err(|_| TransportError::Tls)?;
         // Explicit queue strategy keeps body-buffer accounting stable across TLS adapters.
         let (mut sender, connection) = hyper::client::conn::http1::Builder::new()

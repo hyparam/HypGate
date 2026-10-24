@@ -623,11 +623,13 @@ or response data, and release admission. This exercises diagnostic construction
 and cleanup; it does not measure its private allocations or certify worst-case
 verification latency.
 
-TLS verification runs synchronously within the connector's poll. The executable
-uses a current-thread Tokio runtime, so a long verification poll can delay other
-requests and health checks. Tokio timeout cannot preempt that synchronous work.
-CPU isolation or a demonstrated worst-case scheduling bound remains availability
-work; these source budgets must not be described as proving deadline enforcement.
+TLS verification runs synchronously within the connector's poll, now isolated on
+the [bounded handshake pool](https-transport.md#tls-scheduling-isolation). Four
+dedicated threads and 32 queued/running credits per transport prevent cancellation
+from creating unbounded replacement work. The caller executor can enforce its
+timeout while verification runs, under scheduler assumptions; it cannot preempt
+the verification poll itself. Canceled jobs retain separate TLS/socket storage
+until cleanup. These source budgets do not prove a hard CPU deadline.
 
 ### Control traffic is not covered by the application buffer limit
 

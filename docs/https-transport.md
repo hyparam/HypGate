@@ -18,10 +18,9 @@ Approved-host DNS resolution is trusted and is not an IP-range/SSRF restriction.
 
 The connection future runs inline alongside upload/response work, with no spawned
 connection task. One configurable total exchange deadline, at most one hour,
-covers DNS, connection, TLS, upload, and download. Timeout drops those futures and
-their connection before releasing request ownership. There is no transparent replay.
-The timeout is cooperative: synchronous TLS certificate verification must return
-from its poll before the runtime can enforce it. This is not a hard CPU deadline.
+covers DNS, connection, TLS, upload, and download. Timeout drops the exchange
+futures before releasing request ownership. There is no transparent replay. TLS handshake work has separate retained credits, as described
+below; a canceled handshake can outlive the request until its current poll returns.
 Per-phase/idle deadlines and load-tested cancellation remain future hardening.
 
 The async transfer driver feeds upload bytes into a one-slot HTTP body channel,
@@ -69,9 +68,11 @@ and an end-to-end disk test now exist; broader fault and concurrency coverage re
 borrows that owner mutably for the entire TCP/TLS/HTTP operation; it moves only
 HTTP metadata into Hyper, leaving the verified stream/key owner in the outer
 future. Success, error, timeout, and cancellation drop the borrowed network future
-before the outer request can release its slot. This is enforced by Rust lifetimes
-and future ownership, not a Verus proof of Tokio or socket syscalls. No connection
-task is detached. The separate server worker credit continues through response
+before the outer request can release its slot. A dispatched TLS handshake instead
+retains a separate pool credit through its asynchronous cancellation tail. This is
+enforced by Rust lifetimes and future ownership, not a Verus proof of Tokio or
+socket syscalls. No HTTP connection task is detached. The separate server worker
+credit continues through response
 cleanup after exchange completion.
 
 A real-socket cancellation test waits until the peer receives a TLS handshake
@@ -92,3 +93,30 @@ not release lookup credit before the actual system call finishes. Only bounded
 socket-address results enter the TCP connector; TLS authenticates the original
 configured hostname. These DNS workers can outlive a canceled network future,
 but have separate accounting and cannot hold Tokio shutdown open.
+
+## TLS scheduling isolation
+
+The production connector is polled by `transport/handshake.rs` on four dedicated
+threads, with 32 total queued/running jobs per transport. Each thread reserves a
+2 MiB stack. The existing Tokio reactor still drives socket readiness; threads
+use its handle to poll the handshake and return the established stream. HTTP
+processing resumes on the caller's executor. No request body, credentials, stream
+owner, or audit operation is sent to the handshake pool.
+
+Admission uses the verified resource registry. Full or poisoned pools fail closed.
+Cancellation closes a reply channel; queued jobs skip polling, and running jobs
+select cancellation when their current poll returns. A blocked verification poll
+retains its job credit, socket, and TLS storage. No replacement thread is created.
+Job field destruction releases the work before credit. Panics are caught outside
+that job so a panic cleans up and does not shrink the fixed pool.
+
+The caller's timeout and other executor work can progress while verification is
+blocked, assuming OS scheduling and the other executor polls return. This is not a
+hard verification CPU deadline: four stuck polls can exhaust the pool permanently.
+The detached threads do not hold Tokio shutdown open; process exit is the final
+boundary for permanently stuck work. Separate transport instances have separate
+pools, so the limits are per instance, not global across arbitrary construction.
+The five pool regression tests cover blocked-poll saturation, cancellation,
+skipping queued work, state-before-credit destruction, panic recovery, and runtime
+shutdown while work is blocked.
+Real TLS transport tests exercise the production dispatch and returned sockets.
