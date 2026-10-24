@@ -224,11 +224,41 @@ async fn blocked_disk_times_out_without_spawning_replacements() {
 }
 
 #[tokio::test]
-async fn queue_capacity_rejects_excess_work_before_allocation() {
+async fn full_queue_parks_excess_work_before_allocation_and_serves_it_in_order() {
+    let mut file = sink(); let syncs = file.syncs.clone(); let bytes = file.bytes.clone();
+    let (entered, started) = oneshot::channel(); let (release, wait) = blocking::channel();
+    file.gate = Some((entered, wait));
+    let log = DiskLog::start(file, 1, Duration::from_secs(5), [1; 16]).unwrap();
+    let mut first_log = log.clone(); let mut second_log = log.clone(); let mut third_log = log.clone();
+    let first = tokio::spawn(async move { first_log.append(record(b"first", 1)).await });
+    started.await.unwrap();
+    let second = tokio::spawn(async move { second_log.append(record(b"second", 2)).await });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while log.queued_for_test() != 1 { tokio::task::yield_now().await; }
+    }).await.unwrap();
+    // The third append waits for a slot instead of failing; while it waits nothing
+    // is reserved or encoded, and the logger stays healthy.
+    let third = tokio::spawn(async move { third_log.append(record(b"third", 3)).await });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!third.is_finished());
+    assert_eq!(log.queued_for_test(), 1);
+    assert!(log.healthy());
+    assert_eq!(syncs.load(Ordering::Relaxed), 1); // Only the blocked first sync.
+    release.send(()).unwrap();
+    first.await.unwrap().unwrap(); second.await.unwrap().unwrap(); third.await.unwrap().unwrap();
+    assert_eq!(syncs.load(Ordering::Relaxed), 3);
+    let mut expected = encode(record(b"first", 1));
+    expected.extend(encode(record(b"second", 2))); expected.extend(encode(record(b"third", 3)));
+    assert_eq!(*bytes.lock().unwrap(), expected);
+    assert!(log.healthy());
+}
+
+#[tokio::test]
+async fn slot_wait_is_bounded_by_the_deadline_and_poisons_health() {
     let mut file = sink(); let syncs = file.syncs.clone();
     let (entered, started) = oneshot::channel(); let (release, wait) = blocking::channel();
     file.gate = Some((entered, wait));
-    let mut log = DiskLog::start(file, 1, Duration::from_secs(5), [1; 16]).unwrap();
+    let mut log = DiskLog::start(file, 1, Duration::from_millis(40), [1; 16]).unwrap();
     let mut first_log = log.clone(); let mut second_log = log.clone();
     let first = tokio::spawn(async move { first_log.append(record(b"first", 1)).await });
     started.await.unwrap();
@@ -236,11 +266,16 @@ async fn queue_capacity_rejects_excess_work_before_allocation() {
     tokio::time::timeout(Duration::from_secs(1), async {
         while log.queued_for_test() != 1 { tokio::task::yield_now().await; }
     }).await.unwrap();
-    assert_eq!(log.append(record(b"third", 3)).await.err().unwrap().kind(), io::ErrorKind::WouldBlock);
-    assert!(log.healthy());
+    // A worker that never frees a slot is indistinguishable from one that never
+    // acknowledges: the waiting append fails at its deadline and health closes.
+    let started_waiting = tokio::time::Instant::now();
+    assert_eq!(log.append(record(b"third", 3)).await.err().unwrap().kind(), io::ErrorKind::BrokenPipe);
+    assert!(started_waiting.elapsed() >= Duration::from_millis(40));
+    assert!(!log.healthy());
+    assert_eq!(log.queued_for_test(), 1);
+    assert!(first.await.unwrap().is_err()); assert!(second.await.unwrap().is_err());
+    assert_eq!(syncs.load(Ordering::Relaxed), 1);
     release.send(()).unwrap();
-    first.await.unwrap().unwrap(); second.await.unwrap().unwrap();
-    assert_eq!(syncs.load(Ordering::Relaxed), 2);
 }
 
 
@@ -425,14 +460,19 @@ async fn canceling_append_callers_does_not_release_queued_or_active_frame_credit
         assert_eq!(log.queued_for_test(), 1);
         assert_eq!(syncs.load(Ordering::Relaxed), 1);
         assert!(log.healthy());
-        for _ in 0..16 {
-            assert_eq!(log.append(record(b"excess", 3)).await.err().unwrap().kind(), io::ErrorKind::WouldBlock);
-        }
+        // A further append waits behind the canceled callers' frames; it reserves
+        // nothing until the worker frees the slot they still occupy.
+        let mut excess_log = log.clone();
+        let excess = tokio::spawn(async move { excess_log.append(record(b"excess", 3)).await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!excess.is_finished());
+        assert_eq!(log.queued_for_test(), 1);
         assert_eq!(*bytes.lock().unwrap(), encode(record(b"active", 1)));
         release.send(()).unwrap();
-        while syncs.load(Ordering::Relaxed) < 2 || log.queued_for_test() != 0 {
-            tokio::task::yield_now().await;
-        }
+        let receipt = excess.await.unwrap().unwrap();
+        assert!(receipt.matches_record(Header { payload: 6, tenant: 1, request: 2,
+            chunk: 3, direction: 1 }, b"excess"));
+        while log.queued_for_test() != 0 { tokio::task::yield_now().await; }
         // The same worker continues. There is no retry of either canceled job;
         // a later caller receives only its own receipt.
         let receipt = log.append(record(b"later", 4)).await.unwrap();
@@ -441,9 +481,10 @@ async fn canceling_append_callers_does_not_release_queued_or_active_frame_credit
         log.shutdown(Duration::from_secs(1)).await.unwrap();
         let mut expected = encode(record(b"active", 1));
         expected.extend(encode(record(b"queued", 2)));
+        expected.extend(encode(record(b"excess", 3)));
         expected.extend(encode(record(b"later", 4)));
         assert_eq!(*bytes.lock().unwrap(), expected);
-        assert_eq!(syncs.load(Ordering::Relaxed), 3);
+        assert_eq!(syncs.load(Ordering::Relaxed), 4);
     }).await.unwrap();
 }
 

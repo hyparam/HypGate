@@ -8,19 +8,19 @@ const DOWNLOAD: usize = 64 * 1024;
 const PIECE: usize = 16384;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Workload { Healthy, SlowPeers, FailedLog, ConcurrencySweep, LongStreams, LargeUploads, QueueSaturation }
+enum Workload { Healthy, SlowPeers, FailedLog, ConcurrencySweep, LongStreams, LargeUploads, QueueContention }
 
 impl Workload {
     fn name(self) -> &'static str {
         match self {
             Self::Healthy => "healthy", Self::SlowPeers => "slow_peers", Self::FailedLog => "failed_log",
             Self::ConcurrencySweep => "concurrency_sweep", Self::LongStreams => "long_streams",
-            Self::LargeUploads => "large_uploads", Self::QueueSaturation => "queue_saturation",
+            Self::LargeUploads => "large_uploads", Self::QueueContention => "queue_contention",
         }
     }
 }
 
-enum Outcome { Complete(f64, f64, Vec<f64>), Rejected, Failed }
+enum Outcome { Complete(f64, f64, Vec<f64>), Rejected }
 
 /// One closed-loop run: `requests / concurrency` batches of `concurrency` clients.
 #[derive(Clone, Copy)]
@@ -44,9 +44,6 @@ async fn benchmark(availability: bool, profile: Profile) {
         let Profile { workload, requests, concurrency, upload, download, provider_pace_ms, client_pace_ms, .. } = profile;
         assert!(requests % concurrency == 0 && download % PIECE == 0);
         let failed_log = workload == Workload::FailedLog;
-        // Above the 16-record audit queue, concurrent appends are refused: strict
-        // requests fail honestly and availability requests record gaps.
-        let saturating = workload == Workload::QueueSaturation;
         let forwarded = if failed_log && !availability { concurrency } else { requests };
         let cert = generate_simple_self_signed(vec!["localhost".into()]).unwrap();
         let mut roots = RootCertStore::empty(); roots.add(cert.cert.der().clone()).unwrap();
@@ -77,23 +74,18 @@ async fn benchmark(availability: bool, profile: Profile) {
                     let service = service_fn(move |request: Request<Incoming>| async move {
                         assert_eq!(request.headers()["x-api-key"], "fixture-key");
                         let (mut writer, body) = http_body::channel(PIECE);
-                        let Ok(collected) = request.collect().await else {
-                            assert!(saturating, "gateway dropped an upload outside the saturation workload");
-                            drop(writer); return Ok::<_, Infallible>(Response::new(body));
-                        };
-                        let uploaded = collected.to_bytes();
+                        let uploaded = request.collect().await.unwrap().to_bytes();
                         assert_eq!(uploaded.len(), upload); assert!(uploaded.iter().all(|b| *b == 17));
                         tokio::spawn(async move {
                             for _ in 0..download / PIECE {
                                 if provider_pace_ms > 0 { tokio::time::sleep(Duration::from_millis(provider_pace_ms)).await; }
-                                if writer.write_all(&[29; PIECE]).await.is_err() { assert!(saturating); return; }
+                                writer.write_all(&[29; PIECE]).await.unwrap();
                             }
-                            if writer.shutdown().await.is_err() { assert!(saturating); }
+                            writer.shutdown().await.unwrap();
                         });
                         Ok::<_, Infallible>(Response::new(body))
                     });
-                    let served = hyper::server::conn::http1::Builder::new().serve_connection(TokioIo::new(socket), service).await;
-                    if !saturating { served.unwrap(); }
+                    hyper::server::conn::http1::Builder::new().serve_connection(TokioIo::new(socket), service).await.unwrap();
                 });
             }
             while let Some(result) = connections.join_next().await { result.unwrap(); }
@@ -114,7 +106,7 @@ async fn benchmark(availability: bool, profile: Profile) {
             }
         });
         let start = tokio::time::Instant::now();
-        let mut rejected = 0; let mut failed = 0;
+        let mut rejected = 0;
         let mut latencies = Vec::new(); let mut first_bytes = Vec::new(); let mut gaps = Vec::new();
         // Fixed closed-loop batches: queueing outside these clients is not
         // included. This is a reproducible workload, not an overload experiment.
@@ -130,28 +122,14 @@ async fn benchmark(availability: bool, profile: Profile) {
                     let connection = tokio::spawn(async move { connection.await.unwrap(); });
                     let request = Request::builder().method("POST").uri("/routes/7").header("host", "localhost")
                         .header("authorization", "Bearer gateway").body(Full::new(Bytes::from(vec![17; upload]))).unwrap();
-                    // A strict append refused during the upload can close the connection
-                    // while this client is still sending its body; the client then sees
-                    // a connection error instead of the 502. Either way the exchange failed.
-                    let mut response = match sender.send_request(request).await {
-                        Ok(response) => response,
-                        Err(_) if saturating => { let _ = connection.await; return Outcome::Failed; }
-                        Err(error) => panic!("request failed outside the saturation workload: {error}"),
-                    };
+                    let mut response = sender.send_request(request).await.unwrap();
                     if expect_rejection {
                         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
                         response.collect().await.unwrap(); connection.await.unwrap();
                         return Outcome::Rejected;
                     }
-                    if saturating && response.status() == StatusCode::BAD_GATEWAY {
-                        assert!(response.collect().await.unwrap().to_bytes().is_empty()); let _ = connection.await;
-                        return Outcome::Failed;
-                    }
                     assert_eq!(response.status(), StatusCode::OK);
-                    let first = match response.body_mut().frame().await.unwrap() {
-                        Ok(frame) => frame.into_data().unwrap(),
-                        Err(_) => { assert!(saturating); let _ = connection.await; return Outcome::Failed; }
-                    };
+                    let first = response.body_mut().frame().await.unwrap().unwrap().into_data().unwrap();
                     assert!(!first.is_empty());
                     let first_byte = start.elapsed().as_secs_f64() * 1000.;
                     assert!(first.iter().all(|b| *b == 29));
@@ -162,11 +140,7 @@ async fn benchmark(availability: bool, profile: Profile) {
                         let Some(frame) = response.body_mut().frame().await else { break; };
                         let now = tokio::time::Instant::now();
                         frame_gaps.push((now - previous).as_secs_f64() * 1000.); previous = now;
-                        let bytes = match frame {
-                            Ok(frame) => frame.into_data().unwrap(),
-                            // A refused strict append after headers aborts the body: never a clean EOF.
-                            Err(_) => { assert!(saturating); let _ = connection.await; return Outcome::Failed; }
-                        };
+                        let bytes = frame.unwrap().into_data().unwrap();
                         assert!(bytes.iter().all(|b| *b == 29)); received += bytes.len();
                     }
                     assert_eq!(received, download);
@@ -180,7 +154,6 @@ async fn benchmark(availability: bool, profile: Profile) {
                         first_bytes.push(first); latencies.push(elapsed); gaps.extend(frame_gaps);
                     }
                     Outcome::Rejected => rejected += 1,
-                    Outcome::Failed => failed += 1,
                 }
             }
             // Successful client EOF can precede final worker bookkeeping.
@@ -193,18 +166,9 @@ async fn benchmark(availability: bool, profile: Profile) {
         provider.await.unwrap(); shutdown.send(()).unwrap(); gateway.await.unwrap().unwrap();
         assert!(app.workers.is_empty());
         let completed = latencies.len();
-        if saturating {
-            // Strict mode fails requests instead of forwarding unlogged bytes;
-            // availability mode forwards everything and counts the gaps.
-            assert_eq!(completed + failed, requests);
-            if availability { assert_eq!(failed, 0); assert!(app.audit_gaps() > 0 && app.audit_gaps() <= requests as u64); }
-            else { assert_eq!(app.audit_gaps(), 0); assert!(failed > 0, "32 concurrent appends never exceeded the 16-record queue"); }
-            assert_eq!(app.failed_exchanges(), failed as u64);
-        } else {
-            assert_eq!(failed, 0);
-            assert_eq!(app.audit_gaps(), if failed_log && availability { (requests - concurrency) as u64 } else { 0 });
-            assert_eq!(app.failed_exchanges(), 0);
-        }
+        assert_eq!(completed, forwarded);
+        assert_eq!(app.audit_gaps(), if failed_log && availability { (requests - concurrency) as u64 } else { 0 });
+        assert_eq!(app.failed_exchanges(), 0);
         let mut scanner = LogReader::new(File::open(&path).unwrap()).unwrap();
         let mut totals = std::collections::BTreeMap::<u64, (usize, usize)>::new();
         while let Some(record) = scanner.next_record().unwrap() {
@@ -214,16 +178,8 @@ async fn benchmark(availability: bool, profile: Profile) {
                 crate::transfer::Direction::Download => entry.1 += record.bytes.len(),
             }
         }
-        if saturating {
-            // Strict: exactly the completed requests are fully logged; failed ones may
-            // hold a prefix. Availability: exactly the gap-free requests are fully logged.
-            let fully_logged = totals.values().filter(|total| **total == (upload, download)).count();
-            assert!(totals.len() <= requests);
-            assert_eq!(fully_logged, if availability { requests - app.audit_gaps() as usize } else { completed });
-        } else {
-            assert_eq!(totals.len(), if failed_log { concurrency } else { requests });
-            assert!(totals.values().all(|total| *total == (upload, download)));
-        }
+        assert_eq!(totals.len(), if failed_log { concurrency } else { requests });
+        assert!(totals.values().all(|total| *total == (upload, download)));
         first_bytes.sort_by(f64::total_cmp); latencies.sort_by(f64::total_cmp); gaps.sort_by(f64::total_cmp);
         let percentile = |values: &[f64], percent: usize| values[(values.len() * percent).div_ceil(100) - 1];
         let payload = completed as f64 * (upload + download) as f64;
@@ -232,7 +188,7 @@ async fn benchmark(availability: bool, profile: Profile) {
             "mode":if availability { "availability" } else { "strict" },
             "requests":requests, "concurrency":concurrency, "upload_bytes":upload, "download_bytes":download,
             "provider_pace_ms":provider_pace_ms, "client_pace_ms":client_pace_ms, "forwarded":forwarded, "rejected":rejected,
-            "completed":completed, "failed_exchanges":failed, "logged_requests":totals.len(),
+            "completed":completed, "failed_exchanges":app.failed_exchanges(), "logged_requests":totals.len(),
             "peak_active_sampled":peak.load(Ordering::Relaxed), "audit_gaps":app.audit_gaps(),
             "elapsed_seconds":elapsed, "requests_per_second":requests as f64 / elapsed, "forwarded_per_second":forwarded as f64 / elapsed,
             "payload_mib_per_second":payload / elapsed / (1024. * 1024.),
@@ -244,23 +200,23 @@ async fn benchmark(availability: bool, profile: Profile) {
     }).await.unwrap();
 }
 
-/// Concurrency levels one through 16 with four batches each, repeated three
+/// Concurrency levels one through 32 with four batches each, repeated three
 /// times, to report throughput and latency scaling with run-to-run variation.
-/// Sixteen is the audit queue depth; see `queue_saturation` for 32.
+/// Above 16, appends wait for one of the 16 audit queue slots.
 async fn concurrency_sweep(availability: bool) {
     for repeat in 0..3 {
-        for concurrency in [1, 2, 4, 8, 16] {
+        for concurrency in [1, 2, 4, 8, 16, 32] {
             benchmark(availability, Profile { workload: Workload::ConcurrencySweep, requests: 4 * concurrency, concurrency,
                 upload: UPLOAD, download: DOWNLOAD, provider_pace_ms: 0, client_pace_ms: 0, repeat, timeout_secs: 120 }).await;
         }
     }
 }
 
-/// 32 concurrent requests against the 16-record audit queue: measures how many
-/// strict requests fail with 502 or an aborted body, and how many availability
-/// requests record gaps, while every completed response stays exact.
-async fn queue_saturation(availability: bool) {
-    benchmark(availability, Profile { workload: Workload::QueueSaturation, requests: 128, concurrency: 32, upload: UPLOAD,
+/// 128 requests at 32 concurrent against the 16-record audit queue: every
+/// append beyond the queue depth waits for a slot, so all requests must complete
+/// exactly, with no failed exchange and no audit gap, in both modes.
+async fn queue_contention(availability: bool) {
+    benchmark(availability, Profile { workload: Workload::QueueContention, requests: 128, concurrency: 32, upload: UPLOAD,
         download: DOWNLOAD, provider_pace_ms: 0, client_pace_ms: 0, repeat: 0, timeout_secs: 120 }).await;
 }
 
@@ -307,10 +263,10 @@ async fn strict_concurrency_sweep() { concurrency_sweep(false).await; }
 async fn availability_concurrency_sweep() { concurrency_sweep(true).await; }
 #[tokio::test]
 #[ignore = "local workload; run in release mode with --ignored --nocapture --test-threads=1"]
-async fn strict_queue_saturation() { queue_saturation(false).await; }
+async fn strict_queue_contention() { queue_contention(false).await; }
 #[tokio::test]
 #[ignore = "local workload; run in release mode with --ignored --nocapture --test-threads=1"]
-async fn availability_queue_saturation() { queue_saturation(true).await; }
+async fn availability_queue_contention() { queue_contention(true).await; }
 #[tokio::test]
 #[ignore = "local workload; run in release mode with --ignored --nocapture --test-threads=1"]
 async fn strict_long_streams() { long_streams(false).await; }

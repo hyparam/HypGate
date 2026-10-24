@@ -33,11 +33,12 @@ The separate candidate route file selects the permitted grant:
 {"routes": [{"tenant": 1, "selector": 7, "origin": 0, "credential": 0}]}
 ```
 
-Keep `requests` at or below the logger's 16 queued records in strict mode: each
-request has one audit append outstanding at a time, so 16 concurrent requests can
-never find the queue full, while a burst of more than 16 makes the extra strict
-requests fail with 502 and makes availability requests record audit gaps. The
-[operational limits](operational-limits.md) list every such limit.
+The logger queues 16 records. Each request has one audit append outstanding at a
+time, so with more than 16 request slots the extra appends wait, in arrival order,
+for a slot to free; the two-second acknowledgment deadline covers that wait, and
+expiry marks logging unhealthy in either mode. More slots therefore add latency
+per frame rather than failures, as the [benchmarks](benchmarks.md#broader-workloads)
+show. The [operational limits](operational-limits.md) list every such limit.
 
 Provision `PROVIDER_KEY` in the process environment through your secret-management
 mechanism. Use at least 32 random bytes of entropy for gateway tokens, encoded in

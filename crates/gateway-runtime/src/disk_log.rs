@@ -193,18 +193,22 @@ impl AuditLog for DiskLog {
         }
         // Reserve queue space before allocating/copying a payload. Queued frames
         // plus the worker's one active frame bound retained log payloads.
-        let completion = {
-            // The queue lock serializes construction/insertion with shutdown.
-            // Unlike an mpsc sender clone, this Arc cannot keep admission open
-            // after Queue::close. Do not hold the worker mutex while encoding.
-            let queue = self.worker.lock().map_err(|_| io::ErrorKind::BrokenPipe)?.queue.clone();
-            queue.enqueue(record).map_err(|error| {
-                if error.kind() == io::ErrorKind::BrokenPipe { self.healthy.store(false, Ordering::Release); }
-                error
-            })?
-        };
-        match tokio::time::timeout(self.deadline, completion).await {
+        // The queue lock serializes construction/insertion with shutdown.
+        // Unlike an mpsc sender clone, this Arc cannot keep admission open
+        // after Queue::close. Do not hold the worker mutex while encoding.
+        let queue = self.worker.lock().map_err(|_| io::ErrorKind::BrokenPipe)?.queue.clone();
+        // One deadline covers waiting for a free slot and waiting for the sync
+        // acknowledgment: a worker that stops freeing slots fails the append and
+        // poisons health exactly as a worker that stops acknowledging does.
+        let outcome = tokio::time::timeout(self.deadline, async {
+            let completion = queue.enqueue(record).await?;
+            Ok::<_, io::Error>(completion.await.ok().flatten())
+        }).await;
+        match outcome {
             Ok(Ok(Some(receipt))) => Ok(receipt),
+            // Only a verified-reservation refusal that the permit should have
+            // prevented; the logger stays usable and nothing was lost.
+            Ok(Err(error)) if error.kind() == io::ErrorKind::WouldBlock => Err(error),
             _ => {
                 self.healthy.store(false, Ordering::Release);
                 Err(io::ErrorKind::BrokenPipe.into())

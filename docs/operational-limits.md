@@ -3,7 +3,7 @@
 Every fixed or configurable limit in the runnable gateway, the behavior when a
 caller or peer reaches it, and the evidence behind that behavior. Values are
 those compiled into the `soundgate` executable or accepted by its configuration
-at commit `553ba36`; library callers may choose others within the stated ranges.
+as of 2026-10-24; library callers may choose others within the stated ranges.
 "Proved" means a Verus contract covers the count or transition; "tested" means a
 workspace or opt-in test exercises the limit; "measured" points at the
 [benchmarks](benchmarks.md). None of these limits is a measured memory or latency
@@ -14,7 +14,7 @@ requested-allocation accounting that follows from them.
 
 | Limit | Value | Reached | Evidence |
 | --- | --- | --- | --- |
-| Request slots (`limits.requests`) | 1 to 65,536; documented example 16, matching the audit queue depth | Admission returns 503 before any upstream connection; readiness stays 200; a released slot is reusable. | Proved acquire/release/occupancy; `repeated_overload_preserves_active_streams_health_and_reusable_capacity`, `sustained_overload_preserves_active_streams_and_health`; measured. |
+| Request slots (`limits.requests`) | 1 to 65,536; documented example 16 | Admission returns 503 before any upstream connection; readiness stays 200; a released slot is reusable. Slots above the audit queue depth add waiting per frame, not failures. | Proved acquire/release/occupancy; `repeated_overload_preserves_active_streams_health_and_reusable_capacity`, `sustained_overload_preserves_active_streams_and_health`; measured. |
 | Chunk size (`limits.chunk_bytes`) | 1 byte to 1 MiB; example 16 KiB; `requests × chunk_bytes` at most 128 MiB | Larger configurations are rejected at startup. The chunk size bounds every core stream chunk and every audit record payload. | `validate_limits` proved; configuration tests. |
 | Root policy and candidate route files | 1 MiB each | Startup fails with "invalid configuration". | `config.rs` tests. |
 | Destination URL | 8,192 bytes, `https://` only, no query, host at most 253 bytes | Rejected at startup; routing never uses caller URLs. | Configuration confinement proved and tested. |
@@ -48,10 +48,10 @@ requested-allocation accounting that follows from them.
 
 | Limit | Value | Reached | Evidence |
 | --- | --- | --- | --- |
-| Queued records | 16 (library range 1 to 1,024) | A full queue refuses the append immediately; nothing waits for a slot. Strict mode then fails the request with 502 before headers or an aborted body after them; availability mode forwards and records a gap. Each request has at most one append outstanding, so `limits.requests` at or below 16 can never reach this limit; above it, bursts do. Logger health is unaffected and no worker is replaced. | FIFO and reservation proved; `production_enqueue_preserves_pairing_and_refuses_full_or_closed_before_encoding`; measured by `queue_saturation` at 32 concurrent requests. |
+| Queued records | 16 (library range 1 to 1,024) | A full queue parks the append, in arrival order, until the worker frees a slot; nothing is reserved, allocated, or encoded while waiting, and a canceled waiter leaves no reservation. The acknowledgment deadline covers the wait, so if no slot frees in time the append fails and health closes exactly as for a late acknowledgment (strict: 502 before headers or an aborted body, then readiness 503; availability: one gap). Each request has at most one append outstanding, so at most `limits.requests` appends ever wait. No worker is replaced. | FIFO and reservation proved; `production_enqueue_preserves_pairing_waits_while_full_and_refuses_closed_before_encoding`, `full_queue_parks_excess_work_before_allocation_and_serves_it_in_order`, `slot_wait_is_bounded_by_the_deadline_and_poisons_health`; measured by `queue_contention` and the sweep at 32 concurrent requests. |
 | Record payload | Equal to `chunk_bytes`; hard maximum 1 MiB | Larger records cannot be constructed. | Framing proof. |
 | Synced-record rate | Storage dependent: about 125 to 210 records of 16 KiB per second on the benchmark laptop, about 1,800 on the Ubuntu CI runner's virtual disk | Every record is written and synced by one disk worker in both modes while the log is healthy, so sustained payload throughput is the synced-record rate times `chunk_bytes`, and each forwarded frame waits behind one synced write per concurrent stream. | Measured: concurrency sweep, long streams, and 1 MiB uploads in the [benchmarks](benchmarks.md#broader-workloads). |
-| Acknowledgment deadline | 2 s (library range up to 300 s) | Strict: 503 before headers or an aborted body; readiness becomes 503. Availability: gap counter increments once per request. | `stalled_log_under_load_preserves_health_deadlines_and_mode_policy`. |
+| Acknowledgment deadline | 2 s (library range up to 300 s), measured from the append call and including any wait for a queue slot | Health closes permanently. Strict: the waiting request gets 502 before headers or an aborted body, later requests are refused with 503 at dispatch, and readiness becomes 503. Availability: gap counter increments once per request. | `stalled_log_under_load_preserves_health_deadlines_and_mode_policy`. |
 | Storage faults | Full or read-only filesystem, process death | Acknowledged prefix survives; scan reports a complete, incomplete, or corrupt tail without modifying the file. | `filesystem_full_preserves_acknowledged_prefix_and_fails_closed`, `filesystem_read_only_refuses_logger_startup`, crash tests on Linux ext4. |
 | Log file reuse | Never | Startup refuses an existing path and leaves it unchanged. | `check_deployment.sh`. |
 
@@ -67,9 +67,9 @@ requested-allocation accounting that follows from them.
 The [benchmarks](benchmarks.md) report throughput, first-byte and completion
 latency, client-observed inter-frame gaps, and gateway-only resident memory for
 both logging modes at concurrency one through 32, with paced 4 MiB and 32 MiB
-streams, 1 MiB uploads, 32 concurrent requests against the 16-record audit queue
-(62 of 128 strict requests failed honestly; availability completed all 128 with
-60 gaps), permanent logging failure, a blocked disk worker, ten minutes of
+streams, 1 MiB uploads, 128 requests at 32 concurrent against the 16-record audit
+queue (all complete in both modes, with the frame gap doubling while appends wait
+for slots), permanent logging failure, a blocked disk worker, ten minutes of
 admission overload per mode, and 100-wave memory soaks. Those numbers are
 single-machine observations. No release performance threshold has been set,
 and no table above turns a logical limit into a memory, CPU, or latency guarantee.

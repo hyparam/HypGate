@@ -116,73 +116,78 @@ The fixture now takes a profile (request count, concurrency, upload and download
 sizes, provider and client pacing) and reports client-observed inter-frame gaps,
 completed and failed counts, and payload throughput in addition to the earlier
 fields. Six new opt-in runs cover a concurrency sweep, half-minute paced streams,
-1 MiB uploads, and deliberate audit-queue saturation, each in both logging modes.
+1 MiB uploads, and 128 requests at 32 concurrent contending for the 16-record
+audit queue, each in both logging modes.
 The `Release workloads` CI job runs every opt-in workload in release mode on
 Ubuntu 24.04 and prints the JSON rows. The [operational limits](operational-limits.md)
 tabulate every limit these workloads approach.
 
 All numbers below are from one local machine (Apple M3 Max, macOS 27.0.1, release
-build, local temporary storage) on 2026-10-24, with other processes idle. They are
+build, local temporary storage) on 2026-10-24, with other processes idle, after
+the audit queue was changed to make appends wait for a slot instead of refusing. They are
 observations of this fixture, not performance guarantees or a controlled
 comparison between modes.
 
 ### Concurrency sweep
 
 Four closed-loop batches at each level, 8 KiB uploads and 64 KiB responses, three
-separate runs per level and mode. Sixteen is the audit queue depth; 32 is measured
-separately below.
+separate runs per level and mode. Sixteen is the audit queue depth; at 32, half of
+the concurrent appends are waiting for a slot at any moment.
 
 | Concurrency | Mode | Requests/s (3 runs) | First byte p95 ms (3 runs) | Completion p95 ms (3 runs) | Frame gap p99 ms (max of runs) |
 | ---: | --- | --- | --- | --- | ---: |
-| 1 | Strict | 23.4 / 24.3 / 21.9 | 17 / 16 / 17 | 44 / 44 / 47 | 5.3 |
-| 1 | Availability | 22.6 / 23.3 / 25.3 | 18 / 16 / 15 | 45 / 45 / 40 | 5.3 |
-| 2 | Strict | 24.6 / 25.1 / 22.4 | 29 / 28 / 33 | 84 / 83 / 90 | 10.4 |
-| 2 | Availability | 24.2 / 23.7 / 24.2 | 32 / 30 / 32 | 88 / 86 / 89 | 11.7 |
-| 4 | Strict | 24.6 / 12.4 / 24.1 | 58 / 58 / 58 | 167 / 803 / 169 | 335.5 |
-| 4 | Availability | 24.3 / 23.8 / 23.2 | 58 / 57 / 59 | 170 / 168 / 173 | 20.1 |
-| 8 | Strict | 24.5 / 24.9 / 24.8 | 110 / 109 / 112 | 341 / 322 / 330 | 42.0 |
-| 8 | Availability | 23.9 / 25.3 / 25.5 | 114 / 107 / 113 | 338 / 339 / 342 | 48.0 |
-| 16 | Strict | 25.9 / 24.7 / 26.6 | 209 / 221 / 204 | 650 / 674 / 610 | 80.3 |
-| 16 | Availability | 24.9 / 26.1 / 26.5 | 218 / 209 / 201 | 651 / 623 / 606 | 78.0 |
+| 1 | Strict | 24.7 / 24.7 / 24.6 | 16 / 16 / 16 | 44 / 43 / 43 | 5.3 |
+| 1 | Availability | 22.0 / 23.2 / 23.9 | 20 / 16 / 16 | 51 / 46 / 42 | 5.7 |
+| 2 | Strict | 25.1 / 19.5 / 25.7 | 29 / 28 / 28 | 82 / 176 / 81 | 54.6 |
+| 2 | Availability | 24.7 / 25.0 / 25.4 | 30 / 29 / 29 | 83 / 82 / 82 | 10.4 |
+| 4 | Strict | 25.2 / 17.3 / 26.0 | 54 / 179 / 54 | 163 / 376 / 160 | 48.5 |
+| 4 | Availability | 25.3 / 25.1 / 25.3 | 55 / 57 / 57 | 162 / 162 / 163 | 20.0 |
+| 8 | Strict | 24.9 / 17.4 / 25.8 | 111 / 109 / 106 | 335 / 905 / 312 | 538.9 |
+| 8 | Availability | 25.1 / 18.0 / 26.4 | 110 / 111 / 107 | 324 / 783 / 304 | 504.4 |
+| 16 | Strict | 25.9 / 24.8 / 25.8 | 207 / 217 / 204 | 629 / 648 / 644 | 82.0 |
+| 16 | Availability | 26.5 / 25.2 / 26.5 | 200 / 222 / 206 | 610 / 656 / 611 | 77.1 |
+| 32 | Strict | 24.9 / 25.5 / 22.8 | 483 / 413 / 1,038 | 1,364 / 1,287 / 1,838 | 177.7 |
+| 32 | Availability | 26.0 / 25.1 / 22.7 | 416 / 460 / 414 | 1,297 / 1,322 / 1,891 | 859.3 |
 
 Throughput stays near 25 requests per second at every level while completion
 latency grows linearly with concurrency, and the client-observed gap between
-16 KiB frames grows from about 5 ms at one request to about 78 ms at sixteen.
-Both modes write and sync every 16 KiB record on one disk worker, so each frame
-waits behind one synced write per concurrent stream: roughly 5 ms per record on
-this storage, about 125 synced records per second at this payload mix. Adding
-concurrency therefore adds latency rather than throughput once the disk worker is
-busy. One strict run at concurrency four stalled for about 0.8 s on one request
-(803 ms completion p95, 335 ms frame gap); the other two runs at that level did
-not, which is why three runs are reported rather than one.
+16 KiB frames grows from about 4 ms at one request to about 68 ms at sixteen and
+about 137 ms at 32. Both modes write and sync every 16 KiB record on one disk
+worker, so each frame waits behind one synced write per concurrent stream: roughly
+4 ms per record on this storage, about 230 synced records per second at this
+payload mix. Adding concurrency therefore adds latency rather than throughput once
+the disk worker is busy, and crossing the queue depth changes nothing but the place
+where a frame waits. Single requests occasionally stalled for half a second to
+0.8 s in one of the three runs (strict at two, four, and eight; availability at
+eight and 32), which is why three runs are reported rather than one.
 
-### Long streams, large uploads, and queue saturation
+### Long streams, large uploads, and queue contention
 
 | Workload | Mode | Completed / failed | Audit gaps | Elapsed s | Payload MiB/s | First byte p95 ms | Completion p50 / p95 ms | Frame gap p50 / p99 / max ms |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Healthy 64 KiB (eight concurrent) | Strict | 32 / 0 | 0 | 1.343 | 1.68 | 171 | 307 / 369 | 34.0 / 64.1 / 64 |
-| Healthy 64 KiB (eight concurrent) | Availability | 32 / 0 | 0 | 1.245 | 1.81 | 106 | 295 / 315 | 34.0 / 38.3 / 39 |
-| 1 MiB uploads, 16 KiB responses (eight concurrent) | Strict | 32 / 0 | 0 | 9.955 | 3.26 | 2,935 | 2,295 / 2,969 | 32.9 / 38.1 / 38 |
-| 1 MiB uploads, 16 KiB responses (eight concurrent) | Availability | 32 / 0 | 0 | 9.880 | 3.29 | 2,848 | 2,320 / 2,888 | 33.1 / 40.0 / 40 |
-| Paced 4 MiB responses (eight concurrent) | Strict | 32 / 0 | 0 | 61.166 | 2.10 | 139 | 14,466 / 17,899 | 34.5 / 147.8 / 788 |
-| Paced 4 MiB responses (eight concurrent) | Availability | 32 / 0 | 0 | 58.391 | 2.20 | 109 | 13,769 / 17,160 | 34.0 / 140.7 / 739 |
-| Eight 32 MiB streams, 16 KiB per 15 ms | Strict | 8 / 0 | 0 | 111.085 | 2.31 | 126 | 111,064 / 111,085 | 34.0 / 54.0 / 737 |
-| Eight 32 MiB streams, 16 KiB per 15 ms | Availability | 8 / 0 | 0 | 109.145 | 2.35 | 115 | 109,128 / 109,145 | 34.0 / 45.5 / 705 |
-| 32 concurrent requests, 128 total | Strict | 66 / 62 | 0 | 3.138 | 1.48 | 286 | 723 / 847 | 82.0 / 114.9 / 123 |
-| 32 concurrent requests, 128 total | Availability | 128 / 0 | 60 | 2.642 | 3.41 | 224 | 584 / 663 | 0.2 / 82.0 / 85 |
-| Log fails after batch one | Strict | 8 / 0 (24 rejected) | 0 | 0.317 | 1.77 | 108 | 298 / 315 | 35.0 / 38.0 / 38 |
-| Log fails after batch one | Availability | 32 / 0 | 24 | 0.340 | 6.61 | 103 | 5 / 321 | 0.1 / 37.1 / 38 |
+| Healthy 64 KiB (eight concurrent) | Strict | 32 / 0 | 0 | 1.316 | 1.71 | 111 | 312 / 345 | 36.1 / 40.0 / 40 |
+| Healthy 64 KiB (eight concurrent) | Availability | 32 / 0 | 0 | 1.332 | 1.69 | 121 | 312 / 345 | 35.0 / 45.5 / 59 |
+| 1 MiB uploads, 16 KiB responses (eight concurrent) | Strict | 32 / 0 | 0 | 9.052 | 3.59 | 2,262 | 2,240 / 2,294 | 31.9 / 44.1 / 44 |
+| 1 MiB uploads, 16 KiB responses (eight concurrent) | Availability | 32 / 0 | 0 | 9.115 | 3.57 | 2,298 | 2,254 / 2,330 | 32.0 / 36.1 / 36 |
+| Paced 4 MiB responses (eight concurrent) | Strict | 32 / 0 | 0 | 58.503 | 2.19 | 117 | 13,765 / 17,383 | 34.0 / 144.2 / 765 |
+| Paced 4 MiB responses (eight concurrent) | Availability | 32 / 0 | 0 | 58.738 | 2.18 | 105 | 14,314 / 16,286 | 34.0 / 141.5 / 830 |
+| Eight 32 MiB streams, 16 KiB per 15 ms | Strict | 8 / 0 | 0 | 109.603 | 2.34 | 117 | 109,585 / 109,603 | 33.9 / 44.5 / 669 |
+| Eight 32 MiB streams, 16 KiB per 15 ms | Availability | 8 / 0 | 0 | 108.935 | 2.35 | 134 | 108,918 / 108,935 | 33.1 / 43.1 / 706 |
+| 32 concurrent requests, 128 total | Strict | 128 / 0 | 0 | 5.469 | 1.65 | 483 | 1,279 / 1,447 | 147.0 / 196.1 / 197 |
+| 32 concurrent requests, 128 total | Availability | 128 / 0 | 0 | 5.198 | 1.73 | 449 | 1,225 / 1,353 | 141.0 / 159.5 / 168 |
+| Log fails after batch one | Strict | 8 / 0 (24 rejected) | 0 | 0.324 | 1.74 | 111 | 304 / 322 | 34.9 / 38.0 / 38 |
+| Log fails after batch one | Availability | 32 / 0 | 24 | 0.361 | 6.23 | 108 | 5 / 340 | 0.1 / 39.9 / 40 |
 
-Every completed response was byte-exact and every completed request's audit
-records summed to its exact upload and download sizes; all runs ended with zero
-active requests and workers and a clean shutdown. The long-stream logs were
-270,099,528 and 270,099,333 bytes, with 24,584 frames per mode.
+Every response was byte-exact and every request's audit records summed to its
+exact upload and download sizes; no run had a failed exchange, and all ended with
+zero active requests and workers and a clean shutdown. The long-stream logs were
+270,099,333 and 270,099,853 bytes, with 24,587 and 24,595 client-observed frames.
 
-The eight 32 MiB streams were paced to finish in about 31 s, but took about 110 s
+The eight 32 MiB streams were paced to finish in about 31 s, but took about 109 s
 in both modes: 16,384 records of 16 KiB passed through the single disk worker at
-about 149 synced records per second, or 2.3 MiB/s of logged payload, and the
+about 150 synced records per second, or 2.3 MiB/s of logged payload, and the
 client-observed frame gap settled at 34 ms, the same gap the sweep shows for eight
-concurrent streams. The 1 MiB uploads ran at about 209 synced records per second.
+concurrent streams. The 1 MiB uploads ran at about 230 synced records per second.
 Sustained payload throughput is therefore bounded by the synced-record rate of the
 log device times the chunk size; a larger `chunk_bytes` (up to 1 MiB) raises the
 bytes per sync, and faster storage raises the rate, as the Linux runner results
@@ -191,26 +196,28 @@ cost while the log is healthy; availability mode only differs after a failure.
 The rare 700 to 800 ms maximum gaps in the paced runs are single stalls of the
 local disk or scheduler, not a steady-state behavior.
 
-The 32-concurrent run exceeds the 16-record audit queue, which refuses an append
-immediately when full. Strict mode failed 62 of 128 requests honestly: each got a
-502 with no body or an aborted body, none produced an audit gap, and 70 requests
-left records (the 66 completed ones in full and four failed ones as a prefix).
-Availability mode completed all 128 with exact bytes and recorded 60 audit gaps.
-Sixteen concurrent requests never hit this limit in any sweep run because each
-request has at most one append outstanding. The documented configuration now
-uses 16 request slots in strict mode for this reason. When the refused append
-happens while the client is still sending its request body, the gateway's early
-502 and close can reach the client as a connection error rather than a status;
-the fixture counts both as failed exchanges, and the gateway counts them once.
+At 32 concurrent requests, twice the audit queue depth, every append beyond the
+16 slots waits in arrival order for the worker to free one. Both modes completed
+all 128 requests with exact bytes, no failed exchange, and no audit gap; the cost
+is latency, not failure. The frame gap roughly doubles from the 16-concurrent level
+(about 140 ms against 68 ms), first-byte p95 reaches about 450 ms, and completion
+p95 about 1.4 s, while throughput stays near 25 requests per second: the same one
+synced write per concurrent stream, now partly spent waiting for a slot. A waiting
+append charges nothing until its slot is reserved, and the two-second
+acknowledgment deadline covers the wait, so a disk that stops freeing slots fails
+the append and closes health the same way a late acknowledgment does. Before this
+change the queue refused an append when full, and the same workload at commit
+`c81b35f` failed 62 of 128 strict requests with 502 or an aborted body and recorded
+60 audit gaps in availability mode.
 
 ### The same workloads on the Ubuntu CI runner
 
 The `Release workloads` job at `b5fffbd`
 ([run 40078196998](https://github.com/platypii/LogGate/actions/runs/40078196998),
 2026-10-24 UTC) ran every workload above on a GitHub-hosted Ubuntu 24.04 runner.
-Thirteen passed; the strict saturation run failed only in the client fixture on the
-connection-error case just described, which was then made to count as a failure.
-The runner's synced writes are far faster than this laptop's, so the same code
+Thirteen passed; the strict 32-concurrent run failed in the client fixture because
+the audit queue then refused appends when full, which it no longer does. The
+runner's synced writes are far faster than this laptop's, so the same code
 behaves differently:
 
 | Concurrency | Mode | Requests/s (3 runs) | Completion p95 ms (3 runs) | Frame gap p99 ms (max) |

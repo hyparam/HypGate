@@ -1,10 +1,14 @@
 //! Trusted mutex/condvar wrapper around the verified fixed-slot FIFO.
 use super::{Job, Completion, DurableFrame, LogRecord};
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, Semaphore};
 use gateway_core::frame_queue::FrameQueue;
 use std::{io, sync::{Condvar, Mutex}};
 
-pub(super) struct Queue { state: Mutex<FrameQueue<Completion>>, ready: Condvar }
+/// `slots` holds one permit per free queue slot. A caller acquires a permit (in
+/// arrival order) before reserving under the lock, forgets it once the slot is
+/// charged, and the worker returns it when it pops the job. Closing the semaphore
+/// wakes every waiting caller with an error instead of leaving it parked.
+pub(super) struct Queue { state: Mutex<FrameQueue<Completion>>, ready: Condvar, slots: Semaphore }
 // Only this module can mint a permit. Consuming it prevents a callback from
 // constructing a second record through the same queue reservation.
 struct EncodingPermit<'a> { state: &'a FrameQueue<Completion> }
@@ -24,20 +28,27 @@ impl Queue {
     #[cfg(test)]
     pub(super) fn new(capacity: usize) -> Self { Self::with_payload_limit(capacity, super::MAX_RECORD_BYTES) }
     pub(super) fn with_payload_limit(capacity: usize, payload_limit: usize) -> Self {
-        Self { state: Mutex::new(FrameQueue::with_payload_limit(capacity, payload_limit)), ready: Condvar::new() }
+        Self { state: Mutex::new(FrameQueue::with_payload_limit(capacity, payload_limit)), ready: Condvar::new(),
+            slots: Semaphore::new(capacity) }
     }
     pub(super) fn is_open(&self) -> bool {
         self.state.lock().map(|state| !state.is_closed()).unwrap_or(false)
     }
     // The production interface admits a record, not arbitrary encoding code or
     // a core queue reference. Frame construction and receipt pairing stay here.
-    pub(super) fn enqueue(&self, record: LogRecord<'_>) -> io::Result<oneshot::Receiver<Option<DurableFrame>>> {
+    // A full queue parks the caller until the worker frees a slot; the caller's
+    // acknowledgment deadline bounds that wait. Nothing is allocated or encoded
+    // while waiting, and a dropped waiter leaves no reservation behind.
+    pub(super) async fn enqueue(&self, record: LogRecord<'_>) -> io::Result<oneshot::Receiver<Option<DurableFrame>>> {
+        let permit = self.slots.acquire().await.map_err(|_| io::ErrorKind::BrokenPipe)?;
         let mut receive = None;
         self.push_with(|permit| {
             let (job, completion) = permit.encode(record);
             receive = Some(completion);
             job
         })?;
+        // The slot is now charged in the verified queue; the worker's pop returns it.
+        permit.forget();
         Ok(receive.expect("successful insertion constructed a receipt"))
     }
     fn push_with(&self, make: impl FnOnce(EncodingPermit<'_>) -> Job) -> io::Result<()> {
@@ -46,6 +57,9 @@ impl Queue {
         let _wake = WakeOnDrop(&self.ready);
         let mut state = self.state.lock().map_err(|_| io::ErrorKind::BrokenPipe)?;
         if state.is_closed() { return Err(io::ErrorKind::BrokenPipe.into()); }
+        // Unreachable through `enqueue`, whose permit guarantees a free slot; the
+        // verified reservation still decides, so a bookkeeping fault refuses
+        // rather than overfills.
         if !state.reserve() { return Err(io::ErrorKind::WouldBlock.into()); }
         // Capacity is reserved before allocating the frame, under the same lock
         // as insertion and shutdown. A panic leaves the reservation charged
@@ -53,21 +67,29 @@ impl Queue {
         let job = make(EncodingPermit { state: &state });
         if state.finish_reserved(job).is_err() {
             state.close();
+            self.slots.close();
             self.ready.notify_all();
             return Err(io::ErrorKind::BrokenPipe.into());
         }
         Ok(())
     }
     pub(super) fn recv(&self) -> Option<Job> {
-        let mut state = self.state.lock().ok()?;
-        loop {
-            if let Some(job) = state.pop() { return Some(job); }
-            if state.is_closed() { return None; }
-            state = self.ready.wait(state).ok()?;
-        }
+        let job = {
+            let mut state = self.state.lock().ok()?;
+            loop {
+                if let Some(job) = state.pop() { break job; }
+                if state.is_closed() { return None; }
+                state = self.ready.wait(state).ok()?;
+            }
+        };
+        // Every pop frees exactly one slot, after the lock is released.
+        self.slots.add_permits(1);
+        Some(job)
     }
     pub(super) fn close(&self) {
         if let Ok(mut state) = self.state.lock() { state.close(); }
+        // Waiting callers fail now rather than after their deadline.
+        self.slots.close();
         self.ready.notify_all();
     }
     pub(super) fn abort(&self) {
@@ -77,6 +99,7 @@ impl Queue {
             // still owns a DiskLog handle. Poison is never recovered to resume.
             while state.pop().is_some() {}
         }
+        self.slots.close();
         self.ready.notify_all();
     }
     #[cfg(test)]
@@ -90,27 +113,72 @@ impl Queue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
     fn job(chunk: u64) -> Job {
         (super::super::encode_record(crate::transfer::LogRecord {
             tenant: 1, request: 1, chunk, direction: crate::transfer::Direction::Upload, bytes: b"record",
         }), tokio::sync::oneshot::channel().0)
     }
     #[tokio::test]
-    async fn production_enqueue_preserves_pairing_and_refuses_full_or_closed_before_encoding() {
+    async fn production_enqueue_preserves_pairing_waits_while_full_and_refuses_closed_before_encoding() {
         let queue = Queue::with_payload_limit(1, 3);
         let record = |bytes| LogRecord { tenant: 1, request: 2, chunk: 3,
             direction: super::super::Direction::Upload, bytes };
-        let completion = queue.enqueue(record(b"abc")).unwrap();
-        // If invoked, encoding this excessive payload would fail. Full/closed
-        // rejection must precede construction through the production interface.
-        assert!(matches!(queue.enqueue(record(b"oversized")), Err(e) if e.kind() == io::ErrorKind::WouldBlock));
+        let completion = queue.enqueue(record(b"abc")).await.unwrap();
+        // A full queue parks the caller without constructing anything: encoding
+        // this excessive payload would panic, so the wait must precede construction.
+        assert!(tokio::time::timeout(Duration::from_millis(50), queue.enqueue(record(b"oversized"))).await.is_err());
+        assert_eq!(queue.len(), 1);
+        // A valid waiter is admitted as soon as the worker pops the first job, in order.
+        let mut waiter = Box::pin(queue.enqueue(record(b"def")));
+        assert!(tokio::time::timeout(Duration::from_millis(50), &mut waiter).await.is_err());
         let (frame, done) = queue.recv().unwrap();
         assert_eq!(frame.bytes(), super::super::encode_record(record(b"abc")).bytes());
         assert!(done.send(None).is_ok());
         assert!(completion.await.unwrap().is_none());
+        let second = waiter.await.unwrap();
+        assert_eq!(queue.len(), 1);
+        let (frame, done) = queue.recv().unwrap();
+        assert_eq!(frame.bytes(), super::super::encode_record(record(b"def")).bytes());
+        assert!(done.send(None).is_ok());
+        assert!(second.await.unwrap().is_none());
         queue.close();
-        assert!(matches!(queue.enqueue(record(b"oversized")), Err(e) if e.kind() == io::ErrorKind::BrokenPipe));
+        assert!(matches!(queue.enqueue(record(b"oversized")).await, Err(e) if e.kind() == io::ErrorKind::BrokenPipe));
         assert!(queue.recv().is_none());
+    }
+    #[tokio::test]
+    async fn closing_wakes_waiting_callers_without_constructing_their_jobs() {
+        let queue = std::sync::Arc::new(Queue::with_payload_limit(1, 3));
+        let record = |bytes| LogRecord { tenant: 1, request: 2, chunk: 3,
+            direction: super::super::Direction::Upload, bytes };
+        let _queued = queue.enqueue(record(b"abc")).await.unwrap();
+        let waiting_queue = queue.clone();
+        let waiter = tokio::spawn(async move {
+            waiting_queue.enqueue(record(b"oversized")).await.map(|_| ()).unwrap_err().kind()
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!waiter.is_finished());
+        queue.close();
+        assert_eq!(tokio::time::timeout(Duration::from_secs(2), waiter).await.unwrap().unwrap(), io::ErrorKind::BrokenPipe);
+        // The admitted job survives closure; the waiter never reserved anything.
+        assert_eq!(queue.len(), 1);
+        assert!(queue.recv().is_some()); assert!(queue.recv().is_none());
+    }
+    #[tokio::test]
+    async fn dropped_waiter_leaves_no_reservation_and_later_callers_proceed() {
+        let queue = Queue::with_payload_limit(1, 3);
+        let record = |bytes| LogRecord { tenant: 1, request: 2, chunk: 3,
+            direction: super::super::Direction::Upload, bytes };
+        let _queued = queue.enqueue(record(b"abc")).await.unwrap();
+        drop(tokio::time::timeout(Duration::from_millis(20), queue.enqueue(record(b"def"))).await);
+        assert_eq!(queue.len(), 1);
+        assert!(queue.recv().is_some());
+        // The freed slot goes to the next caller, not to the canceled waiter.
+        let later = tokio::time::timeout(Duration::from_secs(2), queue.enqueue(record(b"ghi"))).await.unwrap().unwrap();
+        assert_eq!(queue.len(), 1);
+        let (frame, done) = queue.recv().unwrap();
+        assert_eq!(frame.bytes(), super::super::encode_record(record(b"ghi")).bytes());
+        assert!(done.send(None).is_ok()); assert!(later.await.unwrap().is_none());
     }
     #[test]
     fn full_and_closed_queues_never_construct_rejected_jobs_and_close_drains() {

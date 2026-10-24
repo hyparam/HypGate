@@ -17,8 +17,10 @@ One worker thread owns the file. Cloned logger handles share its bounded queue.
 Each append reserves a queue slot before copying its record; the worker performs
 `write_all` followed by `sync_all` before returning a positive acknowledgment.
 There is no retry after write or sync failure. Such failures poison logger health,
-and later appends fail. Queue saturation fails immediately without poisoning the
-whole logger; the request's logging policy decides whether forwarding may continue.
+and later appends fail. A full queue parks the caller, in arrival order, until the
+worker frees a slot; nothing is reserved or encoded while it waits, and a canceled
+waiter leaves nothing behind. The acknowledgment deadline covers the wait, so a
+worker that stops freeing slots is treated like one that stops acknowledging.
 The worker owns an exit guard that marks logging unhealthy even when a panic
 unwinds the thread after its append caller was canceled. A closed queue also
 poisons health on observation. This prevents a dead worker from leaving strict
