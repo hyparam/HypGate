@@ -39,9 +39,19 @@ fn header() -> Vec<u8> {
 struct TempDir(std::path::PathBuf);
 impl TempDir {
     fn new() -> Self {
-        let p = std::env::temp_dir().join(format!("soundgate-log-{}-{}", std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
-        std::fs::create_dir(&p).unwrap(); Self(p)
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        loop {
+            // Wall-clock timestamps alone can collide across parallel tests.
+            let p = std::env::temp_dir().join(format!("soundgate-log-{}-{}-{}", std::process::id(),
+                SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos(),
+                NEXT.fetch_add(1, Ordering::Relaxed)));
+            match std::fs::create_dir(&p) {
+                Ok(()) => return Self(p),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("create disk-log test directory: {error}"),
+            }
+        }
     }
 }
 impl Drop for TempDir { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }
