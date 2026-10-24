@@ -58,6 +58,10 @@ impl StreamChunk {
             request: self.owner, chunk: self.chunk, direction }, self.bytes.as_slice()))
     }
 
+    pub fn capacity_bytes(&self) -> (out: usize)
+        ensures out == self.capacity(),
+    { self.capacity }
+
     pub fn owner_id(&self) -> (out: u64)
         ensures out == self.owner(),
     { self.owner }
@@ -82,7 +86,7 @@ impl StreamChunk {
 
     pub proof fn payload_within_capacity(&self)
         requires self.valid(),
-        ensures self.body().len() <= self.capacity(),
+        ensures self.body().len() <= self.capacity(), self.position() <= self.end() <= self.body().len(),
     {}
 
     pub closed spec fn chunk(&self) -> u64 { self.chunk }

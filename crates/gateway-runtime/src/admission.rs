@@ -6,6 +6,7 @@ use gateway_core::resource::{RequestKey, ResourceAdmission};
 use gateway_core::owned_stream::OwnedStream;
 use gateway_core::stream::{StreamChunk, Ticket};
 use std::sync::Mutex;
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum AdmissionError {
@@ -121,7 +122,14 @@ impl<'a> Request<'a> {
     pub(crate) fn log_failed(&self) -> bool { self.log_failed }
     pub(crate) fn strict(&self) -> bool { self.lease.admission.strict }
 
-    pub(crate) fn discard_completed(&mut self) -> bool { self.stream_mut().discard_completed() }
+    pub(crate) async fn read_next<R: AsyncRead + Unpin>(&mut self, reader: &mut R)
+        -> Result<usize, TransferError>
+    {
+        if !self.stream_mut().begin_read() { return Err(TransferError::InvalidState); }
+        let length = reader.read(self.stream_mut().read_buffer()).await.map_err(|_| TransferError::Read)?;
+        if !self.stream_mut().finish_read(length) { return Err(TransferError::InvalidState); }
+        Ok(length)
+    }
 
     pub fn advance(&mut self, bytes: Vec<u8>) -> Option<u64> {
         // Verus models payload length, not Vec backing capacity. Reject excess

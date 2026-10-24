@@ -158,3 +158,36 @@ fn owned_stream_preserves_pairing_through_failure_progress_and_retirement() {
     assert_ne!(replacement.owner(), id);
     assert!(registry.release(&replacement));
 }
+
+#[test]
+fn owned_read_buffer_moves_only_filled_bytes_and_excludes_a_second_chunk() {
+    use gateway_core::owned_stream::OwnedStream;
+    let route = || Route { tenant: 1, selector: 7, origin: 0, credential: 0 };
+    let policy = Policy::validate(vec![Identity { tenant: 1, digest: vec![9; 32] }],
+        vec![route()], vec![route()], 1, vec![1]).unwrap();
+    let identity = policy.authenticate(&[9; 32]).unwrap();
+    let mut registry = ResourceAdmission::new(1, 4);
+    let key = registry.acquire().unwrap();
+    let authority = identity.authorize(7, key.owner()).unwrap();
+    let mut owned = OwnedStream::claim(&registry, key, &authority, false).ok().unwrap();
+    assert!(owned.begin_read());
+    assert!(!owned.begin_read());
+    assert!(owned.advance(vec![9]).is_none());
+    owned.read_buffer().copy_from_slice(&[1, 2, 3, 99]);
+    assert!(!owned.finish_read(5));
+    assert_eq!(owned.read_buffer(), &[1, 2, 3, 99]);
+    assert!(owned.finish_read(3));
+    assert_eq!(owned.stream().log_bytes(), &[1, 2, 3]);
+    assert!(!owned.begin_read()); // unfinished stream cannot be discarded
+    let ticket = owned.prepare(3).unwrap();
+    assert!(owned.complete(&ticket, 3));
+    assert!(owned.begin_read());
+    assert!(owned.stream().log_bytes().is_empty());
+    assert!(owned.finish_read(0));
+    assert!(owned.read_buffer().is_empty());
+    assert!(owned.begin_read());
+    owned.cancel();
+    assert!(!owned.finish_read(2));
+    assert!(owned.retire(&mut registry));
+    assert_eq!(registry.usage(), (0, 1));
+}

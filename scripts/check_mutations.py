@@ -15,11 +15,14 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("owned_stream.rs", "read_keeps_completed_chunk", "if !self.stream.discard_completed() { return false; }", "if self.stream.is_closed() { return false; }"),
+    ("owned_stream.rs", "read_changes_filled_prefix", "bytes.truncate(length);", "bytes.truncate(0);"),
+    ("owned_stream.rs", "read_denies_valid_completion", "self.stream.advance(bytes).is_some()", "false"),
     ("buffer_accounting.rs", "omit_receipt_storage", "+ byte_sum(receipt_bytes(self.receipts)) + byte_sum(self.headers)", "+ byte_sum(self.headers)"),
     ("buffer_accounting.rs", "underbudget_receipts", "+ (connections + requests) * 16384 + (queue + requests + 1) * (chunk + 65)", "+ (connections + requests) * 16384 + (queue + 1) * (chunk + 65)"),
     ("journal.rs", "receipt_frame_overhead_too_small", "ensures self.record().len() == self.payload_len() + 65,", "ensures self.record().len() == self.payload_len() + 64,"),
     ("owned_stream.rs", "owned_retirement_skips_release", "registry.release_stream(&self.key, self.stream)", "true"),
-    ("owned_stream.rs", "owned_advance_changes_bytes", "{ self.stream.advance(bytes) }", "{ self.stream.advance(Vec::new()) }"),
+    ("owned_stream.rs", "owned_advance_changes_bytes", "let out = self.stream.advance(bytes);", "let out = self.stream.advance(Vec::new());"),
     ("owned_stream.rs", "owned_cancel_ignored", "{ self.stream.cancel() }", "{ }"),
     ("owned_stream.rs", "owned_prepare_denies_progress", "{ self.stream.prepare(max) }", "{ None }"),
     ("resource.rs", "mapping_reserve_live_slot", "slots[index] == 0, owner != 0,", "owner != 0,"),

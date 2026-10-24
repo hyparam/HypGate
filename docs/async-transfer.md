@@ -83,3 +83,8 @@ returns 502 before upstream headers are sent. Normal streaming responses continu
 to release the abort guard only at clean EOF. Tests reproduce the original aborted
 accounting path over real HTTP and cover unexpected data and dropped writers.
 This is trusted async adapter behavior, not a Verus proof of Hyper or cancellation.
+
+The transfer driver now reads through `Request::read_next` into the verified
+owner's pending buffer. It no longer allocates an independent chunk. See the
+[read-buffer ownership proof](runtime-ownership.md#verified-read-buffer-ownership)
+for the exact prefix, exclusive-buffer, EOF, and mutable-slice trust boundary.

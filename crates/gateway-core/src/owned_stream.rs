@@ -11,13 +11,30 @@ verus! {
 ///     owner.stream().advance(vec![1]);
 /// }
 /// ```
-pub struct OwnedStream { key: RequestKey, stream: StreamChunk }
+///
+/// ```compile_fail
+/// fn complete_while_read_borrow_is_live(owner: &mut gateway_core::owned_stream::OwnedStream) {
+///     let buffer = owner.read_buffer();
+///     owner.finish_read(1);
+///     buffer[0] = 7;
+/// }
+/// ```
+pub struct OwnedStream { key: RequestKey, stream: StreamChunk, read_buffer: Vec<u8> }
 impl OwnedStream {
     pub closed spec fn state(&self) -> StreamChunk { self.stream }
+    pub closed spec fn read_bytes(&self) -> Seq<u8> { self.read_buffer@ }
     pub closed spec fn key(&self) -> RequestKey { self.key }
     pub closed spec fn valid(&self) -> bool {
         self.key.stream_claimed() && self.stream.valid() && self.stream.owner() == self.key.id()
+            && self.stream.body().len() + self.read_buffer.len() <= self.stream.capacity()
+            && (self.read_buffer.len() > 0 ==> self.stream.body().len() == 0)
     }
+
+    pub proof fn payload_bound(&self)
+        requires self.valid(),
+        ensures self.state().body().len() + self.read_bytes().len() <= self.state().capacity(),
+            self.read_bytes().len() > 0 ==> self.state().body().len() == 0,
+    {}
 
     pub fn claim(registry: &ResourceAdmission, mut key: RequestKey,
         authority: &AuthorizedRequest, strict: bool) -> (out: Result<Self, RequestKey>)
@@ -27,13 +44,18 @@ impl OwnedStream {
                 && owned.key().slot() == key.slot() && owned.key().id() == key.id()
                 && owned.state().capacity() == registry.per_request()
                 && owned.state().owner() == authority.request()
-                && owned.state().body().len() == 0 && owned.state().strict() == strict,
+                && owned.state().body().len() == 0 && owned.state().strict() == strict
+                && owned.read_bytes().len() == 0 && !owned.state().closed() && !owned.state().pending()
+                && owned.state().position() == 0,
             Err(returned) => returned == key && (key.stream_claimed()
                 || key.id() != authority.request() || !registry.owns(&key)),
         },
     {
         match registry.authorized_stream(&mut key, authority, strict) {
-            Some(stream) => Ok(OwnedStream { key, stream }),
+            Some(stream) => {
+                proof { stream.payload_within_capacity(); }
+                Ok(OwnedStream { key, stream, read_buffer: Vec::new() })
+            },
             None => Err(key),
         }
     }
@@ -42,7 +64,7 @@ impl OwnedStream {
         ensures *out == self.state(),
     { &self.stream }
 
-    pub fn retire(self, registry: &mut ResourceAdmission) -> (ok: bool)
+    pub fn retire(mut self, registry: &mut ResourceAdmission) -> (ok: bool)
         requires self.valid(), old(registry).valid(),
         ensures final(registry).valid(),
             final(registry).limit() == old(registry).limit(),
@@ -58,12 +80,80 @@ impl OwnedStream {
                     == crate::resource::occupied(old(registry).entries()),
             !ok ==> *final(registry) == *old(registry),
     {
+        self.read_buffer = Vec::new();
         registry.release_stream(&self.key, self.stream)
+    }
+
+    pub fn begin_read(&mut self) -> (ok: bool)
+        requires old(self).valid(),
+        ensures final(self).valid(), final(self).key() == old(self).key(),
+            final(self).state().owner() == old(self).state().owner(),
+            final(self).state().capacity() == old(self).state().capacity(),
+            final(self).state().completed() == old(self).state().completed(),
+            final(self).state().strict() == old(self).state().strict(),
+            final(self).state().failed() == old(self).state().failed(),
+            final(self).state().closed() == old(self).state().closed(),
+            final(self).state().generation() == old(self).state().generation(),
+            final(self).state().input() == old(self).state().input(),
+            final(self).state().chunk() == old(self).state().chunk(),
+            ok == (old(self).read_bytes().len() == 0 && old(self).state().capacity() > 0
+                && !old(self).state().closed() && !old(self).state().pending()
+                && old(self).state().position() == old(self).state().body().len()),
+            ok ==> final(self).state().body().len() == 0
+                && final(self).read_bytes().len() == old(self).state().capacity(),
+            !ok ==> *final(self) == *old(self),
+    {
+        if !self.read_buffer.is_empty() || self.stream.capacity_bytes() == 0 { return false; }
+        if !self.stream.discard_completed() { return false; }
+        let capacity = self.stream.capacity_bytes();
+        self.read_buffer = Vec::with_capacity(capacity);
+        self.read_buffer.resize(capacity, 0);
+        true
+    }
+
+    // Rust's slice borrow cannot resize the backing vector. The vstd slice
+    // projection exposes future contents abstractly, so the preservation
+    // postcondition explicitly states the length obligation at this boundary.
+    pub fn read_buffer(&mut self) -> (out: &mut [u8])
+        requires old(self).valid(),
+        ensures out@ == old(self).read_bytes(), final(out)@ == final(self).read_bytes(),
+            final(self).state() == old(self).state(), final(self).key() == old(self).key(),
+            final(out)@.len() == out@.len() ==> final(self).valid(),
+    { self.read_buffer.as_mut_slice() }
+
+    pub fn finish_read(&mut self, length: usize) -> (ok: bool)
+        requires old(self).valid(),
+        ensures final(self).valid(), final(self).key() == old(self).key(),
+            final(self).state().owner() == old(self).state().owner(),
+            final(self).state().capacity() == old(self).state().capacity(),
+            final(self).state().completed() == old(self).state().completed(),
+            final(self).state().strict() == old(self).state().strict(),
+            final(self).state().failed() == old(self).state().failed(),
+            final(self).state().closed() == old(self).state().closed(),
+            final(self).state().generation() == old(self).state().generation(),
+            ok == (old(self).read_bytes().len() > 0 && length <= old(self).read_bytes().len()
+                && (length == 0 || (!old(self).state().closed() && !old(self).state().pending()
+                    && old(self).state().position() == old(self).state().body().len()
+                    && length <= old(self).state().capacity() && old(self).state().chunk() < u64::MAX))),
+            ok ==> final(self).read_bytes().len() == 0
+                && final(self).state().body() == old(self).read_bytes().subrange(0, length as int),
+            ok && length > 0 ==> final(self).state().chunk() == old(self).state().chunk() + 1
+                && final(self).state().input() == old(self).state().input()
+                    + old(self).read_bytes().subrange(0, length as int),
+            !ok || length == 0 ==> final(self).state() == old(self).state(),
+    {
+        if self.read_buffer.is_empty() || length > self.read_buffer.len() { return false; }
+        let mut bytes = Vec::new();
+        core::mem::swap(&mut bytes, &mut self.read_buffer);
+        bytes.truncate(length);
+        if length == 0 { return true; }
+        self.stream.advance(bytes).is_some()
     }
 
     pub fn advance(&mut self, bytes: Vec<u8>) -> (out: Option<u64>)
         requires old(self).valid(),
-        ensures final(self).valid(), final(self).key() == old(self).key(), final(self).state().valid(), final(self).state().owner() == old(self).state().owner(),
+        ensures final(self).valid(), final(self).key() == old(self).key(),
+            final(self).read_bytes() == old(self).read_bytes(), final(self).state().valid(), final(self).state().owner() == old(self).state().owner(),
             final(self).state().strict() == old(self).state().strict(), final(self).state().failed() == old(self).state().failed(),
             final(self).state().capacity() == old(self).state().capacity(),
             final(self).state().generation() == old(self).state().generation(),
@@ -77,13 +167,20 @@ impl OwnedStream {
                     && final(self).state().durable() == 0 && !final(self).state().pending() && !final(self).state().closed(),
                 None => final(self).state() == old(self).state() && (old(self).state().closed() || old(self).state().pending()
                     || old(self).state().position() != old(self).state().body().len()
-                    || bytes.len() > old(self).state().capacity() || old(self).state().chunk() == u64::MAX),
+                    || bytes.len() > old(self).state().capacity() || old(self).state().chunk() == u64::MAX
+                    || old(self).read_bytes().len() != 0),
             },
-    { self.stream.advance(bytes) }
+    {
+        if !self.read_buffer.is_empty() { return None; }
+        let out = self.stream.advance(bytes);
+        proof { self.stream.payload_within_capacity(); }
+        out
+    }
 
     pub fn discard_completed(&mut self) -> (ok: bool)
         requires old(self).valid(),
-        ensures final(self).valid(), final(self).key() == old(self).key(), final(self).state().valid(),
+        ensures final(self).valid(), final(self).key() == old(self).key(),
+            final(self).read_bytes() == old(self).read_bytes(), final(self).state().valid(),
             final(self).state().owner() == old(self).state().owner(), final(self).state().capacity() == old(self).state().capacity(),
             final(self).state().chunk() == old(self).state().chunk(), final(self).state().generation() == old(self).state().generation(),
             final(self).state().strict() == old(self).state().strict(), final(self).state().failed() == old(self).state().failed(),
@@ -99,7 +196,8 @@ impl OwnedStream {
 
     pub fn prepare(&mut self, max: usize) -> (out: Option<Ticket>)
         requires old(self).valid(),
-        ensures final(self).valid(), final(self).key() == old(self).key(), final(self).state().valid(), final(self).state().body() == old(self).state().body(),
+        ensures final(self).valid(), final(self).key() == old(self).key(),
+            final(self).read_bytes() == old(self).read_bytes(), final(self).state().valid(), final(self).state().body() == old(self).state().body(),
             final(self).state().chunk() == old(self).state().chunk(), final(self).state().capacity() == old(self).state().capacity(),
             final(self).state().input() == old(self).state().input(),
             final(self).state().completed() == old(self).state().completed(),
@@ -120,7 +218,8 @@ impl OwnedStream {
 
     pub fn complete(&mut self, t: &Ticket, count: usize) -> (ok: bool)
         requires old(self).valid(),
-        ensures final(self).valid(), final(self).key() == old(self).key(), final(self).state().valid(), final(self).state().body() == old(self).state().body(),
+        ensures final(self).valid(), final(self).key() == old(self).key(),
+            final(self).read_bytes() == old(self).read_bytes(), final(self).state().valid(), final(self).state().body() == old(self).state().body(),
             final(self).state().chunk() == old(self).state().chunk(), final(self).state().capacity() == old(self).state().capacity(),
             final(self).state().input() == old(self).state().input(),
             final(self).state().owner() == old(self).state().owner(), final(self).state().strict() == old(self).state().strict(),
@@ -138,7 +237,8 @@ impl OwnedStream {
 
     pub fn cancel(&mut self)
         requires old(self).valid(),
-        ensures final(self).valid(), final(self).key() == old(self).key(), final(self).state().valid(), final(self).state().closed(),
+        ensures final(self).valid(), final(self).key() == old(self).key(),
+            final(self).read_bytes() == old(self).read_bytes(), final(self).state().valid(), final(self).state().closed(),
             final(self).state().body() == old(self).state().body(),
             final(self).state().chunk() == old(self).state().chunk(), final(self).state().capacity() == old(self).state().capacity(),
             final(self).state().input() == old(self).state().input(),
@@ -151,7 +251,8 @@ impl OwnedStream {
 
     pub fn fail_log(&mut self)
         requires old(self).valid(),
-        ensures final(self).valid(), final(self).key() == old(self).key(), final(self).state().valid(), final(self).state().failed(),
+        ensures final(self).valid(), final(self).key() == old(self).key(),
+            final(self).read_bytes() == old(self).read_bytes(), final(self).state().valid(), final(self).state().failed(),
             final(self).state().body() == old(self).state().body(),
             final(self).state().chunk() == old(self).state().chunk(), final(self).state().capacity() == old(self).state().capacity(),
             final(self).state().input() == old(self).state().input(),
@@ -166,7 +267,8 @@ impl OwnedStream {
 
     pub fn acknowledge_receipt(&mut self, authority: &AuthorizedRequest, direction: u8, receipt: &crate::journal::DurableFrame) -> (ok: bool)
         requires old(self).valid(), authority.valid(), receipt.valid(),
-        ensures final(self).valid(), final(self).key() == old(self).key(), final(self).state().valid(),
+        ensures final(self).valid(), final(self).key() == old(self).key(),
+            final(self).read_bytes() == old(self).read_bytes(), final(self).state().valid(),
             ok == (!old(self).state().closed() && !old(self).state().failed() && old(self).state().owner() != 0
                 && old(self).state().owner() == authority.request() && old(self).state().body().len() <= 1048576
                 && direction <= 1 && receipt.record() == crate::framing::encoding(crate::framing::Header {
@@ -180,6 +282,11 @@ impl OwnedStream {
             final(self).state().generation() == old(self).state().generation(), final(self).state().strict() == old(self).state().strict(),
             final(self).state().closed() == old(self).state().closed(), final(self).state().failed() == old(self).state().failed(),
             final(self).state().capacity() == old(self).state().capacity(),
+            final(self).state().completed() == old(self).state().completed(),
+            final(self).state().strict() == old(self).state().strict(),
+            final(self).state().failed() == old(self).state().failed(),
+            final(self).state().closed() == old(self).state().closed(),
+            final(self).state().generation() == old(self).state().generation(),
             ok ==> final(self).state().durable() == old(self).state().body().len()
                 && receipt.acknowledged() == receipt.prefix()
                     + crate::framing::encoding(crate::framing::Header { payload: old(self).state().body().len() as u32,

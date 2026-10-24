@@ -226,7 +226,8 @@ method that preserves the pair invariant and retains the exact underlying
 behavioral contract: rollover, discard, prepare, partial completion, cancellation,
 logging failure, and durable-receipt acknowledgment. `retire` consumes the pair,
 clears exactly its live slot, and preserves the ownership map with that stream
-removed. No new heap allocation is added by this owner.
+removed. The owned read buffer replaces the driver's former allocation; it does not add
+a second per-request payload buffer.
 
 The runtime lease now stores either an unclaimed reservation or this owner. Its
 Drop implementation holds the same registry mutex while retiring the owner; no
@@ -244,3 +245,30 @@ claim, capacity, partial writes, rollover, cancellation, retirement, and slot re
 a compile-fail doctest rejects mutation through the read-only accessor. Four
 mutations check skipped retirement, altered bytes, ignored cancellation, and denied
 valid write progress.
+
+## Verified read-buffer ownership
+
+`OwnedStream` now owns the pending read vector as well as its stream. Its invariant
+bounds their combined logical length by the request capacity and requires an empty
+stream body whenever a read buffer exists. `payload_bound` exposes that theorem.
+`begin_read` discards only completed stream storage before allocating the next
+buffer; it rejects a second pending buffer and specifies exact acceptance.
+`finish_read` checks the reported length, truncates to that prefix, and moves the
+same allocation into the stream. EOF frees the read buffer without advancing the
+chunk; canceled or invalid completion cannot authorize forwarding. Valid completion
+has an exact acceptance contract and preserves byte history and owner identity.
+Retirement explicitly drops any pending read buffer before releasing its slot.
+
+The async driver now calls `Request::read_next`; it no longer owns a separately
+allocated chunk. That helper borrows the owner's mutable slice through the awaited
+read. Rust slices cannot resize their underlying vector. Because vstd's mutable
+slice projection represents future contents abstractly, the accessor's proof states
+preservation conditional on unchanged slice length; Rust/AsyncRead correspondence
+at that boundary remains trusted. No new assumed specification or external-body
+escape was added. Vec backing capacity and allocator behavior are still outside
+Verus's logical-length model; allocation uses `with_capacity` before zero-filling.
+
+Tests exercise partial fill, rejection of an oversized count, EOF, cancellation,
+rollover, and refusal of a second read or external chunk while a buffer is pending.
+Mutations retain an old chunk while allocating, substitute the completed prefix,
+or deny a valid read completion and must fail verification.

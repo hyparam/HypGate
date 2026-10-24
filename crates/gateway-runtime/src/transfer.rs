@@ -3,7 +3,7 @@
 use crate::admission::Request;
 pub use gateway_core::journal::DurableFrame;
 use std::{future::Future, io};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Direction { Upload, Download }
@@ -53,19 +53,14 @@ where R: AsyncRead + Unpin, W: AsyncWrite + Unpin, L: AuditLog {
     if capacity == 0 || guard.request.is_closed() { return Err(TransferError::InvalidState); }
     let mut total = 0u64;
     loop {
-        // Release the previous completed payload before the next allocation.
-        // The verified transition preserves history and rejects unfinished work.
-        if !guard.request.discard_completed() { return Err(TransferError::InvalidState); }
-        // This is not a bound on TLS/HTTP buffers or allocator overhead.
-        let mut buffer = vec![0; capacity];
-        let length = reader.read(&mut buffer).await.map_err(|_| TransferError::Read)?;
+        // The verified owner drops completed stream storage before allocating
+        // its next read buffer, then moves the filled prefix back into the stream.
+        let length = guard.request.read_next(reader).await?;
         if length == 0 {
             guard.armed = false;
             return Ok(TransferStats { accepted_bytes: total, audit_gap: guard.request.log_failed() });
         }
-        buffer.truncate(length);
         let next_total = total.checked_add(length as u64).ok_or(TransferError::CounterExhausted)?;
-        guard.request.advance(buffer).ok_or(TransferError::InvalidState)?;
         if !guard.request.log_failed() {
             match guard.request.audit_current(log, direction).await {
                 Ok(()) | Err(TransferError::Log) => {},

@@ -16,7 +16,7 @@ at most 32 KiB of frame data into its own bounded copy. One DiskLog owns one dis
 
 | Retained object | Budget and ownership | Evidence and limitation |
 | --- | --- | --- |
-| Core chunk or next transfer buffer | At most K per admitted exchange in the production sequential driver | `transfer::copy_body` discards the completed core payload before allocating the next read buffer, then moves it into the stream. `Request::advance` rejects excessive vector capacity. The ghost theorem covers logical lengths, not allocator size. |
+| Core chunk or next transfer buffer | At most K per admitted exchange in the production sequential driver | `OwnedStream::payload_bound` proves the combined stream/read-buffer logical length stays within K, with only one nonempty at a time. The driver reads into the owner and verified completion moves the filled prefix into its stream. External `Request::advance` still rejects excessive vector capacity. Slice I/O correspondence, Vec backing capacity, and allocator size remain trusted. |
 | Inbound/outbound reader copies | At most 32 KiB of copied payload per reader; conservatively two readers per admitted exchange | `http_body::Reader` copies accepted visible frame bytes and releases its input reference before yielding; it clears the copy immediately when consumed. It cannot retain a large input owner through a small slice. Upload and download run sequentially; the inbound reader object remains alive. Allocator overhead and references retained inside Hyper remain separate. |
 | Client response channel | One data message of at most 16 KiB per connection with a response body | Created before authorization but after acquiring a worker permit in `Gateway::handle`; charging this solely to authorized request leases is incorrect. A consumed message leaves this queue and becomes Hyper-owned. End markers carry no payload. |
 | Provider upload channel | One data message of at most 16 KiB per admitted exchange | Constructed in `HttpsTransport::run`; `Writer::poll_write` reserves queue credit before copying bytes. Hyper may retain previously consumed frames outside the channel. |
@@ -45,8 +45,9 @@ frame, not the erased acknowledged-history prefix. `covers_categories` prevents
 an accidentally omitted category from silently weakening the modeled total.
 
 This is a size-composition proof, not proof that every async runtime state supplies
-those snapshots. In particular, each request's stream body and pending read buffer
-must be accounted for exclusively, queue reservations must precede encoding, the
+those snapshots. The verified owner now enforces exclusive accounting of each request's stream body
+and pending read buffer under the mutable-slice length contract. Queue reservations
+must still precede encoding, the
 worker must retain only one active frame, and receipts must be counted until
 consumed or dropped. The runtime correspondence and all excluded allocations
 below remain separate obligations.
