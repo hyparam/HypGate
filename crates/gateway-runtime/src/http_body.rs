@@ -121,6 +121,73 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test]
+    async fn incoming_body_read_ahead_stays_bounded_with_a_slow_reader() {
+        use std::sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}};
+        struct Input {
+            wire: Bytes, read: Arc<AtomicUsize>, dropped: Arc<AtomicBool>, written: bool,
+        }
+        impl Drop for Input {
+            fn drop(&mut self) { self.dropped.store(true, Ordering::SeqCst); }
+        }
+        impl AsyncRead for Input {
+            fn poll_read(mut self: Pin<&mut Self>, _: &mut Context<'_>, out: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+                if !self.written || self.wire.is_empty() { return Poll::Pending; }
+                let n = out.remaining().min(self.wire.len());
+                out.put_slice(&self.wire[..n]); self.wire.advance(n);
+                self.read.fetch_add(n, Ordering::SeqCst);
+                Poll::Ready(Ok(()))
+            }
+        }
+        impl AsyncWrite for Input {
+            fn poll_write(mut self: Pin<&mut Self>, _: &mut Context<'_>, data: &[u8]) -> Poll<io::Result<usize>> {
+                self.written = true; Poll::Ready(Ok(data.len()))
+            }
+            fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> { Poll::Ready(Ok(())) }
+            fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> { Poll::Ready(Ok(())) }
+        }
+        let read = Arc::new(AtomicUsize::new(0));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let size = 2 * 1024 * 1024;
+        let head = format!("HTTP/1.1 200 OK\r\ncontent-length: {size}\r\nx-retained: value\r\n\r\n");
+        let mut wire = head.as_bytes().to_vec(); wire.resize(head.len() + size, 42);
+        let input = Input { wire: Bytes::from(wire), read: read.clone(), dropped: dropped.clone(), written: false };
+        let (mut sender, connection) = hyper::client::conn::http1::Builder::new()
+            .max_buf_size(MAX_INPUT_FRAME).max_header_size(MAX_INPUT_FRAME).max_headers(100).writev(true)
+            .handshake(hyper_util::rt::TokioIo::new(crate::http_io::ReadLimited::new(input))).await.unwrap();
+        let mut connection = Box::pin(connection);
+        let mut response = Box::pin(sender.send_request(http::Request::new(http_body_util::Empty::<Bytes>::new())));
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        let mut received = None;
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+            assert!(connection.as_mut().poll(&mut cx).is_pending());
+            if let Poll::Ready(result) = response.as_mut().poll(&mut cx) { received = Some(result.unwrap()); break; }
+        }
+        let (parts, incoming) = received.expect("response head delivered").into_parts();
+        let mut reader = Reader::new(incoming);
+        let mut consumed = 0;
+        // Hold the original parsed header view while the body forces replacement
+        // parser allocations. Each round consumes only one application byte.
+        for round in 0..64 {
+            let before = read.load(Ordering::SeqCst);
+            for _ in 0..32 {
+                tokio::task::yield_now().await;
+                assert!(connection.as_mut().poll(&mut cx).is_pending());
+            }
+            let after = read.load(Ordering::SeqCst);
+            assert!(after - head.len() <= consumed + 4 * MAX_INPUT_FRAME);
+            if round > 1 { assert_eq!(after, before, "no extra reads while detached remainder is full"); }
+            let mut byte = [0]; let mut out = ReadBuf::new(&mut byte);
+            assert!(matches!(Pin::new(&mut reader).poll_read(&mut cx, &mut out), Poll::Ready(Ok(()))));
+            assert_eq!(out.filled(), &[42]); consumed += 1;
+        }
+        assert_eq!(parts.headers["x-retained"], "value");
+        assert!(read.load(Ordering::SeqCst) < head.len() + size);
+        drop(parts); drop(reader); drop(response); drop(sender); drop(connection);
+        assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
     async fn queued_hyper_output_preserves_duplex_bytes_with_short_nonvectored_writes() {
         use hyper_util::rt::TokioIo;
         struct ShortWrites(tokio::io::DuplexStream);

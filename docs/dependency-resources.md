@@ -272,6 +272,66 @@ Composition must count distinct live backing owners, shared control blocks,
 detached application copies, and canceled-task tails; allocator overhead remains
 excluded. Recheck every read call site and bytes/Vec growth branch on upgrades.
 
+### Live parser backing owners
+
+For one production HTTP/1 exchange, the following locations can hold distinct
+allocations originating in `Buffered::read_buf`. Several locations often share
+one allocation; charging them independently is conservative.
+
+| Location | Maximum distinct parser allocations | Lifetime |
+| --- | ---: | --- |
+| Current parser buffer | 1 | Connection driver, including its cleanup tail |
+| Parsed request/response head | 1 | Original Parts until the consuming metadata boundary completes |
+| Incoming-body channel item or producer's decoded data frame | 1 | Delivery, rejection, or final channel destruction |
+| Reader's transient input data | 1 | Synchronous bounded copy; released before that poll returns |
+
+`role.rs` splits a complete head from one contiguous read buffer. Its retained
+HeaderValue slices all refer to that allocation; field count does not multiply
+parser backing owners. Request URI/response reason-phrase copies and collection
+storage are separate categories. Production disables header-case/order extensions
+and installs no informational-response callback; skipped 1xx heads drop before
+the next parse iteration. Only one final head is delivered per connection.
+
+Hyper's `body/chan.rs` has one `item` slot. The sole producer in
+`dispatch.rs::poll_read` checks `poll_ready` before decoding the next frame and
+moves that frame into `try_send_data`; there is no independent producer backlog.
+Once the reader takes a frame, the producer may fill the slot again while the
+reader copies. Both must be charged. Our Reader retains only its detached copy
+after the poll, and never stores the source frame across an await. Decoder trailer
+assembly copies bytes into a separate buffer; it does not retain prior data
+frames or parser slices. Trailer storage/metadata remain separate obligations.
+
+Receiver cancellation does **not** immediately release Hyper's queued item:
+`Receiver::drop` marks it closed but does not take `state.item`. An outstanding
+sender can therefore keep the item alive until it is dropped. The producer checks
+receiver closure before another decode; a cancellation racing a decode returns
+the rejected frame for local destruction. Keep the channel item charged through
+this tail, even after the application has released its request slot. This differs
+from our outgoing mailbox, whose receiver drop extracts its pending item.
+
+These four locations give a conservative 512 KiB of requested parser backing
+capacity per live exchange, using the per-allocation bound above. During a
+replacement, charge the other three locations at 128 KiB each and old/new parser
+storage together at 192 KiB: 576 KiB. In the shared-replacement branch the new
+allocation is at most 64 KiB; in the unique branch the old allocation is below
+64 KiB. This also covers overlap rather than silently reclaiming the old buffer.
+
+This is a trusted source/ownership argument for this adapter, not a Verus theorem
+or a per-connection total-memory bound. It excludes detached Reader copies,
+trailer buffers/maps, errors, metadata/control objects, allocator internals, TLS,
+and other HTTP output storage. Do not multiply it solely by active request count:
+inbound connections and canceled connection/channel tails have separate lifetimes.
+It assumes no arbitrary user extension retains additional raw Incoming frames.
+
+`incoming_body_read_ahead_stays_bounded_with_a_slow_reader` keeps the original
+response header alive, offers a two-MiB eager body, repeatedly polls the actual
+driver with renewed cooperative budgets, and consumes one byte per round.
+Read-ahead reaches a plateau while the detached remainder is occupied; the test
+also checks exact bytes and destruction of the I/O owner on cancellation. This
+measures read-ahead and task destruction, **not** private allocation identities or
+heap capacity. The separate tracked-owner Reader test checks immediate release
+of a large source owner after copying a small visible frame.
+
 ### Header collections and parser scratch
 
 The explicit wire-head limit includes the request/status line, field separators,

@@ -16,7 +16,7 @@ another milestone or treat adapter assumptions as proved runtime behavior.
 | Mutation tests reject corruption, cross-request writes, duplicate advancement, capacity violations, and strict-mode forwarding before durability | All 139 mutations are rejected by proof obligations; the script verifies the unmodified library first. Named defects include wrong owner/generation, full-write substitution, omitted payload/receipt storage, queue overwrite/reopening, and advancing beyond durability. Mutations test the strength of specified contracts, not the completeness of the threat model. | Covered for listed defect classes |
 | Verified admission issues private authorization tied to identity/policy/origin/credential; candidate configuration cannot expand root grants | Policy validation, authentication, and tenant-scoped authorization establish those relationships. AuthorizedRequest construction is private and its policy borrow binds the immutable snapshot. Runtime dispatch consumes PreparedRequest; concrete URI/DNS/TLS/secret binding remains trusted and tested. | Covered at the verified admission boundary |
 
-The current workspace has 159 passing regular tests and five compile-fail doctests.
+The current workspace has 160 passing regular tests and five compile-fail doctests.
 The raw-construction, raw-claim, and raw-release negative examples require the
 private-method diagnostic; existing examples prohibit mutable stream extraction
 and completing a read while its mutable buffer borrow remains live. Low-level
@@ -57,7 +57,10 @@ without reopening the external API.
    requests have also been inventoried. Pinned Rust/bytes source now bounds each
    header/parser backing allocation request at 128 KiB, with 192 KiB allowed for
    a unique-buffer replacement. These exclude allocator overhead and do not
-   bound the count of shared parser allocations. Live parser backing-owner counts,
+   by themselves bound the count of shared parser allocations. A separate
+   four-location ownership audit now budgets 512 KiB of parser backing requests
+   per live exchange (576 KiB during replacement), including delayed channel
+   cleanup. Trailer storage and composition across connection/task lifetimes,
    metadata collections, TLS handshake/cache active owners, task/waker storage,
    and allocator/OS storage remain outside the subtotal. The dependency audit
    distinguishes known control-object counts and stack reservations from unresolved
