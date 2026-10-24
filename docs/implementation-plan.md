@@ -5,7 +5,7 @@
 | 1. Verified streaming core | 68/68 | ✓ |
 | 2. Minimal working gateway | 6/6 | ✓ |
 | 3. Crash-safe logging | 15/15 | ✓ |
-| 4. Availability hardening | 14/16 | ☐ |
+| 4. Availability hardening | 15/16 | ☐ |
 | 5. Auditable first release | 6/9 | ☐ |
 
 Progress counts completed rows in each milestone's table below. Rows are not
@@ -253,7 +253,7 @@ records the remaining shutdown/resource composition obligations.
 | ✓ | TLS handshake CPU work isolated on four dedicated threads with 32 retained job credits; saturation, cancellation, panic, and runtime-shutdown regressions. |
 | ✓ | Two ten-minute overload runs, each five minutes per logging mode, preserve active streams and health while rejecting over 1.4 million total excess requests; dedicated CI soak. |
 | ☐ | Complete broader fault and load coverage against the exit criteria. |
-| ☐ | Complete shutdown and resource proofs under explicit scheduler/I/O assumptions. |
+| ✓ | Verified permanent worker-admission closure and drain rank, with a conditional shutdown/resource composition argument and shared-listener cancellation regressions under explicit scheduler/I/O assumptions. |
 
 Enforce global and per-request limits, backpressure, admission control, deadlines,
 and bounded worker counts. A timed-out disk operation must not spawn an unbounded

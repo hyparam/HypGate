@@ -1,14 +1,16 @@
 //! Worker credits use verified registry transitions. Mutex serialization, private
 //! key ownership, field drop order, and task cancellation remain trusted Rust.
-use gateway_core::resource::{RequestKey, ResourceAdmission};
+use gateway_core::{resource::RequestKey, drain::DrainRegistry};
 use std::{future::Future, pin::Pin, sync::{Arc, Mutex}, task::{Context, Poll}};
 use tokio_util::task::{TaskTracker, task_tracker::TaskTrackerToken};
 
-pub(super) struct WorkerSlots { registry: Mutex<ResourceAdmission> }
+pub(super) struct WorkerSlots { registry: Mutex<DrainRegistry> }
 
-// Tracking must disappear before another worker can reuse this credit.
-pub(super) struct WorkerLease { _tracked: TaskTrackerToken, _credit: WorkerCredit }
-struct WorkerCredit { slots: Arc<WorkerSlots>, key: RequestKey }
+// Unregister and release under one mutex: replacements cannot overlap tracking,
+// and a drain observer can synchronize with completion of credit destruction.
+pub(super) struct WorkerLease {
+    tracked: Option<TaskTrackerToken>, slots: Arc<WorkerSlots>, key: RequestKey,
+}
 
 // Unlike a lease local inside an async block, this field order also covers
 // captured values in a never-polled or partly completed future.
@@ -25,10 +27,11 @@ impl WorkerLease {
     }
 }
 
-impl Drop for WorkerCredit {
+impl Drop for WorkerLease {
     fn drop(&mut self) {
         // Never recover poisoned state just to return credit.
         if let Ok(mut registry) = self.slots.registry.lock() {
+            self.tracked.take();
             let released = registry.release(&self.key);
             debug_assert!(released, "worker credit must own its registry slot");
         }
@@ -38,13 +41,29 @@ impl Drop for WorkerCredit {
 impl WorkerSlots {
     pub(super) fn new(limit: usize) -> Arc<Self> {
         // Worker keys never create streams or allocate payload buffers.
-        Arc::new(Self { registry: Mutex::new(ResourceAdmission::new(limit, 0)) })
+        Arc::new(Self { registry: Mutex::new(DrainRegistry::new(limit)) })
     }
-    pub(super) fn healthy(&self) -> bool { !self.registry.is_poisoned() }
+    pub(super) fn healthy(&self) -> bool {
+        self.registry.lock().is_ok_and(|registry| !registry.is_closed())
+    }
+    pub(super) fn close(&self, tracker: &TaskTracker) {
+        // The same mutex covers admission through tracker registration. Once
+        // closed, a zero tracker cannot race with a late successful acquire.
+        if let Ok(mut registry) = self.registry.lock() { registry.close(); }
+        tracker.close();
+    }
+    pub(super) async fn wait_drained(&self, tracker: &TaskTracker) {
+        tracker.wait().await;
+        // A notified waiter may run before the notifying destructor returns.
+        // Synchronize with the registry release protected by that same lock.
+        let _guard = self.registry.lock();
+    }
     pub(super) fn acquire(self: &Arc<Self>, tracker: &TaskTracker) -> Option<WorkerLease> {
-        let key = self.registry.lock().ok()?.acquire()?;
-        let credit = WorkerCredit { slots: self.clone(), key };
-        Some(WorkerLease { _tracked: tracker.token(), _credit: credit })
+        let mut registry = self.registry.lock().ok()?;
+        let key = registry.acquire()?;
+        let lease = WorkerLease { tracked: Some(tracker.token()), slots: self.clone(), key };
+        drop(registry);
+        Some(lease)
     }
     #[cfg(test)]
     pub(super) fn usage(&self) -> Option<(usize, usize)> {

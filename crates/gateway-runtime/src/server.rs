@@ -23,6 +23,7 @@ pub struct Gateway {
     transport: HttpsTransport,
     log: DiskLog,
     workers: TaskTracker,
+    cancel_workers: tokio_util::sync::CancellationToken,
     worker_slots: Arc<WorkerSlots>,
     connection_slots: std::sync::OnceLock<Arc<ConnectionSlots>>,
     audit_gaps: AtomicU64,
@@ -33,6 +34,7 @@ impl Gateway {
         let limit = config.usage().map(|(_, limit)| limit).unwrap_or(0);
         Arc::new(Self { worker_slots: WorkerSlots::new(limit), config: Arc::new(config), transport, log, workers: TaskTracker::new(),
             connection_slots: std::sync::OnceLock::new(),
+            cancel_workers: tokio_util::sync::CancellationToken::new(),
             audit_gaps: AtomicU64::new(0), failed_exchanges: AtomicU64::new(0) })
     }
     pub fn audit_gaps(&self) -> u64 { self.audit_gaps.load(Ordering::Relaxed) }
@@ -70,7 +72,12 @@ impl Gateway {
         let (head, headers) = oneshot::channel();
         let (writer, body) = http_body::channel(16 * 1024);
         let app = self.clone();
+        let cancel = self.cancel_workers.clone();
         let task = lease.spawn(async move {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {},
+                _ = async {
             let mut output = Output { head: Some(head), writer };
             let prepared = match http_boundary::prepare_request_parts(&app.config, parts) {
                 Ok(p) => p,
@@ -104,6 +111,8 @@ impl Gateway {
                     // After headers, dropping the writer makes the body fail;
                     // never turn a truncated generation into successful HTTP EOF.
                 }
+            }
+                } => {},
             }
         });
         let guard = AbortOnDrop(Some(task));
@@ -203,6 +212,9 @@ impl AsyncWrite for Output {
 /// may outlive it, and the shared logger's explicit shutdown is skipped. The
 /// first invocation fixes the connection limit for this Gateway. Later invocations
 /// must use the same limit and share credits, including canceled-task cleanup.
+/// Graceful shutdown permanently closes shared worker admission and cancels
+/// remaining shared workers after the drain window; other invocations still
+/// own their listeners. A graceful restart requires a fresh Gateway/logger.
 pub async fn serve(listener: TcpListener, app: Arc<Gateway>, connections: usize,
     connection_deadline: Duration, shutdown: impl Future<Output = ()>) -> io::Result<()> {
     if connections == 0 || connections > 65536 || connection_deadline.is_zero()
@@ -234,11 +246,16 @@ pub async fn serve(listener: TcpListener, app: Arc<Gateway>, connections: usize,
         }
     };
     drop(listener);
-    // A bounded drain then abort: no request is replayed during shutdown.
-    if tokio::time::timeout(Duration::from_secs(10), async { while tasks.join_next().await.is_some() {} }).await.is_err() {
+    app.worker_slots.close(&app.workers);
+    // One shared drain window covers connections and workers from all listeners.
+    let drain_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    if tokio::time::timeout_at(drain_deadline, async { while tasks.join_next().await.is_some() {} }).await.is_err() {
         tasks.abort_all(); while tasks.join_next().await.is_some() {}
     }
-    app.workers.close(); app.workers.wait().await;
+    if tokio::time::timeout_at(drain_deadline, app.worker_slots.wait_drained(&app.workers)).await.is_err() {
+        app.cancel_workers.cancel();
+        app.worker_slots.wait_drained(&app.workers).await;
+    }
     let log_result = app.log.shutdown(Duration::from_secs(2)).await;
     result.and(log_result)
 }

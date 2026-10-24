@@ -184,6 +184,10 @@ identifies excluded metadata and active owners.
   with validated limits), plus vector spare capacity and mutex/registry metadata.
   Acquisition scans at most R slots under a synchronous mutex; it creates no async
   waiter. Each `WorkerTask` additionally boxes its future to enforce safe drop order.
+- The shared shutdown token adds one token state per Gateway and at most R
+  cancellation-wait registrations in credited worker futures; each serving
+  invocation adds its tracker drain waiter. Token clones share state and never
+  create child-token trees. These are control/waker objects, not payload bytes.
 - Tokio task/future state, task trackers, queue nodes, channel permits/oneshots,
   thread stacks, allocator rounding/fragmentation, and runtime bookkeeping.
   The [channel inventory](dependency-resources.md#channel-control-storage) now

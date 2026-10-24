@@ -57,7 +57,7 @@ valid earlier records remain reported. Scanning never replays or truncates data.
 See the [storage crash contract](storage-crash-contract.md) for its limits.
 
 GET `/healthz` reports process responsiveness. GET `/readyz` fails when the
-admission or worker registry is poisoned in either logging mode, or when the logger is
+admission or worker registry is poisoned, or worker admission is closed for shutdown, in either logging mode, or when the logger is
 unhealthy in strict mode. Availability mode stays ready despite logging loss but
 never overrides admission failure.
 Readiness does not yet probe upstream availability, request capacity, or disk space.
@@ -71,7 +71,7 @@ or credentials. It also exposes `soundgate_requests_active`,
 verified count of live registry slots, sampled under the runtime lock. Poisoned
 admission omits the occupancy gauges and reports health zero. These gauges are
 not process memory or connection counts. `soundgate_worker_admission_healthy`
-separately reports whether the worker registry is unpoisoned; worker registry
+separately reports whether the worker registry is unpoisoned and open; worker registry
 failure also makes readiness fail in both logging modes. Counters live in memory and crashes reset them. Failed exchanges
 count transport errors returned to the worker, not all externally canceled tasks.
 The gap counter increments once per availability-mode request at its first failed
@@ -138,3 +138,14 @@ Both inbound and upstream HTTP/1 heads are limited to 32 KiB on the wire and
 includes the request/status line and delimiters. Oversized inbound heads receive
 431 before dispatch; oversized upstream heads fail the exchange before forwarding
 response headers. These parser limits do not cap request or response body length.
+
+
+Graceful shutdown permanently closes worker admission across every listener that
+shares the Gateway. One ten-second window covers local connections and shared
+workers; remaining workers then receive cancellation, including those whose
+connections belong to another listener. Each listener still owns its own socket
+and must be signaled to stop accepting. Restart after graceful shutdown requires a
+fresh Gateway and log file. The [conditional shutdown proof](shutdown-proof.md)
+explains scheduler/destructor assumptions, poison behavior, and retained disk,
+DNS, and TLS work. The ten-second drain plus two-second logger window is not a
+hard twelve-second process-exit guarantee.

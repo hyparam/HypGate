@@ -39,7 +39,7 @@ async fn send(port: u16, path: &str, token: &str, method: &str) -> (Response<Inc
 }
 
 #[derive(Clone, Copy)]
-enum Stop { None, Disconnect, Drain, Abort }
+enum Stop { None, Disconnect, Drain, Abort, SharedAbort }
 
 async fn exercise(availability: bool, failed_log: bool, truncated: bool, stop: Stop) {
     tokio::time::timeout(Duration::from_secs(25), async {
@@ -54,11 +54,21 @@ async fn exercise(availability: bool, failed_log: bool, truncated: bool, stop: S
         let log = DiskLog::create(&path, 4, Duration::from_secs(2)).unwrap();
         if failed_log { log.inject_failure(); }
         // Shutdown tests must expire through the drain, not the transport deadline.
-        let deadline = if matches!(stop, Stop::Drain | Stop::Abort) { 60 } else { 5 };
+        let deadline = if matches!(stop, Stop::Drain | Stop::Abort | Stop::SharedAbort) { 60 } else { 5 };
         let app = Gateway::new(config, HttpsTransport::with_roots(roots, Duration::from_secs(deadline)).unwrap(), log);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap(); let port = listener.local_addr().unwrap().port();
         let (shutdown, stopped) = oneshot::channel();
         let gateway = tokio::spawn(serve(listener, app.clone(), 4, Duration::from_secs(deadline + 3), async { let _ = stopped.await; }));
+        let shutdown_port = port;
+        let mut shared = None;
+        let port = if matches!(stop, Stop::SharedAbort) {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let (shutdown, stopped) = oneshot::channel();
+            let task = tokio::spawn(serve(listener, app.clone(), 4, Duration::from_secs(63), async { let _ = stopped.await; }));
+            shared = Some((shutdown, task));
+            port
+        } else { port };
         for (path, token, method, status) in [("/healthz", "", "GET", 200), ("/readyz", "", "GET", if failed_log && !availability { 503 } else { 200 }),
             ("/routes/7", "wrong", "POST", 401), ("/routes/99", "gateway", "POST", 401)] {
             let (r, c) = send(port, path, token, method).await;
@@ -113,13 +123,13 @@ async fn exercise(availability: bool, failed_log: bool, truncated: bool, stop: S
         assert!(metrics.contains("soundgate_admission_healthy 1\n"));
         assert!(metrics.contains("soundgate_requests_active 1\n"));
         assert!(metrics.contains("soundgate_requests_limit 1\n"));
-        if matches!(stop, Stop::Drain | Stop::Abort) {
+        if matches!(stop, Stop::Drain | Stop::Abort | Stop::SharedAbort) {
             let started = tokio::time::Instant::now();
             shutdown.send(()).unwrap();
             // Observe listener closure before releasing the provider. This proves
             // the stream is completing during drain, rather than before shutdown.
             tokio::time::timeout(Duration::from_secs(1), async {
-                while TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+                while TcpStream::connect(("127.0.0.1", shutdown_port)).await.is_ok() {
                     tokio::task::yield_now().await;
                 }
             }).await.unwrap();
@@ -140,6 +150,12 @@ async fn exercise(availability: bool, failed_log: bool, truncated: bool, stop: S
                 drop(release);
             }
             connection.await.unwrap(); upstream_task.await.unwrap();
+            if let Some((shutdown, task)) = shared {
+                let (response, connection) = send(port, "/readyz", "", "GET").await;
+                assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+                response.collect().await.unwrap(); connection.await.unwrap();
+                shutdown.send(()).unwrap(); task.await.unwrap().unwrap();
+            }
             assert!(app.workers.is_empty());
             assert!(app.config.admit(b"gateway", 7).is_ok());
             return;
@@ -316,6 +332,11 @@ async fn shutdown_drains_active_response_without_truncation() {
 #[tokio::test]
 async fn shutdown_aborts_stalled_response_after_drain_and_releases_request() {
     exercise(false, false, false, Stop::Abort).await;
+}
+
+#[tokio::test]
+async fn shutdown_cancels_stalled_workers_owned_by_another_listener() {
+    for availability in [false, true] { exercise(availability, false, false, Stop::SharedAbort).await; }
 }
 
 mod benchmark;
@@ -732,5 +753,43 @@ async fn serve_invocations_share_connection_credit_and_reject_limit_changes() {
         }
         assert!(app.log.healthy());
         app.log.shutdown(Duration::from_secs(1)).await.unwrap();
+    }).await.unwrap();
+}
+
+#[tokio::test]
+async fn shutdown_closes_shared_worker_admission_before_waiting_for_existing_work() {
+    tokio::time::timeout(Duration::from_secs(8), async {
+        for availability in [false, true] {
+            let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let dir = TempDir::new();
+            let app = Gateway::new(config_with_limits(upstream.local_addr().unwrap().port(), availability, 2, 16384),
+                HttpsTransport::with_roots(RootCertStore::empty(), Duration::from_secs(2)).unwrap(),
+                DiskLog::create(&dir.0.join("shutdown.log"), 2, Duration::from_secs(1)).unwrap());
+            let first = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let second = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = second.local_addr().unwrap().port();
+            let (stop_first, first_stopped) = oneshot::channel();
+            let (stop_second, second_stopped) = oneshot::channel();
+            let lease = app.worker_slots.acquire(&app.workers).unwrap();
+            let first = tokio::spawn(serve(first, app.clone(), 8, Duration::from_secs(3), async { let _ = first_stopped.await; }));
+            let second = tokio::spawn(serve(second, app.clone(), 8, Duration::from_secs(3), async { let _ = second_stopped.await; }));
+            stop_first.send(()).unwrap();
+            while app.worker_slots.healthy() { tokio::task::yield_now().await; }
+            assert!(!first.is_finished()); // Existing credit still protects drain.
+            assert!(app.log.healthy());
+            for route in ["/routes/7", "/readyz"] {
+                let (response, connection) = send(port, route, "gateway", "GET").await;
+                assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+                response.collect().await.unwrap(); connection.await.unwrap();
+            }
+            assert!(app.worker_slots.acquire(&app.workers).is_none());
+            assert_eq!(app.worker_slots.usage(), Some((1, 2)));
+            drop(lease);
+            first.await.unwrap().unwrap();
+            assert_eq!(app.worker_slots.usage(), Some((0, 2)));
+            assert!(app.workers.is_empty());
+            assert!(tokio::time::timeout(Duration::from_millis(20), upstream.accept()).await.is_err());
+            stop_second.send(()).unwrap(); second.await.unwrap().unwrap();
+        }
     }).await.unwrap();
 }

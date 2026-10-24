@@ -15,6 +15,11 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("drain.rs", "drain_denies_open_capacity", "if self.closed { None } else", "if true { None } else"),
+    ("drain.rs", "drain_admits_after_close", "if self.closed { None } else", "if false { None } else"),
+    ("drain.rs", "drain_close_is_ignored", "{ self.closed = true; }", "{ }"),
+    ("drain.rs", "drain_release_reopens", "{ self.registry.release(key) }", "{ self.closed = false; self.registry.release(key) }"),
+    ("drain.rs", "drain_forgets_release", "{ self.registry.release(key) }", "{ false }"),
     ("mailbox.rs", "mailbox_sends_after_receiver_close", "if !self.sender_open || !self.receiver_open || self.value.is_some()", "if !self.sender_open || self.value.is_some()"),
     ("mailbox.rs", "mailbox_overwrites_full_slot", "if !self.sender_open || !self.receiver_open || self.value.is_some()", "if !self.sender_open || !self.receiver_open"),
     ("mailbox.rs", "mailbox_denies_valid_send", "if !self.sender_open || !self.receiver_open || self.value.is_some()", "if true"),
@@ -171,6 +176,12 @@ MUTATIONS = [
 def command(source):
     return [VERUS, str(source / "lib.rs"), "--crate-type", "lib", "--triggers-mode", "silent"]
 
+
+# Optional focused reruns after changing one proof module; default remains all.
+if selected := os.environ.get("MUTATION_FILTER"):
+    MUTATIONS = [m for m in MUTATIONS if selected in m[0] or selected in m[1]]
+    if not MUTATIONS:
+        raise SystemExit(f"no mutations match {selected!r}")
 
 subprocess.run(command(SOURCE), check=True)
 with tempfile.TemporaryDirectory(prefix="gateway-mutations-") as temporary:

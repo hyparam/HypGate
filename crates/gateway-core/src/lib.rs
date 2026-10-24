@@ -4,6 +4,7 @@
 use vstd::prelude::*;
 
 pub mod resource;
+pub mod drain;
 pub mod stream;
 pub mod policy;
 pub mod journal;
