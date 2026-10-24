@@ -49,6 +49,54 @@ some process failures, not host, disk, proxy, network, or regional loss. Host-le
 redundancy needs another TLS-protected deployment boundary; the executable must
 remain loopback-bound. Shared upstream or storage failures can affect both instances.
 
+## Clean-environment reproduction
+
+`scripts/check_deployment.sh` performs the documented operator path from a fresh
+checkout with nothing but bash, the pinned Rust toolchain, curl, and openssl. It
+builds the release executable with locked dependencies, generates a 32-byte gateway
+token and its SHA-256 digest, writes the [documented root policy and candidate
+routes](running.md#configuration-example) with only the digest and the upstream
+destination substituted, and creates a mode-700 log directory. The destination is a
+closed loopback port, so the check makes no provider or external network connection
+and needs no real credential; `PROVIDER_KEY` holds a placeholder.
+
+It then checks that startup refuses a non-loopback listen address, a missing provider
+credential, and an existing log path without touching that file; that the new audit
+log is created with mode 600; that `/healthz`, `/readyz`, and `/metrics` report a
+healthy strict-mode instance with 32 request slots; that requests without
+credentials, with a wrong token, with a token but no grant, with the wrong method,
+or outside `/routes/<n>` receive 401, 401, 401, 405, and 400 and that an authorized
+request whose upstream refuses the connection receives 502, is counted once as a
+failed exchange, releases its slot, and leaves no audit gap. When HAProxy is on
+`PATH` or named by `SOUNDGATE_HAPROXY`, it also starts a standby instance, generates
+fixture TLS material, validates and runs the [example configuration](../deploy/haproxy.cfg)
+with only ports and the certificate path substituted, checks that the public frontend
+exposes only `POST /routes/<n>`, shuts the primary down with SIGTERM, and verifies
+that a new request reaches the standby without any replayed exchange. Finally every
+gateway must exit with status zero after SIGTERM, and `soundgate scan` must report a
+complete, record-free log without changing its bytes.
+
+`deploy/Dockerfile` reproduces the same path inside a container built from the
+official Rust 1.99.1 image pinned by digest. The build installs the checksum-pinned
+Verus release, builds the executable, runs the workspace tests, and verifies the
+production core; running the image executes the deployment check with the
+distribution HAProxy. Verus is skipped on architectures without a pinned Linux
+binary, so run the image under `linux/amd64` to reproduce the proofs. Mutation
+checks remain in CI, which runs the script directly on Ubuntu 24.04 and then builds
+and runs the container on every push.
+
+```sh
+bash scripts/check_deployment.sh
+docker build --file deploy/Dockerfile --tag soundgate-deploy .
+docker run --rm soundgate-deploy
+```
+
+The check demonstrates provisioning, fail-closed startup, authorization, honest
+upstream failure, proxy policy, standby routing, graceful shutdown, and read-only
+scanning on a clean machine. It does not exercise a live provider, real certificates,
+a service manager, log retention, or host-level redundancy; those remain operator
+obligations described above and in [running the gateway](running.md).
+
 ## Reproduction and limits
 
 Run `python3 scripts/check_proxy.py --haproxy /path/to/haproxy` with Python 3 and

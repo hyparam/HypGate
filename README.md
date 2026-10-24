@@ -162,3 +162,6 @@ also passed; measurements and limits are in the benchmark notes.
 These counts are checks, not a count of independent security guarantees.
 
 [Automated checks](.github/workflows/ci.yml) reproduce the tests and proofs on Linux.
+`bash scripts/check_deployment.sh` reproduces the documented deployment from a clean
+checkout, and `deploy/Dockerfile` repeats the build, tests, proofs, and that check in
+a digest-pinned container; see [clean-environment reproduction](docs/deployment.md#clean-environment-reproduction).

@@ -6,7 +6,7 @@
 | 2. Minimal working gateway | 6/6 | ✓ |
 | 3. Crash-safe logging | 15/15 | ✓ |
 | 4. Availability hardening | 16/16 | ✓ |
-| 5. Auditable first release | 7/9 | ☐ |
+| 5. Auditable first release | 8/9 | ☐ |
 
 Progress counts completed rows in each milestone's table below. Rows are not
 weighted estimates of effort or proof coverage; an open row can still block the
@@ -23,8 +23,9 @@ Milestone 1 is closed under the explicit assumptions in the
 evidence. Milestone 4 is closed under its [availability audit](availability-audit.md)
 and explicit scheduler/I/O assumptions. Next focus is milestone 5, the auditable release;
 the [end-to-end audit](end-to-end-audit.md) now traces one request from authorization
-to the exact network and disk calls, and the remaining rows are clean-environment
-deployment and broader benchmarks.
+to the exact network and disk calls, a [clean-environment deployment](deployment.md#clean-environment-reproduction)
+is scripted and reproduced in CI and a pinned container, and the remaining row is
+broader benchmarks.
 See the [streaming-core progress notes](streaming-core-progress.md) and
 [authorization core](authorization-core.md) for completed increments and remaining gaps.
 The [runtime ownership layer](runtime-ownership.md) now ties authorization, a single
@@ -285,7 +286,7 @@ Exit criteria:
 | ✓ | Local TLS/disk latency and process-RSS baseline for both modes. |
 | ✓ | Concurrent stalled-sync/queue-saturation test in both logging modes. |
 | ✓ | Paced-peer and permanent-log-failure workload results, with a separate paced strict-mode RSS measurement. |
-| ☐ | Demonstrate reproducible full deployment from a clean environment. |
+| ✓ | Reproducible deployment from a clean environment: a scripted operator path and a digest-pinned container reproduce the build, tests, proofs, provisioning, fail-closed startup, TLS proxy with standby, shutdown, and read-only scan; see [clean-environment reproduction](deployment.md#clean-environment-reproduction). |
 | ☐ | Complete broader benchmarks and operational-limit reporting. |
 | ✓ | End-to-end audit traces authorization through the enumerated network/disk effect sites, every failure exit, and shutdown, marking each step proved, tested, or assumed; see the [end-to-end audit](end-to-end-audit.md). |
 
