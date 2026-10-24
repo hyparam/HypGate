@@ -291,6 +291,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn large_valid_http_head_does_not_make_body_frames_fail() {
+        struct Input<'a> { bytes: &'a [u8], written: bool }
+        impl AsyncRead for Input<'_> {
+            fn poll_read(mut self: Pin<&mut Self>, _: &mut Context<'_>, out: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+                if !self.written || self.bytes.is_empty() { return Poll::Pending; }
+                let n = self.bytes.len().min(out.remaining());
+                out.put_slice(&self.bytes[..n]); self.bytes = &self.bytes[n..]; Poll::Ready(Ok(()))
+            }
+        }
+        impl AsyncWrite for Input<'_> {
+            fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, data: &[u8]) -> Poll<io::Result<usize>> { self.written = true; cx.waker().wake_by_ref(); Poll::Ready(Ok(data.len())) }
+            fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> { Poll::Ready(Ok(())) }
+            fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> { Poll::Ready(Ok(())) }
+        }
+        let payload: Vec<u8> = (0..256 * 1024).map(|i| (i % 251) as u8).collect();
+        for inbound in [false, true] {
+            for chunked in [false, true] {
+                let line = if inbound { "POST / HTTP/1.1\r\nHost: localhost" } else { "HTTP/1.1 200 OK" };
+                let framing = if chunked { "Transfer-Encoding: chunked".to_owned() } else { format!("Content-Length: {}", payload.len()) };
+                let prefix = format!("{line}\r\n{framing}\r\nX-Pad: ");
+                let mut wire = format!("{prefix}{}\r\n\r\n", "x".repeat(MAX_INPUT_FRAME - prefix.len() - 4)).into_bytes();
+                if chunked { wire.extend_from_slice(format!("{:x}\r\n", payload.len()).as_bytes()); }
+                wire.extend_from_slice(&payload);
+                if chunked { wire.extend_from_slice(b"\r\n0\r\n\r\n"); }
+                if inbound {
+                    let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    let observed = called.clone();
+                    let expected = &payload;
+                    let service = hyper::service::service_fn(move |request: http::Request<hyper::body::Incoming>| {
+                        let observed = observed.clone();
+                        async move {
+                            let mut actual = Vec::new();
+                            Reader::new(request.into_body()).read_to_end(&mut actual).await.unwrap();
+                            assert_eq!(&actual, expected);
+                            observed.store(true, std::sync::atomic::Ordering::SeqCst);
+                            Ok::<_, std::convert::Infallible>(http::Response::new(http_body_util::Empty::<Bytes>::new()))
+                        }
+                    });
+                    hyper::server::conn::http1::Builder::new().keep_alive(false)
+                        .max_buf_size(MAX_INPUT_FRAME).max_header_size(MAX_INPUT_FRAME)
+                        .serve_connection(hyper_util::rt::TokioIo::new(crate::http_io::ReadLimited::new(Input { bytes: &wire, written: true })), service)
+                        .await.unwrap();
+                    assert!(called.load(std::sync::atomic::Ordering::SeqCst));
+                    continue;
+                }
+                let (mut sender, connection) = hyper::client::conn::http1::Builder::new()
+                    .max_buf_size(MAX_INPUT_FRAME).max_header_size(MAX_INPUT_FRAME)
+                    .handshake(hyper_util::rt::TokioIo::new(crate::http_io::ReadLimited::new(Input { bytes: &wire, written: false }))).await.unwrap();
+                let consume = async {
+                    let response = sender.send_request(http::Request::new(http_body_util::Empty::<Bytes>::new())).await.unwrap();
+                    let mut actual = Vec::new();
+                    Reader::new(response.into_body()).read_to_end(&mut actual).await.unwrap();
+                    assert_eq!(actual, payload);
+                    drop(sender);
+                };
+                let (result, ()) = tokio::join!(connection, consume);
+                result.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn stalled_hyper_output_bounds_body_consumption_and_cancellation() {
         // No socket/kernel queue: every write remains pending. Exercise both
         // Hyper buffer strategies, including tiny chunks that hit the queue's

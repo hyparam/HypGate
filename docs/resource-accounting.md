@@ -115,7 +115,9 @@ identifies excluded metadata and active owners.
   its copied-value subtotal and inserted Host/credential data remain separate
   from the stream/log buffer theorem. Both HTTP/1 builders set a
   32 KiB parser-buffer limit, but that setting alone does not prove total Hyper
-  allocation bounds or backing-storage sizes.
+  allocation bounds or backing-storage sizes. A separate plaintext-read adapter
+  caps each actual HTTP read at 32 KiB without imposing a wire-chunk/body length
+  limit; it adds no owned payload buffer.
 - rustls handshake and record buffers, certificate/root-store data, TLS overhead,
   system-resolver internals, and kernel socket buffers. The
   [DNS inventory](dns-resources.md) accounts for lookup jobs, dedicated threads,

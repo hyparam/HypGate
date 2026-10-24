@@ -18,8 +18,25 @@ In Hyper's [h1/io.rs](https://docs.rs/crate/hyper/1.12.0/source/src/proto/h1/io.
 buffer threshold. `poll_read_from_io` limits the requested reserve but passes the
 available `BytesMut` spare capacity to the I/O reader. Allocation rounding and
 shared backing storage therefore prevent treating 32768 as a hard allocation
-or per-read byte cap. Our frame reader independently rejects visible frames above
-32768 and detaches accepted frames into bounded copies.
+or per-read byte cap. Both production connections now wrap their HTTP plaintext
+I/O in `http_io::ReadLimited`, which exposes at most 32768 bytes per read even
+when Hyper offers larger spare capacity. Inbound reads wrap TCP; upstream reads
+wrap the completed TLS stream, so this is not a TLS handshake-buffer limit.
+The adapter allocates no separate read buffer and preserves vectored writes.
+Its safe ReadBuf projection may initialize up to 32768 previously uninitialized
+bytes; it preserves existing filled bytes and propagates pending/error/EOF states.
+Our frame reader still independently rejects visible frames above 32768 and
+detaches accepted frames into bounded copies.
+
+This cap fixes an observed compatibility defect, not just an accounting ambiguity:
+an exactly 32768-byte valid response head grew Hyper's parser backing storage;
+subsequent body reads reused that larger allocation, and our Reader rejected a
+valid body with `InvalidData`. A deterministic eager-input regression failed
+without the wrapper and now preserves a 256 KiB opaque payload after a maximum
+head in both client/server parsers, with Content-Length and chunked framing.
+The chunked case uses a single 256 KiB wire chunk, demonstrating that the read
+limit does not impose an HTTP chunk-size or whole-body-size limit. Parser backing
+capacity, shared owners, and allocator overhead remain separate accounting work.
 
 `WriteBuf::can_buffer` checks the buffered length *before* accepting the next body
 buffer. The next buffer can cross the threshold. Queue strategy additionally

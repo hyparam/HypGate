@@ -68,7 +68,7 @@ impl HttpsTransport {
         let (mut sender, connection) = hyper::client::conn::http1::Builder::new()
             .max_headers(crate::http_boundary::MAX_HEADER_VALUES)
             .max_header_size(crate::http_boundary::MAX_HEADER_BYTES)
-            .max_buf_size(http_body::MAX_INPUT_FRAME).handshake(TokioIo::new(tls)).await.map_err(|_| TransportError::Http)?;
+            .max_buf_size(http_body::MAX_INPUT_FRAME).handshake(TokioIo::new(crate::http_io::ReadLimited::new(tls))).await.map_err(|_| TransportError::Http)?;
         let (mut body_writer, body) = http_body::channel(16 * 1024);
         // Direct HTTP/1 connection uses origin-form; authority was already bound
         // to the TCP/TLS destination and the trusted Host header.

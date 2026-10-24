@@ -7,4 +7,5 @@ pub mod transfer;
 pub mod disk_log;
 pub mod transport;
 mod http_body;
+mod http_io;
 pub mod server;

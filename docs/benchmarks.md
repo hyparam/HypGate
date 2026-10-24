@@ -251,3 +251,11 @@ on 2026-10-24 UTC, before the subsequent worker-registry change:
 
 Linux settled samples varied; this is not the flat sequence seen in the macOS
 run. Both are bounded-duration observations, not a proven memory ceiling.
+
+After introducing the bounded HTTP plaintext-read adapter on 2026-10-23, the
+short three-wave macOS fixture passed again in both modes (24 requests and
+24 MiB of response payload per mode). Strict mode took 11.160 seconds with
+12,910,592 bytes sampled peak RSS; availability mode took 11.704 seconds with
+12,877,824 bytes sampled peak RSS. Exact responses, audit coverage, released
+credits, and shutdown passed. This is a short regression check, not a rerun of
+the 100-wave soak or evidence of a universal allocation bound.
