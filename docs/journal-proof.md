@@ -32,7 +32,7 @@ a separate obligation; the lemma does not assume or prove scanner correctness.
 
 The worker reserves before writing, then calls `commit_frame` only after both
 `write_all` and `sync_all` succeed for that immutable frame. This verified operation
-uses `record_durable_frame` and `record_durable` to compose `record_written`, `sync_succeeded`, and
+uses `record_durable` to compose `record_written`, `sync_succeeded`, and
 `acknowledge`. The queued immutable `RecordFrame` binds that byte sequence to its
 canonical metadata, payload, and checksum. Success proves that
 the new acknowledged and stable histories equal the previous complete history

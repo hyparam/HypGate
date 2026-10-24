@@ -155,11 +155,11 @@ MUTATIONS = [
     ("framing.rs", "receipt_ignores_payload", "let payload_ok = equal_bytes(slice_subrange(bytes, 33, bytes.len() - 32), payload);", "let payload_ok = true;"),
     ("framing.rs", "receipt_ignores_header", "let header_ok = equal_bytes(slice_subrange(bytes, 0, 33), header.as_slice());", "let header_ok = true;"),
     ("stream.rs", "acknowledge_unmatched_receipt", "if !receipt.matches_record(header, bytes)", "if false"),
-    ("journal.rs", "mint_receipt_without_commit", "if !self.record_durable_frame(t, &frame)", "if false"),
+    ("journal.rs", "mint_receipt_without_commit", "if !self.record_durable(t, frame.bytes())", "if false"),
 
     ("framing.rs", "omit_sealed_checksum", "append(&mut self.bytes, checksum.as_slice());", ""),
     ("framing.rs", "discard_sealed_record", "RecordFrame { bytes: self.bytes,", "RecordFrame { bytes: Vec::new(),"),
-    ("journal.rs", "deny_valid_typed_commit", "let ok = self.record_durable(t, frame.bytes());", "let ok = false;"),
+    ("journal.rs", "deny_valid_typed_commit", "if !self.record_durable(t, frame.bytes()) { return None; }", "if true { return None; }"),
 
     ("stream.rs", "audit_wrong_authority", " || self.owner != authority.request_id()", ""),
     ("stream.rs", "audit_wrong_tenant", "tenant: authority.tenant_id(),", "tenant: 0,"),

@@ -187,30 +187,8 @@ impl Journal {
         true
     }
 
-    pub fn record_durable_frame(&mut self, t: &Append, frame: &RecordFrame) -> (ok: bool)
-        requires old(self).valid(), frame.valid(),
-        ensures final(self).session() == old(self).session(), final(self).valid(),
-            ok == (!old(self).failed() && old(self).matches(t)
-                && old(self).acked_len() == old(self).written_len()
-                && frame.contents().len() == t.end() - t.start()),
-            ok ==> final(self).history() == old(self).history() + frame.contents()
-                && final(self).acked() == final(self).history() && !final(self).failed()
-                && final(self).acked() == old(self).history()
-                + crate::framing::encoding(frame.header()) + frame.payload() + frame.checksum()
-                && final(self).stable() == final(self).history()
-                && final(self).acked_len() == t.end() && final(self).idle(),
-            !ok ==> *final(self) == *old(self),
-    {
-        proof { frame.canonical(); }
-        let ok = self.record_durable(t, frame.bytes());
-        proof {
-            assert((old(self).history() + (crate::framing::encoding(frame.header())
-                + frame.payload() + frame.checksum())) =~= (old(self).history()
-                + crate::framing::encoding(frame.header()) + frame.payload() + frame.checksum()));
-        }
-        ok
-    }
-
+    // The receipt owns the committed frame, so its acknowledged bytes are the
+    // prior history followed by exactly that canonical header, payload, and checksum.
     pub fn commit_frame(&mut self, t: &Append, frame: RecordFrame) -> (out: Option<DurableFrame>)
         requires old(self).valid(), frame.valid(),
         ensures final(self).session() == old(self).session(), final(self).valid(),
@@ -228,8 +206,8 @@ impl Journal {
         },
     {
         let ghost prefix = self.history();
-        if !self.record_durable_frame(t, &frame) { return None; }
         proof { frame.canonical(); }
+        if !self.record_durable(t, frame.bytes()) { return None; }
         Some(DurableFrame { session: self.session, frame, prefix: Ghost(prefix) })
     }
 

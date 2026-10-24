@@ -62,18 +62,19 @@ fn durable_frame_commit_binds_one_complete_record_and_rejects_stale_tickets() {
 #[test]
 fn typed_frame_commits_only_the_reserved_complete_record() {
     use gateway_core::framing::{Header, RecordBody};
-    let frame = RecordBody::new(Header { payload: 3, tenant: 1, request: 2, chunk: 3, direction: 0 },
+    let frame = || RecordBody::new(Header { payload: 3, tenant: 1, request: 2, chunk: 3, direction: 0 },
         &[4, 5, 6]).unwrap().seal(&[7; 32]);
+    let length = frame().bytes().len() as u64;
     let mut wrong = Journal::new(0);
-    let short = wrong.begin(frame.bytes().len() as u64 - 1).unwrap();
-    assert!(!wrong.record_durable_frame(&short, &frame));
+    let short = wrong.begin(length - 1).unwrap();
+    assert!(wrong.commit_frame(&short, frame()).is_none());
     let mut journal = Journal::new(0);
-    let ticket = journal.begin(frame.bytes().len() as u64).unwrap();
-    assert!(journal.record_durable_frame(&ticket, &frame));
-    assert!(!journal.record_durable_frame(&ticket, &frame));
-    let next = journal.begin(frame.bytes().len() as u64).unwrap();
+    let ticket = journal.begin(length).unwrap();
+    assert!(journal.commit_frame(&ticket, frame()).is_some());
+    assert!(journal.commit_frame(&ticket, frame()).is_none());
+    let next = journal.begin(length).unwrap();
     journal.fail();
-    assert!(!journal.record_durable_frame(&next, &frame));
+    assert!(journal.commit_frame(&next, frame()).is_none());
 }
 
 #[test]

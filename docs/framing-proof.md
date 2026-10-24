@@ -42,7 +42,7 @@ arbitrary sealed bytes. The checksum may be incorrect: cryptographic computation
 and its association with the supplied body remain trusted.
 
 The production disk queue now carries `RecordFrame`. The worker writes its byte
-view and, after sync, uses `Journal::record_durable_frame`. On success the checked
+view and, after sync, uses `Journal::commit_frame`. On success the checked
 acknowledged prefix is exactly the old history followed by this frame's canonical
 header, payload, and checksum. Thus framing and journal byte identities compose;
 the [journal receipt path](journal-proof.md) now connects this record to stream write authorization.
