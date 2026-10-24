@@ -34,6 +34,15 @@ pub proof fn bounded_sum(buffers: Seq<Seq<u8>>, count: nat, size: nat)
     }
 }
 
+// Documented combined subtotal for R requests of K-byte chunks, C connections,
+// and Q queued frames: one chunk, two reader buffers, output queues, queued plus
+// active plus receipt frames with 65 bytes of framing each, and one header apiece.
+pub open spec fn budget(requests: nat, chunk: nat, connections: nat, queue: nat) -> nat {
+    requests * chunk + 2 * requests * 32768
+        + (connections + 2 * requests) * 16384 + (queue + requests + 1) * (chunk + 65)
+        + (requests + 1) * 33
+}
+
 pub open spec fn frame_bytes(frames: Seq<RecordFrame>) -> Seq<Seq<u8>> {
     frames.map(|i: int, frame: RecordFrame| frame.contents())
 }
@@ -115,9 +124,7 @@ impl Buffers {
         requires self.other_categories_valid(requests, chunk, connections), queue.valid(),
             self.queued_log == queue.frames(),
             queue.payload_limit() <= chunk,
-        ensures self.bytes() <= requests * chunk + 2 * requests * 32768
-            + (connections + 2 * requests) * 16384 + (queue.capacity() + requests + 1) * (chunk + 65)
-            + (requests + 1) * 33,
+        ensures self.bytes() <= budget(requests, chunk, connections, queue.capacity()),
     {
         self.accounted_payload_with_encoding(requests, chunk, connections, queue, Seq::empty());
     }
@@ -138,9 +145,7 @@ impl Buffers {
             self.queued_log == queue.frames(), queue.payload_limit() <= chunk,
             encoding.len() <= queue.payload_limit() + 65,
             !queue.reserved() ==> encoding.len() == 0,
-        ensures self.bytes_with_encoding(encoding) <= requests * chunk + 2 * requests * 32768
-            + (connections + 2 * requests) * 16384 + (queue.capacity() + requests + 1) * (chunk + 65)
-            + (requests + 1) * 33,
+        ensures self.bytes_with_encoding(encoding) <= budget(requests, chunk, connections, queue.capacity()),
     {
         queue.encoding_and_queued_bound(encoding.len());
         bounded_sum(self.chunks, requests, chunk);
@@ -163,9 +168,7 @@ impl Buffers {
         requires self.other_categories_valid(requests, chunk, connections), queue.valid(), queue.reserved(),
             self.queued_log == queue.frames(), queue.payload_limit() <= chunk,
             body.valid(), body.payload().len() <= queue.payload_limit(),
-        ensures self.bytes_with_encoding(body.contents()) <= requests * chunk + 2 * requests * 32768
-            + (connections + 2 * requests) * 16384 + (queue.capacity() + requests + 1) * (chunk + 65)
-            + (requests + 1) * 33,
+        ensures self.bytes_with_encoding(body.contents()) <= budget(requests, chunk, connections, queue.capacity()),
     {
         body.retained_size();
         self.accounted_payload_with_encoding(requests, chunk, connections, queue, body.contents());
@@ -176,9 +179,7 @@ impl Buffers {
         requires self.other_categories_valid(requests, chunk, connections), queue.valid(), queue.reserved(),
             self.queued_log == queue.frames(), queue.payload_limit() <= chunk,
             frame.valid(), frame.payload().len() <= queue.payload_limit(),
-        ensures self.bytes_with_encoding(frame.contents()) <= requests * chunk + 2 * requests * 32768
-            + (connections + 2 * requests) * 16384 + (queue.capacity() + requests + 1) * (chunk + 65)
-            + (requests + 1) * 33,
+        ensures self.bytes_with_encoding(frame.contents()) <= budget(requests, chunk, connections, queue.capacity()),
     {
         frame.canonical();
         crate::framing::encoded_header_roundtrip(frame.header());
@@ -195,9 +196,7 @@ impl Buffers {
 
     pub proof fn accounted_payload_bound(&self, requests: nat, chunk: nat, connections: nat, queue: nat)
         requires self.valid(requests, chunk, connections, queue),
-        ensures self.bytes() <= requests * chunk + 2 * requests * 32768
-            + (connections + 2 * requests) * 16384 + (queue + requests + 1) * (chunk + 65)
-            + (requests + 1) * 33,
+        ensures self.bytes() <= budget(requests, chunk, connections, queue),
     {
         bounded_sum(self.chunks, requests, chunk);
         bounded_sum(self.readers, 2 * requests, 32768);

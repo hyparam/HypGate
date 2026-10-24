@@ -25,7 +25,7 @@ impl<'a, D, C> ResolvedRoute<'a, D, C> {
                 && resolved.route().origin < destinations.len() && resolved.route().credential < credentials.len()
                 && resolved.destination_value() == destinations@[resolved.route().origin as int]
                 && resolved.credential_value() == credentials@[resolved.route().credential as int]
-                && crate::policy::allowed(resolved.route(), authority.policy().roots(), authority.policy().origins(), authority.policy().credentials()),
+                && authority.grants(resolved.route()),
             None => authority.binding().origin >= destinations.len() || authority.binding().credential >= credentials.len(),
         },
     {
@@ -40,7 +40,7 @@ impl<'a, D, C> ResolvedRoute<'a, D, C> {
         requires owner.valid(), authority.valid(),
         ensures match out {
             Some(bytes) => self.bound_to(authority) && write.route() == self.route() && write.direction() == direction && direction <= 1 && write.bound_to(authority)
-                && crate::policy::allowed(write.route(), authority.policy().roots(), authority.policy().origins(), authority.policy().credentials()) && write.request() == owner.state().owner()
+                && authority.grants(write.route()) && write.request() == owner.state().owner()
                 && owner.state().matches(&write.ticket()) && !owner.state().closed()
                 && bytes@ == owner.state().body().subrange(owner.state().position() as int, owner.state().end() as int)
                 && (owner.state().strict() ==> owner.state().end() <= owner.state().durable()

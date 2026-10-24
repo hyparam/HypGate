@@ -243,10 +243,13 @@ impl<'a> Authenticated<'a> {
 }
 
 impl<'a> AuthorizedRequest<'a> {
+    // The route is an operator grant with this tenant's credential under this policy.
+    pub open spec fn grants(&self, r: Route) -> bool {
+        allowed(r, self.policy().roots(), self.policy().origins(), self.policy().credentials())
+    }
     pub fn route(&self) -> (out: Route)
         requires self.valid(),
-        ensures out == self.binding(), out.tenant == self.tenant(),
-            allowed(out, self.policy().roots(), self.policy().origins(), self.policy().credentials()),
+        ensures out == self.binding(), out.tenant == self.tenant(), self.grants(out),
     {
         let r = &self.policy.routes[self.route];
         Route { tenant: r.tenant, selector: r.selector, origin: r.origin, credential: r.credential }
@@ -263,7 +266,7 @@ impl<'a> AuthorizedRequest<'a> {
             && self.policy.identities@[i].tenant == self.tenant
             && self.policy.identities@[i].digest@ == self.digest@)
         && self.binding().tenant == self.tenant
-        && allowed(self.binding(), self.policy.roots(), self.policy.origins(), self.policy.credentials())
+        && self.grants(self.binding())
     }
     pub fn origin(&self) -> (out: usize)
         requires self.valid(),

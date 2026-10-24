@@ -24,7 +24,7 @@ impl AuthorizedWrite {
             final(stream).state().owner() == old(stream).state().owner(),
             match out {
                 Some(write) => write.direction() == direction && direction <= 1 && write.bound_to(authority)
-                    && crate::policy::allowed(write.route(), authority.policy().roots(), authority.policy().origins(), authority.policy().credentials())
+                    && authority.grants(write.route())
                     && write.request() == final(stream).state().owner()
                     && final(stream).state().matches(&write.ticket())
                     && !final(stream).state().closed()
@@ -48,17 +48,15 @@ impl AuthorizedWrite {
         requires owner.valid(), authority.valid(),
         ensures match out {
             Some(bytes) => self.direction() == direction && direction <= 1 && self.bound_to(authority)
-                && crate::policy::allowed(self.route(), authority.policy().roots(), authority.policy().origins(), authority.policy().credentials()) && self.request() == owner.state().owner()
+                && authority.grants(self.route()) && self.request() == owner.state().owner()
                 && owner.state().matches(&self.ticket()) && !owner.state().closed()
                 && bytes@ == owner.state().body().subrange(owner.state().position() as int, owner.state().end() as int)
                 && (owner.state().strict() ==> owner.state().end() <= owner.state().durable()
                     && owner.audited_for(authority, journal) && owner.receipt().is_some()
                     && owner.receipt().unwrap().valid()
                     && journal.session() == Some(owner.receipt().unwrap().session())
-                    && owner.receipt().unwrap().record() == crate::framing::encoding(crate::framing::Header {
-                        payload: owner.state().body().len() as u32, tenant: authority.tenant(),
-                        request: authority.request(), chunk: owner.state().chunk(), direction })
-                        + owner.state().body() + owner.receipt().unwrap().checksum()),
+                    && owner.receipt().unwrap().record()
+                        == owner.state().audit_frame(authority.tenant(), direction, owner.receipt().unwrap().checksum())),
             None => direction > 1 || self.direction() != direction || (owner.state().strict() && (!owner.audited_for(authority, journal) || owner.audit_direction() != direction)) || !self.bound_to(authority) || self.request() != owner.state().owner()
                 || !owner.state().matches(&self.ticket()) || owner.state().closed(),
         },
