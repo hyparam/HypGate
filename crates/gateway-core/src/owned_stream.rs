@@ -46,7 +46,11 @@ impl OwnedStream {
                 && owned.state().owner() == authority.request()
                 && owned.state().body().len() == 0 && owned.state().strict() == strict
                 && owned.read_bytes().len() == 0 && !owned.state().closed() && !owned.state().pending()
-                && owned.state().position() == 0,
+                && owned.state().position() == 0
+                && (forall|owners: Seq<Option<OwnedStream>>|
+                    #[trigger] crate::owned_accounting::owners_match(registry.entries(), owners, registry.per_request())
+                    ==> crate::owned_accounting::owners_match(registry.entries(),
+                        owners.update(owned.key().slot() as int, Some(owned)), registry.per_request())),
             Err(returned) => returned == key && (key.stream_claimed()
                 || key.id() != authority.request() || !registry.owns(&key)),
         },
@@ -54,7 +58,17 @@ impl OwnedStream {
         match registry.authorized_stream(&mut key, authority, strict) {
             Some(stream) => {
                 proof { stream.payload_within_capacity(); }
-                Ok(OwnedStream { key, stream, read_buffer: Vec::new() })
+                let owned = OwnedStream { key, stream, read_buffer: Vec::new() };
+                proof {
+                    registry.layout(); registry.ownership_facts(&owned.key());
+                    assert forall|owners: Seq<Option<OwnedStream>>|
+                        #[trigger] crate::owned_accounting::owners_match(registry.entries(), owners, registry.per_request())
+                        implies crate::owned_accounting::owners_match(registry.entries(),
+                            owners.update(owned.key().slot() as int, Some(owned)), registry.per_request())
+                    by { crate::owned_accounting::replace_owner(registry.entries(), owners,
+                        registry.per_request(), owned.key().slot() as int, owned); }
+                }
+                Ok(owned)
             },
             None => Err(key),
         }
@@ -75,13 +89,18 @@ impl OwnedStream {
                 #[trigger] crate::resource::streams_bound(old(registry).entries(), streams, old(registry).per_request())
                 ==> crate::resource::streams_bound(final(registry).entries(),
                     streams.update(self.key().slot() as int, None), final(registry).per_request())),
+            ok ==> (forall|owners: Seq<Option<OwnedStream>>|
+                #[trigger] crate::owned_accounting::owners_match(old(registry).entries(), owners, old(registry).per_request())
+                ==> crate::owned_accounting::owners_match(final(registry).entries(),
+                    owners.update(self.key().slot() as int, None), final(registry).per_request())),
             ok ==> !final(registry).owns(&self.key())
                 && crate::resource::occupied(final(registry).entries()) + 1
                     == crate::resource::occupied(old(registry).entries()),
             !ok ==> *final(registry) == *old(registry),
     {
         self.read_buffer = Vec::new();
-        registry.release_stream(&self.key, self.stream)
+        let ok = registry.release_stream(&self.key, self.stream);
+        ok
     }
 
     pub fn begin_read(&mut self) -> (ok: bool)

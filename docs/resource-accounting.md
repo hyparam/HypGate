@@ -1,8 +1,8 @@
 # Runtime resource accounting
 
 This is a source-level inventory of the production path, not a whole-process
-memory theorem. The verified combined bound covers logical payload in streams
-mapped to live registry slots. The adapter additionally allocates buffers and owns
+memory theorem. The verified registry bound covers both stream payload and pending read buffers
+in production owners mapped to live registry slots. The adapter additionally allocates buffers and owns
 queues outside that model. RSS measurements include still more memory.
 
 ## Parameters and ownership
@@ -102,8 +102,10 @@ checks reclaimed request slots and both logging modes, and releases that same
 worker without any additional write. [Benchmark results](benchmarks.md) report
 whole-fixture RSS separately from these logical budgets.
 
-The production lease now uses a verified private `OwnedStream` key/stream pair;
-its transitions preserve pairing and consuming retirement returns the slot.
+The production lease uses a verified private `OwnedStream` key/stream/read-buffer
+owner; its transitions preserve pairing and consuming retirement returns the slot.
+`registry_owned_payload_bound` includes pending read bytes and supplies the chunk
+predicate for the combined subtotal, under a complete registry-owner snapshot.
 Core ownership-map preservation is now checked for admission, stream creation,
 replacement, and retirement; see the [ownership notes](runtime-ownership.md#ownership-map-preservation).
 Remaining work includes correspondence between the full runtime ownership and

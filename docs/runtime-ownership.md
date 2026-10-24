@@ -272,3 +272,29 @@ Tests exercise partial fill, rejection of an oversized count, EOF, cancellation,
 rollover, and refusal of a second read or external chunk while a buffer is pending.
 Mutations retain an old chunk while allocating, substitute the completed prefix,
 or deny a valid read completion and must fail verification.
+
+## Registry-wide bound including pending reads
+
+`owned_accounting::registry_owned_payload_bound` lifts the production owner's
+`payload_bound` to a registry-wide total. The ghost owner map is indexed by slot;
+each present owner must be valid, belong to that live registry slot, and retain
+its configured capacity. Its projected buffer is the stream body concatenated
+with the pending read bytes. This concatenation is erased specification data,
+not a runtime allocation; the owner invariant makes at most one side nonempty.
+
+The theorem proves that the total is at most live-slot occupancy times per-request
+capacity, hence at most the configured request limit times capacity. With the
+validated configuration budget, that logical total is at most 128 MiB. It also
+supplies the `bounded` chunk-category predicate consumed by the combined buffer
+subtotal theorem, so pending async reads are included in that category.
+
+The actual registry constructor establishes the empty owner map. Acquisition
+preserves it, `OwnedStream::claim` proves insertion of its returned owner, and
+successful release/retirement proves removal. The `replace_owner` lemma lifts
+mutating owner transitions using their preserved key/capacity and valid-state
+postconditions. A coverage lemma and three mutations check omitted read bytes,
+oversized replacements, and retained payload after retirement.
+
+The runtime must still maintain a complete single-registry map of its live owners;
+this is not a proof of all Tokio scheduling or global allocation lifetimes. The
+mutable-read-slice length obligation and dependency/allocator exclusions remain.

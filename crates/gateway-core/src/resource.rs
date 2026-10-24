@@ -162,6 +162,16 @@ impl ResourceAdmission {
             ==> self.slots@[i] != self.slots@[j])
     }
 
+    pub proof fn layout(&self)
+        ensures self.entries().len() == self.limit(),
+    {}
+
+    pub proof fn ownership_facts(&self, key: &RequestKey)
+        requires self.owns(key),
+        ensures key.slot() < self.limit(), key.id() != 0,
+            self.entries()[key.slot() as int] == key.id(),
+    {}
+
     // Conditional composition theorem. The runtime must maintain the mapping
     // of owned streams to live slots; async ownership itself is not proved here.
     pub proof fn logical_payload_bound(&self, streams: Seq<Option<StreamChunk>>)
@@ -180,6 +190,8 @@ impl ResourceAdmission {
         ensures a.valid(), a.limit() == request_limit, a.per_request() == per_request,
             a.next_id() == 1, occupied(a.entries()) == 0,
             streams_bound(a.entries(), Seq::new(request_limit as nat, |i: int| None::<StreamChunk>), a.per_request()),
+            crate::owned_accounting::owners_match(a.entries(),
+                Seq::new(request_limit as nat, |i: int| None::<crate::owned_stream::OwnedStream>), a.per_request()),
             forall|i: int| 0 <= i < a.limit() ==> #[trigger] a.entries()[i] == 0,
     {
         let mut slots = Vec::new();
@@ -223,6 +235,9 @@ impl ResourceAdmission {
             forall|streams: Seq<Option<StreamChunk>>|
                 #[trigger] streams_bound(old(self).entries(), streams, old(self).per_request())
                 ==> streams_bound(final(self).entries(), streams, final(self).per_request()),
+            forall|owners: Seq<Option<crate::owned_stream::OwnedStream>>|
+                #[trigger] crate::owned_accounting::owners_match(old(self).entries(), owners, old(self).per_request())
+                ==> crate::owned_accounting::owners_match(final(self).entries(), owners, final(self).per_request()),
             match out {
                 Some(key) => final(self).owns(&key) && !key.stream_claimed() && key.id() == old(self).next_id()
                     && final(self).next_id() == old(self).next_id() + 1
@@ -250,6 +265,10 @@ impl ResourceAdmission {
                         #[trigger] streams_bound(self.slots@, streams, self.per_request as nat)
                         implies streams_bound(self.slots@.update(i as int, id), streams, self.per_request as nat)
                     by { reserve_preserves_streams(self.slots@, streams, self.per_request as nat, i as int, id); }
+                    assert forall|owners: Seq<Option<crate::owned_stream::OwnedStream>>|
+                        #[trigger] crate::owned_accounting::owners_match(self.slots@, owners, self.per_request as nat)
+                        implies crate::owned_accounting::owners_match(self.slots@.update(i as int, id), owners, self.per_request as nat)
+                    by { crate::owned_accounting::reserve_owner_slot(self.slots@, owners, self.per_request as nat, i as int, id); }
                 }
                 self.slots.set(i, id);
                 self.next = self.next + 1;
@@ -317,6 +336,10 @@ impl ResourceAdmission {
         ensures final(self).valid(), final(self).limit() == old(self).limit(),
             final(self).per_request() == old(self).per_request(),
             final(self).next_id() == old(self).next_id(),
+            ok ==> (forall|owners: Seq<Option<crate::owned_stream::OwnedStream>>|
+                #[trigger] crate::owned_accounting::owners_match(old(self).entries(), owners, old(self).per_request())
+                ==> crate::owned_accounting::owners_match(final(self).entries(),
+                    owners.update(key.slot() as int, None), final(self).per_request())),
             ok ==> (forall|streams: Seq<Option<StreamChunk>>|
                 #[trigger] streams_bound(old(self).entries(), streams, old(self).per_request())
                 ==> streams_bound(final(self).entries(), streams.update(key.slot() as int, None), final(self).per_request())),
@@ -338,6 +361,10 @@ impl ResourceAdmission {
         ensures final(self).valid(), final(self).limit() == old(self).limit(),
             final(self).per_request() == old(self).per_request(),
             final(self).next_id() == old(self).next_id(),
+            ok ==> (forall|owners: Seq<Option<crate::owned_stream::OwnedStream>>|
+                #[trigger] crate::owned_accounting::owners_match(old(self).entries(), owners, old(self).per_request())
+                ==> crate::owned_accounting::owners_match(final(self).entries(),
+                    owners.update(key.slot() as int, None), final(self).per_request())),
             ok ==> (forall|streams: Seq<Option<StreamChunk>>|
                 #[trigger] streams_bound(old(self).entries(), streams, old(self).per_request())
                 ==> streams_bound(final(self).entries(), streams.update(key.slot() as int, None), final(self).per_request())),
@@ -359,6 +386,10 @@ impl ResourceAdmission {
         ensures final(self).valid(), final(self).limit() == old(self).limit(),
             final(self).per_request() == old(self).per_request(),
             final(self).next_id() == old(self).next_id(),
+            ok ==> (forall|owners: Seq<Option<crate::owned_stream::OwnedStream>>|
+                #[trigger] crate::owned_accounting::owners_match(old(self).entries(), owners, old(self).per_request())
+                ==> crate::owned_accounting::owners_match(final(self).entries(),
+                    owners.update(key.slot() as int, None), final(self).per_request())),
             ok ==> (forall|streams: Seq<Option<StreamChunk>>|
                 #[trigger] streams_bound(old(self).entries(), streams, old(self).per_request())
                 ==> streams_bound(final(self).entries(), streams.update(key.slot() as int, None), final(self).per_request())),
@@ -378,6 +409,11 @@ impl ResourceAdmission {
                 #[trigger] streams_bound(self.slots@, streams, self.per_request as nat)
                 implies streams_bound(self.slots@.update(key.slot as int, 0), streams.update(key.slot as int, None), self.per_request as nat)
             by { retire_preserves_streams(self.slots@, streams, self.per_request as nat, key.slot as int); }
+            assert forall|owners: Seq<Option<crate::owned_stream::OwnedStream>>|
+                #[trigger] crate::owned_accounting::owners_match(self.slots@, owners, self.per_request as nat)
+                implies crate::owned_accounting::owners_match(self.slots@.update(key.slot as int, 0),
+                    owners.update(key.slot as int, None), self.per_request as nat)
+            by { crate::owned_accounting::retire_owner_slot(self.slots@, owners, self.per_request as nat, key.slot as int); }
         }
         self.slots.set(key.slot, 0);
         true
