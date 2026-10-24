@@ -340,7 +340,7 @@ The generic public `copy_body` helper deliberately supports embedders with their
 own writer mapping; the production HTTPS path always uses the resolved binding.
 Tests cover wrong resolved request/route, foreign session, mismatched direction,
 exact partial ranges, stale tickets, strict unaudited rejection, availability,
-metadata substitution, and real TLS transport. At this checkpoint 250 Verus
+metadata substitution, and real TLS transport. At this checkpoint 237 Verus
 checks, the locked workspace suite and six compile-fail doctests pass, and all
-209 mutations are rejected. The resource/HTTP ownership composition rows remain
+208 mutations are rejected. The resource/HTTP ownership composition rows remain
 open; closing this row does not claim a whole-runtime memory or scheduling proof.
