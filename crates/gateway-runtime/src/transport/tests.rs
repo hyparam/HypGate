@@ -766,3 +766,146 @@ async fn upstream_wire_head_and_header_count_limits_cover_status_line() {
         }
     }).await.unwrap();
 }
+
+/// Splits a TLS 1.3 ClientHello handshake message into its echoed session id,
+/// declared extension length, and the bytes following that length field.
+fn hello_parts(handshake: &[u8]) -> (&[u8], usize, &[u8]) {
+    assert_eq!(handshake[0], 1);
+    let declared = ((handshake[1] as usize) << 16) | ((handshake[2] as usize) << 8) | handshake[3] as usize;
+    assert_eq!(declared + 4, handshake.len());
+    let session_len = handshake[38] as usize;
+    let session = &handshake[39..39 + session_len];
+    let mut at = 39 + session_len;
+    at += 2 + u16::from_be_bytes([handshake[at], handshake[at + 1]]) as usize;
+    at += 1 + handshake[at] as usize;
+    let extensions = u16::from_be_bytes([handshake[at], handshake[at + 1]]) as usize;
+    (session, extensions, &handshake[at + 2..])
+}
+fn cookie_extension(mut extensions: &[u8]) -> Option<&[u8]> {
+    while extensions.len() >= 4 {
+        let kind = u16::from_be_bytes([extensions[0], extensions[1]]);
+        let len = u16::from_be_bytes([extensions[2], extensions[3]]) as usize;
+        let (data, rest) = extensions[4..].split_at(len);
+        if kind == 44 { return Some(&data[2..]); }
+        extensions = rest;
+    }
+    None
+}
+/// Stateless HelloRetryRequest: fixed RFC 8446 random, echoed session id,
+/// TLS_AES_128_GCM_SHA256, supported_versions, and a cookie of 42s.
+fn hello_retry_request(session: &[u8], cookie_len: usize) -> Vec<u8> {
+    let random = [0xcf, 0x21, 0xad, 0x74, 0xe5, 0x9a, 0x61, 0x11, 0xbe, 0x1d, 0x8c, 0x02, 0x1e, 0x65, 0xb8, 0x91,
+        0xc2, 0xa2, 0x11, 0x16, 0x7a, 0xbb, 0x8c, 0x5e, 0x07, 0x9e, 0x09, 0xe2, 0xc8, 0xa8, 0x33, 0x9c];
+    let mut extensions = vec![0, 43, 0, 2, 3, 4, 0, 44];
+    extensions.extend_from_slice(&((cookie_len + 2) as u16).to_be_bytes());
+    extensions.extend_from_slice(&(cookie_len as u16).to_be_bytes());
+    extensions.resize(extensions.len() + cookie_len, 42);
+    let mut body = vec![3, 3]; body.extend_from_slice(&random);
+    body.push(session.len() as u8); body.extend_from_slice(session); body.extend_from_slice(&[0x13, 1, 0]);
+    body.extend_from_slice(&(extensions.len() as u16).to_be_bytes()); body.extend_from_slice(&extensions);
+    assert!(body.len() <= 65535);
+    let mut handshake = vec![2]; handshake.extend_from_slice(&(body.len() as u32).to_be_bytes()[1..]);
+    handshake.extend_from_slice(&body); handshake
+}
+fn handshake_records(handshake: &[u8]) -> Vec<Vec<u8>> {
+    handshake.chunks(16384).map(|fragment| {
+        let mut record = vec![22, 3, 3]; record.extend_from_slice(&(fragment.len() as u16).to_be_bytes());
+        record.extend_from_slice(fragment); record
+    }).collect()
+}
+/// Concatenates handshake record payloads, skipping the compatibility CCS record.
+fn handshake_messages(mut wire: &[u8]) -> Vec<u8> {
+    let mut handshake = Vec::new();
+    while !wire.is_empty() {
+        let len = u16::from_be_bytes([wire[3], wire[4]]) as usize;
+        assert!(len <= 16384);
+        let (record, rest) = wire.split_at(5 + len);
+        match record[0] { 22 => handshake.extend_from_slice(&record[5..]), 20 => assert_eq!(&record[5..], &[1]), other => panic!("record {other}") }
+        wire = rest;
+    }
+    handshake
+}
+
+#[test]
+fn tls_retry_cookie_echo_is_bounded_by_the_client_hello_extension_field() {
+    use tokio_rustls::rustls::ClientConnection;
+    let config = Arc::new(ClientConfig::builder().with_root_certificates(RootCertStore::empty()).with_no_client_auth());
+    for extra in [0usize, 1] {
+        let mut client = ClientConnection::new(config.clone(), ServerName::try_from("localhost").unwrap()).unwrap();
+        client.set_buffer_limit(Some(TLS_APPLICATION_BUFFER));
+        let mut wire = Vec::new(); client.write_tls(&mut wire).unwrap();
+        let first = handshake_messages(&wire);
+        let (session, declared, extensions) = hello_parts(&first);
+        assert_eq!(declared, extensions.len());
+        // The echoed cookie adds a four-byte extension header and two length bytes.
+        let cookie_len = 65535 - declared - 6 + extra;
+        let retry = hello_retry_request(session, cookie_len);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            for record in handshake_records(&retry) {
+                let mut incoming = &record[..];
+                while !incoming.is_empty() { client.read_tls(&mut incoming).unwrap(); }
+                client.process_new_packets().unwrap();
+            }
+            let mut wire = Vec::new(); client.write_tls(&mut wire).unwrap(); wire
+        }));
+        if extra == 0 {
+            let wire = outcome.unwrap();
+            assert_eq!(&wire[..6], &[20, 3, 3, 0, 1, 1]);
+            let second = handshake_messages(&wire);
+            let (_, declared, extensions) = hello_parts(&second);
+            assert_eq!(declared, 65535); assert_eq!(extensions.len(), 65535);
+            assert_eq!(cookie_extension(extensions), Some(&vec![42u8; cookie_len][..]));
+            // Handshake output is not limited by the application buffer setting.
+            assert!(wire.len() > TLS_APPLICATION_BUFFER);
+        } else if cfg!(debug_assertions) {
+            // Pinned rustls asserts the u16 extension length only in debug builds.
+            assert!(outcome.is_err());
+        } else {
+            let second = handshake_messages(&outcome.unwrap());
+            let (_, declared, extensions) = hello_parts(&second);
+            assert_eq!(declared, 0); assert_eq!(extensions.len(), 65536);
+        }
+    }
+}
+
+#[tokio::test]
+async fn retry_cookie_is_echoed_above_the_buffer_limit_and_closure_fails_before_upload() {
+    use tokio::io::AsyncReadExt;
+    async fn read_handshake_message(socket: &mut TcpStream) -> Vec<u8> {
+        let mut handshake = Vec::new();
+        loop {
+            let mut header = [0; 5]; socket.read_exact(&mut header).await.unwrap();
+            let mut payload = vec![0; u16::from_be_bytes([header[3], header[4]]) as usize];
+            socket.read_exact(&mut payload).await.unwrap();
+            match header[0] { 22 => handshake.extend_from_slice(&payload), 20 => assert_eq!(payload, [1]), other => panic!("record {other}") }
+            if handshake.len() >= 4 && handshake.len() == 4 + (((handshake[1] as usize) << 16) | ((handshake[2] as usize) << 8) | handshake[3] as usize) { return handshake; }
+        }
+    }
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let config = config(listener.local_addr().unwrap().port());
+        let provider = async {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let first = read_handshake_message(&mut socket).await;
+            let (session, declared, _) = hello_parts(&first);
+            let cookie_len = 65535 - declared - 6;
+            for record in handshake_records(&hello_retry_request(session, cookie_len)) { socket.write_all(&record).await.unwrap(); }
+            let second = read_handshake_message(&mut socket).await;
+            let (_, declared, extensions) = hello_parts(&second);
+            assert_eq!(declared, 65535); assert_eq!(extensions.len(), 65535);
+            assert_eq!(cookie_extension(extensions), Some(&vec![42u8; cookie_len][..]));
+            assert!(second.len() > TLS_APPLICATION_BUFFER);
+            // Close without a ServerHello; the client must fail without any request bytes.
+            drop(socket);
+        };
+        let transport = HttpsTransport::with_roots(RootCertStore::empty(), Duration::from_secs(5)).unwrap();
+        let mut output = Output::new(); let mut log = Log::default();
+        let mut input = &b"secret body"[..];
+        let (result, ()) = tokio::join!(transport.exchange(prepare(&config), &mut input, &mut output, &mut log), provider);
+        assert!(matches!(result, Err(TransportError::Tls)));
+        assert_eq!(input, b"secret body");
+        assert!(output.status.is_none()); assert!(output.bytes.is_empty());
+        assert!(log.upload.is_empty()); assert!(log.download.is_empty());
+        assert_eq!(config.usage(), Some((0, 1)));
+    }).await.unwrap();
+}

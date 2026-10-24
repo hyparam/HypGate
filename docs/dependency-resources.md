@@ -470,6 +470,58 @@ owned decoded messages, certificate verification, session values,
 and TLS application/control queues still require separate composition. They do
 not turn the 64 KiB application buffer setting into a total TLS-memory bound.
 
+### HelloRetryRequest cookie storage
+
+A TLS 1.3 server may answer the first ClientHello with a HelloRetryRequest that
+carries a stateless cookie. The pinned client
+([client/hs.rs](https://docs.rs/crate/rustls/0.23.46/source/src/client/hs.rs)
+`handle_hello_retry_request` and `emit_client_hello_for_retry`) accepts any
+non-empty cookie that fits the 65,535-byte handshake-message limit and echoes it
+in the second ClientHello. The state after a retry accepts only a ServerHello, so
+one connection echoes at most one cookie. For a cookie of C bytes, source
+inspection finds these copies beyond the deframer's working vector:
+
+| Copy | Lifetime |
+| --- | --- |
+| Decoded `PayloadU16` cookie; `msgs/base.rs` copies the sub-slice into a Vec | Until the retry handler returns |
+| Cookie clone inside the retry ClientHello extensions | Until the second hello is encoded |
+| Encoded second ClientHello; `MessagePayload::handshake` encodes eagerly | Until the message is fragmented and dropped |
+| Transcript buffer: 36-byte message_hash, the HelloRetryRequest encoding, and the second ClientHello encoding | Until the ServerHello selects the hash in `ExpectServerHello` |
+| Per-record plaintext copies from `to_unencrypted_opaque`, exact `PrefixedPayload` capacity, 16,384-byte fragments | Queued in `sendable_tls` until written to the socket |
+
+At peak this is about six cookie-sized copies plus the deframer; after the
+handler returns, about three (two transcript copies and the queued records)
+remain until the ServerHello arrives or the exchange deadline fires. The
+transcript buffer grows with `extend_from_slice`, so its capacity follows the
+audited Vec growth policy rather than its content length. With the fixture's
+134-byte extension list, the largest cookie that fits is 65,395 bytes: the
+HelloRetryRequest is 65,483 bytes and the second ClientHello 65,632 bytes.
+Longer configured server names reduce the fitting cookie by the same amount.
+Handshake output uses `ChunkVecBuffer::append`, not `append_limited_copy`, so
+`set_buffer_limit` does not cap the queued second hello.
+
+`LengthPrefixedBuffer::drop` in `msgs/codec.rs` checks the u16 extension-list
+length only with `debug_assert!`. A cookie one byte beyond the fit therefore
+panics inside `process_new_packets` in debug builds, including `cargo test`,
+while release builds emit a ClientHello whose extension-length field wraps to
+zero; a conforming server rejects it. Neither case stores more than the copies
+above. A debug panic unwinds the connection task, whose credits are released by
+owner drop and whose registry poison behavior is tested separately; the
+production binary uses the release profile.
+
+`tls_retry_cookie_echo_is_bounded_by_the_client_hello_extension_field` checks the
+largest fitting cookie is echoed exactly, that the queued output exceeds the
+64 KiB application limit, and the overflow branch for the active build profile.
+The release branch was validated locally with `cargo test --release` on
+2026-10-23; CI exercises the debug branch.
+`retry_cookie_is_echoed_above_the_buffer_limit_and_closure_fails_before_upload`
+drives the production connector with a raw peer: the peer receives the echoed
+cookie in a hello above 64 KiB, then closes without a ServerHello. The exchange
+returns `TransportError::Tls`, leaves the request body unread, produces no
+output or audit bytes, and releases admission. Key-share changes with a new key
+exchange, ECH, PSK binders, and the transcript Vec capacity are not measured by
+these tests.
+
 ### Certificate parsing metadata and compression policy
 
 The production ClientConfig explicitly clears `cert_decompressors`. Current
