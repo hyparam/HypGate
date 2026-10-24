@@ -88,6 +88,8 @@ checks reclaimed request slots and both logging modes, and releases that same
 worker without any additional write. [Benchmark results](benchmarks.md) report
 whole-fixture RSS separately from these logical budgets.
 
+The production lease now uses a verified private `OwnedStream` key/stream pair;
+its transitions preserve pairing and consuming retirement returns the slot.
 Core ownership-map preservation is now checked for admission, stream creation,
 replacement, and retirement; see the [ownership notes](runtime-ownership.md#ownership-map-preservation).
 Remaining work includes correspondence between the full runtime ownership and

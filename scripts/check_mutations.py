@@ -15,6 +15,10 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("owned_stream.rs", "owned_retirement_skips_release", "registry.release_stream(&self.key, self.stream)", "true"),
+    ("owned_stream.rs", "owned_advance_changes_bytes", "{ self.stream.advance(bytes) }", "{ self.stream.advance(Vec::new()) }"),
+    ("owned_stream.rs", "owned_cancel_ignored", "{ self.stream.cancel() }", "{ }"),
+    ("owned_stream.rs", "owned_prepare_denies_progress", "{ self.stream.prepare(max) }", "{ None }"),
     ("resource.rs", "mapping_reserve_live_slot", "slots[index] == 0, owner != 0,", "owner != 0,"),
     ("resource.rs", "mapping_wrong_stream_owner", "slots[index] != 0, stream.valid(), stream.owner() == slots[index], stream.capacity() <= capacity,", "slots[index] != 0, stream.valid(), stream.capacity() <= capacity,"),
     ("resource.rs", "mapping_retains_retired_stream", "ensures streams_bound(slots.update(index, 0), streams.update(index, None), capacity),", "ensures streams_bound(slots.update(index, 0), streams, capacity),"),

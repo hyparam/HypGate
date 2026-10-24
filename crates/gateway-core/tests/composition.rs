@@ -122,3 +122,39 @@ fn audit_record_binds_authority_current_chunk_and_exact_payload() {
     let oversized = StreamChunk::new(11, vec![0; 1048577], 1048577, false).unwrap();
     assert!(oversized.audit_record(&authority, 0).is_none());
 }
+
+#[test]
+fn owned_stream_preserves_pairing_through_failure_progress_and_retirement() {
+    use gateway_core::owned_stream::OwnedStream;
+    let route = || Route { tenant: 1, selector: 7, origin: 0, credential: 0 };
+    let policy = Policy::validate(vec![Identity { tenant: 1, digest: vec![9; 32] }],
+        vec![route()], vec![route()], 1, vec![1]).unwrap();
+    let identity = policy.authenticate(&[9; 32]).unwrap();
+    let mut registry = ResourceAdmission::new(1, 4);
+    let key = registry.acquire().unwrap();
+    let id = key.owner();
+    let wrong = identity.authorize(7, id + 1).unwrap();
+    let key = OwnedStream::claim(&registry, key, &wrong, false).err().unwrap();
+    assert_eq!(key.owner(), id);
+    assert_eq!(registry.usage(), (1, 1));
+    let authority = identity.authorize(7, id).unwrap();
+    let mut owned = OwnedStream::claim(&registry, key, &authority, false).ok().unwrap();
+    assert!(registry.acquire().is_none());
+    assert!(owned.advance(vec![1; 5]).is_none());
+    owned.advance(vec![1, 2, 3, 4]).unwrap();
+    let ticket = owned.prepare(2).unwrap();
+    assert_eq!(owned.stream().pending_bytes(&ticket).unwrap(), &[1, 2]);
+    assert!(owned.complete(&ticket, 1));
+    let ticket = owned.prepare(4).unwrap();
+    assert_eq!(owned.stream().pending_bytes(&ticket).unwrap(), &[2, 3, 4]);
+    assert!(owned.complete(&ticket, 3));
+    assert!(owned.discard_completed());
+    owned.advance(vec![5]).unwrap();
+    owned.cancel();
+    assert!(owned.prepare(1).is_none());
+    assert!(owned.retire(&mut registry));
+    assert_eq!(registry.usage(), (0, 1));
+    let replacement = registry.acquire().unwrap();
+    assert_ne!(replacement.owner(), id);
+    assert!(registry.release(&replacement));
+}

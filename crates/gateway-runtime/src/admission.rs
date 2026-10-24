@@ -3,6 +3,7 @@
 use crate::transfer::{AuditLog, Direction, LogRecord, TransferError};
 use gateway_core::policy::{AuthorizedRequest, Policy};
 use gateway_core::resource::{RequestKey, ResourceAdmission};
+use gateway_core::owned_stream::OwnedStream;
 use gateway_core::stream::{StreamChunk, Ticket};
 use std::sync::Mutex;
 
@@ -19,10 +20,10 @@ pub struct Admission {
     strict: bool,
 }
 
+enum LeaseState { Reserved(RequestKey), Streaming(OwnedStream) }
 struct Lease<'a> {
     admission: &'a Admission,
-    key: RequestKey,
-    stream: Option<StreamChunk>,
+    state: Option<LeaseState>,
 }
 
 impl Drop for Lease<'_> {
@@ -30,9 +31,10 @@ impl Drop for Lease<'_> {
         // Poison permanently closes admission. Do not recover potentially broken
         // registry state merely to reclaim a credit.
         if let Ok(mut registry) = self.admission.registry.lock() {
-            let released = match self.stream.take() {
-                Some(stream) => registry.release_stream(&self.key, stream),
-                None => registry.release(&self.key), // reservation before stream construction
+            let released = match self.state.take() {
+                Some(LeaseState::Streaming(stream)) => stream.retire(&mut registry),
+                Some(LeaseState::Reserved(key)) => registry.release(&key),
+                None => return, // unwinding during ownership transfer retains the slot
             };
             debug_assert!(released, "private lease must own its registry slot");
         }
@@ -67,21 +69,27 @@ impl Admission {
 
     pub fn admit(&self, digest: &[u8], selector: u64) -> Result<Request<'_>, AdmissionError> {
         let identity = self.policy.authenticate(digest).ok_or(AdmissionError::Unauthorized)?;
-        let (mut lease, capacity) = {
+        let (mut lease, capacity, request_id) = {
             let mut registry = self.registry.lock().map_err(|_| AdmissionError::Unavailable)?;
             let key = registry.acquire().ok_or(AdmissionError::AtCapacity)?;
             let capacity = registry.capacity(&key).expect("fresh registry key");
-            (Lease { admission: self, key, stream: None }, capacity)
+            let request_id = key.owner();
+            (Lease { admission: self, state: Some(LeaseState::Reserved(key)) }, capacity, request_id)
         };
         // Any early return drops the lease, including failed route authorization.
-        let authorized = identity.authorize(selector, lease.key.owner())
+        let authorized = identity.authorize(selector, request_id)
             .ok_or(AdmissionError::Unauthorized)?;
-        let stream = {
+        {
             let registry = self.registry.lock().map_err(|_| AdmissionError::Unavailable)?;
-            registry.authorized_stream(&mut lease.key, &authorized, self.strict)
-                .ok_or(AdmissionError::Unavailable)?
-        };
-        lease.stream = Some(stream);
+            let Some(LeaseState::Reserved(key)) = lease.state.take() else { unreachable!("new reservation") };
+            match OwnedStream::claim(&registry, key, &authorized, self.strict) {
+                Ok(stream) => lease.state = Some(LeaseState::Streaming(stream)),
+                Err(key) => {
+                    lease.state = Some(LeaseState::Reserved(key));
+                    return Err(AdmissionError::Unavailable);
+                }
+            }
+        }
         Ok(Request { authorized, capacity, log_failed: false, lease })
     }
 }
@@ -92,8 +100,18 @@ pub struct WriteTicket<'a> {
 }
 
 impl<'a> Request<'a> {
-    fn stream(&self) -> &StreamChunk { self.lease.stream.as_ref().expect("admitted stream") }
-    fn stream_mut(&mut self) -> &mut StreamChunk { self.lease.stream.as_mut().expect("admitted stream") }
+    fn stream(&self) -> &StreamChunk {
+        match self.lease.state.as_ref().expect("live lease") {
+            LeaseState::Streaming(stream) => stream.stream(),
+            LeaseState::Reserved(_) => unreachable!("admitted stream"),
+        }
+    }
+    fn stream_mut(&mut self) -> &mut OwnedStream {
+        match self.lease.state.as_mut().expect("live lease") {
+            LeaseState::Streaming(stream) => stream,
+            LeaseState::Reserved(_) => unreachable!("admitted stream"),
+        }
+    }
     pub fn request_id(&self) -> u64 { self.authorized.request_id() }
     pub fn tenant_id(&self) -> u64 { self.authorized.tenant_id() }
     pub fn origin(&self) -> usize { self.authorized.origin() }
@@ -140,8 +158,10 @@ impl<'a> Request<'a> {
                 return Err(TransferError::Log);
             }
         };
-        if !pending.request.lease.stream.as_mut().expect("admitted stream")
-            .acknowledge_receipt(&pending.request.authorized, direction_id, &receipt) {
+        let Some(LeaseState::Streaming(stream)) = pending.request.lease.state.as_mut() else {
+            unreachable!("admitted stream")
+        };
+        if !stream.acknowledge_receipt(&pending.request.authorized, direction_id, &receipt) {
             return Err(TransferError::InvalidState);
         }
         pending.armed = false;

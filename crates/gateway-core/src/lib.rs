@@ -11,3 +11,5 @@ pub mod framing;
 
 pub mod recovery;
 pub mod audit_journal;
+
+pub mod owned_stream;

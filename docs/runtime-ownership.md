@@ -6,13 +6,13 @@ stream transitions; their proofs do not automatically verify this composition.
 
 An `Admission` owns an immutable policy and a mutex-protected registry. `admit`
 authenticates a digest, reserves a slot, authorizes a tenant-scoped route using the
-new request ID, and calls the verified `authorized_stream` constructor for its
+new request ID, and calls verified `OwnedStream::claim`, which uses `authorized_stream` for its
 initially empty stream. A denied route
 returns its reservation. Registry poisoning rejects new requests.
 
 The returned `Request` privately owns its authorization token, stream, and lease.
 There is no stream extraction or mutable reference to the core. The lease owns
-the stream and consumes it through verified `release_stream` while holding the
+a verified `OwnedStream` pair and consumes it through `OwnedStream::retire` while holding the
 registry mutex, before another admission can reuse the slot. Cancellation closes the stream
 but retains the lease until the request is dropped. Unwinding also drops the lease;
 process abort does not promise cleanup. Deliberately forgetting a request leaks its
@@ -32,7 +32,8 @@ non-cloneable claimed bit. Successful construction proves stream validity, match
 owner/token/key IDs, empty payload, the registry's per-request capacity, and the
 requested logging mode. The key's identity and slot remain unchanged. A failed
 construction leaves the key unchanged, allowing the correct token to be used later.
-The runtime creates its stream through this path after policy authorization.
+The runtime creates its stream through `OwnedStream::claim`, which consumes the key
+and uses this path after policy authorization.
 
 This is an initial composition theorem, not a proof of the whole Rust wrapper.
 Keys must remain scoped to their registry; identical numeric slots and IDs in
@@ -48,7 +49,8 @@ independently retained stream exists; the runtime wrapper prevents that extracti
 when the key has claimed a stream, its ID matches the stream owner, and the registry
 still owns the key. Success clears only that slot and decreases occupancy by one;
 rejection leaves the registry unchanged. Both outcomes consume the supplied stream.
-The runtime lease uses this operation for constructed streams, retaining reservation-only
+The runtime lease uses this operation through `OwnedStream::retire` for constructed
+streams, retaining reservation-only
 `release` for reservations that failed before stream construction. Storage is
 dropped inside the locked operation; no async I/O occurs under the lock.
 
@@ -209,3 +211,36 @@ faithfully implement its insertion/replacement/removal events and enforce one
 stream per key. Formal composition of that async ownership boundary, additional
 queue/receipt allocations, and dependency backing storage remains open. No new
 runtime collection or retained historical payload is introduced.
+
+## Verified owned stream in the production lease
+
+`gateway_core::owned_stream::OwnedStream` privately owns both the request key and
+its stream. `claim` consumes a reservation and either returns the valid pair or
+returns the unchanged key with a specified rejection reason. Successful creation
+binds the stream owner, authority request, live key, capacity, and logging mode.
+There is no key extraction, stream extraction, cloning, or mutable stream accessor.
+Its read-only stream borrow cannot outlive the pair or replace its stream.
+
+Every mutating stream operation used by the runtime goes through a verified
+method that preserves the pair invariant and retains the exact underlying
+behavioral contract: rollover, discard, prepare, partial completion, cancellation,
+logging failure, and durable-receipt acknowledgment. `retire` consumes the pair,
+clears exactly its live slot, and preserves the ownership map with that stream
+removed. No new heap allocation is added by this owner.
+
+The runtime lease now stores either an unclaimed reservation or this owner. Its
+Drop implementation holds the same registry mutex while retiring the owner; no
+raw stream/key re-pairing is performed by the async adapter. A panic during the
+synchronous reservation-to-owner transfer can leak a slot until restart, but cannot
+return credit while retaining the stream. Normal rejection restores the reservation
+for Drop to release. Poisoning continues to close admission.
+
+The constructor/transition/retirement proofs reduce the trusted ownership surface;
+they do not verify Tokio scheduling, mutex identity, cancellation/drop execution,
+or all allocation lifetimes. Lower-level core constructors still exist for other
+embeddings, and registry namespaces remain externally scoped. These limits prevent
+claiming a complete global async ownership proof. The composition test covers failed
+claim, capacity, partial writes, rollover, cancellation, retirement, and slot reuse;
+a compile-fail doctest rejects mutation through the read-only accessor. Four
+mutations check skipped retirement, altered bytes, ignored cancellation, and denied
+valid write progress.
