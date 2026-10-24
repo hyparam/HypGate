@@ -87,6 +87,7 @@ impl StreamChunk {
     pub proof fn payload_within_capacity(&self)
         requires self.valid(),
         ensures self.body().len() <= self.capacity(), self.position() <= self.end() <= self.body().len(),
+            self.strict() ==> self.end() <= self.durable(),
     {}
 
     pub closed spec fn chunk(&self) -> u64 { self.chunk }

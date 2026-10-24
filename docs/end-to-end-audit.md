@@ -264,3 +264,18 @@ actual file session; test loggers must also explicitly implement identity.
 The initial logger selection and file correspondence remain trusted. The
 end-to-end theorem connecting authorization, concrete destination/credentials,
 receipt acceptance, and exact write submission is still unfinished.
+
+
+## Milestone 6 authorized-write follow-up
+
+Production `Request` now uses `submission::AuthorizedWrite` in prepare, byte
+access, and completion. Issuance checks authority/request ownership. Byte access
+checks the token against the request, tenant, selector, origin index, and
+credential index, then returns the exact live stream-ticket range. The checked
+contract also establishes root-policy permission and the strict-mode durable
+ceiling. Runtime cross-admission pointer checks remain in place. The existing
+transfer driver still borrows those bytes into its single write call and reports
+the actual accepted count; cancellation closes access without erasing issued
+completion accounting. This does not yet compose concrete URL/secret resolution,
+the AsyncWrite target, and journal receipt provenance into the required final
+upstream mediation theorem. Those remaining joins stay explicit in milestone 6.

@@ -4,7 +4,8 @@ use crate::transfer::{AuditLog, Direction, LogRecord, TransferError};
 use gateway_core::policy::{AuthorizedRequest, Policy};
 use gateway_core::resource::{RequestKey, ResourceAdmission};
 use gateway_core::owned_stream::OwnedStream;
-use gateway_core::stream::{StreamChunk, Ticket};
+use gateway_core::stream::StreamChunk;
+use gateway_core::submission::AuthorizedWrite;
 use std::sync::Mutex;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
@@ -100,7 +101,7 @@ impl Admission {
 
 pub struct WriteTicket<'a> {
     admission: &'a Admission,
-    core: Ticket,
+    core: AuthorizedWrite,
 }
 
 impl<'a> Request<'a> {
@@ -190,15 +191,17 @@ impl<'a> Request<'a> {
         Ok(())
     }
     pub fn prepare(&mut self, max: usize) -> Option<WriteTicket<'a>> {
-        self.stream_mut().prepare(max).map(|core| WriteTicket { admission: self.lease.admission, core })
+        let Some(LeaseState::Streaming(stream)) = self.lease.state.as_mut() else { return None; };
+        AuthorizedWrite::prepare(stream, &self.authorized, max)
+            .map(|core| WriteTicket { admission: self.lease.admission, core })
     }
     pub fn pending_bytes(&self, ticket: &WriteTicket<'_>) -> Option<&[u8]> {
         if !std::ptr::eq(ticket.admission, self.lease.admission) { return None; }
-        self.stream().pending_bytes(&ticket.core)
+        ticket.core.bytes(self.stream(), &self.authorized)
     }
     pub fn complete(&mut self, ticket: &WriteTicket<'_>, count: usize) -> bool {
         if !std::ptr::eq(ticket.admission, self.lease.admission) { return false; }
-        self.stream_mut().complete(&ticket.core, count)
+        ticket.core.complete(self.stream_mut(), count)
     }
     pub fn cancel(&mut self) { self.stream_mut().cancel(); }
     pub fn fail_log(&mut self) { self.log_failed = true; self.stream_mut().fail_log(); }

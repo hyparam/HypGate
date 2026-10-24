@@ -11,6 +11,7 @@ pub mod stream;
 pub mod policy;
 pub mod journal;
 pub mod journal_binding;
+pub mod submission;
 pub mod framing;
 
 pub mod recovery;

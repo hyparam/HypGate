@@ -243,6 +243,15 @@ impl<'a> Authenticated<'a> {
 }
 
 impl<'a> AuthorizedRequest<'a> {
+    pub fn route(&self) -> (out: Route)
+        requires self.valid(),
+        ensures out == self.binding(), out.tenant == self.tenant(),
+            allowed(out, self.policy().roots(), self.policy().origins(), self.policy().credentials()),
+    {
+        let r = &self.policy.routes[self.route];
+        Route { tenant: r.tenant, selector: r.selector, origin: r.origin, credential: r.credential }
+    }
+
     pub closed spec fn proof_digest(&self) -> Seq<u8> { self.digest@ }
     pub closed spec fn policy(&self) -> Policy { *self.policy }
     pub closed spec fn binding(&self) -> Route { self.policy.routes@[self.route as int] }

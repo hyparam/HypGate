@@ -16,6 +16,13 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("submission.rs", "submission_issues_for_wrong_request", "if stream.owner_id() != authority.request_id()", "if false"),
+    ("submission.rs", "submission_uses_another_origin", "ticket, route, request:", "ticket, route: Route { origin: 0, ..route }, request:"),
+    ("submission.rs", "submission_accepts_another_origin", " || self.route.origin != route.origin", ""),
+    ("submission.rs", "submission_accepts_another_credential", " || self.route.credential != route.credential", ""),
+    ("submission.rs", "submission_accepts_another_selector", " || self.route.selector != route.selector", ""),
+    ("submission.rs", "submission_accepts_another_tenant", "self.route.tenant != authority.tenant_id() || ", ""),
+
     ("journal_binding.rs", "binding_replaces_designated_session", "Some(current) => current == session,", "Some(current) => { self.session = Some(session); true },"),
     ("journal_binding.rs", "binding_accepts_foreign_receipt", "Some(session) => session == receipt.session_id(),", "Some(session) => true,"),
     ("journal_binding.rs", "binding_accepts_undesignated_receipt", "None => false,", "None => true,"),
