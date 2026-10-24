@@ -253,3 +253,48 @@ async fn maximum_configured_request_head_serializes_below_64_kib() {
         drop(sender); driver.await.unwrap().unwrap();
     }).await.unwrap();
 }
+
+#[tokio::test]
+async fn maximum_response_head_with_continue_serializes_below_64_kib() {
+    use http_body_util::{BodyExt, Empty};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let mut input = HeaderMap::new();
+        for _ in 0..99 { input.append("request-id", HeaderValue::from_static("x")); }
+        let used: usize = input.iter().map(|(n, v)| n.as_str().len() + v.as_bytes().len()).sum();
+        input.append("request-id", HeaderValue::from_str(
+            &"r".repeat(MAX_HEADER_BYTES - used - "request-id".len())).unwrap());
+        assert_eq!(input.len(), MAX_HEADER_VALUES);
+        let headers = response_headers(&input).unwrap();
+        let (server, mut peer) = tokio::io::duplex(65536);
+        let service = hyper::service::service_fn(move |request: Request<hyper::body::Incoming>| {
+            let headers = headers.clone();
+            async move {
+                assert_eq!(request.collect().await.unwrap().to_bytes().as_ref(), b"x");
+                let mut response = http::Response::new(Empty::<bytes::Bytes>::new());
+                *response.headers_mut() = headers;
+                Ok::<_, std::convert::Infallible>(response)
+            }
+        });
+        let driver = tokio::spawn(async move {
+            hyper::server::conn::http1::Builder::new().keep_alive(false).writev(true)
+                .serve_connection(hyper_util::rt::TokioIo::new(server), service).await.unwrap();
+        });
+        peer.write_all(b"POST / HTTP/1.1\r\nhost: example.com\r\nexpect: 100-continue\r\ncontent-length: 1\r\n\r\n").await.unwrap();
+        let mut interim = Vec::new();
+        while !interim.ends_with(b"\r\n\r\n") {
+            interim.push(peer.read_u8().await.unwrap());
+            assert!(interim.len() <= 25);
+        }
+        assert_eq!(interim, b"HTTP/1.1 100 Continue\r\n\r\n");
+        peer.write_all(b"x").await.unwrap();
+        let mut final_head = Vec::new();
+        peer.read_to_end(&mut final_head).await.unwrap();
+        assert!(final_head.starts_with(b"HTTP/1.1 200 OK\r\n"));
+        assert!(final_head.ends_with(b"\r\n\r\n"));
+        assert_eq!(String::from_utf8_lossy(&final_head).matches("request-id:").count(), 100);
+        assert!(final_head.len() > MAX_HEADER_BYTES);
+        assert!(interim.len() + final_head.len() <= 33445);
+        driver.await.unwrap();
+    }).await.unwrap();
+}

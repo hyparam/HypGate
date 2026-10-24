@@ -169,6 +169,15 @@ Together with separators and the final CRLF, this is at most 33,420 bytes. The
 upstream's arbitrary reason phrase is not forwarded: only its StatusCode is kept.
 Generated fixed responses have small fixed headers within this allowance.
 
+The server can additionally generate a 25-byte `100 Continue` head when the
+client supplies `Expect: 100-continue`. In `conn.rs::poll_read_body`, the
+`Reading::Continue` branch appends it only while writing is still in `Init`, then
+changes reading to `Body` before recurring. Thus it occurs at most once for the
+single request on a production connection. Budget it even if it has not drained
+before final-head encoding: the combined server-head allowance is 33,445 bytes.
+Provider informational responses are not forwarded as output heads; the client
+decoder skips them and no informational callback is installed.
+
 Both inventories fit 64 KiB. `maximum_configured_request_head_serializes_below_64_kib`
 uses the real client serializer with an exact-limit URI, a 253-byte DNS name,
 a five-digit port, an 8,192-byte bearer secret, and 100 inbound fields filling the
@@ -176,6 +185,32 @@ a five-digit port, an 8,192-byte bearer secret, and 100 inbound fields filling t
 exact path/credential, and completes the empty streamed exchange. The config
 boundary test accepts 8,192 bytes, rejects 8,193, and observes no secret calls
 on rejection. These are adapter/source bounds and regressions, not Verus proofs.
+
+`maximum_response_head_with_continue_serializes_below_64_kib` exercises the real
+server serializer with 100 filtered response fields filling the 32 KiB metadata
+budget. The client waits for the exact interim response before sending its body;
+the test checks that all 100 final fields survive and that the total interim/final
+wire length fits 33,445 bytes. This tests the protocol path and length inventory,
+not simultaneous internal-buffer occupancy or allocation capacity.
+
+### Serialized head reservation requests
+
+The pinned `role.rs` encoders call `reserve(30 + 30 * header_count)` before
+encoding. The client calls `set_length` first, which can add one framing field:
+103 application fields plus one generated field therefore request at most 3,150
+additional bytes. The server's 100 application fields request at most 3,030;
+including a retained interim head, the required length is at most 3,055. Its
+additional Date reservation is 37 bytes, covered by the remaining final-head
+inventory (the subsequent Date line and terminal CRLF occupy 39 bytes).
+Default lowercase writers and `FastWrite` append actual slices; they do not
+reserve an arbitrary URI formatting estimate. Under these production paths,
+every header-vector required length (`len + additional`) remains below 64 KiB.
+
+Fully consumed headers call `Cursor::reset`, which clears length but preserves
+capacity; partially consumed headers retain their original vector length. The
+interim-head allowance covers that retained prefix. One exchange per connection,
+no server keep-alive, no pipelined flush aggregation, and queue-only body output
+are essential to this reservation inventory. It is not a general Hyper bound.
 
 Hyper requests an initial 8,192-byte header vector and can grow it while encoding
 a larger head. A bound on serialized length does not itself bound Vec spare
