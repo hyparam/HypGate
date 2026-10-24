@@ -134,18 +134,8 @@ impl DiskWorker {
         storage: &mut S, enabled: bool) -> (out: FinishedAppend<C>)
         requires self.valid(), self.owns(&job), job.valid(), old(journal).valid(), old(storage).valid(),
             !old(journal).failed() ==> old(storage).written() == old(journal).history(),
-        ensures final(journal).session() == old(journal).session(), final(journal).valid(), final(storage).valid(), out.valid(),
-            (!enabled || old(journal).failed() || old(journal).session() != self.session()) ==> *final(storage) == *old(storage), self.owns_finished(&out),
-            out.generation() == job.generation(), out.session() == job.session(), out.completion() == job.completion(),
-            match out.receipt() {
-                Some(receipt) => receipt.session() == self.session() && receipt.session() == old(journal).session() && enabled && !old(journal).failed() && !final(journal).failed()
-                    && receipt.record() == job.frame().contents()
-                    && receipt.acknowledged() == final(journal).history()
-                    && final(journal).history() == old(journal).history() + job.frame().contents()
-                    && final(storage).written() == final(journal).history()
-                    && final(storage).stable() == final(journal).history(),
-                None => final(journal).failed() && final(journal).history() == old(journal).history(),
-            },
+        ensures job.ran(*old(journal), *final(journal), *old(storage), *final(storage), enabled, out),
+            self.owns_finished(&out),
     { job.run(journal, storage, enabled) }
 
     pub proof fn queued_and_active_bound<C>(&self, queue: &FrameQueue<C>, encoding_bytes: nat)
@@ -173,24 +163,32 @@ impl<C> ActiveAppend<C> {
     pub closed spec fn completion(&self) -> C { self.completion }
     pub closed spec fn generation(&self) -> u64 { self.generation }
     pub closed spec fn session(&self) -> u128 { self.session }
+    // Outcome of running this append: a receipt only after write and sync of the
+    // exact frame under the matching journal; otherwise the journal fails and
+    // storage was left alone whenever the attempt was refused up front.
+    pub open spec fn ran<S: Storage>(&self, journal_before: AuditJournal, journal: AuditJournal,
+        storage_before: S, storage: S, enabled: bool, out: FinishedAppend<C>) -> bool
+    {
+        journal.session() == journal_before.session() && journal.valid() && storage.valid() && out.valid()
+        && ((!enabled || journal_before.failed() || journal_before.session() != self.session()) ==> storage == storage_before)
+        && out.generation() == self.generation() && out.session() == self.session() && out.completion() == self.completion()
+        && match out.receipt() {
+            Some(receipt) => receipt.session() == self.session() && receipt.session() == journal_before.session()
+                && enabled && !journal_before.failed() && !journal.failed()
+                && receipt.record() == self.frame().contents()
+                && receipt.acknowledged() == journal.history()
+                && journal.history() == journal_before.history() + self.frame().contents()
+                && storage.written() == journal.history() && storage.stable() == journal.history(),
+            None => journal.failed() && journal.history() == journal_before.history(),
+        }
+    }
 }
 impl<C: Completion> ActiveAppend<C> {
     fn run<S: Storage>(self, journal: &mut AuditJournal, storage: &mut S, enabled: bool)
         -> (out: FinishedAppend<C>)
         requires self.valid(), old(journal).valid(), old(storage).valid(),
             !old(journal).failed() ==> old(storage).written() == old(journal).history(),
-        ensures final(journal).session() == old(journal).session(), final(journal).valid(), final(storage).valid(), out.valid(),
-            (!enabled || old(journal).failed() || old(journal).session() != self.session()) ==> *final(storage) == *old(storage),
-            out.generation() == self.generation(), out.session() == self.session(), out.completion() == self.completion(),
-            match out.receipt() {
-                Some(receipt) => receipt.session() == self.session() && receipt.session() == old(journal).session() && enabled && !old(journal).failed() && !final(journal).failed()
-                    && receipt.record() == self.frame().contents()
-                    && receipt.acknowledged() == final(journal).history()
-                    && final(journal).history() == old(journal).history() + self.frame().contents()
-                    && final(storage).written() == final(journal).history()
-                    && final(storage).stable() == final(journal).history(),
-                None => final(journal).failed() && final(journal).history() == old(journal).history(),
-            },
+        ensures self.ran(*old(journal), *final(journal), *old(storage), *final(storage), enabled, out),
     {
         let mut receipt = None;
         if enabled && journal.session_id() == self.session {
