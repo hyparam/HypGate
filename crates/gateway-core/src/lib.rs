@@ -12,6 +12,7 @@ pub mod policy;
 pub mod journal;
 pub mod journal_binding;
 pub mod submission;
+pub mod resolved_route;
 pub mod framing;
 
 pub mod recovery;

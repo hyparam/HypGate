@@ -16,8 +16,20 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
-    ("submission.rs", "provenance_prepare_without_evidence", "if stream.stream().requires_audit() && !stream.is_audited_for(authority, journal) { return None; }", ""),
-    ("submission.rs", "provenance_bytes_without_evidence", "if owner.stream().requires_audit() && !owner.is_audited_for(authority, journal) { return None; }", ""),
+    ("resolved_route.rs", "resolved_route_wrong_destination", "destination: &destinations[route.origin]", "destination: &destinations[0]"),
+    ("resolved_route.rs", "resolved_route_wrong_credential", "credential: &credentials[route.credential]", "credential: &credentials[0]"),
+    ("resolved_route.rs", "resolved_route_ignores_request", "self.request == authority.request_id() && ", ""),
+    ("resolved_route.rs", "resolved_route_ignores_credential", "&& self.route.credential == route.credential", ""),
+    ("resolved_route.rs", "resolved_route_releases_unbound_target", "if self.matches(authority) { Some(self.destination) }", "if true { Some(self.destination) }"),
+
+    ("submission.rs", "direction_ignores_receipt_at_prepare", " || stream.recorded_direction() != direction", ""),
+    ("submission.rs", "direction_ignores_receipt_at_submission", " || owner.recorded_direction() != direction", ""),
+    ("submission.rs", "direction_uses_opposite_ticket", " || self.direction != direction", ""),
+    ("submission.rs", "direction_mints_wrong_ticket", "request: authority.request_id(), direction", "request: authority.request_id(), direction: 0"),
+    ("submission.rs", "direction_accepts_invalid_direction", "if direction > 1 { return None; }", ""),
+
+    ("submission.rs", "provenance_prepare_without_evidence", "if stream.stream().requires_audit() && (!stream.is_audited_for(authority, journal) || stream.recorded_direction() != direction) { return None; }", ""),
+    ("submission.rs", "provenance_bytes_without_evidence", "if owner.stream().requires_audit() && (!owner.is_audited_for(authority, journal) || owner.recorded_direction() != direction) { return None; }", ""),
     ("owned_stream.rs", "provenance_reuses_prior_chunk", "if out.is_some() { self.audit_session = None; self.audit = Ghost(None); }", ""),
     ("owned_stream.rs", "provenance_forges_receipt_session", "self.audit_session = Some(receipt.session_id());", "self.audit_session = Some(0);"),
     ("owned_stream.rs", "provenance_omits_receipt_evidence", "self.audit = Ghost(Some(*receipt));", "self.audit = Ghost(None);"),

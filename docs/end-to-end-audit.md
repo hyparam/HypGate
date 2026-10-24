@@ -296,3 +296,24 @@ prior evidence. Availability permits missing audit evidence but retains the same
 request/tenant/route/credential checks. Concrete transport direction, URL/secret
 resolution and actual writer correspondence still need the remaining mediation
 work; this is not yet closure of milestone 6.
+
+
+## Milestone 6 concrete route and transfer-direction follow-up
+
+Production configuration now calls `ResolvedRoute::resolve` instead of indexing
+destination/credential tables in unverified Rust. Its postcondition binds the
+actual selected values to the authorized route; both getters recheck request and
+route identity. The configuration/secret parser and the meaning of these opaque
+values remain trusted. `PreparedRequest` fields are private. Before DNS, TCP, or
+TLS, the transport calls `take_upstream`, which checks the configured URI, method,
+Host, and credential, converts only the configured path/query to origin form,
+and moves the HTTP request once. Socket/TLS naming derives from the immutable
+configured destination. HTTP header serialization remains a trusted adapter join.
+The upload driver passes Upload to logging, ticket preparation, and byte access;
+the response driver passes Download. Strict write access now requires exact
+receipt direction, and tickets reject opposite-direction use in either mode.
+Tests exercise mismatched metadata, repeated dispatch, strict direction mismatch,
+and correct response-direction partial writes. These replace the corresponding
+historical transport/configuration joins above, without claiming a proof of
+Hyper/TLS/DNS or peer delivery. One explicit composition between the resolved
+dispatch owner and the body-write capability remains in milestone 6.

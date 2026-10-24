@@ -44,6 +44,9 @@ pub struct OwnedStream { key: RequestKey, stream: StreamChunk, read_buffer: Vec<
 impl OwnedStream {
     pub closed spec fn audit_session(&self) -> Option<u128> { self.audit_session }
     pub closed spec fn audit_tenant(&self) -> u64 { self.audit_tenant }
+    pub fn recorded_direction(&self) -> (out: u8)
+        ensures out == self.audit_direction(),
+    { self.audit_direction }
     pub closed spec fn audit_direction(&self) -> u8 { self.audit_direction }
     pub closed spec fn receipt(&self) -> Option<crate::journal::DurableFrame> { self.audit@ }
     pub closed spec fn audit_valid(&self) -> bool {
@@ -292,7 +295,7 @@ impl OwnedStream {
     pub fn prepare(&mut self, max: usize) -> (out: Option<Ticket>)
         requires old(self).valid(),
         ensures final(self).audit_session() == old(self).audit_session(),
-            final(self).audit_tenant() == old(self).audit_tenant(), final(self).receipt() == old(self).receipt(),
+            final(self).audit_tenant() == old(self).audit_tenant(), final(self).audit_direction() == old(self).audit_direction(), final(self).receipt() == old(self).receipt(),
             final(self).valid(), final(self).key() == old(self).key(),
             final(self).read_bytes() == old(self).read_bytes(), final(self).state().valid(), final(self).state().body() == old(self).state().body(),
             final(self).state().chunk() == old(self).state().chunk(), final(self).state().capacity() == old(self).state().capacity(),

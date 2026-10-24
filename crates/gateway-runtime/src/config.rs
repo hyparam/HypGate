@@ -1,5 +1,6 @@
 //! Trusted parsing and secret loading. The normalized grant relation is checked
-//! by the verified core; JSON, URI parsing, hashing, and mappings are not proved.
+//! by the verified core, including selection of concrete destination/credential
+//! values. JSON, URI parsing, hashing, and secret provisioning remain trusted.
 use crate::admission::{Admission, AdmissionError, Request};
 use gateway_core::policy::{Identity, Policy, Route};
 use http::{HeaderValue, Uri};
@@ -65,8 +66,7 @@ pub struct GatewayConfig {
 /// that admitted the owned request. No caller-supplied URI or secret override.
 pub struct RoutedRequest<'a> {
     request: Request<'a>,
-    destination: &'a Uri,
-    credential: &'a Credential,
+    resolved: gateway_core::resolved_route::ResolvedRoute<'a, Uri, Credential>,
 }
 
 fn destination(text: &str) -> Result<Uri, ConfigError> {
@@ -161,9 +161,9 @@ impl GatewayConfig {
         if token.is_empty() || token.len() > 512 { return Err(AdmissionError::Unauthorized); }
         let digest = Sha256::digest(token);
         let request = self.admission.admit(&digest, selector)?;
-        let destination = &self.destinations[request.origin()];
-        let credential = &self.credentials[request.credential()];
-        Ok(RoutedRequest { request, destination, credential })
+        let resolved = gateway_core::resolved_route::ResolvedRoute::resolve(
+            request.authority(), &self.destinations, &self.credentials).ok_or(AdmissionError::Unavailable)?;
+        Ok(RoutedRequest { request, resolved })
     }
 }
 
@@ -171,12 +171,15 @@ impl<'a> RoutedRequest<'a> {
     pub(crate) fn stream(&mut self) -> &mut Request<'a> { &mut self.request }
     pub fn request_id(&self) -> u64 { self.request.request_id() }
     pub fn tenant_id(&self) -> u64 { self.request.tenant_id() }
-    pub fn destination(&self) -> &Uri { self.destination }
+    pub fn destination(&self) -> &Uri {
+        self.resolved.destination(self.request.authority()).expect("private request/route binding")
+    }
 
     // Only the trusted HTTP boundary may inject provider credentials.
     pub(crate) fn credential_header(&self) -> (&'static str, &HeaderValue) {
-        let name = match self.credential.kind { CredentialKind::Bearer => "authorization", CredentialKind::ApiKey => "x-api-key" };
-        (name, &self.credential.value)
+        let credential = self.resolved.credential(self.request.authority()).expect("private request/route binding");
+        let name = match credential.kind { CredentialKind::Bearer => "authorization", CredentialKind::ApiKey => "x-api-key" };
+        (name, &credential.value)
     }
 }
 

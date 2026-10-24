@@ -4,8 +4,9 @@ use vstd::prelude::*;
 use crate::{owned_stream::OwnedStream, policy::{AuthorizedRequest, Route}, stream::Ticket};
 
 verus! {
-pub struct AuthorizedWrite { ticket: Ticket, route: Route, request: u64 }
+pub struct AuthorizedWrite { ticket: Ticket, route: Route, request: u64, direction: u8 }
 impl AuthorizedWrite {
+    pub closed spec fn direction(&self) -> u8 { self.direction }
     pub closed spec fn route(&self) -> Route { self.route }
     pub closed spec fn request(&self) -> u64 { self.request }
     pub closed spec fn ticket(&self) -> Ticket { self.ticket }
@@ -15,14 +16,14 @@ impl AuthorizedWrite {
             && self.route().credential == authority.binding().credential
             && self.route().selector == authority.binding().selector
     }
-    pub fn prepare(stream: &mut OwnedStream, authority: &AuthorizedRequest, journal: &crate::journal_binding::JournalBinding, max: usize)
+    pub fn prepare(stream: &mut OwnedStream, authority: &AuthorizedRequest, journal: &crate::journal_binding::JournalBinding, direction: u8, max: usize)
         -> (out: Option<Self>)
         requires old(stream).valid(), authority.valid(),
         ensures final(stream).valid(), final(stream).key() == old(stream).key(),
             final(stream).state().body() == old(stream).state().body(),
             final(stream).state().owner() == old(stream).state().owner(),
             match out {
-                Some(write) => write.bound_to(authority)
+                Some(write) => write.direction() == direction && direction <= 1 && write.bound_to(authority)
                     && crate::policy::allowed(write.route(), authority.policy().roots(), authority.policy().origins(), authority.policy().credentials())
                     && write.request() == final(stream).state().owner()
                     && final(stream).state().matches(&write.ticket())
@@ -30,22 +31,23 @@ impl AuthorizedWrite {
                     && final(stream).state().end() > final(stream).state().position()
                     && final(stream).state().end() - final(stream).state().position() <= max
                     && (final(stream).state().strict() ==> final(stream).state().end() <= final(stream).state().durable()
-                        && final(stream).audited_for(authority, journal)),
+                        && final(stream).audited_for(authority, journal) && final(stream).audit_direction() == direction),
                 None => final(stream).state() == old(stream).state(),
             },
     {
+        if direction > 1 { return None; }
         if stream.owner_id() != authority.request_id() { return None; }
-        if stream.stream().requires_audit() && !stream.is_audited_for(authority, journal) { return None; }
+        if stream.stream().requires_audit() && (!stream.is_audited_for(authority, journal) || stream.recorded_direction() != direction) { return None; }
         let ticket = match stream.prepare(max) { Some(ticket) => ticket, None => return None };
         let route = authority.route();
         proof { stream.state().payload_within_capacity(); }
-        Some(Self { ticket, route, request: authority.request_id() })
+        Some(Self { ticket, route, request: authority.request_id(), direction })
     }
-    pub fn bytes<'a>(&self, owner: &'a OwnedStream, authority: &AuthorizedRequest, journal: &crate::journal_binding::JournalBinding)
+    pub fn bytes<'a>(&self, owner: &'a OwnedStream, authority: &AuthorizedRequest, journal: &crate::journal_binding::JournalBinding, direction: u8)
         -> (out: Option<&'a [u8]>)
         requires owner.valid(), authority.valid(),
         ensures match out {
-            Some(bytes) => self.bound_to(authority)
+            Some(bytes) => self.direction() == direction && direction <= 1 && self.bound_to(authority)
                 && crate::policy::allowed(self.route(), authority.policy().roots(), authority.policy().origins(), authority.policy().credentials()) && self.request() == owner.state().owner()
                 && owner.state().matches(&self.ticket()) && !owner.state().closed()
                 && bytes@ == owner.state().body().subrange(owner.state().position() as int, owner.state().end() as int)
@@ -55,13 +57,14 @@ impl AuthorizedWrite {
                     && journal.session() == Some(owner.receipt().unwrap().session())
                     && owner.receipt().unwrap().record() == crate::framing::encoding(crate::framing::Header {
                         payload: owner.state().body().len() as u32, tenant: authority.tenant(),
-                        request: authority.request(), chunk: owner.state().chunk(), direction: owner.audit_direction() })
+                        request: authority.request(), chunk: owner.state().chunk(), direction })
                         + owner.state().body() + owner.receipt().unwrap().checksum()),
-            None => (owner.state().strict() && !owner.audited_for(authority, journal)) || !self.bound_to(authority) || self.request() != owner.state().owner()
+            None => direction > 1 || self.direction() != direction || (owner.state().strict() && (!owner.audited_for(authority, journal) || owner.audit_direction() != direction)) || !self.bound_to(authority) || self.request() != owner.state().owner()
                 || !owner.state().matches(&self.ticket()) || owner.state().closed(),
         },
     {
-        if owner.stream().requires_audit() && !owner.is_audited_for(authority, journal) { return None; }
+        if direction > 1 || self.direction != direction { return None; }
+        if owner.stream().requires_audit() && (!owner.is_audited_for(authority, journal) || owner.recorded_direction() != direction) { return None; }
         let stream = owner.stream();
         let route = authority.route();
         if self.request != authority.request_id() || self.request != stream.owner_id()

@@ -91,7 +91,7 @@ async fn zero_error_and_flush_failures_close_without_replay() {
         writer.flush_fail = expected == TransferError::Flush;
         assert_eq!(copy_body(&mut r, &mut &b"abc"[..], &mut writer, &mut log, Direction::Upload).await, Err(expected));
         assert!(r.is_closed());
-        assert!(r.prepare(1).is_none());
+        assert!(r.prepare(1, Direction::Upload).is_none());
         assert_eq!(copy_body(&mut r, &mut &b""[..], &mut writer, &mut log, Direction::Download).await,
             Err(TransferError::InvalidState));
     }

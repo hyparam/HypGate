@@ -29,13 +29,31 @@ impl HttpError {
 /// Owns admission until the transport is finished, including response streaming.
 /// No public constructor, cloning, mutable headers, or raw-request extraction.
 pub struct PreparedRequest<'a> {
-    pub(crate) routed: RoutedRequest<'a>,
-    pub(crate) upstream: Request<()>,
+    routed: RoutedRequest<'a>,
+    upstream: Request<()>,
 }
-impl PreparedRequest<'_> {
+impl<'a> PreparedRequest<'a> {
     pub fn request_id(&self) -> u64 { self.routed.request_id() }
     pub fn tenant_id(&self) -> u64 { self.routed.tenant_id() }
-    pub fn destination(&self) -> &Uri { self.upstream.uri() }
+    pub fn destination(&self) -> &Uri { self.routed.destination() }
+    pub(crate) fn stream(&mut self) -> &mut crate::admission::Request<'a> { self.routed.stream() }
+    // Validate the configured binding before any DNS/TCP/TLS effect, then move
+    // the only request into the direct HTTP/1 transport in origin form.
+    pub(crate) fn take_upstream(&mut self) -> Result<Request<()>, HttpError> {
+        let destination = self.routed.destination();
+        let authority = destination.authority().ok_or(HttpError::BadRequest)?;
+        let (name, credential) = self.routed.credential_header();
+        if self.upstream.uri() != destination || self.upstream.method() != Method::POST
+            || self.upstream.headers().get(name) != Some(credential)
+            || self.upstream.headers().get("host").map(|h| h.as_bytes()) != Some(authority.as_str().as_bytes()) {
+            return Err(HttpError::BadRequest);
+        }
+        let path = destination.path_and_query().ok_or(HttpError::BadRequest)?.clone();
+        let uri = Uri::builder().path_and_query(path).build().map_err(|_| HttpError::BadRequest)?;
+        let mut request = std::mem::take(&mut self.upstream);
+        *request.uri_mut() = uri;
+        Ok(request)
+    }
 }
 
 fn check_size(headers: &HeaderMap) -> Result<(), HttpError> {

@@ -7,6 +7,7 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Direction { Upload, Download }
+impl Direction { pub(crate) fn id(self) -> u8 { match self { Self::Upload => 0, Self::Download => 1 } } }
 
 pub struct LogRecord<'a> {
     pub tenant: u64,
@@ -72,8 +73,8 @@ where R: AsyncRead + Unpin, W: AsyncWrite + Unpin, L: AuditLog {
         if guard.request.log_failed() && guard.request.strict() { return Err(TransferError::Log); }
         let mut sent = 0;
         while sent < length {
-            let ticket = guard.request.prepare(length - sent).ok_or(TransferError::InvalidState)?;
-            let bytes = guard.request.pending_bytes(&ticket).ok_or(TransferError::InvalidState)?;
+            let ticket = guard.request.prepare(length - sent, direction).ok_or(TransferError::InvalidState)?;
+            let bytes = guard.request.pending_bytes(&ticket, direction).ok_or(TransferError::InvalidState)?;
             let count = writer.write(bytes).await.map_err(|_| TransferError::Write)?;
             if !guard.request.complete(&ticket, count) { return Err(TransferError::InvalidState); }
             if count == 0 { return Err(TransferError::WriteZero); }

@@ -105,6 +105,7 @@ pub struct WriteTicket<'a> {
 }
 
 impl<'a> Request<'a> {
+    pub(crate) fn authority(&self) -> &AuthorizedRequest<'a> { &self.authorized }
     /// The caller transfers an owned background result into this request while
     /// retaining its exclusive borrow. No background slot is released first.
     pub(crate) fn adopt_background(&mut self, credit: &mut gateway_core::task_credit::TaskCredit) -> bool {
@@ -190,15 +191,15 @@ impl<'a> Request<'a> {
         pending.armed = false;
         Ok(())
     }
-    pub fn prepare(&mut self, max: usize) -> Option<WriteTicket<'a>> {
+    pub fn prepare(&mut self, max: usize, direction: Direction) -> Option<WriteTicket<'a>> {
         let Some(LeaseState::Streaming(stream)) = self.lease.state.as_mut() else { return None; };
-        AuthorizedWrite::prepare(stream, &self.authorized, &self.journal, max)
+        AuthorizedWrite::prepare(stream, &self.authorized, &self.journal, direction.id(), max)
             .map(|core| WriteTicket { admission: self.lease.admission, core })
     }
-    pub fn pending_bytes(&self, ticket: &WriteTicket<'_>) -> Option<&[u8]> {
+    pub fn pending_bytes(&self, ticket: &WriteTicket<'_>, direction: Direction) -> Option<&[u8]> {
         if !std::ptr::eq(ticket.admission, self.lease.admission) { return None; }
         let Some(LeaseState::Streaming(stream)) = self.lease.state.as_ref() else { return None; };
-        ticket.core.bytes(stream, &self.authorized, &self.journal)
+        ticket.core.bytes(stream, &self.authorized, &self.journal, direction.id())
     }
     pub fn complete(&mut self, ticket: &WriteTicket<'_>, count: usize) -> bool {
         if !std::ptr::eq(ticket.admission, self.lease.admission) { return false; }

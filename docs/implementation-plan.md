@@ -320,7 +320,7 @@ Exit criteria:
 | ✓ | TLS jobs after request cancellation: the same credited job/reply path retains handshake state and sockets through blocked polls and unread replies; verified handoff transfers successful results to a live request before releasing pool capacity. Queued cancellation, blocked polls, panic, runtime shutdown, and actual TLS exchange regressions pass under the same adapter assumptions. |
 | ☐ | HTTP cleanup tails: prove retained mailbox/body buffers remain charged to their owners after a request or connection is canceled. Reader substep implemented: production `ReadBuffer` verifies bounded frame load, exact read ranges, and full backing charge through partial consumption; mailbox closure now transfers the exact pending value and its charge to a verified cleanup owner through reported destruction. Global owner-count composition remains open. |
 | ☐ | Compose cleanup-before-capacity-reuse across all owners: connect the worker, connection, HTTP, disk, DNS, and TLS lifecycles to production ownership across cancellation, normal completion, panic, and shutdown. |
-| ☐ | Authorization and journal-session receipts for upstream writes: prove every submitted body range belongs to the admitted request and its authorized destination/credential binding; strict-mode ranges additionally require an exact matching durable receipt from the request's designated journal session. Journal-side provenance is implemented: tickets and receipts carry an immutable session, and the disk worker refuses a mismatched journal before I/O. Request-side receipt acceptance now checks an immutable `JournalBinding`, established before the first append and reused across chunks/directions. Production write tickets now use `AuthorizedWrite`, binding request/tenant/route/credential to exact pending ranges and strict durable-prefix bounds. Write access now composes policy permission, exact current-chunk receipt evidence, and designated-session provenance. Concrete transport destination/direction binding remains open. |
+| ☐ | Upstream mediation: direction-bound write capabilities now compose authorization and exact receipt/session evidence; `ResolvedRoute` selects the actual configured destination and credential, and private prepared metadata is checked before connection effects. Remaining: one explicit dispatch-to-write composition and final adapter audit, alongside the separate resource-composition row. |
 
 DNS/TLS checkpoint validation: the locked workspace suite and five compile-fail
 doctests pass (opt-in workloads excluded); the pinned Cargo/Verus check reports
@@ -396,6 +396,21 @@ URL/credential/direction correspondence and global resource composition remain
 unfinished; the milestone row stays open. Validation: 244 Cargo/Verus checks,
 the locked workspace suite with six compile-fail doctests, and the extended
 submission regression pass; all 198 deliberate mutations are rejected by proof.
+
+Direction and concrete-route checkpoint: write preparation and byte access now
+require the transfer direction explicitly. Strict evidence must cover that same
+direction; either mode rejects a ticket used for the opposite direction.
+`ResolvedRoute::resolve` selects the actual destination/credential values from
+the immutable configured tables using verified authority indices, and its getters
+reject mismatched authority. Production configuration uses that owner.
+`PreparedRequest` metadata is private; `take_upstream` checks URI, credential,
+Host, and method against the configured route before DNS/TCP/TLS and moves the
+request once into origin form. These parser/serialization and I/O adapter checks
+are tested Rust, not a proof of Hyper or network delivery. A single explicit
+join from this concrete dispatch owner to the body-write capability and the final
+adapter audit remain to be completed before checking off upstream mediation.
+Validation: 249 Cargo/Verus checks pass, the locked workspace suite and six
+compile-fail doctests pass, and all 208 deliberate mutations are rejected by proof.
 
 Start with the shared wrapper to reduce duplicated trusted lifetime logic. Preserve
 the existing task-capture destruction tests for both lease types and their

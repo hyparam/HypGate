@@ -298,3 +298,24 @@ async fn maximum_response_head_with_continue_serializes_below_64_kib() {
         driver.await.unwrap();
     }).await.unwrap();
 }
+
+#[test]
+fn dispatch_rejects_changed_uri_credentials_host_or_method_and_cannot_repeat() {
+    let c = config();
+    for change in 0..4 {
+        let mut p = prep(&c, &headers(), "/routes/7").unwrap();
+        match change {
+            0 => *p.upstream.uri_mut() = "https://other.example/".parse().unwrap(),
+            1 => { p.upstream.headers_mut().insert("authorization", HeaderValue::from_static("Bearer other")); },
+            2 => { p.upstream.headers_mut().insert("host", HeaderValue::from_static("other.example")); },
+            _ => *p.upstream.method_mut() = Method::GET,
+        }
+        assert!(p.take_upstream().is_err());
+        assert_eq!(p.destination(), "https://api.openai.com:8443/v1/responses");
+    }
+    let mut p = prep(&c, &headers(), "/routes/7").unwrap();
+    let outgoing = p.take_upstream().unwrap();
+    assert_eq!(outgoing.uri(), "/v1/responses");
+    assert_eq!(outgoing.headers()["authorization"], "Bearer secret-OPENAI");
+    assert!(p.take_upstream().is_err());
+}

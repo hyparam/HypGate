@@ -60,13 +60,14 @@ impl HttpsTransport {
     async fn run<R: AsyncRead + Unpin, W: ResponseSink, L: AuditLog>(
         &self, prepared: &mut PreparedRequest<'_>, input: &mut R, output: &mut W, log: &mut L,
     ) -> Result<ExchangeStats, TransportError> {
+        let upstream = prepared.take_upstream().map_err(|_| TransportError::Metadata)?;
         let host = prepared.destination().host().ok_or(TransportError::Metadata)?
             .trim_start_matches('[').trim_end_matches(']').to_owned();
         let port = prepared.destination().port_u16().unwrap_or(443);
         let server = ServerName::try_from(host.clone()).map_err(|_| TransportError::Metadata)?;
         let tcp = {
             let addresses = self.resolver.resolve(host.clone(), port).await.map_err(|_| TransportError::Connect)?
-                .adopt(prepared.routed.stream()).map_err(|_| TransportError::Connect)?;
+                .adopt(prepared.stream()).map_err(|_| TransportError::Connect)?;
             TcpStream::connect(addresses.as_slice()).await.map_err(|_| TransportError::Connect)?
         };
         let connector = self.connector.clone();
@@ -75,7 +76,7 @@ impl HttpsTransport {
                 connection.set_buffer_limit(Some(TLS_APPLICATION_BUFFER));
             }).await
         }).await.map_err(|_| TransportError::Tls)?
-            .adopt(prepared.routed.stream()).map_err(|_| TransportError::Tls)?;
+            .adopt(prepared.stream()).map_err(|_| TransportError::Tls)?;
         // Explicit queue strategy keeps body-buffer accounting stable across TLS adapters.
         let (mut sender, connection) = hyper::client::conn::http1::Builder::new()
             .writev(true).max_headers(crate::http_boundary::MAX_HEADER_VALUES)
@@ -84,12 +85,10 @@ impl HttpsTransport {
         let (mut body_writer, body) = http_body::channel(16 * 1024);
         // Direct HTTP/1 connection uses origin-form; authority was already bound
         // to the TCP/TLS destination and the trusted Host header.
-        let path = prepared.upstream.uri().path_and_query().ok_or(TransportError::Metadata)?.clone();
-        *prepared.upstream.uri_mut() = http::Uri::builder().path_and_query(path).build().map_err(|_| TransportError::Metadata)?;
-        let request = std::mem::take(&mut prepared.upstream).map(|()| body);
+        let request = upstream.map(|()| body);
         let operation = async {
             let upload = async {
-                let stats = transfer::copy_body(prepared.routed.stream(), input, &mut body_writer, log, Direction::Upload)
+                let stats = transfer::copy_body(prepared.stream(), input, &mut body_writer, log, Direction::Upload)
                     .await.map_err(|_| TransportError::Upload)?;
                 body_writer.shutdown().await.map_err(|_| TransportError::Upload)?;
                 Ok::<_, TransportError>(stats)
@@ -99,7 +98,7 @@ impl HttpsTransport {
             let (parts, body) = response.into_parts();
             let (status, headers) = prepare_response_parts(parts).map_err(|_| TransportError::Metadata)?;
             output.start(status, headers).await.map_err(|_| TransportError::Client)?;
-            let download = transfer::copy_body(prepared.routed.stream(), &mut http_body::Reader::new(body), output, log, Direction::Download)
+            let download = transfer::copy_body(prepared.stream(), &mut http_body::Reader::new(body), output, log, Direction::Download)
                 .await.map_err(|_| TransportError::Download)?;
             output.finish().await.map_err(|_| TransportError::Client)?;
             Ok(ExchangeStats { upload, download })
