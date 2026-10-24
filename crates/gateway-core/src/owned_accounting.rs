@@ -40,6 +40,7 @@ proof fn bound_prefix(slots: Seq<u64>, owners: Seq<Option<crate::owned_stream::O
         crate::buffer_accounting::bounded(owner_buffers(owners), slots.len(), capacity),
     decreases slots.len(),
 {
+    crate::resource::occupied_bound(slots);
     assert forall|i: int| 0 <= i < owners.len() implies
         #[trigger] owner_buffers(owners)[i].len() <= capacity by {
         match owners[i] { Some(o) => { o.payload_bound(); }, None => {} }

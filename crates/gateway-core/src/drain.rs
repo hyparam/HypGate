@@ -4,13 +4,6 @@ use vstd::prelude::*;
 use crate::resource::{ResourceAdmission, RequestKey};
 
 verus! {
-proof fn occupancy_bound(slots: Seq<u64>)
-    ensures crate::resource::occupied(slots) <= slots.len(),
-    decreases slots.len(),
-{
-    if slots.len() > 0 { occupancy_bound(slots.subrange(0, slots.len() as int - 1)); }
-}
-
 pub struct DrainRegistry { registry: ResourceAdmission, closed: bool }
 impl DrainRegistry {
     pub closed spec fn state(&self) -> ResourceAdmission { self.registry }
@@ -61,7 +54,7 @@ impl DrainRegistry {
             },
     {
         let out = if self.closed { None } else { self.registry.acquire() };
-        proof { self.registry.layout(); occupancy_bound(self.registry.entries()); }
+        proof { self.registry.layout(); crate::resource::occupied_bound(self.registry.entries()); }
         out
     }
     pub fn release(&mut self, key: &RequestKey) -> (out: bool)

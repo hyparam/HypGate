@@ -161,10 +161,6 @@ impl OwnedStream {
             final(registry).per_request() == old(registry).per_request(),
             final(registry).next_id() == old(registry).next_id(),
             ok == old(registry).owns(&self.key()),
-            ok ==> (forall|streams: Seq<Option<StreamChunk>>|
-                #[trigger] crate::resource::streams_bound(old(registry).entries(), streams, old(registry).per_request())
-                ==> crate::resource::streams_bound(final(registry).entries(),
-                    streams.update(self.key().slot() as int, None), final(registry).per_request())),
             ok ==> (forall|owners: Seq<Option<OwnedStream>>|
                 #[trigger] crate::owned_accounting::owners_match(old(registry).entries(), owners, old(registry).per_request())
                 ==> crate::owned_accounting::owners_match(final(registry).entries(),

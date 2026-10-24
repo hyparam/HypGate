@@ -160,51 +160,43 @@ must not be implemented by duplicating the current stream under the same owner.
 
 ## Conditional combined payload theorem
 
-`ResourceAdmission::logical_payload_bound` takes a ghost sequence with one optional
-stream snapshot per registry slot. Its explicit `streams_bound` premise requires
-every present stream to have the live slot's nonzero owner ID, a valid stream state,
-and capacity no larger than the registry's per-request allowance. Empty slots
-therefore cannot carry payload; a slot cannot contribute multiple streams.
+The registry-wide payload theorem lives in `owned_accounting` and is described
+under [registry-wide bound including pending reads](#registry-wide-bound-including-pending-reads).
+An earlier version stated the same bound over bare stream snapshots; production
+only ever maps `OwnedStream` values, so that duplicate map and its preservation
+lemmas were removed.
 
-The inductive `bound_payload` proof sums actual logical body lengths and establishes
-that total retained payload is at most occupied slots times per-request capacity,
-and therefore at most configured slots times capacity. If that configured product
-is at most 128 MiB, the mapped payload total is also at most 128 MiB. The stream
-module exports a checked lemma deriving its body-size bound from its invariant.
-No runtime allocation or per-byte scan is added: these snapshots and sums are ghost
-specifications erased by Cargo.
-
-This composes the synchronous slot and chunk bounds under the stated ownership
-mapping. It does not prove that every async transition maintains that mapping, or
-that dropping a request stops every external effect. Numeric owners remain scoped
-to their registry. It also excludes vector spare capacity, HTTP/TLS backing storage,
-log queues, allocator overhead, and OS caches. The runtime ownership boundary and
-load tests support those separate obligations without turning this into a
-whole-process memory theorem.
+The theorem composes the synchronous slot and chunk bounds under the stated
+ownership mapping. It does not prove that every async transition maintains that
+mapping, or that dropping a request stops every external effect. Numeric owners
+remain scoped to their registry. It also excludes vector spare capacity, HTTP/TLS
+backing storage, log queues, allocator overhead, and OS caches. The runtime
+ownership boundary and load tests support those separate obligations without
+turning this into a whole-process memory theorem.
 
 ## Ownership-map preservation
 
-The core now proves preservation rules for the ghost stream-to-slot map, rather
-than requiring every later snapshot's validity independently:
+The core proves preservation rules for the ghost owner-to-slot map, rather than
+requiring every later snapshot's validity independently:
 
 - `ResourceAdmission::new` establishes a valid all-empty map.
 - The actual `acquire` postcondition preserves every previously valid map. Its
-  proof derives that the newly reserved slot had no retained stream, since it was
-  free; other stream owners remain unchanged.
-- The actual `authorized_stream` postcondition proves that installing the returned
-  stream at its key's slot preserves the map.
-- `replace_preserves_streams` covers subsequent stream snapshots with valid state,
-  unchanged owner, and capacity within the slot's allowance. The executable stream
+  proof derives that the newly reserved slot had no retained owner, since it was
+  free; other owners remain unchanged.
+- `OwnedStream::claim` proves that installing the returned owner at its key's
+  slot preserves the map.
+- `replace_owner` covers subsequent owner snapshots with valid state, unchanged
+  key, and capacity within the slot's allowance. The executable stream
   transitions specify these facts, including chunk rollover and cancellation.
 - Successful `release_stream` and reservation-only `release` prove that clearing
   the released slot's map entry preserves the map. Failed releases leave the
-  registry unchanged. Clearing a map entry describes dropping the stream, not
+  registry unchanged. Clearing a map entry describes dropping the owner, not
   permission to keep an independent copy alive.
 
 Together these rules allow induction over core lifecycle events and application
-of `logical_payload_bound` after each event. Three deliberate defects test
-reservation of a live mapped slot, replacement with the wrong stream owner, and
-retention of a stream after its slot is retired.
+of `registry_owned_payload_bound` after each event. Deliberate defects test
+reservation of a live mapped slot, replacement with the wrong owner, omitted
+read bytes, oversized replacements, and retained payload after retirement.
 
 This is still a conditional resource proof. The ghost map is a specification
 snapshot, not a runtime registry of buffers. Safe Rust lease encapsulation must
@@ -295,8 +287,9 @@ The actual registry constructor establishes the empty owner map. Acquisition
 preserves it, `OwnedStream::claim` proves insertion of its returned owner, and
 successful release/retirement proves removal. The `replace_owner` lemma lifts
 mutating owner transitions using their preserved key/capacity and valid-state
-postconditions. A coverage lemma and three mutations check omitted read bytes,
-oversized replacements, and retained payload after retirement.
+postconditions. A coverage lemma and five mutations check live-slot reservation,
+wrong-owner replacement, omitted read bytes, oversized replacements, and retained
+payload after retirement.
 
 The runtime must still maintain a complete single-registry map of its live owners;
 this is not a proof of all Tokio scheduling or global allocation lifetimes. The
