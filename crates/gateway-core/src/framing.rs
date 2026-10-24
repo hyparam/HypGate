@@ -81,7 +81,8 @@ pub fn encode(h: Header) -> (out: Option<Vec<u8>>)
 {
     if h.payload > 1048576 || h.request == 0 || h.direction > 1 { return None; }
     proof { lemma_auto_spec_u32_to_from_le_bytes(); lemma_auto_spec_u64_to_from_le_bytes(); }
-    let mut bytes = Vec::new();
+    // The canonical header is exactly 33 bytes; avoid geometric growth.
+    let mut bytes = Vec::with_capacity(33);
     bytes.push(83); bytes.push(71); bytes.push(82); bytes.push(49);
     append(&mut bytes, u32_to_le_bytes(h.payload).as_slice());
     append(&mut bytes, u64_to_le_bytes(h.tenant).as_slice());

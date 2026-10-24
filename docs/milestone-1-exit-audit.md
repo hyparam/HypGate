@@ -16,7 +16,7 @@ another milestone or treat adapter assumptions as proved runtime behavior.
 | Mutation tests reject corruption, cross-request writes, duplicate advancement, capacity violations, and strict-mode forwarding before durability | All 131 mutations are rejected by proof obligations; the script verifies the unmodified library first. Named defects include wrong owner/generation, full-write substitution, omitted payload/receipt storage, queue overwrite/reopening, and advancing beyond durability. Mutations test the strength of specified contracts, not the completeness of the threat model. | Covered for listed defect classes |
 | Verified admission issues private authorization tied to identity/policy/origin/credential; candidate configuration cannot expand root grants | Policy validation, authentication, and tenant-scoped authorization establish those relationships. AuthorizedRequest construction is private and its policy borrow binds the immutable snapshot. Runtime dispatch consumes PreparedRequest; concrete URI/DNS/TLS/secret binding remains trusted and tested. | Covered at the verified admission boundary |
 
-The current workspace has 145 passing regular tests and five compile-fail doctests.
+The current workspace has 146 passing regular tests and five compile-fail doctests.
 The raw-construction, raw-claim, and raw-release negative examples require the
 private-method diagnostic; existing examples prohibit mutable stream extraction
 and completing a read while its mutable buffer borrow remains live. Low-level
@@ -42,7 +42,10 @@ without reopening the external API.
    Sealing raw constructors removes one external bypass; it does not prove
    registry identity, destructor timing, or snapshot completeness.
 2. **Finish allocation accounting beyond logical payloads.** The disk queue now
-   requests a fixed Q-slot vector with verified unchanged slot count. HTTP channel
+   requests a fixed Q-slot vector with verified unchanged slot count. Audit encoding
+   requests P + 65 frame bytes plus 33 header scratch bytes; boundary tests check
+   reported capacity and unchanged allocation across sealing. These are allocation
+   requests and regression evidence, not a proof of allocator overhead. HTTP channel
    blocks still have growth/reuse overlap; Hyper parser/output backing capacity,
    metadata collections, TLS handshake/cache active owners, task/waker storage,
    and allocator/OS storage remain outside the subtotal. The dependency audit

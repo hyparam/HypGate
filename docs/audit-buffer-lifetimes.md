@@ -21,7 +21,9 @@ supply up to `MAX_RECORD_BYTES` and must account for retained receipts separatel
 The resulting frame term is `(Q + 1 + R) * (K + 65)`. The checked production
 encoding derives 65 bytes of header/checksum overhead. The journal's byte history
 and canonical-frame sequence are erased ghost state, not retained old payloads.
-Header encoding/comparison scratch is accounted separately. Channel nodes,
+Header encoding/comparison scratch is accounted separately and now requests
+33 bytes up front; the [allocation inventory](dependency-resources.md#audit-encoding-allocation-requests)
+records simultaneous header/body requests and the sealing-capacity regression. Channel nodes,
 oneshot state, allocator slack, and thread stacks are outside the frame-payload term.
 The worker explicitly requests a 2 MiB stack rather than inheriting the
 environment-dependent Rust default; reservation, committed pages, and OS overhead

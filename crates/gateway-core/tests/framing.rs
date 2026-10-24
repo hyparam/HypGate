@@ -152,3 +152,25 @@ fn session_header_requires_exact_version_length_checksum_and_identity() {
         assert_eq!(decode_session(&changed, true), Some(expected));
     }
 }
+
+#[test]
+fn record_encoding_reserves_exact_capacity_and_sealing_reuses_the_allocation() {
+    use gateway_core::framing::RecordBody;
+    // Runtime allocator observations, not a Verus capacity or physical-memory theorem.
+    for length in [0, 1, 31, 32, 33, 63, 64, 65, 4095, 4096, 4097, 65536, 1048576] {
+        let header = || Header { payload: length as u32, tenant: 1, request: 2, chunk: 3, direction: 0 };
+        let encoded_header = encode(header()).unwrap();
+        assert_eq!(encoded_header.len(), 33);
+        assert_eq!(encoded_header.capacity(), 33);
+        let payload = vec![7; length];
+        let body = RecordBody::new(header(), &payload).unwrap();
+        assert_eq!(body.bytes().len(), length + 33);
+        let allocation = body.bytes().as_ptr();
+        let sealed = body.seal(&[9; 32]);
+        assert_eq!(sealed.bytes().as_ptr(), allocation);
+        assert_eq!(sealed.bytes().len(), length + 65);
+        assert_eq!(sealed.bytes().capacity(), length + 65);
+        assert_eq!(&sealed.bytes()[33..33 + length], payload);
+        assert_eq!(&sealed.bytes()[33 + length..], &[9; 32]);
+    }
+}

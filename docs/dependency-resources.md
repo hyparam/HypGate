@@ -284,6 +284,31 @@ These source-derived object counts still exclude
 private ABI sizes, allocator bookkeeping, transient replacement allocations,
 and task references retained by wakeups.
 
+## Audit encoding allocation requests
+
+For payload length P, the production encoder has the following storage requests.
+The caller's borrowed payload already belongs to the request budget.
+
+| Storage | Request and lifetime | Evidence and limit |
+| --- | --- | --- |
+| Canonical header scratch | One 33-byte Vec, dropped when `encode_payload` returns | `encode` now uses `Vec::with_capacity(33)`, avoiding repeated geometric growth from an empty vector. Receipt comparison uses the same encoder. |
+| Record body and sealed frame | One Vec requested at P + 65 bytes, moved from `RecordBody` into `RecordFrame` | The initial length is P + 33; 32 bytes of spare capacity are reserved for the checksum. Total pushes never exceed the initial request, under standard Vec behavior. |
+| Checksum | SHA-256 computation state and 32-byte result | Fixed-size algorithm state is separate from the frame's stored checksum; it is not another payload allocation. Library implementation and stack accounting remain trusted. |
+
+Header scratch and body storage coexist during construction, so requested byte
+storage at that stage is P + 98, in addition to the borrowed input. After header
+drop, sealing appends the 32-byte checksum into the existing reserve. Moving a
+Vec through the queue, journal, and completion channel does not clone its payload;
+control-object and receipt lifetimes are accounted separately.
+
+`record_encoding_reserves_exact_capacity_and_sealing_reuses_the_allocation`
+checks zero, small alignment boundaries, page-size boundaries, 64 KiB, and 1 MiB
+payloads. It checks actual reported Vec capacities, exact bytes, and unchanged
+allocation address across sealing. These are regressions for the supported Rust
+and allocator targets, not a Verus allocator theorem: vstd's Vec specification
+models contents, not backing capacity. Allocator size classes, bookkeeping,
+fragmentation, and physical pages remain outside this request inventory.
+
 ## Dedicated thread stacks
 
 The audit worker explicitly requests a 2 MiB stack, independent of the
