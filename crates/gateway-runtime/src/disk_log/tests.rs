@@ -152,6 +152,37 @@ fn sink() -> Sink {
 }
 
 #[tokio::test]
+async fn dropping_final_logger_handle_wakes_and_releases_idle_worker() {
+    struct OwnedSink { file: Sink, done: Option<oneshot::Sender<()>> }
+    impl Write for OwnedSink {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> { self.file.write(bytes) }
+        fn flush(&mut self) -> io::Result<()> { self.file.flush() }
+    }
+    impl DurableWrite for OwnedSink { fn sync(&mut self) -> io::Result<()> { self.file.sync() } }
+    impl Drop for OwnedSink { fn drop(&mut self) { let _ = self.done.take().unwrap().send(()); } }
+    let (done, released) = oneshot::channel();
+    let mut log = DiskLog::start(OwnedSink { file: sink(), done: Some(done) }, 1, Duration::from_secs(2), [0; 16]).unwrap();
+    drop(log.append(record(b"complete", 1)).await.unwrap());
+    let last = log.clone(); drop(log);
+    assert!(last.healthy());
+    drop(last);
+    tokio::time::timeout(Duration::from_secs(2), released).await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn poisoned_fixed_queue_refuses_logging_and_worker_can_shutdown() {
+    let mut log = DiskLog::start(sink(), 1, Duration::from_secs(2), [0; 16]).unwrap();
+    let queue = log.worker.lock().unwrap().queue.clone();
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = queue.push_with(|| panic!("injected frame-construction panic"));
+    })).is_err());
+    assert!(!log.healthy());
+    assert!(matches!(log.append(record(b"refused", 1)).await, Err(error) if error.kind() == io::ErrorKind::BrokenPipe));
+    log.shutdown(Duration::from_secs(2)).await.unwrap();
+    assert!(log.worker.lock().unwrap().thread.is_none());
+}
+
+#[tokio::test]
 async fn write_and_sync_failures_never_acknowledge_and_poison_future_appends() {
     for fail_write in [true, false] {
         let mut file = sink(); file.fail_write = fail_write; file.fail_sync = !fail_write;
@@ -193,7 +224,7 @@ async fn queue_capacity_rejects_excess_work_before_allocation() {
     started.await.unwrap();
     let second = tokio::spawn(async move { second_log.append(record(b"second", 2)).await });
     tokio::time::timeout(Duration::from_secs(1), async {
-        while log.worker.lock().unwrap().sender.as_ref().unwrap().capacity() != 0 { tokio::task::yield_now().await; }
+        while log.queued_for_test() != 1 { tokio::task::yield_now().await; }
     }).await.unwrap();
     assert_eq!(log.append(record(b"third", 3)).await.err().unwrap().kind(), io::ErrorKind::WouldBlock);
     assert!(log.healthy());
@@ -216,7 +247,7 @@ async fn shutdown_closes_all_clones_drains_admitted_jobs_and_joins() {
     inside.await.unwrap();
     let mut second = log.clone();
     let second = tokio::spawn(async move { second.append(record(b"second", 2)).await });
-    while log.worker.lock().unwrap().sender.as_ref().unwrap().capacity() != 1 {
+    while log.queued_for_test() != 1 {
         tokio::task::yield_now().await;
     }
     let closing = log.clone();

@@ -6,7 +6,9 @@ use gateway_core::framing::{self, Header, RecordBody, RecordFrame};
 use sha2::{Digest, Sha256};
 use std::{fs::{File, OpenOptions}, io::{self, Read, Write}, path::Path,
     sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}}, time::Duration};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
+mod queue;
+use queue::Queue;
 
 #[cfg(test)]
 const FILE_MAGIC: &[u8; 8] = b"SGLOG001";
@@ -29,12 +31,13 @@ pub struct DiskLog {
     session: [u8; 16],
 }
 
-struct Worker { sender: Option<mpsc::Sender<Job>>, thread: Option<std::thread::JoinHandle<()>> }
+struct Worker { queue: Arc<Queue>, thread: Option<std::thread::JoinHandle<()>> }
+impl Drop for Worker { fn drop(&mut self) { self.queue.close(); } }
 
 // Health must not depend on an append caller surviving to observe failure.
-struct UnhealthyOnExit(Arc<AtomicBool>);
+struct UnhealthyOnExit(Arc<AtomicBool>, Arc<Queue>);
 impl Drop for UnhealthyOnExit {
-    fn drop(&mut self) { self.0.store(false, Ordering::Release); }
+    fn drop(&mut self) { self.0.store(false, Ordering::Release); self.1.abort(); }
 }
 
 trait DurableWrite: Write + Send + 'static { fn sync(&mut self) -> io::Result<()>; }
@@ -67,13 +70,15 @@ impl DiskLog {
     }
 
     fn start<W: DurableWrite>(mut file: W, capacity: usize, deadline: Duration, session: [u8; 16]) -> io::Result<Self> {
-        let (sender, mut receiver) = mpsc::channel::<Job>(capacity);
+        if capacity == 0 || capacity > 1024 { return Err(io::ErrorKind::InvalidInput.into()); }
+        let queue = Arc::new(Queue::new(capacity));
+        let receiver = queue.clone();
         let healthy = Arc::new(AtomicBool::new(true));
         let worker_health = healthy.clone();
         let thread = std::thread::Builder::new().name("soundgate-audit".into()).stack_size(WORKER_STACK_BYTES).spawn(move || {
-            let _health_on_exit = UnhealthyOnExit(worker_health.clone());
+            let _health_on_exit = UnhealthyOnExit(worker_health.clone(), receiver.clone());
             let mut journal = Journal::new();
-            while let Some(job) = receiver.blocking_recv() {
+            while let Some(job) = receiver.recv() {
                 let receipt = if worker_health.load(Ordering::Acquire) {
                     match journal.begin(job.frame.bytes().len() as u64) {
                         Some(ticket) if file.write_all(job.frame.bytes()).is_ok() && file.sync().is_ok() =>
@@ -87,12 +92,13 @@ impl DiskLog {
                 let _ = job.done.send(receipt);
             }
         })?;
-        Ok(Self { worker: Arc::new(Mutex::new(Worker { sender: Some(sender), thread: Some(thread) })),
+        Ok(Self { worker: Arc::new(Mutex::new(Worker { queue, thread: Some(thread) })),
             healthy, deadline, session })
     }
 
     pub fn healthy(&self) -> bool {
-        self.healthy.load(Ordering::Acquire) && self.worker.lock().unwrap().sender.is_some()
+        self.healthy.load(Ordering::Acquire)
+            && self.worker.lock().map(|worker| worker.queue.is_open()).unwrap_or(false)
     }
 
     /// Close admission across all clones, drain queued jobs, and join the worker.
@@ -101,7 +107,7 @@ impl DiskLog {
         if deadline.is_zero() || deadline > Duration::from_secs(300) {
             return Err(io::ErrorKind::InvalidInput.into());
         }
-        self.worker.lock().unwrap().sender.take();
+        self.worker.lock().unwrap().queue.close();
         let joined = tokio::time::timeout(deadline, async {
             loop {
                 {
@@ -161,8 +167,7 @@ impl DiskLog {
     #[cfg(test)]
     pub(crate) fn queued_for_test(&self) -> usize {
         let worker = self.worker.lock().unwrap();
-        let sender = worker.sender.as_ref().unwrap();
-        sender.max_capacity() - sender.capacity()
+        worker.queue.len()
     }
     pub fn session(&self) -> [u8; 16] { self.session }
 }
@@ -176,21 +181,21 @@ impl AuditLog for DiskLog {
         // Reserve queue space before allocating/copying a payload. Queued frames
         // plus the worker's one active frame bound retained log payloads.
         let completion = {
-            // Serialize admission with shutdown. No sender or permit can escape
-            // this section and keep the receiver open after shutdown closes it.
-            let worker = self.worker.lock().unwrap();
-            let sender = worker.sender.as_ref().ok_or(io::ErrorKind::BrokenPipe)?;
-            let permit = sender.try_reserve().map_err(|e| match e {
-                mpsc::error::TrySendError::Full(_) => io::ErrorKind::WouldBlock,
-                mpsc::error::TrySendError::Closed(_) => {
-                    self.healthy.store(false, Ordering::Release);
-                    io::ErrorKind::BrokenPipe
-                },
+            // The queue lock serializes construction/insertion with shutdown.
+            // Unlike an mpsc sender clone, this Arc cannot keep admission open
+            // after Queue::close. Do not hold the worker mutex while encoding.
+            let queue = self.worker.lock().map_err(|_| io::ErrorKind::BrokenPipe)?.queue.clone();
+            let mut completion = None;
+            queue.push_with(|| {
+                let frame = encode_record(record);
+                let (done, receive) = oneshot::channel();
+                completion = Some(receive);
+                Job { frame, done }
+            }).map_err(|error| {
+                if error.kind() == io::ErrorKind::BrokenPipe { self.healthy.store(false, Ordering::Release); }
+                error
             })?;
-            let frame = encode_record(record);
-            let (done, completion) = oneshot::channel();
-            permit.send(Job { frame, done });
-            completion
+            completion.expect("successful queue insertion constructed a job")
         };
         match tokio::time::timeout(self.deadline, completion).await {
             Ok(Ok(Some(receipt))) => Ok(receipt),

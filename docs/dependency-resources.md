@@ -243,7 +243,7 @@ their surviving owners; they do not add another copy of message payloads.
 | HTTP body mpsc channels | C + 2R | Client receivers, client sender cleanup, and provider upload channels |
 | HTTP body drain oneshots | C + 2R | One per body channel, including either surviving endpoint |
 | Response-head oneshots | C + R | Waiting inbound service futures or surviving worker senders |
-| Audit completion oneshots | Q + 1 + R | Reserved/queued jobs, sole active worker, and live request receivers |
+| Audit completion oneshots | Q + 1 + R | Encoding/queued jobs, sole active worker, and live request receivers |
 | DNS completion oneshots | 32 + R | Credited lookup jobs or live request receivers after result handoff |
 | PollSender acquire futures | 2R | One client writer and one provider writer per credited worker/exchange |
 
@@ -260,9 +260,8 @@ Message-block counts cannot be equated with `ceil(capacity / 32)`: the sender an
 receiver can be on different blocks, consumed blocks await the source's release
 condition, and `list.rs::reclaim_block` tries up to three links before freeing or
 reusing a block. An allocation at a block boundary can coexist with old blocks.
-The production HTTP sender is exclusive through mutable Writer access; audit sends
-are serialized under the logger mutex. Those restrictions simplify a future
-peak-block proof but are not themselves such a proof. All blocks are freed when
+The production HTTP sender is exclusive through mutable Writer access. That
+restriction simplifies a future peak-block proof but is not itself such a proof. All blocks are freed when
 the last channel owner is destroyed, including the sender-only cleanup cases
 already tested in the HTTP lifetime audit.
 
@@ -278,8 +277,10 @@ The initial and replacement acquire futures use the same concrete async function
 and layout, allowing storage reuse. The semaphore waiter is embedded in that
 future, with intrusive links and a waker; it is not an independently unbounded
 queue of allocated waiters. Both the future allocation and the enclosing Writer
-state must be counted. Disk admission uses `try_reserve`, so it has no suspended
-permit-acquisition future. These source-derived object counts still exclude
+state must be counted. The disk queue now uses the verified fixed FIFO described
+in [audit ownership](audit-buffer-lifetimes.md#verified-fixed-queue-and-synchronization-obligations):
+one Q-slot vector plus a mutex/condvar, with no mpsc blocks or permit futures.
+These source-derived object counts still exclude
 private ABI sizes, allocator bookkeeping, transient replacement allocations,
 and task references retained by wakeups.
 

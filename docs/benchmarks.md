@@ -259,3 +259,12 @@ short three-wave macOS fixture passed again in both modes (24 requests and
 12,877,824 bytes sampled peak RSS. Exact responses, audit coverage, released
 credits, and shutdown passed. This is a short regression check, not a rerun of
 the 100-wave soak or evidence of a universal allocation bound.
+
+The fixed audit-FIFO implementation subsequently passed all six release-mode
+healthy/slow-peer/failed-log workloads (124.23 seconds total), including exact
+payload/audit checks and the expected mode-specific failure behavior. Its short
+isolated memory fixture also passed: strict sampled peak RSS was 13,008,896 bytes
+and availability sampled peak was 12,926,976 bytes across three waves per mode.
+The strict memory run overlapped the load workload, so these timings are not a
+controlled performance comparison. The queue's fixed slot-count claim comes from
+its source and checked contracts, not these RSS samples.

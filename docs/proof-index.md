@@ -18,6 +18,7 @@ their formal scope.
 
 | Claim | Checked definitions and operations | Remaining binding or assumption |
 | --- | --- | --- |
+| Fixed audit queue preserves FIFO identity/order and bounded slot occupancy, including wraparound | `fixed_queue::FixedQueue::{new,len,is_full,push,pop}`, `valid`, and `contents` | Production mutex/condvar ordering, allocation success, Vec backing capacity, and Rust destruction remain trusted. |
 | Candidate routes cannot expand root grants or select another tenant's credential | [policy.rs](../crates/gateway-core/src/policy.rs): `allowed`, `Policy::valid`, `Policy::validate` | Root-policy intent, JSON parsing, and mapping handles to concrete URLs/secrets are trusted. Validated root grants and credential-owner indices survive as erased ghost snapshots, not retained runtime vectors. |
 | Issued authority belongs to an authenticated tenant and configured route | Same module: `Policy::authenticate`, `Authenticated::authorize`, `AuthorizedRequest::valid`, verified accessors | Token provisioning and SHA-256 are trusted. Actual dispatch through the wrapper is audited/tested, not formally proved. |
 | Normalized request/chunk limits fit the configured combined allowance without arithmetic overflow | [resource.rs](../crates/gateway-core/src/resource.rs): `validate_limits` | Covers one chunk per slot; parser binding and total process memory remain separate. |

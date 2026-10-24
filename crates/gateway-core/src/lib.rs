@@ -17,3 +17,4 @@ pub mod owned_stream;
 pub mod buffer_accounting;
 
 pub mod owned_accounting;
+pub mod fixed_queue;
