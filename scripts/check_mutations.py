@@ -16,6 +16,11 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("http_message.rs", "http_message_omits_data_bytes", "Self::Data(frame) => frame.contents()", "Self::Data(frame) => Seq::empty()"),
+
+    ("http_message.rs", "http_message_cleanup_releases_on_extraction", "if cleanup.finished() { 0 }", "if cleanup.started() { 0 }"),
+    ("http_message.rs", "http_message_counts_only_queue_after_close", "message_bytes(queue.item()) + cleanup_bytes(cleanup) <= 16384,", "message_bytes(queue.item()) + cleanup_bytes(cleanup) <= 0,"),
+
     ("output_frame.rs", "output_frame_ignores_hard_limit", "let cap = if requested < MAX_OUTPUT_FRAME { requested } else { MAX_OUTPUT_FRAME };", "let cap = requested;"),
     ("output_frame.rs", "output_frame_ignores_requested_limit", "let cap = if requested < MAX_OUTPUT_FRAME { requested } else { MAX_OUTPUT_FRAME };", "let cap = MAX_OUTPUT_FRAME;"),
     ("output_frame.rs", "output_frame_corrupts_payload", "copy.push(bytes[i]);", "copy.push(0);"),

@@ -157,8 +157,8 @@ cargo verus verify -p gateway-core --locked -- --triggers-mode silent
 VERUS=/path/to/verus python3 scripts/check_mutations.py
 ```
 
-Validation on 2026-10-24: 242 core verification checks passed, 225 workspace tests and six compile-fail doctests
-passed, and all 213 deliberate mutations failed their proof obligations. The opt-in TLS proxy/gateway
+Validation on 2026-10-24: 247 core verification checks passed, 227 workspace tests and six compile-fail doctests
+passed, and all 216 deliberate mutations failed their proof obligations. The opt-in TLS proxy/gateway
 process-failover test and six load/fault workloads passed on 2026-10-23.
 Two ten-minute overload runs and the final 100-wave-per-mode isolated memory soak
 also passed; measurements and limits are in the benchmark notes.

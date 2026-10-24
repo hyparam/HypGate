@@ -10,7 +10,15 @@ acknowledge End. Rust destruction, wakeups, and async scheduling remain trusted.
 Each channel owns one inline optional message, one Arc/mutex control allocation,
 and at most two registered wakers. `http_body/slot.rs` exposes non-cloneable sender and
 receiver endpoints. There are no linked message blocks, semaphore permits, or
-PollSender acquisition futures. The message is stored directly in the mailbox, with no separate slot vector.
+PollSender acquisition futures. The production message is `http_message::HttpMessage`, stored directly in the
+mailbox with no separate slot vector. Its verified payload projection distinguishes
+bounded Data frames from zero-byte End. `queued_payload_bound` derives the
+16 KiB queued-byte bound from the actual item charge. `closing_payload_bound`
+combines the closed mailbox with its transferred `Cleanup<HttpMessage>` and
+bounds their total through extraction and reported destruction. The consuming
+`into_payload` operation connects that projection to the exact vector handed to
+Hyper. Test builds substitute a local enum only to support observable backing-owner
+probes; ordinary Data paths still use the same verified OutputFrame.
 Verified push/pop preserve exact item identity and reject full-slot overwrite.
 The core owns both endpoint-open flags: sender closure preserves the item for
 draining, receiver closure returns the item and clears the slot, and neither

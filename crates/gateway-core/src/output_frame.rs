@@ -30,6 +30,10 @@ impl OutputFrame {
         }
         Self { bytes: copy }
     }
+    pub proof fn payload_bound(&self)
+        requires self.valid(),
+        ensures self.contents().len() <= 16384,
+    {}
     pub fn len(&self) -> (out: usize)
         requires self.valid(),
         ensures out == self.contents().len(), out <= 16384,

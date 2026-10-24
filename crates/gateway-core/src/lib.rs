@@ -22,6 +22,7 @@ pub mod task_credit;
 pub mod mailbox;
 pub mod read_buffer;
 pub mod output_frame;
+pub mod http_message;
 pub mod buffer_accounting;
 pub mod owned_accounting;
 

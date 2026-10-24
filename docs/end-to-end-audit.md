@@ -358,3 +358,15 @@ retention and destructor probes use a separate test-only message variant so thei
 custom backing owners remain observable. The production type has only bounded
 frames and End. These checks strengthen per-owner sizes, but do not establish
 the remaining global HTTP owner count or cross-owner lifecycle composition.
+
+
+## Milestone 6 HTTP mailbox-byte follow-up
+
+Production mailbox items now use `HttpMessage` from the verified core, including
+its exact consuming payload extraction. Its queued-byte and closed-mailbox-plus-
+cleanup theorems bound the actual message projection, not a caller-supplied byte
+count. End has zero payload; Data owns a bounded OutputFrame. Extraction retains
+the cleanup charge until reported completed destruction. The runtime adapter's
+mutex, wakers, destruction, and Hyper handoff correspondence remain trusted.
+The global HTTP owner-count mapping and cross-owner lifecycle theorem remain
+unfinished; these per-mailbox results do not close either remaining milestone row.

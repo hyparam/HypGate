@@ -52,11 +52,23 @@ impl<B: Body<Data = Bytes> + Unpin> AsyncRead for Reader<B> {
     }
 }
 
+#[cfg(not(test))]
+use gateway_core::http_message::HttpMessage as Message;
+
+// The alternate test item permits observable backing-owner probes. Ordinary
+// data paths in both builds carry the same verified OutputFrame.
+#[cfg(test)]
 enum Message {
     Data(OutputFrame), End,
     // Inject custom backing owners only for dependency/destructor probes.
     #[cfg(test)]
     Probe(Bytes),
+}
+#[cfg(not(test))]
+fn message_data(message: Message) -> Option<Bytes> { message.into_payload().map(Bytes::from) }
+#[cfg(test)]
+fn message_data(message: Message) -> Option<Bytes> {
+    match message { Message::Data(frame) => Some(Bytes::from(frame.into_vec())), Message::Probe(bytes) => Some(bytes), Message::End => None }
 }
 pub(crate) struct Writer { sender: slot::Sender<Message>, max_frame: usize, ended: bool, drained: oneshot::Receiver<()>, complete: bool }
 pub(crate) struct ChannelBody { receiver: slot::Receiver<Message>, ended: bool, drained: Option<oneshot::Sender<()>> }
@@ -112,10 +124,8 @@ impl Body for ChannelBody {
         if this.ended { return Poll::Ready(None); }
         match this.receiver.poll_recv(cx) {
             Poll::Pending => Poll::Pending,
-            Poll::Ready(Some(Message::Data(data))) => Poll::Ready(Some(Ok(Frame::data(Bytes::from(data.into_vec()))))),
-            #[cfg(test)]
-            Poll::Ready(Some(Message::Probe(data))) => Poll::Ready(Some(Ok(Frame::data(data)))),
-            Poll::Ready(Some(Message::End)) => {
+            Poll::Ready(Some(message)) => {
+                if let Some(data) = message_data(message) { return Poll::Ready(Some(Ok(Frame::data(data)))); }
                 this.ended = true;
                 if let Some(done) = this.drained.take() { let _ = done.send(()); }
                 Poll::Ready(None)

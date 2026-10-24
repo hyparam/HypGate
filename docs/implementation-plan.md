@@ -436,6 +436,16 @@ backing-detachment tests plus the oversized-channel-limit runtime regression pas
 compile-fail doctests, and 23 targeted HTTP tests pass. This does not close the
 HTTP owner-count or cross-owner composition obligations; progress remains 6/8.
 
+HTTP mailbox-byte checkpoint: production now stores the core `HttpMessage` enum.
+The byte projection and consuming extraction are checked together, so a weakened
+projection cannot hide a real data frame. The closed mailbox plus its transferred
+cleanup owner retains at most one frame's payload through destruction; End has
+zero payload. Queue and cleanup tests exercise the actual core message type.
+The global mapping/count of HTTP owners and cross-owner lifecycle composition
+remain open; this checkpoint does not change the 6/8 milestone count. Validation:
+247 Verus checks, 227 workspace tests and six compile-fail doctests pass; all 216
+deliberate mutations are rejected by proof.
+
 Start with the shared wrapper to reduce duplicated trusted lifetime logic. Preserve
 the existing task-capture destruction tests for both lease types and their
 poison, tracker-registration, and drain behavior. Generalize ownership mechanics
