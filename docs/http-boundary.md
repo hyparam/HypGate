@@ -61,7 +61,9 @@ buffer, including unrelated headers. Static allowlisted header names require no
 copy of an input name. Configured provider credentials remain shared with their
 immutable configuration; they are not derived from input header storage.
 
-The input checks allow at most 100 values and 32 KiB of header names plus values.
+Both production HTTP/1 parsers cap the complete wire head, including its start
+line and delimiters, at 32 KiB and 100 fields. The subsequent adapter checks also
+allow at most 100 values and 32 KiB of header names plus values.
 Consequently, each filtered request or response owns at most 32 KiB of copied
 value contents. Requests additionally insert the configured Host, credential,
 and `accept-encoding: identity`. If H is the configured authority spelling length,

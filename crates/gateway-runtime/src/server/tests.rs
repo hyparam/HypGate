@@ -601,3 +601,40 @@ async fn poisoned_worker_registry_is_unready_and_fail_closed_in_both_modes() {
         }
     }).await.unwrap();
 }
+
+#[tokio::test]
+async fn inbound_wire_head_and_header_count_limits_apply_before_health_dispatch() {
+    use tokio::io::AsyncReadExt;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dir = TempDir::new();
+        let app = Gateway::new(config(upstream.local_addr().unwrap().port(), false),
+            HttpsTransport::with_roots(RootCertStore::empty(), Duration::from_secs(2)).unwrap(),
+            DiskLog::create(&dir.0.join("headers.log"), 2, Duration::from_secs(1)).unwrap());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap(); let port = listener.local_addr().unwrap().port();
+        let (shutdown, stopped) = oneshot::channel();
+        let gateway = tokio::spawn(serve(listener, app.clone(), 4, Duration::from_secs(3), async { let _ = stopped.await; }));
+        let prefix = "GET /healthz HTTP/1.1\r\nHost: localhost\r\nX-Pad: ";
+        let mut cases = Vec::new();
+        for extra in [0, 1] {
+            let request = format!("{prefix}{}\r\n\r\n", "x".repeat(http_boundary::MAX_HEADER_BYTES + extra - prefix.len() - 4));
+            cases.push((request, if extra == 0 { 200 } else { 431 }));
+        }
+        for count in [100, 101] {
+            let mut request = "GET /healthz HTTP/1.1\r\nHost: localhost\r\n".to_owned();
+            for i in 1..count { request.push_str(&format!("x-{i}: a\r\n")); }
+            request.push_str("\r\n"); cases.push((request, if count == 100 { 200 } else { 431 }));
+        }
+        for (request, expected) in cases {
+            let mut socket = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+            socket.write_all(request.as_bytes()).await.unwrap();
+            let mut response = Vec::new();
+            let result = socket.read_to_end(&mut response).await;
+            if let Err(error) = result { assert_eq!(error.kind(), io::ErrorKind::ConnectionReset); }
+            assert!(response.starts_with(format!("HTTP/1.1 {expected}").as_bytes()));
+        }
+        assert_eq!(app.config.usage(), Some((0, 1))); assert!(app.workers.is_empty());
+        assert!(tokio::time::timeout(Duration::from_millis(20), upstream.accept()).await.is_err());
+        shutdown.send(()).unwrap(); gateway.await.unwrap().unwrap();
+    }).await.unwrap();
+}

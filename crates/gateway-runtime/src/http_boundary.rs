@@ -3,8 +3,8 @@ use crate::admission::AdmissionError;
 use crate::config::{GatewayConfig, RoutedRequest};
 use http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode, Uri};
 
-const MAX_HEADER_BYTES: usize = 32 * 1024;
-const MAX_HEADER_VALUES: usize = 100;
+pub(crate) const MAX_HEADER_BYTES: usize = 32 * 1024;
+pub(crate) const MAX_HEADER_VALUES: usize = 100;
 const FORWARDED_REQUEST_HEADERS: &[&str] = &[
     "content-type", "accept", "anthropic-version", "anthropic-beta", "openai-beta",
 ];

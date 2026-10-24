@@ -313,3 +313,44 @@ async fn tls_session_cache_bounds_servers_and_tickets_without_disabling_resumpti
         }
     }).await.unwrap();
 }
+
+#[tokio::test]
+async fn upstream_wire_head_and_header_count_limits_cover_status_line() {
+    use tokio::io::AsyncReadExt;
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let mut cases = Vec::new();
+        let prefix = "HTTP/1.1 200 "; let suffix = "\r\nContent-Length: 0\r\n\r\n";
+        for extra in [0, 1] {
+            let response = format!("{prefix}{}{suffix}", "x".repeat(crate::http_boundary::MAX_HEADER_BYTES + extra - prefix.len() - suffix.len()));
+            cases.push((response, extra == 0));
+        }
+        for count in [100, 101] {
+            let mut response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n".to_owned();
+            for i in 1..count { response.push_str(&format!("x-{i}: a\r\n")); }
+            response.push_str("\r\n"); cases.push((response, count == 100));
+        }
+        for (response, accepted) in cases {
+            let (listener, acceptor, roots) = tls().await;
+            let config = config(listener.local_addr().unwrap().port());
+            let transport = HttpsTransport::with_roots(roots, Duration::from_secs(3)).unwrap();
+            let provider = async {
+                let (tcp, _) = listener.accept().await.unwrap(); let mut socket = acceptor.accept(tcp).await.unwrap();
+                let mut request = Vec::new(); let mut byte = [0];
+                while !request.ends_with(b"\r\n\r\n") {
+                    socket.read_exact(&mut byte).await.unwrap(); request.push(byte[0]); assert!(request.len() < 8192);
+                }
+                if String::from_utf8(request).unwrap().to_ascii_lowercase().contains("transfer-encoding: chunked") {
+                    let mut end = [0; 5]; socket.read_exact(&mut end).await.unwrap(); assert_eq!(&end, b"0\r\n\r\n");
+                }
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            };
+            let mut output = Output::new(); let mut log = Log::default(); let mut input = &b""[..];
+            let (result, ()) = tokio::join!(transport.exchange(prepare(&config), &mut input, &mut output, &mut log), provider);
+            if accepted { result.unwrap(); assert_eq!(output.status, Some(StatusCode::OK)); }
+            else { assert!(matches!(result, Err(TransportError::Http))); assert!(output.status.is_none()); }
+            assert!(output.bytes.is_empty()); assert!(log.download.is_empty());
+            assert!(config.admit(b"gateway", 7).is_ok());
+        }
+    }).await.unwrap();
+}

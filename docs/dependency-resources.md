@@ -8,8 +8,9 @@ buffers and the number of live connections and requests.
 
 ## HTTP/1 storage
 
-Both production builders set `max_buf_size(32768)`; the inbound builder also
-sets `max_headers(100)` and disables keep-alive. The upstream performs one exchange
+Both production builders explicitly set `max_buf_size(32768)`,
+`max_header_size(32768)`, and `max_headers(100)`; the inbound builder disables
+keep-alive. The upstream performs one exchange
 per connection. Neither enables pipelined flush aggregation.
 
 In Hyper's [h1/io.rs](https://docs.rs/crate/hyper/1.12.0/source/src/proto/h1/io.rs),
@@ -39,6 +40,59 @@ request/response Parts before awaiting further I/O; a tiny forwarded header cann
 retain a large source owner through that copy. Connection-option storage retains
 at most five/six relevant distinct names. See [metadata accounting](http-boundary.md#metadata-ownership-and-allocation)
 for inserted credential/Host bytes and excluded serialization/collection storage.
+
+### Header collections and parser scratch
+
+The explicit wire-head limit includes the request/status line, field separators,
+and terminal CRLF, rather than only the names/values checked by the adapter.
+Hyper checks the completed parsed head length before constructing its HeaderMap;
+the parser-buffer threshold still governs incomplete heads. The same explicit
+limit also applies to chunked trailer parsing, although the gateway rejects
+trailers. Socket tests accept exactly 32 KiB/100 fields and reject one byte/field
+more on both directions, including a large upstream reason phrase with almost no
+header-value content. These checks do not bound backing-buffer capacity or every
+transient read allocation.
+
+Pinned `http` 1.5.0 [header/map.rs](https://docs.rs/crate/http/1.5.0/source/src/header/map.rs)
+stores an index array, a vector of distinct-name buckets, and a separate vector
+for additional values under repeated names. A count of 100 values is therefore
+not a count of 100 equal-sized allocations. The following are source-derived
+collection slot requests for this gateway, before allocator overhead:
+
+| Map at the inspected boundary | Index slots | Distinct-name bucket capacity request | Additional-value count |
+| --- | ---: | ---: | ---: |
+| Hyper parsed head, at most 100 fields | At most 256 | At most 192 | At most 99 |
+| Newly filtered/injected request map, at most eight distinct names | At most 16 | At most 12 | At most 99 |
+| Newly filtered response map, at most six distinct names | At most 16 | At most 12 | At most 99 |
+
+Hyper reserves for the parsed field count. HeaderMap rounds raw capacity to a
+power of two and uses three quarters for distinct-name buckets. Its insertion
+path reserves before checking whether the name already exists, so appending a
+duplicate can grow a six-name map from eight to sixteen index slots. The adaptive
+hashing growth thresholds are 128 displaced / 512 shifted entries, beyond these
+100-or-fewer-distinct-name maps. This reasoning assumes the parser's cached map
+starts empty and only retains capacities from the same bounded head path; it does
+not apply to arbitrary externally pre-reserved HeaderMaps.
+
+The extra-value vector grows independently; with the pinned standard Vec growth
+and at most 99 extras, its requested capacity is at most 128 elements. Each
+private Bucket contains a HeaderName, HeaderValue, hash, and optional link pair;
+each ExtraValue contains a HeaderValue and two links. Their ABI sizes, padding,
+shared Bytes control blocks, and allocator rounding must be added separately.
+Growth can temporarily retain old and new arrays; the final capacities above are
+not peak allocation bounds. Hyper may also modify a map after the adapter handoff.
+
+`role.rs` additionally uses two parser scratch arrays of up to 100 elements each:
+one of httparse header views, one of header byte-range indices. Their SmallVec
+storage and frame/stack placement are separate from the HeaderMap. A noncanonical
+response reason phrase has its own copied bytes, now bounded by the wire-head
+limit and released with response Parts at the metadata boundary. Header-case
+preservation and original-order recording are not enabled in this transport.
+
+These per-map facts advance collection accounting; composing every live/cached
+map, parser scratch, and growth overlap across connections and worker cleanup
+remains part of the complete allocation inventory. They are source audits, not
+Verus proofs of Hyper/http/Vec or a total process-memory ceiling.
 
 ## Upstream TLS storage
 

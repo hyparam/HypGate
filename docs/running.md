@@ -129,3 +129,9 @@ results above 64 addresses are rejected. Request deadlines include DNS wait time
 but cannot interrupt a running system lookup. Dedicated resolver threads do not
 block Tokio runtime shutdown. See [DNS accounting](dns-resources.md) for the
 remaining system-resolver assumptions and behavior under a permanent stall.
+
+Both inbound and upstream HTTP/1 heads are limited to 32 KiB on the wire and
+100 header fields, including fields the gateway later discards. The byte limit
+includes the request/status line and delimiters. Oversized inbound heads receive
+431 before dispatch; oversized upstream heads fail the exchange before forwarding
+response headers. These parser limits do not cap request or response body length.
