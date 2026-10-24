@@ -552,6 +552,41 @@ owned-chain conversions/clones, extension payloads, and verifier intermediates
 can overlap these arrays; this table is not their combined heap bound. Codec
 parsing and Vec capacity remain trusted source facts, not Verus proofs.
 
+### Peer certificate chain owners
+
+The parsed TLS 1.3 Certificate message borrows each DER entry from the deframer
+buffer. `client/tls13.rs::ExpectCertificate` then calls
+`into_certificate_chain().into_owned()`, copying every entry into its own Vec, and
+copies the end-entity OCSP staple with `to_vec`. The borrowed message and the
+owned chain coexist until the handler returns and the processed flight is
+discarded, so the Certificate step holds up to two copies of the chain bytes.
+Each copy is bounded by the 65,535-byte handshake-message limit; entry counts
+follow the table above. The verifier borrows the owned chain. After
+`CertificateVerify`, the chain moves without copying into
+`CommonState.peer_certificates`, where it stays for the connection's lifetime,
+including the entire HTTP exchange, until the TLS stream is dropped. TLS 1.2
+(`client/tls12.rs`) retains the chain the same way.
+
+Each accepted NewSessionTicket clones that chain into a `Tls13ClientSessionValue`
+(`cx.peer_certificates.cloned()`) alongside a copy of the ticket bytes, and
+inserts it into the shared cache. The client counts received tickets but does
+not limit them; the cache's eight-ticket-per-server bound evicts earlier values,
+so a ticket flood allocates transiently but does not accumulate in the
+connection. On resumption the new connection receives no Certificate message and
+instead clones the cached chain into its own `peer_certificates`
+(`tls13.rs` ServerHello handling, `tls12.rs` resumption). A resumed connection
+therefore owns a chain copy independent of the cache entry, which the cache
+audit below counts separately.
+
+`tls_peer_certificate_chain_is_owned_per_connection_and_restored_on_resumption`
+performs two in-memory handshakes against a two-certificate chain whose DER
+totals more than 48 KiB. The full handshake's `peer_certificates` equals the
+served chain exactly; the resumed handshake reports `HandshakeKind::Resumed`
+and the same chain, which survives dropping the first connection. The test
+observes content equality through the public accessor, not allocation
+addresses or capacities; per-entry Vec capacity, descriptor sizes, and the
+OCSP copy are source facts outside this regression.
+
 ### Certificate-verifier scratch and diagnostics
 
 The pinned rustls-webpki 0.103.16 verifier borrows the peer's DER when constructing

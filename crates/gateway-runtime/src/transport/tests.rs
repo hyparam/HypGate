@@ -909,3 +909,54 @@ async fn retry_cookie_is_echoed_above_the_buffer_limit_and_closure_fails_before_
         assert_eq!(config.usage(), Some((0, 1)));
     }).await.unwrap();
 }
+
+#[test]
+fn tls_peer_certificate_chain_is_owned_per_connection_and_restored_on_resumption() {
+    use tokio_rustls::rustls::{ClientConnection, HandshakeKind, ServerConnection};
+    fn settle(client: &mut ClientConnection, server: &mut ServerConnection) {
+        for _ in 0..16 {
+            let mut wire = Vec::new(); client.write_tls(&mut wire).unwrap();
+            let mut incoming = &wire[..];
+            while !incoming.is_empty() { server.read_tls(&mut incoming).unwrap(); server.process_new_packets().unwrap(); }
+            let mut wire = Vec::new(); server.write_tls(&mut wire).unwrap();
+            let mut incoming = &wire[..];
+            while !incoming.is_empty() { client.read_tls(&mut incoming).unwrap(); client.process_new_packets().unwrap(); }
+            if !client.is_handshaking() && !server.is_handshaking() && !client.wants_write() && !server.wants_write() { return; }
+        }
+        panic!("handshake did not settle");
+    }
+    // Large non-critical extensions make the two DER entries total above 48 KiB
+    // while the Certificate message stays under the 65,535-byte handshake limit.
+    let mut issuer = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+    issuer.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    issuer.custom_extensions = vec![rcgen::CustomExtension::from_oid_content(&[1, 3, 6, 1, 4, 1, 99999, 1], vec![7; 20_000])];
+    let issuer_key = rcgen::KeyPair::generate().unwrap();
+    let issuer_cert = issuer.self_signed(&issuer_key).unwrap();
+    let mut leaf = rcgen::CertificateParams::new(vec!["localhost".into()]).unwrap();
+    leaf.custom_extensions = vec![rcgen::CustomExtension::from_oid_content(&[1, 3, 6, 1, 4, 1, 99999, 2], vec![9; 30_000])];
+    let leaf_key = rcgen::KeyPair::generate().unwrap();
+    let leaf_cert = leaf.signed_by(&leaf_key, &rcgen::Issuer::from_params(&issuer, &issuer_key)).unwrap();
+    let chain = vec![leaf_cert.der().clone(), issuer_cert.der().clone()];
+    let total: usize = chain.iter().map(|der| der.len()).sum();
+    assert!(total > 49_152 && total < 65_000, "{total}");
+    let mut roots = RootCertStore::empty(); roots.add(issuer_cert.der().clone()).unwrap();
+    let mut server_config = ServerConfig::builder().with_no_client_auth()
+        .with_single_cert(chain.clone(), PrivatePkcs8KeyDer::from(leaf_key.serialize_der()).into()).unwrap();
+    server_config.send_tls13_tickets = 2;
+    let server_config = Arc::new(server_config);
+    let client_config = Arc::new(ClientConfig::builder().with_root_certificates(roots).with_no_client_auth());
+    let mut first = ClientConnection::new(client_config.clone(), ServerName::try_from("localhost").unwrap()).unwrap();
+    let mut server = ServerConnection::new(server_config.clone()).unwrap();
+    settle(&mut first, &mut server);
+    assert_eq!(first.handshake_kind(), Some(HandshakeKind::Full));
+    assert_eq!(first.peer_certificates(), Some(&chain[..]));
+    // The resumed connection receives no Certificate message; its chain is a
+    // separate copy restored from the cached ticket value, not a shared view.
+    let mut second = ClientConnection::new(client_config, ServerName::try_from("localhost").unwrap()).unwrap();
+    let mut server = ServerConnection::new(server_config).unwrap();
+    settle(&mut second, &mut server);
+    assert_eq!(second.handshake_kind(), Some(HandshakeKind::Resumed));
+    assert_eq!(second.peer_certificates(), Some(&chain[..]));
+    drop(first);
+    assert_eq!(second.peer_certificates().map(|chain| chain.iter().map(|der| der.len()).sum::<usize>()), Some(total));
+}

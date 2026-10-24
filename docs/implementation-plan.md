@@ -2,7 +2,7 @@
 
 | Milestone | Progress | Complete |
 | --- | :---: | :---: |
-| 1. Verified streaming core | 64/67 | ☐ |
+| 1. Verified streaming core | 65/68 | ☐ |
 | 2. Minimal working gateway | 6/6 | ✓ |
 | 3. Crash-safe logging | 15/15 | ✓ |
 | 4. Availability hardening | 12/16 | ☐ |
@@ -115,6 +115,7 @@ the synchronous authorization/token boundary before adding network dispatch.
 | ✓ | Automatic TLS key refresh exercised at eight starting positions using a test-only shortened key limit. |
 | ✓ | TLS record allocation reuse, vectored scratch, and consumed-prefix retention inventoried, with allocation-capacity/address regression. |
 | ✓ | HelloRetryRequest cookie copy inventory, pinned debug-only extension-length assertion, and connector-level echo/fail-closed regression. |
+| ✓ | Peer certificate chain ownership across Certificate/verify/ticket/resumption, with a large-chain equality regression. |
 | ☐ | Complete runtime correspondence to resource snapshots, including every owner, receipt, encoding buffer, queue, and cancellation tail. |
 | ☐ | Compose all allocation bounds, including TLS control/handshake storage, metadata capacities, task/waker storage, and explicit allocator/OS assumptions. |
 | ☐ | Compose lifetime and instance scopes across server invocations, separate Gateway/transport/logger instances, DNS workers, and request/worker limits. |

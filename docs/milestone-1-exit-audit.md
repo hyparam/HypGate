@@ -16,7 +16,7 @@ another milestone or treat adapter assumptions as proved runtime behavior.
 | Mutation tests reject corruption, cross-request writes, duplicate advancement, capacity violations, and strict-mode forwarding before durability | All 139 mutations are rejected by proof obligations; the script verifies the unmodified library first. Named defects include wrong owner/generation, full-write substitution, omitted payload/receipt storage, queue overwrite/reopening, and advancing beyond durability. Mutations test the strength of specified contracts, not the completeness of the threat model. | Covered for listed defect classes |
 | Verified admission issues private authorization tied to identity/policy/origin/credential; candidate configuration cannot expand root grants | Policy validation, authentication, and tenant-scoped authorization establish those relationships. AuthorizedRequest construction is private and its policy borrow binds the immutable snapshot. Runtime dispatch consumes PreparedRequest; concrete URI/DNS/TLS/secret binding remains trusted and tested. | Covered at the verified admission boundary |
 
-The current workspace has 175 passing regular tests and five compile-fail doctests.
+The current workspace has 176 passing regular tests and five compile-fail doctests.
 All five CI jobs passed at `b72c839` in
 [run 40061075707](https://github.com/platypii/LogGate/actions/runs/40061075707):
 183 production proof checks, all 139 rejected mutations, Rust tests, Linux ext4,
@@ -83,7 +83,9 @@ without reopening the external API.
    with trusted-but-wrong-purpose rejection/cleanup coverage. HelloRetryRequest
    cookie copies are inventoried (about six at peak, three retained until the
    ServerHello), the pinned debug-only extension-length assertion is documented,
-   and the production connector echoes a maximal cookie then fails closed. These counters
+   and the production connector echoes a maximal cookie then fails closed. Peer
+   certificate chain copies are inventoried through Certificate, verification,
+   ticket cloning, and resumption, with a large-chain equality regression. These counters
    do not bound synchronous verification wall time. The TLS control-traffic
    audit identifies direct queue appends outside the application-byte cap;
    key-update burst/cleanup tests cover the consecutive limit, while queue
