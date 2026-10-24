@@ -342,3 +342,46 @@ async fn worker_panic_marks_health_failed_even_after_append_caller_is_canceled()
         assert!(log.worker.lock().unwrap().thread.is_none());
     }).await.unwrap();
 }
+
+#[tokio::test]
+async fn canceling_append_callers_does_not_release_queued_or_active_frame_credit() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut file = sink(); let syncs = file.syncs.clone(); let bytes = file.bytes.clone();
+        let (entered, started) = oneshot::channel(); let (release, wait) = blocking::channel();
+        file.gate = Some((entered, wait));
+        let mut log = DiskLog::start(file, 1, Duration::from_secs(30), [1; 16]).unwrap();
+        let mut first_log = log.clone(); let mut second_log = log.clone();
+        let first = tokio::spawn(async move { first_log.append(record(b"active", 1)).await });
+        started.await.unwrap();
+        let second = tokio::spawn(async move { second_log.append(record(b"queued", 2)).await });
+        while log.queued_for_test() != 1 { tokio::task::yield_now().await; }
+        first.abort(); second.abort();
+        assert!(first.await.err().unwrap().is_cancelled());
+        assert!(second.await.err().unwrap().is_cancelled());
+        // Aborting both callers must not free the slot occupied by their work.
+        // The active worker still owns its first frame, and the queued frame
+        // still owns the only channel credit even though both receipts will be lost.
+        assert_eq!(log.queued_for_test(), 1);
+        assert_eq!(syncs.load(Ordering::Relaxed), 1);
+        assert!(log.healthy());
+        for _ in 0..16 {
+            assert_eq!(log.append(record(b"excess", 3)).await.err().unwrap().kind(), io::ErrorKind::WouldBlock);
+        }
+        assert_eq!(*bytes.lock().unwrap(), encode(record(b"active", 1)));
+        release.send(()).unwrap();
+        while syncs.load(Ordering::Relaxed) < 2 || log.queued_for_test() != 0 {
+            tokio::task::yield_now().await;
+        }
+        // The same worker continues. There is no retry of either canceled job;
+        // a later caller receives only its own receipt.
+        let receipt = log.append(record(b"later", 4)).await.unwrap();
+        assert!(receipt.matches_record(Header { payload: 5, tenant: 1, request: 2,
+            chunk: 4, direction: 1 }, b"later"));
+        log.shutdown(Duration::from_secs(1)).await.unwrap();
+        let mut expected = encode(record(b"active", 1));
+        expected.extend(encode(record(b"queued", 2)));
+        expected.extend(encode(record(b"later", 4)));
+        assert_eq!(*bytes.lock().unwrap(), expected);
+        assert_eq!(syncs.load(Ordering::Relaxed), 3);
+    }).await.unwrap();
+}

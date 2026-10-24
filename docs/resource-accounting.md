@@ -54,6 +54,10 @@ below remain separate obligations.
 Do not substitute the lower observed concurrent-request count for R when publishing
 configuration guarantees. Multiple gateway/logger instances multiply their budgets.
 
+The [audit-buffer lifetime audit](audit-buffer-lifetimes.md) follows queue credit,
+worker ownership, and receipt delivery through cancellation, including the pinned
+Tokio send/receive/drop operations and a stalled-worker cancellation test.
+
 ## Allocations outside that subtotal
 
 The [dependency audit](dependency-resources.md) traces the pinned Hyper/TLS
