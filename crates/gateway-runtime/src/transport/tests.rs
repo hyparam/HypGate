@@ -325,19 +325,47 @@ async fn tls_session_cache_bounds_servers_and_tickets_without_disabling_resumpti
             let mut server = ServerConfig::builder_with_protocol_versions(&[version])
                 .with_no_client_auth().with_single_cert(vec![cert.cert.der().clone()],
                     PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()).into()).unwrap();
+            // Keep server-side tickets valid throughout client-cache eviction,
+            // including tickets read late from the held connection.
+            server.session_storage = tokio_rustls::rustls::server::ServerSessionMemoryCache::new(4096);
             server.send_tls13_tickets = 24; // deliberately exceeds the eight-ticket client budget
             let acceptor = TlsAcceptor::from(Arc::new(server.clone()));
             server.send_tls13_tickets = 0; // shares server-side session storage with the first config
             let no_tickets = TlsAcceptor::from(Arc::new(server));
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let transport = HttpsTransport::with_roots(roots, Duration::from_secs(5)).unwrap();
-            let mut order = vec![(0, HandshakeKind::Full), (0, HandshakeKind::Resumed)];
-            order.extend((1..33).map(|i| (i, HandshakeKind::Full)));
+            connect(&listener, &acceptor, &transport, &names[0], HandshakeKind::Full).await;
+            // Keep a resumed connection alive across eviction. Its session and
+            // authenticated peer state must not be treated as freed cache data.
+            let held_provider = async {
+                let (tcp, _) = listener.accept().await.unwrap();
+                acceptor.accept(tcp).await.unwrap()
+            };
+            let held_client = async {
+                let tcp = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+                transport.connector.connect(ServerName::try_from(names[0].clone()).unwrap(), tcp).await.unwrap()
+            };
+            let (mut held_provider, mut held_client) = tokio::join!(held_provider, held_client);
+            assert_eq!(held_provider.get_ref().1.handshake_kind(), Some(HandshakeKind::Resumed));
+            assert_eq!(held_client.get_ref().1.handshake_kind(), Some(HandshakeKind::Resumed));
+            let mut order: Vec<_> = (1..33).map(|i| (i, HandshakeKind::Full)).collect();
             order.push((0, HandshakeKind::Full)); // oldest entry was evicted
             order.push((0, HandshakeKind::Resumed)); // replacement remains usable
             for (index, expected) in order {
                 connect(&listener, &acceptor, &transport, &names[index], expected).await;
             }
+            assert!(!held_client.get_ref().1.peer_certificates().unwrap().is_empty());
+            let send_held = async {
+                held_provider.write_all(b"alive after eviction").await.unwrap();
+                held_provider.shutdown().await.unwrap();
+            };
+            let receive_held = async {
+                let mut received = Vec::new();
+                held_client.read_to_end(&mut received).await.unwrap();
+                assert_eq!(received, b"alive after eviction");
+            };
+            tokio::join!(send_held, receive_held);
+            drop(held_provider); drop(held_client);
             if version.version == TLS13.version {
                 // Only eight of the last 24 issued tickets may remain. Consume
                 // them without replacement; the ninth connection must be full.

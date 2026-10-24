@@ -515,6 +515,39 @@ TLS 1.2 clones and taken TLS 1.3 tickets can keep data alive after cache evictio
 the active-connection allocation account must include those owners separately.
 The root store, verifier, and client configuration also remain separate.
 
+### Active session owners
+
+`client/hs.rs::ClientSessionValue::retrieve` selects one TLS 1.3 ticket, or one
+TLS 1.2 session if no ticket is available. Retrieval runs once when constructing
+the initial ClientHello input; later handshake states move that optional value
+or borrow it. TLS 1.3 retrieval removes the value from the cache. TLS 1.2 retrieval
+clones it: its ticket and certificate chain use Arc ownership, while its secret
+has owned copied bytes. Either kind can therefore outlive the cache entry.
+
+`tls12.rs::ExpectFinished::save_session` and
+`tls13.rs::ExpectTraffic::handle_new_ticket_impl` construct one new session value
+and synchronously transfer it into the store. Budget that value even while its
+thread waits for the cache mutex; it is not yet covered by the cache's slot count.
+TLS 1.2 can still hold its retrieved session while constructing the replacement.
+There is no queue of these callbacks per connection: the connection state machine
+processes them serially. Conservatively charge two session values per active TLS
+connection (one retrieved, one being constructed/inserted), without assuming
+shared ticket/certificate contents reduce the total.
+
+For one production transport with at most R admitted exchanges, these session
+values contribute at most `2 * R * 131119` logical bytes of ticket, certificate
+DER, and secret contents. Including the cache's conservative insertion peak gives
+`(33 * 9 + 2 * R) * 131119` bytes **for these three contents only**. The timed
+network future borrows its outer request owner, so its TLS session cleanup occurs
+before that admission credit is returned. Custom connector use outside this
+production admission path must supply its own live-connection count.
+
+This is not a TLS heap bound. It excludes the connection's own authenticated
+peer-certificate chain, encoded ClientHello/ticket copies, parsed handshake
+messages, key schedules, certificate verification scratch, collection capacities,
+Arc/Weak control blocks, and allocator overhead. Cache eviction is not treated as
+destruction of active-session data. Each additional transport has its own cache.
+
 The real TLS regression test
 `tls_session_cache_bounds_servers_and_tickets_without_disabling_resumption` exercises
 both TLS 1.2 and TLS 1.3 with the production connector: a second connection resumes,
@@ -522,7 +555,12 @@ both TLS 1.2 and TLS 1.3 with the production connector: a second connection resu
 name then performs a full handshake followed by successful resumption again.
 The TLS 1.3 provider deliberately issues 24 tickets; when replacement tickets
 are disabled, exactly eight subsequent handshakes resume and the ninth is full.
-This checks server/ticket eviction and continued functionality, not all retained byte sizes or
+The fixture also holds a resumed connection open while 32 other authenticated
+names evict its entry, then checks that its peer certificates and exact application
+bytes remain usable. The test server retains 4,096 sessions so server-side
+eviction does not invalidate tickets read late from that held connection; the
+production client cache remains unchanged. This checks server/ticket eviction,
+active-connection survival, and continued functionality, not all retained byte sizes or
 adversarial certificate/ticket inputs. Re-audit the source on dependency upgrades.
 
 ## Blocking hostname resolution
