@@ -54,8 +54,10 @@ without reopening the external API.
    coverage. Destination inputs are now capped at 8 KiB, and a serialized-head
    inventory plus maximum-input wire test bounds request/response heads below
    64 KiB, including the server-generated interim response. Serializer reservation
-   requests have also been inventoried; they are not backing-capacity bounds.
-   Hyper parser/output backing capacity,
+   requests have also been inventoried. Pinned Rust/bytes source now bounds each
+   header/parser backing allocation request at 128 KiB, with 192 KiB allowed for
+   a unique-buffer replacement. These exclude allocator overhead and do not
+   bound the count of shared parser allocations. Live parser backing-owner counts,
    metadata collections, TLS handshake/cache active owners, task/waker storage,
    and allocator/OS storage remain outside the subtotal. The dependency audit
    distinguishes known control-object counts and stack reservations from unresolved

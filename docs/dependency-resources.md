@@ -212,11 +212,65 @@ interim-head allowance covers that retained prefix. One exchange per connection,
 no server keep-alive, no pipelined flush aggregation, and queue-only body output
 are essential to this reservation inventory. It is not a general Hyper bound.
 
-Hyper requests an initial 8,192-byte header vector and can grow it while encoding
-a larger head. A bound on serialized length does not itself bound Vec spare
-capacity, allocator rounding, or overlap between old and replacement allocations.
-Those remain explicit backing-storage obligations; body data uses queue mode and
-does not extend this header vector during streaming.
+### Header-vector backing capacity
+
+The Rust 1.99.1 `rust-src` component supplies the next step of this audit:
+`library/alloc/src/raw_vec/mod.rs::{grow_amortized,set_ptr_and_cap}` requests
+`max(2 * old_capacity, required_capacity, minimum_capacity)` and records that
+requested capacity. For byte vectors the minimum is eight. Slice extension in
+`vec/spec_extend.rs` uses `append_elements`, reserving the actual appended count.
+`alloc/src/alloc.rs::Global::grow_impl_runtime` passes the new layout size to
+reallocation. These are pinned implementation facts, not stable Vec API promises.
+
+Hyper starts its header vector at 8,192 bytes. Let M = 65,536, the conservative
+upper bound on every required length established above. A growth occurs only
+when old capacity C is below the required length, so C < M. The new capacity is
+at most 2M. Once capacity reaches M, no further growth is needed on these paths.
+Thus each writer retains at most 131,072 requested header-vector bytes, including
+spare capacity. A replacement can overlap an old allocation below M and a new
+allocation at most 2M: allow 196,608 requested bytes during that operation.
+Do not add both the retained and replacement allowances for the same writer.
+
+These bounds exclude allocator size-class rounding, allocator-internal scratch,
+freed-memory caching, and OS mappings. They do not guarantee successful allocation
+or bound RSS. The existing wire regressions validate the serializer inputs, not
+the private Vec capacity. No Verus claim is made about Hyper, Vec, or the allocator.
+
+### Parser backing allocation requests
+
+For the read side let M = 32,768. All production paths into
+`Buffered::poll_read_from_io` start with visible length L < M: head parsing checks
+the threshold first, `MemRead::read_mem` reads only when empty, and the idle/EOF
+and notification paths likewise check emptiness. It reserves additional A with
+L + A <= M. The plaintext adapter limits each completed read to M bytes, so the
+visible length after a read is less than 2M even if spare capacity is larger.
+Splitting/advancing can leave an offset into a larger backing vector; visible
+length alone is therefore insufficient for its allocation bound.
+
+Inspection of bytes 1.12.1 `bytes_mut.rs::reserve_inner` gives a backing-vector
+capacity bound of 4M = 131,072 requested bytes per allocation, using the pinned
+Vec growth rule above. For a uniquely owned vector with backing capacity B and
+offset O, a reservation that needs allocation has two cases:
+
+- If O < L, the underlying required length O + L + A is less than 2M.
+- If O >= L, bytes reclaims the prefix whenever B >= L + A. Allocation in this
+  case therefore implies B < M, and O + L + A is again less than 2M.
+
+In either case growth is unnecessary once B >= 2M; when growth is necessary,
+doubling B and the underlying required length are at most 4M. The same reasoning
+applies to the uniquely owned shared-vector branch, including its explicit
+doubling. With multiple owners, bytes allocates a replacement of
+`max(L + A, original_capacity)`. Its original-capacity representation rounds
+down and caps at 65,536, so this branch requests at most 2M. The initial empty
+buffer and first reserve satisfy the bound.
+
+Unique-vector reallocation can overlap an old allocation below 2M and a new
+allocation at most 4M: allow 6M = 196,608 requested bytes for that operation.
+Shared replacement instead retains old allocations through outstanding header
+or body views. **This per-allocation bound does not bound their count or sum.**
+Composition must count distinct live backing owners, shared control blocks,
+detached application copies, and canceled-task tails; allocator overhead remains
+excluded. Recheck every read call site and bytes/Vec growth branch on upgrades.
 
 ### Header collections and parser scratch
 
