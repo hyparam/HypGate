@@ -17,6 +17,10 @@ pub trait ResponseSink: AsyncWrite + Unpin {
 pub enum TransportError { Timeout, Connect, Tls, Http, Metadata, Upload, Download, Client }
 pub struct ExchangeStats { pub upload: TransferStats, pub download: TransferStats }
 
+// Application-data buffering only; handshake/control traffic and record overhead
+// have separate rustls limits. See docs/dependency-resources.md.
+const TLS_APPLICATION_BUFFER: usize = 64 * 1024;
+
 pub struct HttpsTransport { connector: TlsConnector, deadline: Duration }
 impl HttpsTransport {
     pub fn new(deadline: Duration) -> io::Result<Self> {
@@ -46,7 +50,9 @@ impl HttpsTransport {
         let port = prepared.destination().port_u16().unwrap_or(443);
         let server = ServerName::try_from(host.clone()).map_err(|_| TransportError::Metadata)?;
         let tcp = TcpStream::connect((host.as_str(), port)).await.map_err(|_| TransportError::Connect)?;
-        let tls = self.connector.connect(server, tcp).await.map_err(|_| TransportError::Tls)?;
+        let tls = self.connector.connect_with(server, tcp, |connection| {
+            connection.set_buffer_limit(Some(TLS_APPLICATION_BUFFER));
+        }).await.map_err(|_| TransportError::Tls)?;
         let (mut sender, connection) = hyper::client::conn::http1::Builder::new()
             .max_buf_size(http_body::MAX_INPUT_FRAME).handshake(TokioIo::new(tls)).await.map_err(|_| TransportError::Http)?;
         let (mut body_writer, body) = http_body::channel(16 * 1024);

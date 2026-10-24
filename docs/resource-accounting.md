@@ -42,6 +42,13 @@ configuration guarantees. Multiple gateway/logger instances multiply their budge
 
 ## Allocations outside that subtotal
 
+The [dependency audit](dependency-resources.md) traces the pinned Hyper/TLS
+implementation's thresholds, extra queues, and retained storage. In particular,
+HTTP buffer thresholds and TLS application-data limits are not hard heap caps.
+The upstream explicitly configures a 64 KiB TLS application-data buffer limit
+before handshake; control traffic and record overhead have separate accounting.
+
+
 - Hyper parser and output buffers, incoming-body channels, HTTP headers and URIs,
   and data frames already consumed from our channels. Both HTTP/1 builders set a
   32 KiB parser-buffer limit, but that setting alone does not prove total Hyper
