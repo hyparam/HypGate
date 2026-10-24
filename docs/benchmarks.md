@@ -293,3 +293,23 @@ and zero audit gaps. Strict mode completed in 1.302 seconds (24.58 requests/s,
 (24.35 requests/s, 115.79 ms first-byte p95). Exact payload/audit checks passed.
 This validates healthy operation after the scheduling change; it is not a
 controlled before/after performance comparison or a latency guarantee.
+
+
+## Sustained admission overload
+
+After TLS scheduling isolation, the ten-minute overload fixture passed locally:
+each mode kept eight TLS responses open for five minutes, repeatedly rejected
+32-request bursts before provider dispatch, and checked health, readiness, and
+metrics during each burst. The fixture then completed all held streams, admitted
+a fresh request, checked exact recovered audit bytes, and shut down cleanly.
+
+| Mode | Duration (s) | Excess requests rejected | Maximum observed health request (ms) | Maximum rejected-wave completion (ms) |
+| --- | ---: | ---: | ---: | ---: |
+| Strict | 300.006 | 362,720 | 22.566 | 25.264 |
+| Availability | 300.008 | 356,736 | 27.667 | 32.734 |
+
+The fixture pauses 20 ms between waves. These maxima include local scheduling and
+other concurrently running checks, not just gateway processing. There is no
+latency SLA assertion. This is sustained admission overload, not saturation of
+the distinct inbound-connection cap or an indefinitely running experiment. A
+separate CI job reproduces five minutes per mode.

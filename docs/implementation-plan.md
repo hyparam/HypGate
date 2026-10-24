@@ -5,7 +5,7 @@
 | 1. Verified streaming core | 68/68 | ✓ |
 | 2. Minimal working gateway | 6/6 | ✓ |
 | 3. Crash-safe logging | 15/15 | ✓ |
-| 4. Availability hardening | 13/16 | ☐ |
+| 4. Availability hardening | 14/16 | ☐ |
 | 5. Auditable first release | 6/9 | ☐ |
 
 Progress counts completed rows in each milestone's table below. Rows are not
@@ -251,7 +251,7 @@ records the remaining shutdown/resource composition obligations.
 | ✓ | Repeated admission overload preserves eight active streams and health checks, rejects excess traffic before dispatch, and recovers capacity. |
 | ✓ | Concurrent stalled-sync test verifies bounded queues, request cleanup, and both operator modes. |
 | ✓ | TLS handshake CPU work isolated on four dedicated threads with 32 retained job credits; saturation, cancellation, panic, and runtime-shutdown regressions. |
-| ☐ | Complete long-duration overload validation. |
+| ✓ | Two ten-minute overload runs, each five minutes per logging mode, preserve active streams and health while rejecting over 1.4 million total excess requests; dedicated CI soak. |
 | ☐ | Complete broader fault and load coverage against the exit criteria. |
 | ☐ | Complete shutdown and resource proofs under explicit scheduler/I/O assumptions. |
 

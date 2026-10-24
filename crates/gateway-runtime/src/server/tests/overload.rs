@@ -3,11 +3,21 @@ use super::*;
 #[tokio::test]
 async fn repeated_overload_preserves_active_streams_health_and_reusable_capacity() {
     tokio::time::timeout(Duration::from_secs(30), async {
-        for availability in [false, true] { exercise(availability).await; }
+        for availability in [false, true] { exercise(availability, Duration::ZERO).await; }
     }).await.unwrap();
 }
 
-async fn exercise(availability: bool) {
+#[tokio::test]
+#[ignore = "ten-minute sustained overload workload"]
+async fn sustained_overload_preserves_active_streams_and_health() {
+    tokio::time::timeout(Duration::from_secs(660), async {
+        for availability in [false, true] {
+            exercise(availability, Duration::from_secs(300)).await;
+        }
+    }).await.unwrap();
+}
+
+async fn exercise(availability: bool, duration: Duration) {
     const SLOTS: usize = 8;
     const BURST: usize = 32;
     const ROUNDS: usize = 4;
@@ -19,11 +29,11 @@ async fn exercise(availability: bool) {
     let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let dir = TempDir::new(); let path = dir.0.join("overload.log");
     let app = Gateway::new(config_with_limits(upstream.local_addr().unwrap().port(), availability, SLOTS, 16384),
-        HttpsTransport::with_roots(roots, Duration::from_secs(20)).unwrap(),
+        HttpsTransport::with_roots(roots, Duration::from_secs(360)).unwrap(),
         DiskLog::create(&path, 16, Duration::from_secs(2)).unwrap());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap(); let port = listener.local_addr().unwrap().port();
     let (shutdown, stopped) = oneshot::channel();
-    let gateway = tokio::spawn(serve(listener, app.clone(), 128, Duration::from_secs(25), async { let _ = stopped.await; }));
+    let gateway = tokio::spawn(serve(listener, app.clone(), 128, Duration::from_secs(365), async { let _ = stopped.await; }));
     let (release, waiting) = tokio::sync::watch::channel(false);
     let connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let accepted = connections.clone();
@@ -61,7 +71,12 @@ async fn exercise(availability: bool) {
         let prefix = response.body_mut().frame().await.unwrap().unwrap().into_data().unwrap();
         assert!(!prefix.is_empty()); held.push((response, connection, prefix));
     }
-    for _ in 0..ROUNDS {
+    let started = std::time::Instant::now();
+    let mut rounds = 0;
+    let mut max_health = Duration::ZERO;
+    let mut max_rejection = Duration::ZERO;
+    while rounds < ROUNDS || started.elapsed() < duration {
+        let round_started = std::time::Instant::now();
         assert_eq!(app.config.usage(), Some((SLOTS, SLOTS)));
         let mut excess = JoinSet::new();
         for _ in 0..BURST {
@@ -73,14 +88,25 @@ async fn exercise(availability: bool) {
         }
         // Check health while excess requests are in flight, not only afterward.
         for route in ["/healthz", "/readyz", "/metrics"] {
+            let health_started = std::time::Instant::now();
             let (response, connection) = send(port, route, "", "GET").await;
             assert_eq!(response.status(), StatusCode::OK);
             response.collect().await.unwrap(); connection.await.unwrap();
+            max_health = max_health.max(health_started.elapsed());
         }
         while let Some(result) = excess.join_next().await { result.unwrap(); }
         assert_eq!(app.config.usage(), Some((SLOTS, SLOTS)));
         assert_eq!(connections.load(Ordering::Relaxed), SLOTS);
+        rounds += 1;
+        max_rejection = max_rejection.max(round_started.elapsed());
+        // Pace sustained arrivals while retaining all eight active streams.
+        if !duration.is_zero() { tokio::time::sleep(Duration::from_millis(20)).await; }
     }
+    println!("{}", serde_json::json!({"workload":"admission_overload",
+        "availability":availability, "elapsed_ms":started.elapsed().as_millis(),
+        "rejected":rounds * BURST, "held_streams":SLOTS,
+        "max_health_ms":max_health.as_secs_f64() * 1000.0,
+        "max_rejection_wave_ms":max_rejection.as_secs_f64() * 1000.0}));
     release.send(true).unwrap();
     for (response, connection, prefix) in held {
         let mut bytes = prefix.to_vec(); bytes.extend_from_slice(&response.collect().await.unwrap().to_bytes());
