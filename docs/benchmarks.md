@@ -484,7 +484,8 @@ The fixture pauses 20 ms between waves. These maxima include local scheduling an
 other concurrently running checks, not just gateway processing. There is no
 latency SLA assertion. This is sustained admission overload, not saturation of
 the distinct inbound-connection cap or an indefinitely running experiment. A
-separate CI job reproduces five minutes per mode. The final shutdown changes passed a second full-duration run and the separate
+separate CI job reproduces one minute per mode (`SOUNDGATE_OVERLOAD_SECONDS=60`); the
+fixture defaults to five. The final shutdown changes passed a second full-duration run and the separate
 shutdown tests.
 
 The six release-mode workloads also passed after admission closure and shared

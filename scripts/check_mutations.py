@@ -3,6 +3,7 @@
 VERUS=/path/to/verus python3 scripts/check_mutations.py
 Normal executable scenarios are tested separately with cargo test --workspace.
 """
+from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
 import shutil
@@ -184,8 +185,34 @@ MUTATIONS = [
 ]
 
 
-def command(source):
-    return [VERUS, str(source / "lib.rs"), "--crate-type", "lib", "--triggers-mode", "silent"]
+MARKERS = ["postcondition not satisfied", "precondition not satisfied", "error: requires not satisfied", "assertion failed", "invariant not satisfied"]
+
+
+def command(source, module=None):
+    args = [VERUS, str(source / "lib.rs"), "--crate-type", "lib", "--triggers-mode", "silent"]
+    return args + (["--verify-module", module] if module else [])
+
+
+def check(workdir, filename, name, before, after):
+    """Return a report line, or raise when the mutated crate still verifies.
+
+    The mutated module is checked alone first. A proof failure there is a failure
+    of the whole crate too, so only a module that still verifies on its own falls
+    back to verifying every module, which catches defects refuted by a caller.
+    """
+    original = (SOURCE / filename).read_text()
+    assert original.count(before) == 1, (name, original.count(before))
+    target = workdir / name / "src"
+    shutil.copytree(SOURCE, target)
+    (target / filename).write_text(original.replace(before, after))
+    for module in (Path(filename).stem, None):
+        result = subprocess.run(command(target, module), capture_output=True, text=True)
+        output = result.stdout + result.stderr
+        if result.returncode != 0:
+            if not any(marker in output for marker in MARKERS):
+                raise RuntimeError(f"{name}: expected a proof failure, got:\n{output}")
+            return f"{name}: rejected by proof" + ("" if module else " outside its module")
+    raise RuntimeError(f"{name}: expected a proof failure, got:\n{output}")
 
 
 # Optional focused reruns after changing one proof module; default remains all.
@@ -196,18 +223,8 @@ if selected := os.environ.get("MUTATION_FILTER"):
 
 subprocess.run(command(SOURCE), check=True)
 with tempfile.TemporaryDirectory(prefix="gateway-mutations-") as temporary:
-    target = Path(temporary) / "src"
-    shutil.copytree(SOURCE, target)
-    for filename, name, before, after in MUTATIONS:
-        original = (SOURCE / filename).read_text()
-        assert original.count(before) == 1, (name, original.count(before))
-        (target / filename).write_text(original.replace(before, after))
-        try:
-            result = subprocess.run(command(target), capture_output=True, text=True)
-            output = result.stdout + result.stderr
-            markers = ["postcondition not satisfied", "precondition not satisfied", "error: requires not satisfied", "assertion failed", "invariant not satisfied"]
-            if result.returncode == 0 or not any(marker in output for marker in markers):
-                raise RuntimeError(f"{name}: expected a proof failure, got:\n{output}")
-            print(f"{name}: rejected by proof", flush=True)
-        finally:
-            (target / filename).write_text(original)
+    # Each mutation verifies in its own copy, so the independent runs share the machine.
+    with ThreadPoolExecutor(max_workers=os.cpu_count() or 1) as pool:
+        for report in pool.map(lambda m: check(Path(temporary), *m), MUTATIONS):
+            print(report, flush=True)
+print(f"{len(MUTATIONS)} mutations rejected by proof", flush=True)
