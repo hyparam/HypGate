@@ -68,7 +68,7 @@ impl Gateway {
         let app = self.clone();
         let task = lease.spawn(async move {
             let mut output = Output { head: Some(head), writer };
-            let prepared = match http_boundary::prepare(&app.config, &parts.method, &parts.uri, &parts.headers) {
+            let prepared = match http_boundary::prepare_request_parts(&app.config, parts) {
                 Ok(p) => p,
                 Err(e) => {
                     let _ = output.start(e.status(), HeaderMap::new()).await;

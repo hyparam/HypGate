@@ -33,7 +33,12 @@ holds one data item, a separate pending error, and optional trailers. This adds 
 slot beyond our reader copy. That item can reference shared parser backing storage;
 its count alone is not a byte-allocation theorem. Peer metadata is parsed before
 our filtering can reject it. Our 100-value/32768-byte header checks bound accepted
-name/value bytes, not HeaderMap allocation or URI/parser scratch.
+name/value bytes, not HeaderMap allocation or URI/parser scratch. The metadata
+adapter now detaches allowed header values into bounded copies and consumes original
+request/response Parts before awaiting further I/O; a tiny forwarded header cannot
+retain a large source owner through that copy. Connection-option storage retains
+at most five/six relevant distinct names. See [metadata accounting](http-boundary.md#metadata-ownership-and-allocation)
+for inserted credential/Host bytes and excluded serialization/collection storage.
 
 ## Upstream TLS storage
 

@@ -73,7 +73,11 @@ identifies excluded metadata and active owners.
 
 
 - Hyper parser and output buffers, incoming-body channels, HTTP headers and URIs,
-  and data frames already consumed from our channels. Both HTTP/1 builders set a
+  and data frames already consumed from our channels. The
+  [HTTP metadata boundary](http-boundary.md#metadata-ownership-and-allocation)
+  now detaches bounded allowed values and drops original Parts before awaits;
+  its copied-value subtotal and inserted Host/credential data remain separate
+  from the stream/log buffer theorem. Both HTTP/1 builders set a
   32 KiB parser-buffer limit, but that setting alone does not prove total Hyper
   allocation bounds or backing-storage sizes.
 - rustls handshake and record buffers, certificate/root-store data, TLS overhead,

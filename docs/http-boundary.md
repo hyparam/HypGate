@@ -44,3 +44,44 @@ overrides, duplicate/malformed authentication, forbidden paths and methods,
 Connection nominations, header limits, admission cleanup, and response filtering.
 All 24 workspace tests passed on 2026-10-23. No live provider was contacted.
 Next: network dispatch, exact body forwarding through the stream core, and logging.
+
+## Metadata ownership and allocation
+
+The production server consumes request `Parts` through `prepare_request_parts`;
+the transport consumes response `Parts` through `prepare_response_parts`. These
+synchronous boundaries finish and destroy the original metadata, including
+extensions, before the caller can await DNS, response output, or body streaming.
+The borrowed preparation functions remain available for library callers, who own
+and must budget their original input metadata separately.
+
+Filtering copies each allowed HeaderValue's visible bytes with `from_bytes`, then
+preserves its sensitive/redaction flag. It does not clone shared input backing.
+This matters because a tiny HeaderValue can own a slice of a much larger parser
+buffer, including unrelated headers. Static allowlisted header names require no
+copy of an input name. Configured provider credentials remain shared with their
+immutable configuration; they are not derived from input header storage.
+
+The input checks allow at most 100 values and 32 KiB of header names plus values.
+Consequently, each filtered request or response owns at most 32 KiB of copied
+value contents. Requests additionally insert the configured Host, credential,
+and `accept-encoding: identity`. If H is the configured authority spelling length,
+a conservative outgoing request name/value subtotal is 41,007 + H bytes, with at
+most 103 values. H and the serialized request path must be budgeted from the
+configuration; the 253-byte DNS hostname limit is not a bound on the entire URI.
+HTTP status/request lines, wire separators, HeaderMap storage, value metadata,
+allocator slack, and Hyper's serialization buffers are outside these subtotals.
+
+Connection-header processing validates every comma-separated token, including
+unknown names, but retains only distinct names relevant to the allowlist: at most
+five for requests and six for responses. A repeated/irrelevant token list cannot
+create an arbitrarily long retained options vector. Parsing one token still uses
+HeaderName validation scratch; the 32 KiB input limit bounds its visible bytes.
+
+Regression tests supply small headers backed by 256 KiB owners and metadata
+extension drop probes. Both original owners must be destroyed while prepared
+output remains live. Tests preserve opaque non-ASCII header bytes, repeated value
+order, status, and sensitivity flags, and reject an invalid unknown Connection
+token after a long valid list. Existing filtering and upgrade tests still apply.
+This is source-level lifetime evidence, not a Verus heap theorem. Hyper or a
+library caller can retain other references, and releasing an allocation does not
+zeroize its contents or require the allocator to return pages to the OS.

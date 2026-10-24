@@ -49,14 +49,19 @@ fn check_size(headers: &HeaderMap) -> Result<(), HttpError> {
     Ok(())
 }
 
-fn connection_options(headers: &HeaderMap) -> Result<Vec<HeaderName>, HttpError> {
+fn connection_options(headers: &HeaderMap, relevant: &[&str]) -> Result<Vec<HeaderName>, HttpError> {
     let mut options = Vec::new();
     for value in headers.get_all("connection") {
         let value = value.to_str().map_err(|_| HttpError::BadRequest)?;
         for part in value.split(',') {
             let part = part.trim_matches([' ', '\t']);
             if part.is_empty() { return Err(HttpError::BadRequest); }
-            options.push(HeaderName::from_bytes(part.as_bytes()).map_err(|_| HttpError::BadRequest)?);
+            let name = HeaderName::from_bytes(part.as_bytes()).map_err(|_| HttpError::BadRequest)?;
+            // Validate every token, but retain only distinct names that can
+            // affect this forwarding allowlist (at most five/six entries).
+            if relevant.iter().any(|candidate| name == *candidate) && !options.contains(&name) {
+                options.push(name);
+            }
         }
     }
     Ok(options)
@@ -64,12 +69,16 @@ fn connection_options(headers: &HeaderMap) -> Result<Vec<HeaderName>, HttpError>
 
 fn filtered(headers: &HeaderMap, allowed: &[&'static str]) -> Result<HeaderMap, HttpError> {
     check_size(headers)?;
-    let hop = connection_options(headers)?;
+    let hop = connection_options(headers, allowed)?;
     let mut out = HeaderMap::new();
     for &name in allowed {
         if hop.iter().any(|h| h == name) { continue; }
         for value in headers.get_all(name) {
-            out.append(HeaderName::from_static(name), value.clone());
+            // A small HeaderValue can share a much larger parser allocation.
+            // Detach only its validated visible bytes, retaining redaction intent.
+            let mut copied = HeaderValue::from_bytes(value.as_bytes()).map_err(|_| HttpError::BadRequest)?;
+            copied.set_sensitive(value.is_sensitive());
+            out.append(HeaderName::from_static(name), copied);
         }
     }
     Ok(out)
@@ -140,13 +149,29 @@ pub fn prepare<'a>(config: &'a GatewayConfig, method: &Method, uri: &Uri, header
     Ok(PreparedRequest { routed, upstream })
 }
 
+/// Consume inbound metadata so its storage is gone before the worker awaits I/O.
+pub(crate) fn prepare_request_parts(config: &GatewayConfig, parts: http::request::Parts)
+    -> Result<PreparedRequest<'_>, HttpError>
+{
+    prepare(config, &parts.method, &parts.uri, &parts.headers)
+}
+
+/// Consume upstream metadata before returning detached headers for streaming.
+pub(crate) fn prepare_response_parts(parts: http::response::Parts)
+    -> Result<(StatusCode, HeaderMap), HttpError>
+{
+    // Hyper exposes 101 as an upgrade; this gateway has no tunnel path.
+    if parts.status.is_informational() { return Err(HttpError::BadRequest); }
+    Ok((parts.status, response_headers(&parts.headers)?))
+}
+
 /// Preserve upstream status separately. A 3xx is returned to the client, never
 /// followed by the gateway; Location and cookies are not forwarded.
 pub fn response_headers(headers: &HeaderMap) -> Result<HeaderMap, HttpError> {
     check_size(headers)?;
     // Removing a nominated encoding while preserving encoded bytes changes
     // their meaning. Reject that upstream response instead.
-    if connection_options(headers)?.iter().any(|h| h == "content-encoding") {
+    if connection_options(headers, FORWARDED_RESPONSE_HEADERS)?.iter().any(|h| h == "content-encoding") {
         return Err(HttpError::BadRequest);
     }
     filtered(headers, FORWARDED_RESPONSE_HEADERS)

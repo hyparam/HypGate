@@ -135,3 +135,67 @@ fn upstream_response_cannot_forward_credentials_cookies_or_redirect_location() {
     h.insert("connection", HeaderValue::from_static("Content-Encoding"));
     assert!(response_headers(&h).is_err());
 }
+
+struct HeaderBacking { bytes: Vec<u8>, dropped: std::sync::Arc<std::sync::atomic::AtomicUsize> }
+impl AsRef<[u8]> for HeaderBacking { fn as_ref(&self) -> &[u8] { &self.bytes } }
+impl Drop for HeaderBacking {
+    fn drop(&mut self) { self.dropped.fetch_add(1, std::sync::atomic::Ordering::SeqCst); }
+}
+fn shared_header(value: &[u8], dropped: &std::sync::Arc<std::sync::atomic::AtomicUsize>) -> HeaderValue {
+    let mut bytes = vec![b'x'; 256 * 1024]; bytes[..value.len()].copy_from_slice(value);
+    let owner = bytes::Bytes::from_owner(HeaderBacking { bytes, dropped: dropped.clone() });
+    let mut header = HeaderValue::from_maybe_shared(owner.slice(..value.len())).unwrap();
+    header.set_sensitive(true);
+    header
+}
+
+#[test]
+fn prepared_request_drops_source_metadata_and_detaches_header_backing() {
+    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+    let c = config(); let dropped = Arc::new(AtomicUsize::new(0));
+    let mut request = Request::new(());
+    *request.method_mut() = Method::POST; *request.uri_mut() = "/routes/7".parse().unwrap();
+    *request.headers_mut() = headers();
+    request.headers_mut().insert("openai-beta", shared_header(b"opaque-\x80-value", &dropped));
+    request.extensions_mut().insert(Arc::new(HeaderBacking { bytes: Vec::new(), dropped: dropped.clone() }));
+    let (parts, ()) = request.into_parts();
+    let prepared = prepare_request_parts(&c, parts).unwrap();
+    // The original header owner and extension are gone while output is alive.
+    assert_eq!(dropped.load(Ordering::SeqCst), 2);
+    assert_eq!(prepared.upstream.headers()["openai-beta"].as_bytes(), b"opaque-\x80-value");
+    assert!(prepared.upstream.headers()["openai-beta"].is_sensitive());
+    assert_eq!(prepared.upstream.headers()["authorization"], "Bearer secret-OPENAI");
+}
+
+#[test]
+fn prepared_response_drops_source_metadata_and_detaches_header_backing() {
+    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let mut response = http::Response::new(());
+    *response.status_mut() = StatusCode::TOO_MANY_REQUESTS;
+    response.headers_mut().append("request-id", shared_header(b"opaque-\xff-id", &dropped));
+    response.headers_mut().append("request-id", HeaderValue::from_static("second"));
+    response.extensions_mut().insert(Arc::new(HeaderBacking { bytes: Vec::new(), dropped: dropped.clone() }));
+    let (parts, ()) = response.into_parts();
+    let (status, output) = prepare_response_parts(parts).unwrap();
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(dropped.load(Ordering::SeqCst), 2);
+    let values: Vec<_> = output.get_all("request-id").iter().collect();
+    assert_eq!(values[0].as_bytes(), b"opaque-\xff-id"); assert!(values[0].is_sensitive());
+    assert_eq!(values[1], "second"); assert!(!values[1].is_sensitive());
+}
+
+#[test]
+fn many_connection_tokens_keep_only_distinct_relevant_names_but_validate_all() {
+    let c = config(); let mut h = headers();
+    let repeated = "x-ignored,content-type,".repeat(500) + "x-final";
+    h.insert("connection", HeaderValue::from_str(&repeated).unwrap());
+    let options = connection_options(&h, FORWARDED_REQUEST_HEADERS).unwrap();
+    assert_eq!(options.len(), 1); assert_eq!(options[0], "content-type");
+    let p = prep(&c, &h, "/routes/7").unwrap();
+    assert!(!p.upstream.headers().contains_key("content-type"));
+    assert_eq!(p.upstream.headers()["accept"], "text/event-stream");
+    drop(p);
+    h.insert("connection", HeaderValue::from_str(&(repeated + ",invalid name")).unwrap());
+    assert!(matches!(prep(&c, &h, "/routes/7"), Err(HttpError::BadRequest)));
+}
