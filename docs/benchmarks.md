@@ -185,7 +185,8 @@ client-observed frame gap settled at 34 ms, the same gap the sweep shows for eig
 concurrent streams. The 1 MiB uploads ran at about 209 synced records per second.
 Sustained payload throughput is therefore bounded by the synced-record rate of the
 log device times the chunk size; a larger `chunk_bytes` (up to 1 MiB) raises the
-bytes per sync, and faster storage raises the rate. Both logging modes pay this
+bytes per sync, and faster storage raises the rate, as the Linux runner results
+below show. Both logging modes pay this
 cost while the log is healthy; availability mode only differs after a failure.
 The rare 700 to 800 ms maximum gaps in the paced runs are single stalls of the
 local disk or scheduler, not a steady-state behavior.
@@ -197,7 +198,40 @@ left records (the 66 completed ones in full and four failed ones as a prefix).
 Availability mode completed all 128 with exact bytes and recorded 60 audit gaps.
 Sixteen concurrent requests never hit this limit in any sweep run because each
 request has at most one append outstanding. The documented configuration now
-uses 16 request slots in strict mode for this reason.
+uses 16 request slots in strict mode for this reason. When the refused append
+happens while the client is still sending its request body, the gateway's early
+502 and close can reach the client as a connection error rather than a status;
+the fixture counts both as failed exchanges, and the gateway counts them once.
+
+### The same workloads on the Ubuntu CI runner
+
+The `Release workloads` job at `b5fffbd`
+([run 40078196998](https://github.com/platypii/LogGate/actions/runs/40078196998),
+2026-10-24 UTC) ran every workload above on a GitHub-hosted Ubuntu 24.04 runner.
+Thirteen passed; the strict saturation run failed only in the client fixture on the
+connection-error case just described, which was then made to count as a failure.
+The runner's synced writes are far faster than this laptop's, so the same code
+behaves differently:
+
+| Concurrency | Mode | Requests/s (3 runs) | Completion p95 ms (3 runs) | Frame gap p99 ms (max) |
+| ---: | --- | --- | --- | ---: |
+| 1 | Strict | 11.9 / 11.9 / 11.9 | 84 / 85 / 85 | 41.0 |
+| 2 | Strict | 23.5 / 23.5 / 23.5 | 86 / 86 / 86 | 39.5 |
+| 4 | Strict | 45.4 / 45.6 / 45.4 | 89 / 88 / 89 | 38.6 |
+| 8 | Strict | 86.4 / 86.2 / 86.8 | 93 / 93 / 92 | 38.1 |
+| 16 | Strict | 156.1 / 158.9 / 155.8 | 103 / 101 / 103 | 35.0 |
+
+Availability rows were within a few percent of strict at every level. There,
+throughput scales linearly with concurrency and completion stays near 85 to 100 ms
+regardless of level, so the single-threaded TLS and HTTP work, not the disk, sets
+the per-request time. The eight 32 MiB streams finished in 32.97 s (strict) and
+32.95 s (availability), matching their 15 ms pacing with a 20 ms p99 frame gap, and
+the 1 MiB uploads completed in 1.14 and 1.20 s (about 1,800 synced records per
+second). A hosted virtual disk may acknowledge a sync before data reaches durable
+media, so this speed is not evidence of durability; the storage contract's
+assumptions still apply. The laptop and runner differ in hardware, OS, and
+filesystem, so these are two separate observations rather than a comparison of
+the gateway's performance.
 
 ### Not measured
 

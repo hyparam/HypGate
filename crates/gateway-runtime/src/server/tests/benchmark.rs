@@ -130,20 +130,27 @@ async fn benchmark(availability: bool, profile: Profile) {
                     let connection = tokio::spawn(async move { connection.await.unwrap(); });
                     let request = Request::builder().method("POST").uri("/routes/7").header("host", "localhost")
                         .header("authorization", "Bearer gateway").body(Full::new(Bytes::from(vec![17; upload]))).unwrap();
-                    let mut response = sender.send_request(request).await.unwrap();
+                    // A strict append refused during the upload can close the connection
+                    // while this client is still sending its body; the client then sees
+                    // a connection error instead of the 502. Either way the exchange failed.
+                    let mut response = match sender.send_request(request).await {
+                        Ok(response) => response,
+                        Err(_) if saturating => { let _ = connection.await; return Outcome::Failed; }
+                        Err(error) => panic!("request failed outside the saturation workload: {error}"),
+                    };
                     if expect_rejection {
                         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
                         response.collect().await.unwrap(); connection.await.unwrap();
                         return Outcome::Rejected;
                     }
                     if saturating && response.status() == StatusCode::BAD_GATEWAY {
-                        assert!(response.collect().await.unwrap().to_bytes().is_empty()); connection.await.unwrap();
+                        assert!(response.collect().await.unwrap().to_bytes().is_empty()); let _ = connection.await;
                         return Outcome::Failed;
                     }
                     assert_eq!(response.status(), StatusCode::OK);
                     let first = match response.body_mut().frame().await.unwrap() {
                         Ok(frame) => frame.into_data().unwrap(),
-                        Err(_) => { assert!(saturating); connection.await.unwrap(); return Outcome::Failed; }
+                        Err(_) => { assert!(saturating); let _ = connection.await; return Outcome::Failed; }
                     };
                     assert!(!first.is_empty());
                     let first_byte = start.elapsed().as_secs_f64() * 1000.;
@@ -158,7 +165,7 @@ async fn benchmark(availability: bool, profile: Profile) {
                         let bytes = match frame {
                             Ok(frame) => frame.into_data().unwrap(),
                             // A refused strict append after headers aborts the body: never a clean EOF.
-                            Err(_) => { assert!(saturating); connection.await.unwrap(); return Outcome::Failed; }
+                            Err(_) => { assert!(saturating); let _ = connection.await; return Outcome::Failed; }
                         };
                         assert!(bytes.iter().all(|b| *b == 29)); received += bytes.len();
                     }
