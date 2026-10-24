@@ -111,13 +111,9 @@ impl<T> FrameQueue<T> {
             final(self).items() == old(self).items(),
     {
         self.queue.close();
-        assert(!self.reserved || self.items().len() < self.capacity());
         assert forall|i: int| 0 <= i < self.items().len() implies (#[trigger] self.items()[i].0.valid() && self.items()[i].0.payload().len() <= self.payload_limit()) by {
             assert(self.items()[i] == old(self).items()[i]);
         }
-        assert(self.queue.valid());
-        assert(self.payload_limit <= 1048576);
-        assert(self.valid());
     }
     pub fn push(&mut self, item: (RecordFrame, T)) -> (out: Result<(), (RecordFrame, T)>)
         requires old(self).valid(), item.0.valid(),
@@ -142,11 +138,6 @@ impl<T> FrameQueue<T> {
                 assert(self.items()[i] == old(self).items()[i]);
             } else { assert(self.items()[i] == item); }
         }
-        assert(self.charged_slots() <= self.capacity());
-        assert(!self.reserved);
-        assert(self.queue.valid());
-        assert(self.payload_limit <= 1048576);
-        assert(self.valid());
         out
     }
     pub fn pop(&mut self) -> (out: Option<(RecordFrame, T)>)
@@ -159,13 +150,10 @@ impl<T> FrameQueue<T> {
                 None => old(self).items().len() == 0 && final(self).items() == old(self).items(),
             },
     {
-        assert(self.items().len() > 0 ==> self.items()[0].0.valid());
         let out = self.queue.pop();
         assert forall|i: int| 0 <= i < self.items().len() implies (#[trigger] self.items()[i].0.valid() && self.items()[i].0.payload().len() <= self.payload_limit()) by {
-            assert(old(self).items()[i + 1].0.valid());
             assert(self.items()[i] == old(self).items()[i + 1]);
         }
-        assert(self.valid());
         out
     }
     // Projects the actual retained frames, without another runtime collection or
