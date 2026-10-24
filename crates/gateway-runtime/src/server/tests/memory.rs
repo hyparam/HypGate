@@ -4,7 +4,6 @@ use std::process::{Child, Command, Stdio};
 use tokio_rustls::rustls::pki_types::CertificateDer;
 
 const CLIENTS: usize = 8;
-const WAVES: usize = 3;
 const RESPONSE: usize = 1024 * 1024;
 struct Process(Child);
 impl Drop for Process { fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); } }
@@ -54,11 +53,20 @@ fn memory(pid: u32) -> (u64, Option<u64>) {
 #[ignore = "isolated gateway RSS workload; run with --ignored --nocapture"]
 async fn isolated_gateway_memory_in_both_logging_modes() {
     for availability in [false, true] {
-        tokio::time::timeout(Duration::from_secs(120), workload(availability)).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(120), workload(availability, 3)).await.unwrap();
     }
 }
 
-async fn workload(availability: bool) {
+#[tokio::test]
+#[ignore = "long isolated gateway RSS workload; run with --ignored --nocapture"]
+async fn isolated_gateway_memory_soak_in_both_logging_modes() {
+    for availability in [false, true] {
+        tokio::time::timeout(Duration::from_secs(600), workload(availability, 100)).await.unwrap();
+    }
+}
+
+async fn workload(availability: bool, waves: usize) {
+    let started = std::time::Instant::now();
     let cert = generate_simple_self_signed(vec!["localhost".into()]).unwrap();
     let tls = ServerConfig::builder().with_no_client_auth().with_single_cert(vec![cert.cert.der().clone()],
         PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()).into()).unwrap();
@@ -97,7 +105,7 @@ async fn workload(availability: bool) {
     });
     let provider = tokio::spawn(async move {
         let mut connections = JoinSet::new();
-        for _ in 0..WAVES * CLIENTS {
+        for _ in 0..waves * CLIENTS {
             let (socket, _) = upstream.accept().await.unwrap(); let acceptor = acceptor.clone();
             connections.spawn(async move {
                 let socket = acceptor.accept(socket).await.unwrap();
@@ -121,7 +129,7 @@ async fn workload(availability: bool) {
         while let Some(result) = connections.join_next().await { result.unwrap(); }
     });
     let mut settled = Vec::new();
-    for _ in 0..WAVES {
+    for _ in 0..waves {
         let mut clients = JoinSet::new();
         for _ in 0..CLIENTS {
             clients.spawn(async move {
@@ -163,10 +171,11 @@ async fn workload(availability: bool) {
             }
         }
     }
-    assert_eq!(totals.len(), CLIENTS * WAVES);
+    assert_eq!(totals.len(), CLIENTS * waves);
     assert!(totals.values().all(|&(up, down)| up == b"{\"stream\":true}".len() && down == RESPONSE));
     println!("isolated_gateway_memory {}", json!({"availability": availability,
-        "os": std::env::consts::OS, "requests":CLIENTS * WAVES, "concurrency":CLIENTS,
+        "os": std::env::consts::OS, "waves":waves, "elapsed_ms":started.elapsed().as_millis(),
+        "requests":CLIENTS * waves, "concurrency":CLIENTS,
         "response_bytes":RESPONSE, "baseline_rss_bytes":baseline.0, "sampled_peak_rss_bytes":peak,
         "kernel_peak_rss_bytes":kernel_peak, "settled_rss_bytes":settled, "samples":samples}));
 }

@@ -175,7 +175,7 @@ all response payloads. RSS is sampled about every 50 ms; Linux additionally read
 brief peaks. Run it with:
 
 ```sh
-cargo test -p gateway-runtime --locked --lib isolated_gateway_memory -- --ignored --nocapture
+cargo test -p gateway-runtime --locked --lib isolated_gateway_memory_in_both_logging_modes -- --ignored --nocapture
 ```
 
 CI runs this fixture on Ubuntu 24.04 and emits JSON with baseline, sampled peak,
@@ -210,3 +210,34 @@ end of the workload:
 
 The Linux and macOS runs differ in OS, machine, and storage timing; their values
 are separate workload observations, not a controlled platform performance comparison.
+
+### Repeated isolated gateway memory workload
+
+The separate ignored test `isolated_gateway_memory_soak_in_both_logging_modes`
+uses the same fixture for 100 waves per mode: 800 requests and 800 MiB of response
+payload per gateway child. It checks every response and recovered audit record,
+then checks zero active requests/workers and graceful shutdown. Each mode has a
+600-second timeout. A dedicated CI job runs this test, leaving the short baseline
+in the regular Rust test job. Run it locally with:
+
+```sh
+cargo test -p gateway-runtime --locked --lib isolated_gateway_memory_soak -- --ignored --nocapture
+```
+
+JSON includes wave count, elapsed milliseconds, and all settled RSS samples.
+The extended workload exercises repeated allocation and cleanup; it does not
+establish leak freedom or a whole-process memory bound, and does not replace
+hostile-input, long-duration overload, or production release measurements.
+
+Local macOS arm64 results on 2026-10-23 (debug test profile): both modes
+passed all 800 requests, recovered audit checks, and clean shutdown checks.
+The complete test took 722.19 seconds. Per-mode elapsed time includes setup and
+final audit validation; RSS sampling ends before gateway shutdown.
+
+| Mode | Elapsed seconds | Baseline RSS bytes | Sampled peak RSS bytes | Final 20 settled samples, bytes | Periodic samples |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Strict | 359.508 | 6,914,048 | 13,434,880 | All 13,434,880 | 6,008 |
+| Availability | 362.660 | 6,897,664 | 13,025,280 | All 13,025,280 | 6,046 |
+
+These observed plateaus are specific to this workload and sampling interval.
+The dedicated Linux CI job has been added; its results are not yet recorded here.

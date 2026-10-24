@@ -114,7 +114,8 @@ Core ownership-map preservation is now checked for admission, stream creation,
 replacement, and retirement; see the [ownership notes](runtime-ownership.md#ownership-map-preservation).
 Remaining work includes correspondence between the full runtime ownership and
 those ghost-map events, dependency/backing-allocation accounting, formal worker-lifetime composition,
-and longer-duration isolated-gateway measurements. A separate gateway-child
-fixture now measures three paced waves per logging mode, excluding provider/client
-memory, and checks audit coverage and clean shutdown; see the [benchmark notes](benchmarks.md#isolated-gateway-process-memory). Until the remaining obligations are resolved,
+and broader isolated-gateway measurements. A separate gateway-child
+fixture measures three paced waves per logging mode, with an extended 100-wave
+workload in a dedicated CI job. Both exclude provider/client memory and check
+audit coverage and clean shutdown; see the [benchmark notes](benchmarks.md#isolated-gateway-process-memory). Until the remaining obligations are resolved,
 neither the subtotal nor the core's 128 MiB allowance is a whole-process guarantee.

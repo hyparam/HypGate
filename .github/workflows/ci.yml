@@ -28,7 +28,20 @@ jobs:
       - name: Concurrent logging failure workloads
         run: cargo test -p gateway-runtime --locked failed_log -- --ignored --nocapture --test-threads=1
       - name: Isolated gateway memory workload
-        run: cargo test -p gateway-runtime --locked --lib isolated_gateway_memory -- --ignored --nocapture
+        run: cargo test -p gateway-runtime --locked --lib isolated_gateway_memory_in_both_logging_modes -- --ignored --nocapture
+
+  memory-soak:
+    name: Isolated gateway memory soak
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Check 100 waves in each logging mode
+        run: cargo test -p gateway-runtime --locked --lib isolated_gateway_memory_soak -- --ignored --nocapture
 
   verify:
     name: Verus proofs and mutations
