@@ -68,6 +68,18 @@ Worker keys use checked registry transitions; the wrapper's field drop order is
 described in [worker lifetimes](worker-lifetimes.md). Completed task bookkeeping,
 channel control objects, wakers, and allocator overhead remain outside payload lengths.
 
+Production readers use `read_buffer::ReadBuffer`, which owns the detached vector
+and its read offset. Checked load refuses replacement of a live frame and rejects
+frames above the configured limit. Peek returns the exact next range; consume
+preserves the original backing charge through every partial read, then replaces
+the vector with an empty vector after the final byte. Failed loads and overlarge
+consumes preserve the existing state. The retained-byte accessor counts the
+original copied payload, including consumed prefixes, rather than just the
+visible remainder. Actual vector destruction and allocator capacity/rounding
+remain Rust/allocator assumptions; the proof bounds logical backing bytes.
+The runtime constructs this owner with the 32 KiB input limit, copies from the
+checked peek into the caller's read buffer, and reports consumption synchronously.
+
 Reader copies detach accepted frames from shared backing owners, and clear their
 copy when consumed. An input frame and its new copy coexist synchronously during
 copying; source frames and references retained by Hyper belong to the dependency

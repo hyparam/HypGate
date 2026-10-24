@@ -1,5 +1,8 @@
 //! Trusted bridge between HTTP body frames and the byte-stream core.
-use bytes::{Buf, Bytes};
+use bytes::Bytes;
+#[cfg(test)]
+use bytes::Buf;
+use gateway_core::read_buffer::ReadBuffer;
 use http_body::{Body, Frame};
 use std::{io, pin::Pin, task::{Context, Poll}};
 use tokio::{io::{AsyncRead, AsyncWrite, ReadBuf}, sync::oneshot};
@@ -10,9 +13,9 @@ mod slot;
 // the reader-owned copy. Hyper's own parser/body allocations remain separate.
 pub(crate) const MAX_INPUT_FRAME: usize = 32 * 1024;
 
-pub(crate) struct Reader<B> { body: B, buffered: Bytes, ended: bool }
+pub(crate) struct Reader<B> { body: B, buffered: ReadBuffer, ended: bool }
 impl<B> Reader<B> {
-    pub(crate) fn new(body: B) -> Self { Self { body, buffered: Bytes::new(), ended: false } }
+    pub(crate) fn new(body: B) -> Self { Self { body, buffered: ReadBuffer::new(MAX_INPUT_FRAME), ended: false } }
 }
 impl<B: Body<Data = Bytes> + Unpin> AsyncRead for Reader<B> {
     fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, out: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
@@ -22,8 +25,8 @@ impl<B: Body<Data = Bytes> + Unpin> AsyncRead for Reader<B> {
         for _ in 0..16 {
             if !this.buffered.is_empty() {
                 let n = out.remaining().min(this.buffered.len());
-                out.put_slice(&this.buffered[..n]); this.buffered.advance(n);
-                if this.buffered.is_empty() { this.buffered = Bytes::new(); }
+                out.put_slice(this.buffered.peek(n));
+                assert!(this.buffered.consume(n));
                 return Poll::Ready(Ok(()));
             }
             if this.ended { return Poll::Ready(Ok(())); }
@@ -35,7 +38,7 @@ impl<B: Body<Data = Bytes> + Unpin> AsyncRead for Reader<B> {
                     // A short Bytes view may retain an arbitrarily large owner.
                     // Copy only the bounded visible frame, then release our input
                     // reference before yielding or keeping a partial remainder.
-                    Ok(data) if data.len() <= MAX_INPUT_FRAME => this.buffered = Bytes::copy_from_slice(&data),
+                    Ok(data) if this.buffered.load(&data) => {},
                     _ => {
                         this.ended = true;
                         return Poll::Ready(Err(io::ErrorKind::InvalidData.into()));
@@ -417,12 +420,15 @@ mod tests {
         let mut first = [0; 1];
         assert_eq!(reader.read(&mut first).await.unwrap(), 1);
         assert_eq!(first[0], expected[0]);
+        assert_eq!(reader.buffered.retained_bytes(), 40);
+        assert_eq!(reader.buffered.len(), 39);
         // Full has transferred its only reference. The reader must not retain
         // the 256 KiB owner while holding the remaining 39 visible bytes.
         assert_eq!(dropped.load(Ordering::Relaxed), 1);
         let mut rest = [0; 39];
         reader.read_exact(&mut rest).await.unwrap();
         assert_eq!(&rest, &expected[1..]);
+        assert_eq!(reader.buffered.retained_bytes(), 0);
         assert!(reader.buffered.is_empty());
         assert_eq!(reader.read(&mut first).await.unwrap(), 0);
     }

@@ -318,7 +318,7 @@ Exit criteria:
 | ✓ | Disk jobs after request cancellation: production `DiskWorker` verifies queue-to-active ownership, the combined Q+1 frame bound, exact write/sync/commit order, and session/generation-checked release only after consuming completion delivery. Stalled I/O and abandoned handles retain active credit; fault/cancellation regressions and eleven deliberate mutations cover the protocol. Syscall truth, consuming channel delivery, and file-session identity remain explicit adapter assumptions. |
 | ✓ | DNS jobs after request cancellation: production `CreditedJob` and `Reply` retain verified `TaskCredit` through queued/running lookup work and unread results; cleanup gates release, or `handoff_to` checks a live admitted owner before result adoption. Blocked/canceled lookup, queued cancellation, panic, reply retention, and adoption regressions pass. Rust destruction/channel behavior and registry identity remain explicit adapter assumptions. |
 | ✓ | TLS jobs after request cancellation: the same credited job/reply path retains handshake state and sockets through blocked polls and unread replies; verified handoff transfers successful results to a live request before releasing pool capacity. Queued cancellation, blocked polls, panic, runtime shutdown, and actual TLS exchange regressions pass under the same adapter assumptions. |
-| ☐ | HTTP cleanup tails: prove retained mailbox/body buffers remain charged to their owners after a request or connection is canceled. |
+| ☐ | HTTP cleanup tails: prove retained mailbox/body buffers remain charged to their owners after a request or connection is canceled. Reader substep implemented: production `ReadBuffer` verifies bounded frame load, exact read ranges, and full backing charge through partial consumption; mailbox cleanup ownership and owner-count composition remain open. |
 | ☐ | Compose cleanup-before-capacity-reuse across all owners: connect the worker, connection, HTTP, disk, DNS, and TLS lifecycles to production ownership across cancellation, normal completion, panic, and shutdown. |
 | ☐ | Authorization and journal-session receipts for upstream writes: prove every submitted body range belongs to the admitted request and its authorized destination/credential binding; strict-mode ranges additionally require an exact matching durable receipt from the request's designated journal session. |
 
@@ -331,6 +331,12 @@ Disk checkpoint validation: the locked workspace suite and six compile-fail
 doctests pass (opt-in workloads excluded); Cargo/Verus reports 217 verified checks
 and no errors; all 11 disk ownership/order mutations are rejected by proof.
 HTTP tails, cross-owner composition, and upstream mediation remain unfinished.
+
+HTTP reader checkpoint: Cargo/Verus reports 225 verified checks and no errors;
+all six reader limit/range/retention mutations are rejected by proof. The locked
+workspace suite and six compile-fail doctests pass; two new core reader regressions
+and the strengthened backing-owner runtime regression also pass. This does
+not complete the HTTP cleanup row or change the milestone count.
 
 Start with the shared wrapper to reduce duplicated trusted lifetime logic. Preserve
 the existing task-capture destruction tests for both lease types and their
