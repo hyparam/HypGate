@@ -107,7 +107,7 @@ impl StreamChunk {
         self.pending && t.owner == self.owner && t.generation == self.generation
     }
 
-    pub fn new(owner: u64, bytes: Vec<u8>, capacity: usize, strict: bool) -> (out: Option<Self>)
+    pub(crate) fn new(owner: u64, bytes: Vec<u8>, capacity: usize, strict: bool) -> (out: Option<Self>)
         ensures match out {
             Some(s) => s.valid() && s.body() == bytes@ && s.body().len() <= capacity
                 && s.capacity() == capacity && s.chunk() == 0

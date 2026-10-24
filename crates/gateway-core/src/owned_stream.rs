@@ -5,6 +5,27 @@ use crate::stream::{StreamChunk, Ticket};
 
 verus! {
 /// Private ownership pair. No extraction, cloning, or mutable stream reference.
+/// Raw stream construction and key-borrowing claim/release are internal to the
+/// core. External callers must use this consuming ownership boundary.
+///
+/// ```compile_fail,E0624
+/// let _ = gateway_core::stream::StreamChunk::new(1, vec![], 1, false);
+/// ```
+///
+/// ```compile_fail,E0624
+/// fn claim_raw(registry: &gateway_core::resource::ResourceAdmission,
+///     key: &mut gateway_core::resource::RequestKey,
+///     authority: &gateway_core::policy::AuthorizedRequest<'_>) {
+///     registry.authorized_stream(key, authority, false);
+/// }
+/// ```
+///
+/// ```compile_fail,E0624
+/// fn release_raw(registry: &mut gateway_core::resource::ResourceAdmission,
+///     key: &gateway_core::resource::RequestKey, stream: gateway_core::stream::StreamChunk) {
+///     registry.release_stream(key, stream);
+/// }
+/// ```
 ///
 /// ```compile_fail
 /// fn replace_owned_stream(owner: &mut gateway_core::owned_stream::OwnedStream) {

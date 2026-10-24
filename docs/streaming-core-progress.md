@@ -95,9 +95,11 @@ specifications and compiler remain trusted.
 IDs are unique within one registry's allocation history. Keys are scoped to that
 registry; two independently constructed registries can issue the same ID. The
 adapter must use one shared registry and one stream instance per issued owner.
-The current public constructors still allow bypassing that discipline. The next
-ownership wrapper must enforce the relationship, rather than treating this as a
-proved whole-gateway isolation property. Request IDs, chunk numbers, and write
+The initial experiment exposed public constructors that could bypass that
+discipline. The production `OwnedStream` wrapper now consumes the key, owns the
+stream, and consumes both on retirement; raw construction/claim/release APIs are
+crate-private. Registry identity and async effects still require the bindings in
+[runtime ownership](runtime-ownership.md), not a whole-gateway isolation claim. Request IDs, chunk numbers, and write
 generations reject exhaustion rather than wrapping.
 
 The registry bounds logical active slots and offers a fixed allowance per slot.

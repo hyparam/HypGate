@@ -1,5 +1,5 @@
-use gateway_core::stream::StreamChunk;
-use gateway_core::resource::ResourceAdmission;
+use crate::stream::StreamChunk;
+use crate::resource::ResourceAdmission;
 
 #[test]
 fn streaming_and_resource_lifecycle() {

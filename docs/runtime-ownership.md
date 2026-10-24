@@ -38,8 +38,9 @@ and uses this path after policy authorization.
 This is an initial composition theorem, not a proof of the whole Rust wrapper.
 Keys must remain scoped to their registry; identical numeric slots and IDs in
 independent registries are not globally distinct. The runtime lease binds that
-identity by ownership. The core still exposes lower-level constructors for other
-verified callers, so arbitrary trusted embedding code could bypass this path.
+identity by ownership. Raw `StreamChunk::new`, `authorized_stream`, and
+`release_stream` are now crate-private. External callers, including the runtime
+crate, must construct and retire streams through the consuming `OwnedStream` API.
 Async effects, release timing, and whole-process budgets remain separate obligations. No proof claims that a slot cannot be released while an
 independently retained stream exists; the runtime wrapper prevents that extraction.
 
@@ -56,9 +57,9 @@ dropped inside the locked operation; no async I/O occurs under the lock.
 
 This proves the synchronous ownership check and registry transition. It does not
 prove that external async effects have stopped, distinguish equal numeric IDs in
-separate registries, or prevent trusted callers from using lower-level constructors
-to synthesize another stream with the same owner. Runtime encapsulation supplies
-those ownership boundaries. Reservation-only `release` now rejects every claimed
+separate registries, or verify every privileged call inside the core crate.
+External code can no longer use raw constructors to synthesize another stream
+with the same owner; runtime encapsulation still binds each owner to its registry. Reservation-only `release` now rejects every claimed
 key without changing registry state; the lower-level slot-clearing primitive is
 private and used only by the two verified release paths. This removes the direct
 non-consuming release bypass, but does not yet prove the global stream-to-slot map.
@@ -238,11 +239,13 @@ for Drop to release. Poisoning continues to close admission.
 
 The constructor/transition/retirement proofs reduce the trusted ownership surface;
 they do not verify Tokio scheduling, mutex identity, cancellation/drop execution,
-or all allocation lifetimes. Lower-level core constructors still exist for other
-embeddings, and registry namespaces remain externally scoped. These limits prevent
+or all allocation lifetimes. Lower-level construction/release is confined to the
+core crate; registry namespaces remain externally scoped. These limits prevent
 claiming a complete global async ownership proof. The composition test covers failed
 claim, capacity, partial writes, rollover, cancellation, retirement, and slot reuse;
-a compile-fail doctest rejects mutation through the read-only accessor. Four
+compile-fail doctests reject raw construction, raw claim/release, mutation through
+the read-only accessor, and completion while a read-buffer borrow remains live.
+The raw API tests explicitly require the private-method diagnostic. Four
 mutations check skipped retirement, altered bytes, ignored cancellation, and denied
 valid write progress.
 

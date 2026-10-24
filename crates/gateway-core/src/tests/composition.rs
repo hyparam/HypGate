@@ -1,4 +1,4 @@
-use gateway_core::{policy::{Identity, Policy, Route}, resource::ResourceAdmission};
+use crate::{policy::{Identity, Policy, Route}, resource::ResourceAdmission};
 
 #[test]
 fn stream_creation_binds_live_capacity_and_authority_once() {
@@ -51,7 +51,7 @@ fn usage_counts_live_slots_including_holes_and_replacements() {
 
 #[test]
 fn normalized_limits_reject_overflow_and_enforce_combined_payload_budget() {
-    use gateway_core::resource::validate_limits;
+    use crate::resource::validate_limits;
     for (requests, chunk, expected) in [
         (0, 1, false), (1, 0, false), (1, 1, true),
         (65536, 2048, true), (65536, 2049, false), (65537, 1, false),
@@ -65,7 +65,7 @@ fn normalized_limits_reject_overflow_and_enforce_combined_payload_budget() {
 
 #[test]
 fn retirement_rejects_wrong_unclaimed_and_stale_stream_ownership() {
-    use gateway_core::stream::StreamChunk;
+    use crate::stream::StreamChunk;
     let route = || Route { tenant: 1, selector: 7, origin: 0, credential: 0 };
     let policy = Policy::validate(vec![Identity { tenant: 1, digest: vec![9; 32] }],
         vec![route()], vec![route()], 1, vec![1]).unwrap();
@@ -97,7 +97,7 @@ fn retirement_rejects_wrong_unclaimed_and_stale_stream_ownership() {
 
 #[test]
 fn audit_record_binds_authority_current_chunk_and_exact_payload() {
-    use gateway_core::stream::StreamChunk;
+    use crate::stream::StreamChunk;
     let route = || Route { tenant: 42, selector: 7, origin: 0, credential: 0 };
     let policy = Policy::validate(vec![Identity { tenant: 42, digest: vec![9; 32] }],
         vec![route()], vec![route()], 1, vec![42]).unwrap();
@@ -125,7 +125,7 @@ fn audit_record_binds_authority_current_chunk_and_exact_payload() {
 
 #[test]
 fn owned_stream_preserves_pairing_through_failure_progress_and_retirement() {
-    use gateway_core::owned_stream::OwnedStream;
+    use crate::owned_stream::OwnedStream;
     let route = || Route { tenant: 1, selector: 7, origin: 0, credential: 0 };
     let policy = Policy::validate(vec![Identity { tenant: 1, digest: vec![9; 32] }],
         vec![route()], vec![route()], 1, vec![1]).unwrap();
@@ -161,7 +161,7 @@ fn owned_stream_preserves_pairing_through_failure_progress_and_retirement() {
 
 #[test]
 fn owned_read_buffer_moves_only_filled_bytes_and_excludes_a_second_chunk() {
-    use gateway_core::owned_stream::OwnedStream;
+    use crate::owned_stream::OwnedStream;
     let route = || Route { tenant: 1, selector: 7, origin: 0, credential: 0 };
     let policy = Policy::validate(vec![Identity { tenant: 1, digest: vec![9; 32] }],
         vec![route()], vec![route()], 1, vec![1]).unwrap();

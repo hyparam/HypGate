@@ -18,3 +18,10 @@ pub mod buffer_accounting;
 
 pub mod owned_accounting;
 pub mod fixed_queue;
+
+#[cfg(test)]
+#[path = "tests/streaming.rs"]
+mod streaming_tests;
+#[cfg(test)]
+#[path = "tests/composition.rs"]
+mod composition_tests;

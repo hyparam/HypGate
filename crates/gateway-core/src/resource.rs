@@ -293,7 +293,7 @@ impl ResourceAdmission {
     }
 
     // One initial stream per reserved key, bound to the authorized request ID.
-    pub fn authorized_stream(&self, key: &mut RequestKey, authority: &AuthorizedRequest, strict: bool)
+    pub(crate) fn authorized_stream(&self, key: &mut RequestKey, authority: &AuthorizedRequest, strict: bool)
         -> (out: Option<StreamChunk>)
         requires self.valid(), authority.valid(),
         ensures final(key).slot() == old(key).slot(), final(key).id() == old(key).id(),
@@ -331,7 +331,7 @@ impl ResourceAdmission {
 
     // Consume the owned stream before the caller can expose the released slot.
     // External effects must already be stopped; registry identity remains scoped.
-    pub fn release_stream(&mut self, key: &RequestKey, stream: StreamChunk) -> (ok: bool)
+    pub(crate) fn release_stream(&mut self, key: &RequestKey, stream: StreamChunk) -> (ok: bool)
         requires old(self).valid(),
         ensures final(self).valid(), final(self).limit() == old(self).limit(),
             final(self).per_request() == old(self).per_request(),
