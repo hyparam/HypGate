@@ -40,13 +40,51 @@ verus! {
 ///     buffer[0] = 7;
 /// }
 /// ```
-pub struct OwnedStream { key: RequestKey, stream: StreamChunk, read_buffer: Vec<u8> }
+pub struct OwnedStream { key: RequestKey, stream: StreamChunk, read_buffer: Vec<u8>, audit_session: Option<u128>, audit_tenant: u64, audit_direction: u8, audit: Ghost<Option<crate::journal::DurableFrame>> }
 impl OwnedStream {
+    pub closed spec fn audit_session(&self) -> Option<u128> { self.audit_session }
+    pub closed spec fn audit_tenant(&self) -> u64 { self.audit_tenant }
+    pub closed spec fn audit_direction(&self) -> u8 { self.audit_direction }
+    pub closed spec fn receipt(&self) -> Option<crate::journal::DurableFrame> { self.audit@ }
+    pub closed spec fn audit_valid(&self) -> bool {
+        match self.audit_session {
+            None => self.audit@.is_none(),
+            Some(session) => self.audit@.is_some() && {
+                let r = self.audit@.unwrap();
+                r.valid() && r.session() == session && self.audit_direction <= 1
+                && self.state().body().len() <= 1048576
+                && r.record() == crate::framing::encoding(crate::framing::Header {
+                    payload: self.state().body().len() as u32, tenant: self.audit_tenant,
+                    request: self.state().owner(), chunk: self.state().chunk(), direction: self.audit_direction })
+                    + self.state().body() + r.checksum()
+            },
+        }
+    }
+    pub open spec fn audited_for(&self, authority: &AuthorizedRequest, journal: &crate::journal_binding::JournalBinding) -> bool {
+        self.audit_session().is_some() && self.audit_session() == journal.session() && self.audit_tenant() == authority.tenant()
+            && self.state().owner() == authority.request()
+    }
+    pub fn is_audited_for(&self, authority: &AuthorizedRequest, journal: &crate::journal_binding::JournalBinding) -> (ok: bool)
+        requires self.valid(), authority.valid(),
+        ensures ok == self.audited_for(authority, journal),
+    {
+        self.audit_session.is_some() && journal.matches_session(self.audit_session)
+            && self.audit_tenant == authority.tenant_id() && self.stream.owner_id() == authority.request_id()
+    }
+    pub proof fn receipt_evidence(&self)
+        requires self.valid(), self.audit_session().is_some(),
+        ensures self.receipt().is_some(), self.receipt().unwrap().valid(), self.state().body().len() <= 1048576,
+            Some(self.receipt().unwrap().session()) == self.audit_session(),
+            self.receipt().unwrap().record() == crate::framing::encoding(crate::framing::Header {
+                payload: self.state().body().len() as u32, tenant: self.audit_tenant(),
+                request: self.state().owner(), chunk: self.state().chunk(), direction: self.audit_direction() })
+                + self.state().body() + self.receipt().unwrap().checksum(),
+    {}
     pub closed spec fn state(&self) -> StreamChunk { self.stream }
     pub closed spec fn read_bytes(&self) -> Seq<u8> { self.read_buffer@ }
     pub closed spec fn key(&self) -> RequestKey { self.key }
     pub closed spec fn valid(&self) -> bool {
-        self.key.stream_claimed() && self.stream.valid() && self.stream.owner() == self.key.id()
+        self.audit_valid() && self.key.stream_claimed() && self.stream.valid() && self.stream.owner() == self.key.id()
             && self.stream.body().len() + self.read_buffer.len() <= self.stream.capacity()
             && (self.read_buffer.len() > 0 ==> self.stream.body().len() == 0)
     }
@@ -79,7 +117,7 @@ impl OwnedStream {
         match registry.authorized_stream(&mut key, authority, strict) {
             Some(stream) => {
                 proof { stream.payload_within_capacity(); }
-                let owned = OwnedStream { key, stream, read_buffer: Vec::new() };
+                let owned = OwnedStream { key, stream, read_buffer: Vec::new(), audit_session: None, audit_tenant: 0, audit_direction: 0, audit: Ghost(None) };
                 proof {
                     registry.layout(); registry.ownership_facts(&owned.key());
                     assert forall|owners: Seq<Option<OwnedStream>>|
@@ -96,7 +134,7 @@ impl OwnedStream {
     }
 
     pub fn stream(&self) -> (out: &StreamChunk)
-        ensures *out == self.state(),
+        ensures *out == self.state(), self.valid() ==> out.valid(),
     { &self.stream }
 
     pub fn is_live(&self, registry: &ResourceAdmission) -> (out: bool)
@@ -155,6 +193,7 @@ impl OwnedStream {
     {
         if !self.read_buffer.is_empty() || self.stream.capacity_bytes() == 0 { return false; }
         if !self.stream.discard_completed() { return false; }
+        self.audit_session = None; self.audit = Ghost(None);
         let capacity = self.stream.capacity_bytes();
         self.read_buffer = Vec::with_capacity(capacity);
         self.read_buffer.resize(capacity, 0);
@@ -197,6 +236,7 @@ impl OwnedStream {
         core::mem::swap(&mut bytes, &mut self.read_buffer);
         bytes.truncate(length);
         if length == 0 { return true; }
+        self.audit_session = None; self.audit = Ghost(None);
         self.stream.advance(bytes).is_some()
     }
 
@@ -223,6 +263,7 @@ impl OwnedStream {
     {
         if !self.read_buffer.is_empty() { return None; }
         let out = self.stream.advance(bytes);
+        if out.is_some() { self.audit_session = None; self.audit = Ghost(None); }
         proof { self.stream.payload_within_capacity(); }
         out
     }
@@ -242,11 +283,17 @@ impl OwnedStream {
                 && final(self).state().end() == 0 && final(self).state().durable() == 0,
             ok == (!old(self).state().closed() && !old(self).state().pending() && old(self).state().position() == old(self).state().body().len()),
             !ok ==> final(self).state() == old(self).state(),
-    { self.stream.discard_completed() }
+    {
+        let ok = self.stream.discard_completed();
+        if ok { self.audit_session = None; self.audit = Ghost(None); }
+        ok
+    }
 
     pub fn prepare(&mut self, max: usize) -> (out: Option<Ticket>)
         requires old(self).valid(),
-        ensures final(self).valid(), final(self).key() == old(self).key(),
+        ensures final(self).audit_session() == old(self).audit_session(),
+            final(self).audit_tenant() == old(self).audit_tenant(), final(self).receipt() == old(self).receipt(),
+            final(self).valid(), final(self).key() == old(self).key(),
             final(self).read_bytes() == old(self).read_bytes(), final(self).state().valid(), final(self).state().body() == old(self).state().body(),
             final(self).state().chunk() == old(self).state().chunk(), final(self).state().capacity() == old(self).state().capacity(),
             final(self).state().input() == old(self).state().input(),
@@ -337,6 +384,7 @@ impl OwnedStream {
             final(self).state().failed() == old(self).state().failed(),
             final(self).state().closed() == old(self).state().closed(),
             final(self).state().generation() == old(self).state().generation(),
+            ok ==> final(self).audited_for(authority, journal) && final(self).receipt() == Some(*receipt),
             ok ==> final(self).state().durable() == old(self).state().body().len()
                 && receipt.acknowledged() == receipt.prefix()
                     + crate::framing::encoding(crate::framing::Header { payload: old(self).state().body().len() as u32,
@@ -344,6 +392,15 @@ impl OwnedStream {
                         chunk: old(self).state().chunk(), direction })
                     + old(self).state().body() + receipt.checksum(),
             !ok ==> final(self).state() == old(self).state(),
-    { self.stream.acknowledge_receipt(authority, journal, direction, receipt) }
+    {
+        let ok = self.stream.acknowledge_receipt(authority, journal, direction, receipt);
+        if ok {
+            self.audit_session = Some(receipt.session_id());
+            self.audit_tenant = authority.tenant_id();
+            self.audit_direction = direction;
+            self.audit = Ghost(Some(*receipt));
+        }
+        ok
+    }
 }
 }

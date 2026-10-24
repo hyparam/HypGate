@@ -279,3 +279,20 @@ the actual accepted count; cancellation closes access without erasing issued
 completion accounting. This does not yet compose concrete URL/secret resolution,
 the AsyncWrite target, and journal receipt provenance into the required final
 upstream mediation theorem. Those remaining joins stay explicit in milestone 6.
+
+
+## Milestone 6 receipt-to-write composition follow-up
+
+`OwnedStream::valid` now includes exact receipt evidence for the current chunk.
+A successful receipt acknowledgment records the issuing session, tenant, and
+direction plus an erased snapshot of the actual `DurableFrame`. The invariant
+binds that snapshot to the current owner, chunk, and exact payload. Every body
+replacement/discard clears evidence; ticket preparation and partial completion
+preserve it. The snapshot adds no runtime payload allocation or retained receipt.
+Production `AuthorizedWrite::bytes` checks the current journal designation and
+jointly proves policy permission, the exact pending range, and strict-mode
+coverage by that valid session-bound receipt. Same-byte later chunks cannot reuse
+prior evidence. Availability permits missing audit evidence but retains the same
+request/tenant/route/credential checks. Concrete transport direction, URL/secret
+resolution and actual writer correspondence still need the remaining mediation
+work; this is not yet closure of milestone 6.

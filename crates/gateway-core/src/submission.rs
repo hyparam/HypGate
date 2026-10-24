@@ -1,7 +1,7 @@
 //! Production body-write capability binds a stream ticket to its authorization.
 //! Concrete URL/secret resolution and the AsyncWrite call remain adapter joins.
 use vstd::prelude::*;
-use crate::{owned_stream::OwnedStream, policy::{AuthorizedRequest, Route}, stream::{StreamChunk, Ticket}};
+use crate::{owned_stream::OwnedStream, policy::{AuthorizedRequest, Route}, stream::Ticket};
 
 verus! {
 pub struct AuthorizedWrite { ticket: Ticket, route: Route, request: u64 }
@@ -15,7 +15,7 @@ impl AuthorizedWrite {
             && self.route().credential == authority.binding().credential
             && self.route().selector == authority.binding().selector
     }
-    pub fn prepare(stream: &mut OwnedStream, authority: &AuthorizedRequest, max: usize)
+    pub fn prepare(stream: &mut OwnedStream, authority: &AuthorizedRequest, journal: &crate::journal_binding::JournalBinding, max: usize)
         -> (out: Option<Self>)
         requires old(stream).valid(), authority.valid(),
         ensures final(stream).valid(), final(stream).key() == old(stream).key(),
@@ -29,34 +29,45 @@ impl AuthorizedWrite {
                     && !final(stream).state().closed()
                     && final(stream).state().end() > final(stream).state().position()
                     && final(stream).state().end() - final(stream).state().position() <= max
-                    && (final(stream).state().strict() ==> final(stream).state().end() <= final(stream).state().durable()),
+                    && (final(stream).state().strict() ==> final(stream).state().end() <= final(stream).state().durable()
+                        && final(stream).audited_for(authority, journal)),
                 None => final(stream).state() == old(stream).state(),
             },
     {
         if stream.owner_id() != authority.request_id() { return None; }
+        if stream.stream().requires_audit() && !stream.is_audited_for(authority, journal) { return None; }
         let ticket = match stream.prepare(max) { Some(ticket) => ticket, None => return None };
         let route = authority.route();
         proof { stream.state().payload_within_capacity(); }
         Some(Self { ticket, route, request: authority.request_id() })
     }
-    pub fn bytes<'a>(&self, stream: &'a StreamChunk, authority: &AuthorizedRequest)
+    pub fn bytes<'a>(&self, owner: &'a OwnedStream, authority: &AuthorizedRequest, journal: &crate::journal_binding::JournalBinding)
         -> (out: Option<&'a [u8]>)
-        requires stream.valid(), authority.valid(),
+        requires owner.valid(), authority.valid(),
         ensures match out {
             Some(bytes) => self.bound_to(authority)
-                && crate::policy::allowed(self.route(), authority.policy().roots(), authority.policy().origins(), authority.policy().credentials()) && self.request() == stream.owner()
-                && stream.matches(&self.ticket()) && !stream.closed()
-                && bytes@ == stream.body().subrange(stream.position() as int, stream.end() as int)
-                && (stream.strict() ==> stream.end() <= stream.durable()),
-            None => !self.bound_to(authority) || self.request() != stream.owner()
-                || !stream.matches(&self.ticket()) || stream.closed(),
+                && crate::policy::allowed(self.route(), authority.policy().roots(), authority.policy().origins(), authority.policy().credentials()) && self.request() == owner.state().owner()
+                && owner.state().matches(&self.ticket()) && !owner.state().closed()
+                && bytes@ == owner.state().body().subrange(owner.state().position() as int, owner.state().end() as int)
+                && (owner.state().strict() ==> owner.state().end() <= owner.state().durable()
+                    && owner.audited_for(authority, journal) && owner.receipt().is_some()
+                    && owner.receipt().unwrap().valid()
+                    && journal.session() == Some(owner.receipt().unwrap().session())
+                    && owner.receipt().unwrap().record() == crate::framing::encoding(crate::framing::Header {
+                        payload: owner.state().body().len() as u32, tenant: authority.tenant(),
+                        request: authority.request(), chunk: owner.state().chunk(), direction: owner.audit_direction() })
+                        + owner.state().body() + owner.receipt().unwrap().checksum()),
+            None => (owner.state().strict() && !owner.audited_for(authority, journal)) || !self.bound_to(authority) || self.request() != owner.state().owner()
+                || !owner.state().matches(&self.ticket()) || owner.state().closed(),
         },
     {
+        if owner.stream().requires_audit() && !owner.is_audited_for(authority, journal) { return None; }
+        let stream = owner.stream();
         let route = authority.route();
         if self.request != authority.request_id() || self.request != stream.owner_id()
             || self.route.tenant != authority.tenant_id() || self.route.origin != route.origin
             || self.route.credential != route.credential || self.route.selector != route.selector { return None; }
-        proof { stream.payload_within_capacity(); }
+        proof { stream.payload_within_capacity(); if stream.strict() { owner.receipt_evidence(); } }
         stream.pending_bytes(&self.ticket)
     }
     pub fn complete(&self, stream: &mut OwnedStream, count: usize) -> (ok: bool)

@@ -70,6 +70,10 @@ impl StreamChunk {
         ensures out == self.chunk(),
     { self.chunk }
 
+    pub fn requires_audit(&self) -> (out: bool)
+        ensures out == self.strict(),
+    { self.strict }
+
     pub fn is_closed(&self) -> (out: bool)
         ensures out == self.closed(),
     { self.closed }

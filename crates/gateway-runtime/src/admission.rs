@@ -192,12 +192,13 @@ impl<'a> Request<'a> {
     }
     pub fn prepare(&mut self, max: usize) -> Option<WriteTicket<'a>> {
         let Some(LeaseState::Streaming(stream)) = self.lease.state.as_mut() else { return None; };
-        AuthorizedWrite::prepare(stream, &self.authorized, max)
+        AuthorizedWrite::prepare(stream, &self.authorized, &self.journal, max)
             .map(|core| WriteTicket { admission: self.lease.admission, core })
     }
     pub fn pending_bytes(&self, ticket: &WriteTicket<'_>) -> Option<&[u8]> {
         if !std::ptr::eq(ticket.admission, self.lease.admission) { return None; }
-        ticket.core.bytes(self.stream(), &self.authorized)
+        let Some(LeaseState::Streaming(stream)) = self.lease.state.as_ref() else { return None; };
+        ticket.core.bytes(stream, &self.authorized, &self.journal)
     }
     pub fn complete(&mut self, ticket: &WriteTicket<'_>, count: usize) -> bool {
         if !std::ptr::eq(ticket.admission, self.lease.admission) { return false; }

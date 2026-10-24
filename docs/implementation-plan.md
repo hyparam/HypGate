@@ -320,7 +320,7 @@ Exit criteria:
 | ✓ | TLS jobs after request cancellation: the same credited job/reply path retains handshake state and sockets through blocked polls and unread replies; verified handoff transfers successful results to a live request before releasing pool capacity. Queued cancellation, blocked polls, panic, runtime shutdown, and actual TLS exchange regressions pass under the same adapter assumptions. |
 | ☐ | HTTP cleanup tails: prove retained mailbox/body buffers remain charged to their owners after a request or connection is canceled. Reader substep implemented: production `ReadBuffer` verifies bounded frame load, exact read ranges, and full backing charge through partial consumption; mailbox closure now transfers the exact pending value and its charge to a verified cleanup owner through reported destruction. Global owner-count composition remains open. |
 | ☐ | Compose cleanup-before-capacity-reuse across all owners: connect the worker, connection, HTTP, disk, DNS, and TLS lifecycles to production ownership across cancellation, normal completion, panic, and shutdown. |
-| ☐ | Authorization and journal-session receipts for upstream writes: prove every submitted body range belongs to the admitted request and its authorized destination/credential binding; strict-mode ranges additionally require an exact matching durable receipt from the request's designated journal session. Journal-side provenance is implemented: tickets and receipts carry an immutable session, and the disk worker refuses a mismatched journal before I/O. Request-side receipt acceptance now checks an immutable `JournalBinding`, established before the first append and reused across chunks/directions. Production write tickets now use `AuthorizedWrite`, binding request/tenant/route/credential to exact pending ranges and strict durable-prefix bounds. Concrete transport destination binding and receipt-provenance-to-submission composition remain open. |
+| ☐ | Authorization and journal-session receipts for upstream writes: prove every submitted body range belongs to the admitted request and its authorized destination/credential binding; strict-mode ranges additionally require an exact matching durable receipt from the request's designated journal session. Journal-side provenance is implemented: tickets and receipts carry an immutable session, and the disk worker refuses a mismatched journal before I/O. Request-side receipt acceptance now checks an immutable `JournalBinding`, established before the first append and reused across chunks/directions. Production write tickets now use `AuthorizedWrite`, binding request/tenant/route/credential to exact pending ranges and strict durable-prefix bounds. Write access now composes policy permission, exact current-chunk receipt evidence, and designated-session provenance. Concrete transport destination/direction binding remains open. |
 
 DNS/TLS checkpoint validation: the locked workspace suite and five compile-fail
 doctests pass (opt-in workloads excluded); the pinned Cargo/Verus check reports
@@ -382,6 +382,20 @@ receipt-provenance-to-submission theorem remain unfinished. The milestone row
 therefore stays open. Validation: 240 Cargo/Verus checks, the locked workspace
 suite with six compile-fail doctests, and the new exact-range/authority regression
 pass; all 192 deliberate mutations are rejected by proof.
+
+Receipt-to-write composition checkpoint: `OwnedStream` now stores an erased
+snapshot of the acknowledged receipt plus small session/tenant/direction metadata.
+Its invariant ties that receipt to the exact current chunk; reads, advances, and
+storage discard clear the evidence, while ticket issuance and partial completion
+preserve it. No receipt payload is retained at runtime. Production
+`AuthorizedWrite::bytes` now jointly establishes root-policy permission, exact
+pending range, and—when strict—the designated journal's valid receipt covering
+the same tenant/request/chunk/body and recorded direction. Availability still
+requires authorization but may omit receipt evidence. Concrete transport
+URL/credential/direction correspondence and global resource composition remain
+unfinished; the milestone row stays open. Validation: 244 Cargo/Verus checks,
+the locked workspace suite with six compile-fail doctests, and the extended
+submission regression pass; all 198 deliberate mutations are rejected by proof.
 
 Start with the shared wrapper to reduce duplicated trusted lifetime logic. Preserve
 the existing task-capture destruction tests for both lease types and their

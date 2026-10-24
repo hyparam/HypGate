@@ -20,6 +20,9 @@ impl JournalBinding {
             None => { self.session = Some(session); true },
         }
     }
+    pub fn matches_session(&self, session: Option<u128>) -> (ok: bool)
+        ensures ok == (self.session() == session),
+    { self.session == session }
     pub fn accepts(&self, receipt: &DurableFrame) -> (ok: bool)
         ensures ok == (self.session() == Some(receipt.session())),
     {

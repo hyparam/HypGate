@@ -16,6 +16,13 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("submission.rs", "provenance_prepare_without_evidence", "if stream.stream().requires_audit() && !stream.is_audited_for(authority, journal) { return None; }", ""),
+    ("submission.rs", "provenance_bytes_without_evidence", "if owner.stream().requires_audit() && !owner.is_audited_for(authority, journal) { return None; }", ""),
+    ("owned_stream.rs", "provenance_reuses_prior_chunk", "if out.is_some() { self.audit_session = None; self.audit = Ghost(None); }", ""),
+    ("owned_stream.rs", "provenance_forges_receipt_session", "self.audit_session = Some(receipt.session_id());", "self.audit_session = Some(0);"),
+    ("owned_stream.rs", "provenance_omits_receipt_evidence", "self.audit = Ghost(Some(*receipt));", "self.audit = Ghost(None);"),
+    ("owned_stream.rs", "provenance_ignores_designated_journal", " && journal.matches_session(self.audit_session)", ""),
+
     ("submission.rs", "submission_issues_for_wrong_request", "if stream.owner_id() != authority.request_id()", "if false"),
     ("submission.rs", "submission_uses_another_origin", "ticket, route, request:", "ticket, route: Route { origin: 0, ..route }, request:"),
     ("submission.rs", "submission_accepts_another_origin", " || self.route.origin != route.origin", ""),
