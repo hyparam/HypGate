@@ -48,6 +48,7 @@ async fn strict_logging_and_cancellation_keep_the_lease_until_drop() {
     assert!(r.prepare(2).is_none());
     struct Log;
     impl gateway_runtime::transfer::AuditLog for Log {
+        fn session_id(&self) -> u128 { 0 }
         async fn append(&mut self, record: gateway_runtime::transfer::LogRecord<'_>) -> std::io::Result<gateway_runtime::transfer::DurableFrame> {
             assert_eq!((record.tenant, record.request, record.chunk), (1, 1, 1));
             assert_eq!(record.bytes, &[1, 2]);
@@ -136,6 +137,7 @@ fn spare_vector_capacity_cannot_escape_the_retained_chunk_budget() {
 async fn canceled_audit_cannot_authorize_or_reuse_the_chunk() {
     struct PendingLog;
     impl gateway_runtime::transfer::AuditLog for PendingLog {
+        fn session_id(&self) -> u128 { 0 }
         async fn append(&mut self, record: gateway_runtime::transfer::LogRecord<'_>) -> std::io::Result<gateway_runtime::transfer::DurableFrame> {
             assert_eq!(record.bytes, &[7, 8]);
             std::future::pending().await
@@ -170,6 +172,7 @@ fn receipt(record: gateway_runtime::transfer::LogRecord<'_>) -> gateway_runtime:
 async fn mismatched_durable_receipts_never_authorize_forwarding() {
     struct WrongLog(u8);
     impl gateway_runtime::transfer::AuditLog for WrongLog {
+        fn session_id(&self) -> u128 { if self.0 == 6 { 1 } else { 0 } }
         async fn append(&mut self, mut record: gateway_runtime::transfer::LogRecord<'_>)
             -> std::io::Result<gateway_runtime::transfer::DurableFrame>
         {
@@ -179,13 +182,14 @@ async fn mismatched_durable_receipts_never_authorize_forwarding() {
                 2 => record.chunk += 1,
                 3 => record.direction = gateway_runtime::transfer::Direction::Download,
                 4 => record.bytes = &[8, 7], // same length, different content
-                _ => record.bytes = &[7],
+                5 => record.bytes = &[7],
+                _ => {}, // exact content, but receipt comes from another session
             }
             Ok(receipt(record))
         }
     }
     for strict in [true, false] {
-        for mismatch in 0..6 {
+        for mismatch in 0..7 {
             let a = admission(1, strict);
             let mut request = a.admit(&[11; 32], 7).unwrap();
             request.advance(vec![7, 8]).unwrap();
@@ -198,5 +202,33 @@ async fn mismatched_durable_receipts_never_authorize_forwarding() {
             drop(request);
             assert!(a.admit(&[11; 32], 7).is_ok());
         }
+    }
+}
+
+#[tokio::test]
+async fn request_refuses_logger_session_switch_before_append() {
+    use gateway_runtime::transfer::{AuditLog, Direction, DurableFrame, LogRecord, TransferError};
+    struct SwitchingLog { session: u128, calls: usize }
+    impl AuditLog for SwitchingLog {
+        fn session_id(&self) -> u128 { self.session }
+        async fn append(&mut self, record: LogRecord<'_>) -> std::io::Result<DurableFrame> {
+            self.calls += 1;
+            Ok(receipt(record))
+        }
+    }
+    for strict in [true, false] {
+        let a = admission(1, strict);
+        let mut request = a.admit(&[11; 32], 7).unwrap();
+        request.advance(vec![7, 8]).unwrap();
+        let mut log = SwitchingLog { session: 0, calls: 0 };
+        request.audit_current(&mut log, Direction::Upload).await.unwrap();
+        // Same-session repeated use remains legal; changed designation is rejected
+        // before a second append, even if it could issue matching content.
+        request.audit_current(&mut log, Direction::Upload).await.unwrap();
+        assert_eq!(log.calls, 2);
+        log.session = 1;
+        assert_eq!(request.audit_current(&mut log, Direction::Upload).await, Err(TransferError::InvalidState));
+        assert_eq!(log.calls, 2);
+        assert!(request.prepare(2).is_none());
     }
 }

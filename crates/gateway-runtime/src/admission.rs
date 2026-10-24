@@ -49,6 +49,7 @@ pub struct Request<'a> {
     authorized: AuthorizedRequest<'a>,
     capacity: usize,
     log_failed: bool,
+    journal: gateway_core::journal_binding::JournalBinding,
     lease: Lease<'a>,
 }
 
@@ -93,7 +94,7 @@ impl Admission {
                 }
             }
         }
-        Ok(Request { authorized, capacity, log_failed: false, lease })
+        Ok(Request { authorized, capacity, log_failed: false, journal: gateway_core::journal_binding::JournalBinding::new(), lease })
     }
 }
 
@@ -161,6 +162,9 @@ impl<'a> Request<'a> {
         if pending.request.is_closed() || pending.request.log_failed() {
             return Err(TransferError::InvalidState);
         }
+        if !pending.request.journal.bind(log.session_id()) {
+            return Err(TransferError::InvalidState);
+        }
         let direction_id = match direction { Direction::Upload => 0, Direction::Download => 1 };
         let (header, bytes) = pending.request.stream()
             .audit_record(&pending.request.authorized, direction_id)
@@ -179,7 +183,7 @@ impl<'a> Request<'a> {
         let Some(LeaseState::Streaming(stream)) = pending.request.lease.state.as_mut() else {
             unreachable!("admitted stream")
         };
-        if !stream.acknowledge_receipt(&pending.request.authorized, direction_id, &receipt) {
+        if !stream.acknowledge_receipt(&pending.request.authorized, &pending.request.journal, direction_id, &receipt) {
             return Err(TransferError::InvalidState);
         }
         pending.armed = false;

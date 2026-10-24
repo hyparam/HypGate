@@ -10,6 +10,7 @@ pub mod disk_worker;
 pub mod stream;
 pub mod policy;
 pub mod journal;
+pub mod journal_binding;
 pub mod framing;
 
 pub mod recovery;

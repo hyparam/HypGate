@@ -15,6 +15,7 @@ enum Event { Log(u64, Direction, Vec<u8>), Write(Vec<u8>) }
 type Events = Arc<Mutex<Vec<Event>>>;
 struct Log { events: Events, fail: bool, pending: bool }
 impl AuditLog for Log {
+    fn session_id(&self) -> u128 { 0 }
     async fn append(&mut self, record: LogRecord<'_>) -> io::Result<crate::transfer::DurableFrame> {
         assert_eq!(record.tenant, 1);
         assert!(record.request != 0);

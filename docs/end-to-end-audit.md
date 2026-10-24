@@ -255,7 +255,12 @@ issues a receipt carrying that journal's identity. `DiskWorker::run` checks the
 worker/job session against the journal before write or sync; mismatch fails the
 journal without a storage effect or receipt. Production uses the same random
 file-header session for the journal and worker. Session uniqueness and the real
-file correspondence remain trusted. This is not yet the end-to-end mediation
-proof: stream receipt matching still checks content without requiring the
-request's designated journal session, and that remaining acceptance boundary is
-tracked in milestone 6.
+file correspondence remain trusted. The subsequent request-side change adds `JournalBinding`, privately owned by
+`Request` and established before its first append. It refuses a different logger
+identity on later calls before any append. Stream receipt acceptance now checks
+that binding as well as the exact existing record, and invalid receipts cancel
+both strict and availability requests. `DiskLog` and `ObservedLog` expose the
+actual file session; test loggers must also explicitly implement identity.
+The initial logger selection and file correspondence remain trusted. The
+end-to-end theorem connecting authorization, concrete destination/credentials,
+receipt acceptance, and exact write submission is still unfinished.

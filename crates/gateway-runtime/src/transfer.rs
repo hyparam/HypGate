@@ -17,6 +17,8 @@ pub struct LogRecord<'a> {
 }
 
 pub trait AuditLog {
+    /// Stable identity of the designated journal; must match every returned receipt.
+    fn session_id(&self) -> u128;
     /// Returns an owned journal receipt for this exact record, durable under the logger's documented
     /// crash model. Implementations must bound work and retain any buffer credits
     /// for effects that survive cancellation. The receipt retains its frame until

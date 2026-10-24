@@ -16,6 +16,11 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("journal_binding.rs", "binding_replaces_designated_session", "Some(current) => current == session,", "Some(current) => { self.session = Some(session); true },"),
+    ("journal_binding.rs", "binding_accepts_foreign_receipt", "Some(session) => session == receipt.session_id(),", "Some(session) => true,"),
+    ("journal_binding.rs", "binding_accepts_undesignated_receipt", "None => false,", "None => true,"),
+    ("stream.rs", "binding_receipt_session_check_omitted", "if !journal.accepts(receipt) { return false; }", ""),
+
     ("journal.rs", "journal_session_wrong_ticket", "Some(Append { session: self.session,", "Some(Append { session: 0,"),
     ("journal.rs", "journal_session_wrong_receipt", "Some(DurableFrame { session: self.session,", "Some(DurableFrame { session: 0,"),
     ("journal.rs", "journal_session_accepts_foreign_ticket", "if self.failed || t.session != self.session || t.start != self.written", "if self.failed || t.start != self.written"),

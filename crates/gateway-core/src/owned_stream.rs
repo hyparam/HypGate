@@ -315,11 +315,11 @@ impl OwnedStream {
             !old(self).state().strict() ==> final(self).state().closed() == old(self).state().closed(),
     { self.stream.fail_log() }
 
-    pub fn acknowledge_receipt(&mut self, authority: &AuthorizedRequest, direction: u8, receipt: &crate::journal::DurableFrame) -> (ok: bool)
+    pub fn acknowledge_receipt(&mut self, authority: &AuthorizedRequest, journal: &crate::journal_binding::JournalBinding, direction: u8, receipt: &crate::journal::DurableFrame) -> (ok: bool)
         requires old(self).valid(), authority.valid(), receipt.valid(),
         ensures final(self).valid(), final(self).key() == old(self).key(),
             final(self).read_bytes() == old(self).read_bytes(), final(self).state().valid(),
-            ok == (!old(self).state().closed() && !old(self).state().failed() && old(self).state().owner() != 0
+            ok == (journal.session() == Some(receipt.session()) && !old(self).state().closed() && !old(self).state().failed() && old(self).state().owner() != 0
                 && old(self).state().owner() == authority.request() && old(self).state().body().len() <= 1048576
                 && direction <= 1 && receipt.record() == crate::framing::encoding(crate::framing::Header {
                     payload: old(self).state().body().len() as u32, tenant: authority.tenant(),
@@ -344,6 +344,6 @@ impl OwnedStream {
                         chunk: old(self).state().chunk(), direction })
                     + old(self).state().body() + receipt.checksum(),
             !ok ==> final(self).state() == old(self).state(),
-    { self.stream.acknowledge_receipt(authority, direction, receipt) }
+    { self.stream.acknowledge_receipt(authority, journal, direction, receipt) }
 }
 }

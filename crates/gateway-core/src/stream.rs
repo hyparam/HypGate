@@ -149,11 +149,11 @@ impl StreamChunk {
         true
     }
 
-    pub fn acknowledge_receipt(&mut self, authority: &AuthorizedRequest, direction: u8,
+    pub fn acknowledge_receipt(&mut self, authority: &AuthorizedRequest, journal: &crate::journal_binding::JournalBinding, direction: u8,
         receipt: &crate::journal::DurableFrame) -> (ok: bool)
         requires old(self).valid(), authority.valid(), receipt.valid(),
         ensures final(self).valid(),
-            ok == (!old(self).closed() && !old(self).failed() && old(self).owner() != 0
+            ok == (journal.session() == Some(receipt.session()) && !old(self).closed() && !old(self).failed() && old(self).owner() != 0
                 && old(self).owner() == authority.request() && old(self).body().len() <= 1048576
                 && direction <= 1 && receipt.record() == crate::framing::encoding(Header {
                     payload: old(self).body().len() as u32, tenant: authority.tenant(),
@@ -174,6 +174,7 @@ impl StreamChunk {
                     + old(self).body() + receipt.checksum(),
             !ok ==> *final(self) == *old(self),
     {
+        if !journal.accepts(receipt) { return false; }
         let (header, bytes) = match self.audit_record(authority, direction) {
             Some(record) => record, None => return false,
         };

@@ -320,7 +320,7 @@ Exit criteria:
 | ✓ | TLS jobs after request cancellation: the same credited job/reply path retains handshake state and sockets through blocked polls and unread replies; verified handoff transfers successful results to a live request before releasing pool capacity. Queued cancellation, blocked polls, panic, runtime shutdown, and actual TLS exchange regressions pass under the same adapter assumptions. |
 | ☐ | HTTP cleanup tails: prove retained mailbox/body buffers remain charged to their owners after a request or connection is canceled. Reader substep implemented: production `ReadBuffer` verifies bounded frame load, exact read ranges, and full backing charge through partial consumption; mailbox closure now transfers the exact pending value and its charge to a verified cleanup owner through reported destruction. Global owner-count composition remains open. |
 | ☐ | Compose cleanup-before-capacity-reuse across all owners: connect the worker, connection, HTTP, disk, DNS, and TLS lifecycles to production ownership across cancellation, normal completion, panic, and shutdown. |
-| ☐ | Authorization and journal-session receipts for upstream writes: prove every submitted body range belongs to the admitted request and its authorized destination/credential binding; strict-mode ranges additionally require an exact matching durable receipt from the request's designated journal session. Journal-side provenance is implemented: tickets and receipts carry an immutable session, and the disk worker refuses a mismatched journal before I/O. Request-side session binding and the authorization/submission composition remain open. |
+| ☐ | Authorization and journal-session receipts for upstream writes: prove every submitted body range belongs to the admitted request and its authorized destination/credential binding; strict-mode ranges additionally require an exact matching durable receipt from the request's designated journal session. Journal-side provenance is implemented: tickets and receipts carry an immutable session, and the disk worker refuses a mismatched journal before I/O. Request-side receipt acceptance now checks an immutable `JournalBinding`, established before the first append and reused across chunks/directions. Authorization-to-destination/submission composition remains open. |
 
 DNS/TLS checkpoint validation: the locked workspace suite and five compile-fail
 doctests pass (opt-in workloads excluded); the pinned Cargo/Verus check reports
@@ -351,12 +351,24 @@ an explicit session ID; all transitions preserve it, foreign-session append
 reservations are rejected, and successful commits issue receipts from that exact
 session. The production worker constructs its journal from the file header's
 random session and checks the job/session match before I/O. Session uniqueness
-and the file-to-journal correspondence remain adapter assumptions. This closes
-the journal-side prerequisite only: `Request`/`Stream` receipt acceptance still
-needs to enforce the designated session, so upstream mediation remains unfinished.
+and the file-to-journal correspondence remain adapter assumptions. This checkpoint closed the journal-side prerequisite. The subsequent request-side
+binding checkpoint below enforces the designated session; upstream mediation
+composition remains unfinished.
 Validation: Cargo/Verus reports 233 checks and zero errors; the locked workspace
 suite and six compile-fail doctests pass, the real-file receipt/session regression
 passes, and all 182 deliberate mutations are rejected by proof.
+
+Request-side session checkpoint: production `Request` owns a private
+`JournalBinding`, binds it before the first append, and rejects later logger
+identity changes before calling append. `StreamChunk::acknowledge_receipt` and
+its `OwnedStream` wrapper require that binding to match the receipt as well as
+all existing record fields and payload bytes. A mismatch cancels the request
+in both logging modes. The initial logger selection, truthful `AuditLog::session_id`,
+file identity, and Rust ownership remain adapter obligations. This is receipt
+acceptance evidence, not the pending authorization/submission composition theorem.
+Validation: 236 Cargo/Verus checks pass; the locked workspace suite and six
+compile-fail doctests pass, the new binding test and ten admission tests pass,
+and all 186 deliberate mutations are rejected by proof.
 
 Start with the shared wrapper to reduce duplicated trusted lifetime logic. Preserve
 the existing task-capture destruction tests for both lease types and their

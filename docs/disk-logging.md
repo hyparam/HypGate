@@ -112,5 +112,8 @@ Journal identity is now explicit in the checked core: append tickets and durable
 receipts carry the immutable file-session ID. The worker refuses a journal from
 another session before any write or sync. Production initializes both owners
 from the same random file-header session. Uniqueness of that session and its
-correspondence to the actual file remain trusted. Request-side receipt-session
-validation is a separate unfinished milestone 6 obligation.
+correspondence to the actual file remain trusted. Each request establishes its immutable `JournalBinding` before its first
+append. Later logger identity changes and receipts from another session are
+rejected; exact record matching is still required. Selecting the intended initial
+logger and its correspondence to the file remain trusted. Full authorized-write
+composition is a separate unfinished milestone 6 obligation.

@@ -202,6 +202,7 @@ impl DiskLog {
 }
 
 impl AuditLog for DiskLog {
+    fn session_id(&self) -> u128 { u128::from_le_bytes(self.session) }
     async fn append(&mut self, record: LogRecord<'_>) -> io::Result<DurableFrame> {
         if !self.healthy() { return Err(io::ErrorKind::BrokenPipe.into()); }
         if record.bytes.len() > self.payload_limit || record.request == 0 {
