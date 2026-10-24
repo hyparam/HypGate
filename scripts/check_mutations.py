@@ -15,6 +15,13 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("task_credit.rs", "task_start_keeps_credit_releasable", "self.phase = Phase::Running;", "self.phase = Phase::Reserved;"),
+    ("task_credit.rs", "task_cleanup_start_releases_early", "self.phase = Phase::Cleaning;", "self.phase = Phase::Cleaned;"),
+    ("task_credit.rs", "task_cleanup_finish_denies_release", "self.phase = Phase::Cleaned;", "self.phase = Phase::Cleaning;"),
+    ("task_credit.rs", "task_cleanup_finishes_without_start", "if !matches!(self.phase, Phase::Cleaning) { return false; }", "if false { return false; }"),
+    ("task_credit.rs", "task_connection_releases_before_cleanup", "if !self.can_release() { return false; }\n        registry.release(&self.key)\n    }\n\n    pub fn release_worker", "registry.release(&self.key)\n    }\n\n    pub fn release_worker"),
+    ("task_credit.rs", "task_worker_releases_before_cleanup", "if !self.can_release() { return false; }\n        registry.release(&self.key)\n    }\n}", "registry.release(&self.key)\n    }\n}"),
+    ("task_credit.rs", "task_admission_overwrites_retained_slot", "before.entries()[issued.slot() as int] == 0,", "true,"),
     ("drain.rs", "drain_denies_open_capacity", "if self.closed { None } else", "if true { None } else"),
     ("drain.rs", "drain_admits_after_close", "if self.closed { None } else", "if false { None } else"),
     ("drain.rs", "drain_close_is_ignored", "{ self.closed = true; }", "{ }"),

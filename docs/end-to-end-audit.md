@@ -10,6 +10,16 @@ It is a source-level traceability record made by reading the code, not an
 independent review or a mechanized proof of the async runtime. Line numbers
 refer to the audited commit.
 
+Milestone 6 ownership refactor: the historical `WorkerTask` and `ConnectionTask`
+wrappers below now share private `server/leased_task.rs::LeasedTask`. It starts a
+verified `TaskCredit`, explicitly destroys the future before reporting cleanup
+complete, and retains unit output. Both lease types consume credits through
+verified gates that refuse release while running or cleaning. Tests cover
+deterministic never-polled destruction and wrapper-cleanup panics, in addition
+to cancellation, task panic, and shutdown. A wrapper-cleanup panic strands the
+credit and closes worker admission. These checked transitions do not mechanize
+the destructor correspondence or independent cleanup tails assumed by this audit.
+
 Related records: the [proof index](proof-index.md) lists every contract, the
 [adapter audit](adapter-audit.md) records milestone 2 bindings, the
 [storage contract](storage-crash-contract.md) and [shutdown proof](shutdown-proof.md)

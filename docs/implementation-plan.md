@@ -7,6 +7,7 @@
 | 3. Crash-safe logging | 15/15 | ✓ |
 | 4. Availability hardening | 16/16 | ✓ |
 | 5. Auditable first release | 9/9 | ✓ |
+| [6. Async ownership and effect composition](#6-async-ownership-and-effect-composition) | 2/8 | ☐ |
 
 Progress counts completed rows in each milestone's table below. Rows are not
 weighted estimates of effort or proof coverage; an open row can still block the
@@ -27,7 +28,8 @@ to the exact network and disk calls, a [clean-environment deployment](deployment
 is scripted and reproduced in CI and a pinned container, and the
 [broader benchmarks](benchmarks.md#broader-workloads) and
 [operational limits](operational-limits.md) close the last row. Every milestone
-row is now checked under its documented assumptions; open obligations are listed
+row in milestones 1–5 is now checked under its documented assumptions; milestone 6
+tracks the next refactor and composition proofs. Other open obligations are listed
 in the [security contract](security-contract.md) and each exit audit.
 See the [streaming-core progress notes](streaming-core-progress.md) and
 [authorization core](authorization-core.md) for completed increments and remaining gaps.
@@ -306,6 +308,52 @@ Exit criteria:
 - Benchmarks report streaming latency and resource use for both logging modes.
 - A reviewer can trace authorization through the core to the actual network/disk
   calls, including failures and shutdown.
+
+## 6. Async ownership and effect composition
+
+| Done | Submilestone |
+| :---: | --- |
+| ✓ | Consolidated worker and connection task wrappers into private `server/leased_task.rs::LeasedTask`, retaining distinct registry/tracking behavior and unit output. Lifecycle tests cover both lease types, including deterministic never-polled destruction. |
+| ✓ | Worker and connection release gates: production `TaskCredit` gates release on reported cleanup completion; lifecycle/non-reuse contracts and seven mutations checked, with deterministic unpolled and cleanup-panic regressions. Actual destructor correspondence remains trusted. |
+| ☐ | Disk jobs after request cancellation: prove queued and active audit work retains its own capacity until completion or cleanup, including a stuck write or sync. |
+| ☐ | DNS jobs after request cancellation: prove queued and running lookups retain their own capacity until their work and retained results are cleaned up. |
+| ☐ | TLS jobs after request cancellation: prove queued and running handshakes retain their own capacity until handshake state and sockets are cleaned up. |
+| ☐ | HTTP cleanup tails: prove retained mailbox/body buffers remain charged to their owners after a request or connection is canceled. |
+| ☐ | Compose cleanup-before-capacity-reuse across all owners: connect the worker, connection, HTTP, disk, DNS, and TLS lifecycles to production ownership across cancellation, normal completion, panic, and shutdown. |
+| ☐ | Authorization and journal-session receipts for upstream writes: prove every submitted body range belongs to the admitted request and its authorized destination/credential binding; strict-mode ranges additionally require an exact matching durable receipt from the request's designated journal session. |
+
+Start with the shared wrapper to reduce duplicated trusted lifetime logic. Preserve
+the existing task-capture destruction tests for both lease types and their
+poison, tracker-registration, and drain behavior. Generalize ownership mechanics
+only; worker tracking and connection admission retain their own policies.
+
+Then model the async lifecycle and effect boundary explicitly, connecting the
+production adapters to the existing core transitions. Cancellation must prevent
+new submissions without treating an uncertain write or a detached disk job as
+completed. Each surviving effect must retain its own resource credit until its
+cleanup finishes. Receipt matching must include journal/session ownership as well
+as tenant, request, chunk, direction, payload, and submitted range; matching bytes
+alone must not permit a receipt from another journal or session to authorize work.
+
+Exit criteria:
+
+- Both production task types use the shared wrapper, and lifecycle regressions
+  cover completion, cancellation before and after first poll, panic, and shutdown.
+- A checked lifecycle theorem forbids credit reuse while the resources it covers
+  remain live; the correspondence to production ownership is explicit, with any
+  remaining Rust/Tokio destructor, scheduling, and I/O assumptions listed.
+- A checked composition theorem connects authorization, destination/credential
+  binding, exact receipt provenance, and body-write submission in the production
+  path. Availability mode may omit audit coverage but preserves authorization and
+  routing constraints.
+- Mutation checks reject premature credit release, cross-request or cross-session
+  receipt substitution, unauthorized dispatch, and strict submission without audit
+  coverage. Update the proof index and end-to-end audit with exact evidence and
+  remaining trusted joins; an abstract model alone does not close this milestone.
+
+These are submission and ownership guarantees, not proofs of peer receipt,
+physical storage durability, or Tokio itself. Existing storage and syscall
+assumptions remain explicit.
 
 ## Decisions to settle as implementation reaches them
 

@@ -1,29 +1,27 @@
 //! Shared connection credits survive canceled serve invocations until task cleanup.
-use gateway_core::resource::{RequestKey, ResourceAdmission};
-use std::{future::Future, pin::Pin, sync::{Arc, Mutex}, task::{Context, Poll}};
+use gateway_core::{task_credit::TaskCredit, resource::ResourceAdmission};
+use std::{future::Future, sync::{Arc, Mutex}};
+use super::leased_task::{LeasedTask, TaskLease};
 
 pub(super) struct ConnectionSlots { registry: Mutex<ResourceAdmission>, limit: usize }
-pub(super) struct ConnectionLease { slots: Arc<ConnectionSlots>, key: RequestKey }
+pub(super) struct ConnectionLease { slots: Arc<ConnectionSlots>, credit: Option<TaskCredit> }
 
-// Drop socket/parser/service captures before making their credit reusable, even
-// when cancellation happens before the connection's first poll.
-struct ConnectionTask<F> { work: Pin<Box<F>>, _lease: ConnectionLease }
-impl<F: Future<Output = ()>> Future for ConnectionTask<F> {
-    type Output = ();
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        self.get_mut().work.as_mut().poll(cx)
-    }
+impl TaskLease for ConnectionLease {
+    fn credit(&mut self) -> &mut TaskCredit { self.credit.as_mut().expect("live connection lease") }
 }
+
 impl ConnectionLease {
     pub(super) fn task<F: Future<Output = ()>>(self, work: F) -> impl Future<Output = ()> {
-        ConnectionTask { work: Box::pin(work), _lease: self }
+        LeasedTask::new(work, self)
     }
 }
 impl Drop for ConnectionLease {
     fn drop(&mut self) {
         if let Ok(mut registry) = self.slots.registry.lock() {
-            let released = registry.release(&self.key);
-            debug_assert!(released, "connection credit must own its registry slot");
+            let credit = self.credit.take().expect("live connection lease");
+            let ready = credit.can_release();
+            let released = credit.release(&mut registry);
+            debug_assert_eq!(released, ready, "connection credit must own its registry slot");
         }
     }
 }
@@ -34,7 +32,7 @@ impl ConnectionSlots {
     pub(super) fn limit(&self) -> usize { self.limit }
     pub(super) fn acquire(self: &Arc<Self>) -> Option<ConnectionLease> {
         let key = self.registry.lock().ok()?.acquire()?;
-        Some(ConnectionLease { slots: self.clone(), key })
+        Some(ConnectionLease { slots: self.clone(), credit: Some(TaskCredit::new(key)) })
     }
     #[cfg(test)]
     pub(super) fn usage(&self) -> Option<(usize, usize)> {
@@ -45,6 +43,37 @@ impl ConnectionSlots {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn panicking_capture_strands_connection_credit() {
+        struct Capture;
+        impl Drop for Capture {
+            fn drop(&mut self) { panic!("injected capture cleanup panic"); }
+        }
+        let slots = ConnectionSlots::new(1);
+        let capture = Capture;
+        let task = slots.acquire().unwrap().task(async move { drop(capture); });
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(task))).is_err());
+        assert_eq!(slots.usage(), Some((1, 1)));
+        assert!(slots.acquire().is_none());
+    }
+
+    #[test]
+    fn never_polled_task_drops_captures_before_connection_credit() {
+        struct Capture(Arc<ConnectionSlots>);
+        impl Drop for Capture {
+            fn drop(&mut self) {
+                assert_eq!(self.0.usage(), Some((1, 1)));
+                assert!(self.0.acquire().is_none());
+            }
+        }
+        let slots = ConnectionSlots::new(1);
+        let capture = Capture(slots.clone());
+        let task = slots.acquire().unwrap().task(async move { drop(capture); });
+        drop(task);
+        assert_eq!(slots.usage(), Some((0, 1)));
+        assert!(slots.acquire().is_some());
+    }
 
     #[test]
     fn poisoned_connection_registry_never_reissues_credit() {

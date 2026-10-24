@@ -1,7 +1,8 @@
 //! Worker credits use verified registry transitions. Mutex serialization, private
 //! key ownership, field drop order, and task cancellation remain trusted Rust.
-use gateway_core::{resource::RequestKey, drain::DrainRegistry};
-use std::{future::Future, pin::Pin, sync::{Arc, Mutex}, task::{Context, Poll}};
+use gateway_core::{task_credit::TaskCredit, drain::DrainRegistry};
+use std::{future::Future, sync::{Arc, Mutex}};
+use super::leased_task::{LeasedTask, TaskLease};
 use tokio_util::task::{TaskTracker, task_tracker::TaskTrackerToken};
 
 pub(super) struct WorkerSlots { registry: Mutex<DrainRegistry> }
@@ -9,21 +10,16 @@ pub(super) struct WorkerSlots { registry: Mutex<DrainRegistry> }
 // Unregister and release under one mutex: replacements cannot overlap tracking,
 // and a drain observer can synchronize with completion of credit destruction.
 pub(super) struct WorkerLease {
-    tracked: Option<TaskTrackerToken>, slots: Arc<WorkerSlots>, key: RequestKey,
+    tracked: Option<TaskTrackerToken>, slots: Arc<WorkerSlots>, credit: Option<TaskCredit>,
 }
 
-// Unlike a lease local inside an async block, this field order also covers
-// captured values in a never-polled or partly completed future.
-struct WorkerTask<F> { work: Pin<Box<F>>, _lease: WorkerLease }
-impl<F: Future<Output = ()>> Future for WorkerTask<F> {
-    type Output = ();
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        self.get_mut().work.as_mut().poll(cx)
-    }
+impl TaskLease for WorkerLease {
+    fn credit(&mut self) -> &mut TaskCredit { self.credit.as_mut().expect("live worker lease") }
 }
+
 impl WorkerLease {
     pub(super) fn spawn<F: Future<Output = ()> + Send + 'static>(self, work: F) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(WorkerTask { work: Box::pin(work), _lease: self })
+        tokio::spawn(LeasedTask::new(work, self))
     }
 }
 
@@ -32,8 +28,11 @@ impl Drop for WorkerLease {
         // Never recover poisoned state just to return credit.
         if let Ok(mut registry) = self.slots.registry.lock() {
             self.tracked.take();
-            let released = registry.release(&self.key);
-            debug_assert!(released, "worker credit must own its registry slot");
+            let credit = self.credit.take().expect("live worker lease");
+            let ready = credit.can_release();
+            if !ready { registry.close(); }
+            let released = credit.release_worker(&mut registry);
+            debug_assert_eq!(released, ready, "worker credit must own its registry slot");
         }
     }
 }
@@ -61,7 +60,7 @@ impl WorkerSlots {
     pub(super) fn acquire(self: &Arc<Self>, tracker: &TaskTracker) -> Option<WorkerLease> {
         let mut registry = self.registry.lock().ok()?;
         let key = registry.acquire()?;
-        let lease = WorkerLease { tracked: Some(tracker.token()), slots: self.clone(), key };
+        let lease = WorkerLease { tracked: Some(tracker.token()), slots: self.clone(), credit: Some(TaskCredit::new(key)) };
         drop(registry);
         Some(lease)
     }
@@ -81,6 +80,45 @@ impl WorkerSlots {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn panicking_capture_strands_worker_credit_and_closes_admission() {
+        struct Capture;
+        impl Drop for Capture {
+            fn drop(&mut self) { panic!("injected capture cleanup panic"); }
+        }
+        let slots = WorkerSlots::new(1);
+        let tracker = TaskTracker::new();
+        let capture = Capture;
+        let task = LeasedTask::new(async move { drop(capture); }, slots.acquire(&tracker).unwrap());
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(task))).is_err());
+        assert!(tracker.is_empty());
+        assert_eq!(slots.usage(), Some((1, 1)));
+        assert!(!slots.healthy());
+        assert!(slots.acquire(&tracker).is_none());
+    }
+
+    #[test]
+    fn never_polled_task_drops_captures_before_credit_and_tracking() {
+        struct Capture(Arc<WorkerSlots>, TaskTracker);
+        impl Drop for Capture {
+            fn drop(&mut self) {
+                assert_eq!(self.0.usage(), Some((1, 1)));
+                assert_eq!(self.1.len(), 1);
+                assert!(self.0.acquire(&self.1).is_none());
+            }
+        }
+        let slots = WorkerSlots::new(1);
+        let tracker = TaskTracker::new();
+        let capture = Capture(slots.clone(), tracker.clone());
+        let lease = slots.acquire(&tracker).unwrap();
+        // No executor: this deterministically exercises destruction before poll.
+        let task = LeasedTask::new(async move { drop(capture); }, lease);
+        drop(task);
+        assert!(tracker.is_empty());
+        assert_eq!(slots.usage(), Some((0, 1)));
+        assert!(slots.acquire(&tracker).is_some());
+    }
 
     #[tokio::test]
     async fn concurrent_workers_hold_credit_until_task_cleanup() {

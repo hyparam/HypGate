@@ -172,6 +172,12 @@ impl ResourceAdmission {
             self.entries()[key.slot() as int] == key.id(),
     {}
 
+    pub proof fn entry_owns(&self, key: &RequestKey)
+        requires key.slot() < self.limit(), key.id() != 0,
+            self.entries()[key.slot() as int] == key.id(),
+        ensures self.owns(key),
+    {}
+
     // Conditional composition theorem. The runtime must maintain the mapping
     // of owned streams to live slots; async ownership itself is not proved here.
     pub proof fn logical_payload_bound(&self, streams: Seq<Option<StreamChunk>>)

@@ -28,7 +28,7 @@ The async server spawns bounded connection tasks and tracked request workers.
 A separate verified resource registry limits request-worker lifetimes to the
 configured request count, including authentication rejection and post-EOF cleanup.
 Credit is acquired before response-channel allocation or spawning; saturation
-returns 503. A `WorkerTask` drops its entire pinned future before its private lease,
+returns 503. A `LeasedTask` drops its entire pinned future before its private lease,
 which removes tracking before returning credit, including cancellation before the
 first task poll. The [worker audit](worker-lifetimes.md) separates checked registry
 transitions from trusted Rust/Tokio lifetime correspondence. Health/readiness/metrics do not consume worker credit.

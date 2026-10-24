@@ -14,6 +14,7 @@ use tokio::{io::{AsyncWrite, AsyncWriteExt}, net::TcpListener, sync::oneshot, ta
 use tokio_util::task::TaskTracker;
 
 mod workers;
+mod leased_task;
 use workers::WorkerSlots;
 mod connections;
 use connections::ConnectionSlots;

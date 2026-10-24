@@ -15,8 +15,12 @@ executor or the runtime wrapper.
   cross-registry release exists in this wrapper.
 - A mutex serializes registry operations. No lock guard crosses an await. Failure
   to lock a poisoned registry refuses admission; Drop never recovers poison.
-- `release` returns the unclaimed key's one live slot and preserves every other
-  slot. The private credit invokes it once in Drop. The worker tracker token is
+- `TaskCredit` owns the key and gates release through reserved, running, cleaning,
+  and cleaned phases. Both running and cleaning refuse release without changing
+  the registry; beginning cleanup is not evidence of its completion. Unused
+  reservations can be returned without starting a task.
+- `release_worker` returns a releasable unclaimed key's one live slot. The private
+  lease invokes it once in Drop. The worker tracker token is
   dropped under the registry mutex before releasing its slot, so a replacement
   never overlaps that token's tracked lifetime. Drain wait synchronizes with the
   same mutex after tracker notification.
@@ -30,15 +34,22 @@ can strand capacity; it must not be interpreted as permission to reuse a slot.
 
 A lease local inside an async block is an insufficiently explicit boundary for
 all future captures, especially when canceled before its first poll. Production
-spawns a `WorkerTask` with its fields in this order:
+spawns the shared private `LeasedTask` from `server/leased_task.rs`, also used
+by connection tasks, containing:
 
-1. A pinned, boxed future containing the entire request worker and its captures.
+1. An optional pinned, boxed future containing the entire worker and its captures.
 2. The worker lease, whose destructor removes tracking and returns registry credit
    while holding the same mutex.
 
-Rust destroys struct fields in declaration order. The wrapper therefore retains
-credit through destruction of the future, without unsafe projection or assumptions
-about the compiler's internal async capture field order. Its only output is unit;
+Construction calls the verified `TaskCredit::start`. The wrapper's destructor
+calls `begin_cleanup`, takes and destroys the entire future, and only on normal
+return calls `finish_cleanup`. The lease destructor then consumes the credit
+through its verified release gate. If destruction inside the wrapper panics,
+the credit remains cleaning and release refuses to change registry occupancy;
+worker admission also closes permanently. A connection credit is likewise
+stranded. An indefinitely blocked destructor never reaches cleanup completion.
+This uses safe Rust without assumptions about internal async capture field order.
+Its only output is unit;
 worker-owned resources cannot escape through a task result. Channels may transfer
 buffers to HTTP or disk owners; those categories still require separate accounting.
 
@@ -59,13 +70,23 @@ then cancels an unpolled task and verifies credit recovery. Additional tests:
   all eight, and reuse all eight slots.
 - A capture destructor asserts the slot and tracking token are still occupied on
   successful completion, worker panic, cancellation before first poll, and
-  cancellation after suspension. Reversing the wrapper's field order makes this regression test fail.
+  cancellation after suspension. Reporting cleanup and releasing the lease before
+  destroying captures would fail these assertions.
+- Deterministically drop unpolled tasks without an executor for both lease types.
+- Inject a capture-destructor panic during wrapper destruction and verify capacity
+  stays occupied; worker admission becomes unhealthy and refuses replacements.
 - Poison a worker registry while a credit is live, drop that credit, and verify
   readiness and forwarding refuse work in both logging modes, with no upstream
   connection and healthy independent request admission.
 
-These are adapter correspondence tests, not new Verus theorems. Full ownership
-snapshot composition and dependency allocation accounting remain open.
+`task_credit.rs` checks the executable lifecycle and both registry release gates.
+`acquire_preserves_retained_task` derives non-reuse of the retained slot from the
+existing registry acquisition contract. Seven mutations cover early release,
+invalid cleanup transitions, denied cleanup completion, and overwriting a live
+slot. The runtime tests exercise correspondence to actual destruction; that
+correspondence remains trusted. The gate does not verify Rust destructors, Tokio,
+or independent HTTP, disk, DNS, and TLS cleanup tails. Full ownership snapshot
+composition and dependency allocation accounting remain open.
 
 Graceful shutdown permanently closes worker admission across all listeners sharing
 the Gateway. Closure serializes with acquisition through tracker registration;

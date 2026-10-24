@@ -39,10 +39,12 @@ same mutex before closing the tracker. Thus any successful concurrent acquisitio
 is already tracked before closure can finish; an acquisition after closure fails.
 A tracker becoming empty cannot race with a newly admitted worker.
 
-`WorkerTask` owns its boxed future before its lease in declaration order. The
-future, including unpolled captures and network/body owners, is destroyed first.
-`WorkerLease::drop` then locks the issuing registry, removes tracking, and returns
-its key before unlocking. The drain waiter synchronizes with this same mutex
+`LeasedTask` starts a verified `TaskCredit` and explicitly enters cleanup before
+destroying its boxed future, including unpolled captures and network/body owners.
+Only normal return from that destruction marks cleanup finished. Running and
+cleaning credits cannot release capacity. `WorkerLease::drop` then locks the
+issuing registry, removes tracking, and consumes the credit through the verified
+release gate before unlocking. The drain waiter synchronizes with this same mutex
 after the tracker wait, covering the interval between notification and the end
 of that destructor. A replacement cannot reuse the slot while its prior future
 or tracking token remains alive.
@@ -57,13 +59,17 @@ Mutex poison refuses admission and never recovers registry state to release a
 slot. The healthy-registry rank argument then stops applying to capacity reuse;
 capacity remains conservatively stranded. The future and its captures still
 drop, tracking disappears, and shutdown can finish. Zero reusable occupancy is
-claimed only for unpoisoned registries.
+claimed only for unpoisoned registries with normally completed wrapper cleanup.
+A panic while the wrapper destroys its future leaves its credit in cleaning;
+the release gate strands capacity and worker admission closes. Tracking can still
+drain in that case, so an empty tracker alone does not imply zero occupancy.
 
 ## Conditional termination argument
 
 Assume a functioning monotonic Tokio timer, fair scheduling of awakened tasks,
 finite completion of each synchronous poll/destructor and lock acquisition, and
-normal Rust unwinding/field destruction. These assumptions exclude an executor
+normal Rust unwinding/field destruction with no panic during wrapper cleanup.
+These assumptions exclude an executor
 thread stuck forever inside a synchronous poll or a permanently held mutex.
 They do not require network peers, disk syscalls, DNS calls, or TLS handshake
 verification to make progress.

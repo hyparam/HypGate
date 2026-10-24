@@ -25,7 +25,7 @@ at most 32 KiB of frame data into its own bounded copy. One DiskLog owns one dis
 | Delivered durable receipts | At most one frame of at most K + 65 bytes per admitted exchange | The job oneshot transfers its owned frame to the waiting request. Exact receipt validation then drops it; cancellation drops undelivered receipts. The worker can advance to another job before delivery is consumed. Custom library callers retaining receipts must budget separately. |
 | Encoding/comparison scratch | One 33-byte header vector per logger encoder plus one per validating request | `framing::encode_payload` copies a canonical header into the reserved frame; header encoding requests exactly 33 bytes up front. Receipt validation also encodes the expected 33-byte header, then compares payload slices without copying the payload. SHA-256 state and the 32-byte digest are additional fixed-size implementation state. |
 | Inbound connection tasks | At most C live connection leases across one Gateway, including canceled-parent tails | A separate verified registry is shared by every serve invocation on that Gateway. A boxed connection future drops before its credit. Each invocation also caps its JoinSet at C, including completed-but-unreaped entries. Listener/accept-loop and completed task metadata remain per invocation. |
-| Server request workers, including rejection and cleanup | At most R worker leases | A separate verified `ResourceAdmission` registry issues a private key before response allocation or spawning. `WorkerTask` drops the entire boxed task future before its lease; the lease drops tracking before returning the key. Registry transitions are verified; mutex serialization, Rust field drop order, and Tokio cancellation remain trusted. |
+| Server request workers, including rejection and cleanup | At most R worker leases | A separate verified `ResourceAdmission` registry issues a private key before response allocation or spawning. `LeasedTask` drops the entire boxed task future before its lease; the lease drops tracking before returning the key. Registry transitions and the `TaskCredit` cleanup/release gate are verified; mutex serialization, truthful destruction reporting, and Tokio cancellation remain trusted. |
 | Admitted exchanges and upstream connections | At most R live leases; one upstream connection per exchange | Verified slot transitions plus trusted ownership. The outer exchange owns admission while the timed TCP/TLS/HTTP future borrows it, so network-future cleanup precedes request release. No pooling, replay, or detached upstream connection task. Failed authentication can still create a tracked server worker without a lease. |
 | TLS handshakes | Four dedicated threads; at most 32 queued/running jobs per transport | Separate verified registry credit survives cancellation until handshake work is destroyed. Each job owns one socket and TLS handshake state; completed replies belong to the waiting request. See [TLS scheduling](https-transport.md#tls-scheduling-isolation). |
 | DNS lookups | Four dedicated threads; at most 32 queued/running jobs per transport | Jobs retain separate verified registry credit across request cancellation. Returned address vectors contain at most 64 addresses. System-resolver internal allocations remain trusted; see [DNS accounting](dns-resources.md). |
@@ -44,9 +44,11 @@ acceptance. Each accepted socket must obtain a private lease from the shared
 transitions used for request/worker admission enforce this count; connection keys
 never create streams. Poison prevents new credits and is not recovered on drop.
 
-`ConnectionTask` owns the boxed connection future before its lease in field drop
-order. Socket, parser, service, and response-body captures are therefore destroyed
-before registry release, including never-polled cancellation and panic. Mutex
+`LeasedTask` explicitly destroys the boxed connection future before marking its
+`TaskCredit` cleaned. Socket, parser, service, and response-body captures are
+destroyed before the verified release gate permits registry release, including
+never-polled cancellation and task panic. A panic during wrapper cleanup leaves
+the credit cleaning and capacity stranded. Mutex
 serialization, Rust destruction, OnceLock initialization, and Tokio scheduling
 remain trusted; no async refinement theorem is claimed. The registry itself
 retains C fixed u64 slots plus its control fields, for the Gateway lifetime.
@@ -183,7 +185,7 @@ identifies excluded metadata and active owners.
 - The worker registry adds R `u64` entries (8 × R logical bytes, at most 512 KiB
   with validated limits), plus vector spare capacity and mutex/registry metadata.
   Acquisition scans at most R slots under a synchronous mutex; it creates no async
-  waiter. Each `WorkerTask` additionally boxes its future to enforce safe drop order.
+  waiter. Each `LeasedTask` additionally boxes its future to enforce safe drop order.
 - The shared shutdown token adds one token state per Gateway and at most R
   cancellation-wait registrations in credited worker futures; each serving
   invocation adds its tracker drain waiter. Token clones share state and never
@@ -207,9 +209,9 @@ identifies excluded metadata and active owners.
 
 The request tracker includes rejected/unauthenticated requests and completion tails
 after body EOF. It has a separate R-slot verified registry, so a free stream slot does not imply
-that a new worker can start. A `WorkerTask` owns the pinned task future followed
-by its lease: Rust field drop order destroys all captures before returning credit,
-including cancellation before the first poll. The lease removes tracking before
+that a new worker can start. A `LeasedTask` owns the pinned task future followed
+by its lease: explicit future destruction precedes the verified cleanup-complete
+transition and credit release, including cancellation before the first poll. The lease removes tracking before
 returning its key to its original registry. Saturation returns 503 without
 spawning a waiter or worker. Health, readiness, and metrics bypass this worker gate
 but remain subject to the inbound connection limit. A poisoned registry at gateway
