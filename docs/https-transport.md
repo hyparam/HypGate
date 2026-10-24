@@ -8,6 +8,9 @@ override is accepted by the exchange API.
 
 DNS/TCP connection targets come from the configured endpoint. TLS validates that
 host using webpki roots; test-only construction accepts a local test certificate.
+TLS certificate compression is explicitly disabled; peers use ordinary certificate
+chains. This keeps optional decompressor implementations outside the transport
+even if another dependency enables their rustls features.
 The transport uses a direct Hyper connection, without an HTTP client redirect,
 proxy-discovery, connection-pool, or retry layer. It sends the fixed path in
 origin-form and preserves the bound Host and provider credential headers.

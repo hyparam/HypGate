@@ -75,7 +75,10 @@ without reopening the external API.
    are not included in that allowance. Active retrieved/new session values now
    have a separate two-per-connection ownership inventory and logical-content
    subtotal, with a live resumed-connection eviction regression; decoded
-   messages, peer-certificate copies, and session/control capacities remain. The dependency audit
+   messages, peer-certificate copies, and session/control capacities remain.
+   TLS certificate decompression is explicitly disabled, and parsed certificate
+   lists now have entry-count/capacity inventories; descriptor ABI sizes and
+   simultaneous owned-chain/verifier allocations remain to compose. The dependency audit
    distinguishes known control-object counts and stack reservations from unresolved
    peak allocations. No RSS plateau substitutes for these obligations.
 3. **Compose the lifetime scopes.** Connection credits now belong to one Gateway and

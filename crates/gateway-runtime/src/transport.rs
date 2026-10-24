@@ -37,6 +37,9 @@ impl HttpsTransport {
         let mut config = ClientConfig::builder().with_root_certificates(roots).with_no_client_auth();
         config.resumption = tokio_rustls::rustls::client::Resumption::in_memory_sessions(TLS_SESSION_CACHE);
         config.enable_early_data = false;
+        // Keep optional certificate decompression outside the transport even if
+        // another dependency enables additional rustls codec features.
+        config.cert_decompressors.clear();
         Ok(Self { connector: TlsConnector::from(Arc::new(config)), deadline, resolver: resolver::Resolver::new()? })
     }
 

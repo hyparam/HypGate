@@ -466,9 +466,39 @@ request body unread, produce no audit/body/status output, and release admission.
 This tests the real connector's early rejection and cleanup, not heap capacity.
 
 These bounds cover only the deframer's byte vector. Its handshake span vector,
-owned decoded messages, certificate verification/decompression, session values,
+owned decoded messages, certificate verification, session values,
 and TLS application/control queues still require separate composition. They do
 not turn the 64 KiB application buffer setting into a total TLS-memory bound.
+
+### Certificate parsing metadata and compression policy
+
+The production ClientConfig explicitly clears `cert_decompressors`. Current
+Cargo features already enable rustls std/ring/tls12 without brotli or zlib, but
+the explicit policy remains in force if dependency feature unification changes.
+The ClientHello omits certificate-compression algorithms when this list is empty;
+`tls13.rs` rejects a peer-selected unoffered algorithm before allocating its
+decompression output buffer or calling a codec. Standard uncompressed certificate
+chains remain supported. This is independent of opaque HTTP body forwarding.
+
+The 65,536-byte certificate-list limit is not a certificate-entry allocation
+limit. `msgs/codec.rs` checks the length-prefixed sub-reader before pushing parsed
+entries into a Vec. `CertificateDer::read` consumes at least its three-byte length
+prefix, even for an empty DER value; TLS 1.3 `CertificateEntry::read` additionally
+consumes at least the two-byte extension-list prefix. Thus the list bound implies:
+
+| Parsed list | Maximum entry count from wire length | Vec capacity request under pinned growth | Old/new array overlap, elements |
+| --- | ---: | ---: | ---: |
+| TLS 1.2 CertificateChain | 21,845 | 32,768 | 49,152 |
+| TLS 1.3 CertificateEntry list | 13,107 | 16,384 | 24,576 |
+
+These are deliberately conservative: the handshake-size limit and a valid leaf
+certificate reduce the realizable counts. Empty or malformed certificates can
+still occupy entries before later validation fails. Each slot is a certificate
+descriptor (plus extensions in TLS 1.3), not a single byte. Multiply by the
+appropriate pinned ABI size when composing allocation bytes. Parsed DER views,
+owned-chain conversions/clones, extension payloads, and verifier intermediates
+can overlap these arrays; this table is not their combined heap bound. Codec
+parsing and Vec capacity remain trusted source facts, not Verus proofs.
 
 ## Shared TLS session storage
 
@@ -496,8 +526,8 @@ For this TCP transport and pinned ring cipher suites, a conservative subtotal of
 these three variable byte contents per cached session is:
 
 - At most 65,535 ticket bytes, parsed with the TLS u16 length field.
-- At most 65,536 certificate DER bytes. Certificate lists and TLS 1.3 certificate
-  decompression use `CERTIFICATE_MAX_SIZE_LIMIT` in `msgs/handshake.rs`; ordinary
+- At most 65,536 certificate DER bytes. Certificate lists use
+  `CERTIFICATE_MAX_SIZE_LIMIT` in `msgs/handshake.rs`; ordinary
   handshake deframing imposes an additional 65,535-byte message limit. Cached
   chains originate from these checked peer-certificate messages.
 - At most 48 secret bytes: the TLS 1.2 master secret is a 48-byte array; TLS 1.3
