@@ -2,7 +2,9 @@
 use bytes::Bytes;
 #[cfg(test)]
 use bytes::Buf;
-use gateway_core::read_buffer::ReadBuffer;
+use gateway_core::{read_buffer::ReadBuffer, output_frame::OutputFrame};
+#[cfg(test)]
+use gateway_core::output_frame::MAX_OUTPUT_FRAME;
 use http_body::{Body, Frame};
 use std::{io, pin::Pin, task::{Context, Poll}};
 use tokio::{io::{AsyncRead, AsyncWrite, ReadBuf}, sync::oneshot};
@@ -50,7 +52,12 @@ impl<B: Body<Data = Bytes> + Unpin> AsyncRead for Reader<B> {
     }
 }
 
-enum Message { Data(Bytes), End }
+enum Message {
+    Data(OutputFrame), End,
+    // Inject custom backing owners only for dependency/destructor probes.
+    #[cfg(test)]
+    Probe(Bytes),
+}
 pub(crate) struct Writer { sender: slot::Sender<Message>, max_frame: usize, ended: bool, drained: oneshot::Receiver<()>, complete: bool }
 pub(crate) struct ChannelBody { receiver: slot::Receiver<Message>, ended: bool, drained: Option<oneshot::Sender<()>> }
 pub(crate) fn channel(max_frame: usize) -> (Writer, ChannelBody) {
@@ -64,8 +71,12 @@ impl AsyncWrite for Writer {
         let this = self.get_mut();
         if this.ended || this.max_frame == 0 { return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into())); }
         if bytes.is_empty() { return Poll::Ready(Ok(0)); }
-        let n = bytes.len().min(this.max_frame);
-        match this.sender.poll_send_with(cx, || Message::Data(Bytes::copy_from_slice(&bytes[..n]))) {
+        let mut n = 0;
+        match this.sender.poll_send_with(cx, || {
+            let frame = OutputFrame::copy_prefix(bytes, this.max_frame);
+            n = frame.len();
+            Message::Data(frame)
+        }) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Ok(())) => Poll::Ready(Ok(n)),
             Poll::Ready(Err(())) => Poll::Ready(Err(io::ErrorKind::BrokenPipe.into())),
@@ -101,7 +112,9 @@ impl Body for ChannelBody {
         if this.ended { return Poll::Ready(None); }
         match this.receiver.poll_recv(cx) {
             Poll::Pending => Poll::Pending,
-            Poll::Ready(Some(Message::Data(data))) => Poll::Ready(Some(Ok(Frame::data(data)))),
+            Poll::Ready(Some(Message::Data(data))) => Poll::Ready(Some(Ok(Frame::data(Bytes::from(data.into_vec()))))),
+            #[cfg(test)]
+            Poll::Ready(Some(Message::Probe(data))) => Poll::Ready(Some(Ok(Frame::data(data)))),
             Poll::Ready(Some(Message::End)) => {
                 this.ended = true;
                 if let Some(done) = this.drained.take() { let _ = done.send(()); }
@@ -122,6 +135,19 @@ mod tests {
     use super::*;
     use http_body_util::BodyExt;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn output_copy_enforces_core_limit_even_for_oversized_configuration() {
+        let (mut writer, mut body) = channel(usize::MAX);
+        let input = vec![7; MAX_OUTPUT_FRAME + 3];
+        let count = writer.write(&input).await.unwrap();
+        assert_eq!(count, MAX_OUTPUT_FRAME);
+        let bytes = body.frame().await.unwrap().unwrap().into_data().unwrap();
+        assert_eq!(bytes.as_ref(), &input[..count]);
+        assert_eq!(writer.write(&input[count..]).await.unwrap(), 3);
+        let tail = body.frame().await.unwrap().unwrap().into_data().unwrap();
+        assert_eq!(tail.as_ref(), &[7; 3]);
+    }
 
     #[tokio::test]
     async fn incoming_trailer_parser_enforces_byte_and_field_limits() {
@@ -331,7 +357,7 @@ mod tests {
                     assert!(connection.as_mut().poll(&mut cx).is_pending());
                     match writer.sender.poll_send_with(&mut cx, || {
                         live.fetch_add(frame_size, Ordering::SeqCst);
-                        Message::Data(Bytes::from_owner(Payload { bytes: vec![42; frame_size], live: live.clone() }))
+                        Message::Probe(Bytes::from_owner(Payload { bytes: vec![42; frame_size], live: live.clone() }))
                     }) {
                         Poll::Ready(Ok(())) => accepted += frame_size,
                         Poll::Pending => {},
@@ -503,7 +529,7 @@ mod tests {
         let dropped = Arc::new(AtomicUsize::new(0));
         let (mut writer, body) = channel(4);
         let mut context = Context::from_waker(std::task::Waker::noop());
-        assert!(matches!(writer.sender.poll_send_with(&mut context, || Message::Data(Bytes::from_owner(Payload {
+        assert!(matches!(writer.sender.poll_send_with(&mut context, || Message::Probe(Bytes::from_owner(Payload {
             bytes: *b"data", dropped: dropped.clone(),
         }))), Poll::Ready(Ok(()))));
         drop(body);

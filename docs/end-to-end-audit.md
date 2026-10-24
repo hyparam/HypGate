@@ -344,3 +344,17 @@ metadata substitution, and real TLS transport. At this checkpoint 237 Verus
 checks, the locked workspace suite and six compile-fail doctests pass, and all
 208 mutations are rejected. The resource/HTTP ownership composition rows remain
 open; closing this row does not claim a whole-runtime memory or scheduling proof.
+
+
+## Milestone 6 HTTP output-frame follow-up
+
+`Writer::poll_write` now constructs the actual queued payload through
+`OutputFrame::copy_prefix` and reports that frame's checked length. The verified
+constructor bounds and detaches the exact visible prefix, including when a
+caller supplies an oversized frame limit. Construction stays inside the mailbox
+callback after its liveness/capacity check. `ChannelBody` consumes the frame's
+exact vector into `Bytes`; it introduces no second payload copy. Dependency
+retention and destructor probes use a separate test-only message variant so their
+custom backing owners remain observable. The production type has only bounded
+frames and End. These checks strengthen per-owner sizes, but do not establish
+the remaining global HTTP owner count or cross-owner lifecycle composition.

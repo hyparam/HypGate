@@ -28,7 +28,15 @@ these transitions do not themselves prove the global owner-count mapping.
 The mailbox's retained count is at most one and zero after receiver closure;
 the transferred cleanup charge must also be counted until destruction completes.
 
-Production writers copy at most 16 KiB per data message. `poll_send_with` checks
+Production writers construct `output_frame::OutputFrame`, a private immutable
+core-owned vector whose constructor copies exactly the requested prefix, capped
+at 16 KiB. Its checked length is the write's reported accepted count. The copy is
+created only inside the existing locked send callback, so a full/closed mailbox
+never constructs it. The consuming `into_vec` handoff preserves the exact bytes;
+the adapter moves that vector into `Bytes` for Hyper. Logical payload length is
+proved; allocator rounding and Hyper's post-dequeue retention remain separate.
+Custom backing-owner dependency probes use a test-only message variant, while
+production and ordinary transfer tests use the verified frame type. `poll_send_with` checks
 receiver liveness and queue capacity while holding the mutex, then constructs and
 inserts the payload under that same lock. Pending sends store only a waker, never
 a copy of the caller's bytes. Canceling a write future leaves no pending payload;

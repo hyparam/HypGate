@@ -318,7 +318,7 @@ Exit criteria:
 | ✓ | Disk jobs after request cancellation: production `DiskWorker` verifies queue-to-active ownership, the combined Q+1 frame bound, exact write/sync/commit order, and session/generation-checked release only after consuming completion delivery. Stalled I/O and abandoned handles retain active credit; fault/cancellation regressions and eleven deliberate mutations cover the protocol. Syscall truth, consuming channel delivery, and file-session identity remain explicit adapter assumptions. |
 | ✓ | DNS jobs after request cancellation: production `CreditedJob` and `Reply` retain verified `TaskCredit` through queued/running lookup work and unread results; cleanup gates release, or `handoff_to` checks a live admitted owner before result adoption. Blocked/canceled lookup, queued cancellation, panic, reply retention, and adoption regressions pass. Rust destruction/channel behavior and registry identity remain explicit adapter assumptions. |
 | ✓ | TLS jobs after request cancellation: the same credited job/reply path retains handshake state and sockets through blocked polls and unread replies; verified handoff transfers successful results to a live request before releasing pool capacity. Queued cancellation, blocked polls, panic, runtime shutdown, and actual TLS exchange regressions pass under the same adapter assumptions. |
-| ☐ | HTTP cleanup tails: prove retained mailbox/body buffers remain charged to their owners after a request or connection is canceled. Reader substep implemented: production `ReadBuffer` verifies bounded frame load, exact read ranges, and full backing charge through partial consumption; mailbox closure now transfers the exact pending value and its charge to a verified cleanup owner through reported destruction. Global owner-count composition remains open. |
+| ☐ | HTTP cleanup tails: prove retained mailbox/body buffers remain charged to their owners after a request or connection is canceled. Reader substep implemented: production `ReadBuffer` verifies bounded frame load, exact read ranges, and full backing charge through partial consumption; mailbox closure now transfers the exact pending value and its charge to a verified cleanup owner through reported destruction. Output frames now use the verified immutable `OutputFrame` constructor and exact consuming handoff. Global owner-count composition remains open. |
 | ☐ | Compose cleanup-before-capacity-reuse across all owners: connect the worker, connection, HTTP, disk, DNS, and TLS lifecycles to production ownership across cancellation, normal completion, panic, and shutdown. |
 | ✓ | Upstream mediation: production HTTPS transfers call `ResolvedRoute::write_bytes` through their privately paired resolved route and request. The checked composition ties policy-authorized destination/credential handles to exact live write ranges and, in strict mode, exact tenant/request/chunk/direction receipts from the designated journal session. Availability retains authorization/routing checks. Concrete table selection is verified; parsing, secret provisioning, initial logger/file identity, Rust ownership, actual writer correspondence, and I/O truth remain explicit adapter assumptions. |
 
@@ -425,6 +425,16 @@ ownership and cross-owner resource-composition rows remain unfinished.
 Validation: 250 Cargo/Verus checks, the locked workspace suite with six compile-fail
 doctests, and the extended wrong-dispatch regression pass; all 209 deliberate
 mutations are rejected by proof. Milestone 6 is now six of eight rows complete.
+
+HTTP output-frame checkpoint: production Writer now constructs a verified
+`OutputFrame` only inside the mailbox send callback. The core copies the exact
+requested prefix capped at 16 KiB; Writer reports the resulting checked length.
+The frame's consuming vector handoff preserves exact bytes for Hyper without
+another payload copy. Pending sends still allocate nothing. Core edge-limit and
+backing-detachment tests plus the oversized-channel-limit runtime regression pass;
+242 Verus checks and all 213 mutations pass. The locked workspace suite, six
+compile-fail doctests, and 23 targeted HTTP tests pass. This does not close the
+HTTP owner-count or cross-owner composition obligations; progress remains 6/8.
 
 Start with the shared wrapper to reduce duplicated trusted lifetime logic. Preserve
 the existing task-capture destruction tests for both lease types and their

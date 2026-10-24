@@ -16,6 +16,12 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("output_frame.rs", "output_frame_ignores_hard_limit", "let cap = if requested < MAX_OUTPUT_FRAME { requested } else { MAX_OUTPUT_FRAME };", "let cap = requested;"),
+    ("output_frame.rs", "output_frame_ignores_requested_limit", "let cap = if requested < MAX_OUTPUT_FRAME { requested } else { MAX_OUTPUT_FRAME };", "let cap = MAX_OUTPUT_FRAME;"),
+    ("output_frame.rs", "output_frame_corrupts_payload", "copy.push(bytes[i]);", "copy.push(0);"),
+    ("output_frame.rs", "output_frame_loses_handoff_payload", "{ self.bytes }", "{ Vec::new() }"),
+    ("output_frame.rs", "output_frame_understates_length", "{ self.bytes.len() }", "{ 0 }"),
+
     ("resolved_route.rs", "dispatch_submits_with_unbound_route", "if !self.matches(authority) { return None; }", ""),
 
     ("resolved_route.rs", "resolved_route_wrong_destination", "destination: &destinations[route.origin]", "destination: &destinations[0]"),
