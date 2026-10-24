@@ -91,7 +91,8 @@ impl Buffers {
     pub open spec fn valid(&self, requests: nat, chunk: nat, connections: nat, queue: nat) -> bool {
         bounded(self.chunks, requests, chunk)
             && bounded(self.readers, 2 * requests, 32768)
-            && bounded(self.output_queues, connections + requests, 16384)
+            // Client receivers + sender-only cleanup tails + provider queues.
+            && bounded(self.output_queues, connections + 2 * requests, 16384)
             && self.queued_log.len() <= queue && self.active_log.len() <= 1 && self.receipts.len() <= requests
             && (forall|i: int| 0 <= i < self.queued_log.len() ==> #[trigger] self.queued_log[i].valid()
                 && self.queued_log[i].payload().len() <= chunk)
@@ -113,12 +114,12 @@ impl Buffers {
     pub proof fn accounted_payload_bound(&self, requests: nat, chunk: nat, connections: nat, queue: nat)
         requires self.valid(requests, chunk, connections, queue),
         ensures self.bytes() <= requests * chunk + 2 * requests * 32768
-            + (connections + requests) * 16384 + (queue + requests + 1) * (chunk + 65)
+            + (connections + 2 * requests) * 16384 + (queue + requests + 1) * (chunk + 65)
             + (requests + 1) * 33,
     {
         bounded_sum(self.chunks, requests, chunk);
         bounded_sum(self.readers, 2 * requests, 32768);
-        bounded_sum(self.output_queues, connections + requests, 16384);
+        bounded_sum(self.output_queues, connections + 2 * requests, 16384);
         bounded_frames(self.queued_log, queue, chunk);
         bounded_frames(self.active_log, 1, chunk);
         bounded_receipts(self.receipts, requests, chunk);

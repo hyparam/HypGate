@@ -18,7 +18,7 @@ at most 32 KiB of frame data into its own bounded copy. One DiskLog owns one dis
 | --- | --- | --- |
 | Core chunk or next transfer buffer | At most K per admitted exchange in the production sequential driver | `OwnedStream::payload_bound` proves the combined stream/read-buffer logical length stays within K, with only one nonempty at a time. The driver reads into the owner and verified completion moves the filled prefix into its stream. External `Request::advance` still rejects excessive vector capacity. Slice I/O correspondence, Vec backing capacity, and allocator size remain trusted. |
 | Inbound/outbound reader copies | At most 32 KiB of copied payload per reader; conservatively two readers per admitted exchange | `http_body::Reader` copies accepted visible frame bytes and releases its input reference before yielding; it clears the copy immediately when consumed. It cannot retain a large input owner through a small slice. Upload and download run sequentially; the inbound reader object remains alive. Allocator overhead and references retained inside Hyper remain separate. |
-| Client response channel | One data message of at most 16 KiB per connection with a response body | Created before authorization but after acquiring worker credit in `Gateway::handle`; charging this solely to authorized request leases is incorrect. A consumed message leaves this queue and becomes Hyper-owned. End markers carry no payload. |
+| Client response channel | At most C + R channels, one data message of at most 16 KiB each | Created before authorization but after acquiring worker credit in `Gateway::handle`; charging this solely to authorized request leases is incorrect. Live receivers are charged to C; sender-only cleanup tails are charged to R because an existing permit can send after receiver destruction. A consumed message becomes Hyper-owned. End markers carry no payload. |
 | Provider upload channel | One data message of at most 16 KiB per admitted exchange | Constructed in `HttpsTransport::run`; `Writer::poll_write` reserves queue credit before copying bytes. Hyper may retain previously consumed frames outside the channel. |
 | Disk frames being encoded or queued | At most Q reserved/queued records, each at most K + 65 bytes for production requests | `DiskLog::append` reserves before encoding. Encoding and enqueueing are serialized under the worker mutex. Other library callers may supply up to 1 MiB per record independently of K. |
 | Active disk frame | One additional frame of at most K + 65 bytes | The worker owns the job after receiving it, through write, sync, and acknowledgment. Cancellation of its caller does not reclaim or duplicate that frame. A stalled worker is never replaced. |
@@ -30,10 +30,14 @@ at most 32 KiB of frame data into its own bounded copy. One DiskLog owns one dis
 | DNS lookups | Four dedicated threads; at most 32 queued/running jobs per transport | Jobs retain separate verified registry credit across request cancellation. Returned address vectors contain at most 64 addresses. System-resolver internal allocations remain trusted; see [DNS accounting](dns-resources.md). |
 | Disk operations | One worker, one sequential write/sync operation | A timeout bounds caller waiting, not syscall duration. Outstanding work retains its frame until completion or process exit. |
 
+The [HTTP buffer lifetime audit](http-buffer-lifetimes.md) follows reservations,
+receiver closure, sender cleanup, and End acknowledgment. Its conservative channel
+count includes cleanup after a client connection has gone away.
+
 A conservative **visible payload subtotal**, under the ownership relationships
 above, is:
 
-    R × K + 2 × R × 32 KiB + (C + R) × 16 KiB + (Q + R + 1) × (K + 65) + (R + 1) × 33 bytes
+    R × K + 2 × R × 32 KiB + (C + 2 × R) × 16 KiB + (Q + R + 1) × (K + 65) + (R + 1) × 33 bytes
 
 This intentionally overcounts reader copies and queue data that may not coexist.
 It is useful for finding missing categories, not for promising a memory ceiling.

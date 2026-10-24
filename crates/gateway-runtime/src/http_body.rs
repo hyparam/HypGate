@@ -217,4 +217,77 @@ mod tests {
         let mut out = Vec::new();
         assert_eq!(Reader::new(Trailers).read_to_end(&mut out).await.unwrap_err().kind(), io::ErrorKind::InvalidData);
     }
+
+    #[tokio::test]
+    async fn canceled_backpressured_write_never_sends_stale_bytes() {
+        let (mut writer, mut body) = channel(4);
+        writer.write_all(b"head").await.unwrap();
+        let mut context = Context::from_waker(std::task::Waker::noop());
+        let mut blocked = Box::pin(writer.write(b"old!"));
+        assert!(blocked.as_mut().poll(&mut context).is_pending());
+        drop(blocked); // keep the Writer, cancel only this write operation
+        assert_eq!(body.frame().await.unwrap().unwrap().into_data().unwrap(), "head");
+        assert_eq!(writer.write(b"new!").await.unwrap(), 4);
+        assert_eq!(body.frame().await.unwrap().unwrap().into_data().unwrap(), "new!");
+        let finish = async { writer.shutdown().await.unwrap(); };
+        let drain = async { assert!(body.frame().await.is_none()); };
+        tokio::join!(finish, drain);
+    }
+
+    #[tokio::test]
+    async fn dropped_receiver_fails_pending_data_and_end_acknowledgment() {
+        let mut context = Context::from_waker(std::task::Waker::noop());
+        let (mut writer, body) = channel(4);
+        writer.write_all(b"head").await.unwrap();
+        let mut blocked = Box::pin(writer.write(b"next"));
+        assert!(blocked.as_mut().poll(&mut context).is_pending());
+        drop(body);
+        assert_eq!(blocked.await.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
+
+        let (mut writer, body) = channel(4);
+        let mut finish = Box::pin(writer.shutdown());
+        // End is enqueued, but success requires the consumer's acknowledgment.
+        assert!(finish.as_mut().poll(&mut context).is_pending());
+        drop(body);
+        assert_eq!(finish.await.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
+    }
+
+    #[tokio::test]
+    async fn canceled_shutdown_before_end_enqueue_cannot_report_clean_eof() {
+        let (mut writer, mut body) = channel(4);
+        writer.write_all(b"head").await.unwrap();
+        let mut context = Context::from_waker(std::task::Waker::noop());
+        let mut finish = Box::pin(writer.shutdown());
+        assert!(finish.as_mut().poll(&mut context).is_pending());
+        drop(finish); drop(writer);
+        assert_eq!(body.frame().await.unwrap().unwrap().into_data().unwrap(), "head");
+        assert_eq!(body.frame().await.unwrap().unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+        assert!(body.frame().await.is_none());
+    }
+
+
+    #[test]
+    fn reserved_send_after_receiver_drop_retains_payload_until_sender_cleanup() {
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        struct Payload { bytes: [u8; 4], dropped: Arc<AtomicUsize> }
+        impl AsRef<[u8]> for Payload { fn as_ref(&self) -> &[u8] { &self.bytes } }
+        impl Drop for Payload { fn drop(&mut self) { self.dropped.fetch_add(1, Ordering::SeqCst); } }
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let (mut writer, body) = channel(4);
+        let mut context = Context::from_waker(std::task::Waker::noop());
+        assert!(matches!(writer.sender.poll_reserve(&mut context), Poll::Ready(Ok(()))));
+        // Model receiver destruction on another executor thread between the
+        // Writer's reservation and send. No new reservation follows closure.
+        drop(body);
+        assert!(writer.sender.send_item(Message::Data(Bytes::from_owner(Payload {
+            bytes: *b"late", dropped: dropped.clone(),
+        }))).is_ok());
+        assert_eq!(dropped.load(Ordering::SeqCst), 0);
+        assert!(matches!(Pin::new(&mut writer).poll_write(&mut context, b"more"), Poll::Ready(Err(_))));
+        // PollSender still owns a sender reference even after observing closure.
+        assert_eq!(dropped.load(Ordering::SeqCst), 0);
+        drop(writer);
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    }
+
 }
