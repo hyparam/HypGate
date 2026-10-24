@@ -63,7 +63,7 @@ and needs no real credential; `PROVIDER_KEY` holds a placeholder.
 It then checks that startup refuses a non-loopback listen address, a missing provider
 credential, and an existing log path without touching that file; that the new audit
 log is created with mode 600; that `/healthz`, `/readyz`, and `/metrics` report a
-healthy strict-mode instance with 32 request slots; that requests without
+healthy strict-mode instance with 16 request slots; that requests without
 credentials, with a wrong token, with a token but no grant, with the wrong method,
 or outside `/routes/<n>` receive 401, 401, 401, 405, and 400 and that an authorized
 request whose upstream refuses the connection receives 502, is counted once as a

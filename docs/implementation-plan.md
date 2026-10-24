@@ -6,7 +6,7 @@
 | 2. Minimal working gateway | 6/6 | ✓ |
 | 3. Crash-safe logging | 15/15 | ✓ |
 | 4. Availability hardening | 16/16 | ✓ |
-| 5. Auditable first release | 8/9 | ☐ |
+| 5. Auditable first release | 9/9 | ✓ |
 
 Progress counts completed rows in each milestone's table below. Rows are not
 weighted estimates of effort or proof coverage; an open row can still block the
@@ -21,11 +21,14 @@ Milestone 1 is closed under the explicit assumptions in the
 [resource composition](resource-composition.md); the
 [milestone 1 exit audit](milestone-1-exit-audit.md) maps all seven criteria to
 evidence. Milestone 4 is closed under its [availability audit](availability-audit.md)
-and explicit scheduler/I/O assumptions. Next focus is milestone 5, the auditable release;
+and explicit scheduler/I/O assumptions. Milestone 5, the auditable release, is complete:
 the [end-to-end audit](end-to-end-audit.md) now traces one request from authorization
 to the exact network and disk calls, a [clean-environment deployment](deployment.md#clean-environment-reproduction)
-is scripted and reproduced in CI and a pinned container, and the remaining row is
-broader benchmarks.
+is scripted and reproduced in CI and a pinned container, and the
+[broader benchmarks](benchmarks.md#broader-workloads) and
+[operational limits](operational-limits.md) close the last row. Every milestone
+row is now checked under its documented assumptions; open obligations are listed
+in the [security contract](security-contract.md) and each exit audit.
 See the [streaming-core progress notes](streaming-core-progress.md) and
 [authorization core](authorization-core.md) for completed increments and remaining gaps.
 The [runtime ownership layer](runtime-ownership.md) now ties authorization, a single
@@ -287,7 +290,7 @@ Exit criteria:
 | ✓ | Concurrent stalled-sync/queue-saturation test in both logging modes. |
 | ✓ | Paced-peer and permanent-log-failure workload results, with a separate paced strict-mode RSS measurement. |
 | ✓ | Reproducible deployment from a clean environment: a scripted operator path and a digest-pinned container reproduce the build, tests, proofs, provisioning, fail-closed startup, TLS proxy with standby, shutdown, and read-only scan; see [clean-environment reproduction](deployment.md#clean-environment-reproduction). |
-| ☐ | Complete broader benchmarks and operational-limit reporting. |
+| ✓ | Broader benchmarks cover concurrency one through 32 with repeats, half-minute paced streams, 1 MiB uploads, and a Linux CI release-workload job; every fixed and configurable limit, its exceeded behavior, and its evidence are tabulated in the [operational limits](operational-limits.md). |
 | ✓ | End-to-end audit traces authorization through the enumerated network/disk effect sites, every failure exit, and shutdown, marking each step proved, tested, or assumed; see the [end-to-end audit](end-to-end-audit.md). |
 
 Pin compiler, verifier, solver, and dependencies; automate proof and mutation checks,

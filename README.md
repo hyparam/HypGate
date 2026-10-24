@@ -120,8 +120,11 @@ standby routing with proxy retries disabled.
 Milestone 4 is complete under the [availability exit audit](docs/availability-audit.md)
 and [conditional shutdown proof](docs/shutdown-proof.md), including TLS CPU isolation,
 shared-listener shutdown, sustained overload, and repeated isolated-memory validation.
-The [local benchmark](docs/benchmarks.md) measures both logging modes through TLS
-and real disk logging, with explicit workload and memory-accounting limits.
+The [benchmarks](docs/benchmarks.md) measure both logging modes through TLS and
+real disk logging at concurrency one through 32, with paced half-minute streams,
+1 MiB uploads, overload, and memory soaks, and a Linux CI job repeats the release
+workloads. The [operational limits](docs/operational-limits.md) tabulate every
+fixed and configurable limit, what happens when it is reached, and the evidence.
 The [adapter audit](docs/adapter-audit.md) maps runtime trust obligations to effect
 paths and tests, including concurrent tenants and client disconnects.
 The [end-to-end audit](docs/end-to-end-audit.md) traces one request from

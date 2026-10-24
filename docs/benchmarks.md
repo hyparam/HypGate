@@ -110,6 +110,103 @@ requests recovered. This includes provider/client fixtures and the recovery scan
 excludes kernel filesystem cache, and is one observation rather than a memory bound.
 The repeated workload's completion p95 was 14,571.22 ms, illustrating run variability.
 
+## Broader workloads
+
+The fixture now takes a profile (request count, concurrency, upload and download
+sizes, provider and client pacing) and reports client-observed inter-frame gaps,
+completed and failed counts, and payload throughput in addition to the earlier
+fields. Six new opt-in runs cover a concurrency sweep, half-minute paced streams,
+1 MiB uploads, and deliberate audit-queue saturation, each in both logging modes.
+The `Release workloads` CI job runs every opt-in workload in release mode on
+Ubuntu 24.04 and prints the JSON rows. The [operational limits](operational-limits.md)
+tabulate every limit these workloads approach.
+
+All numbers below are from one local machine (Apple M3 Max, macOS 27.0.1, release
+build, local temporary storage) on 2026-10-24, with other processes idle. They are
+observations of this fixture, not performance guarantees or a controlled
+comparison between modes.
+
+### Concurrency sweep
+
+Four closed-loop batches at each level, 8 KiB uploads and 64 KiB responses, three
+separate runs per level and mode. Sixteen is the audit queue depth; 32 is measured
+separately below.
+
+| Concurrency | Mode | Requests/s (3 runs) | First byte p95 ms (3 runs) | Completion p95 ms (3 runs) | Frame gap p99 ms (max of runs) |
+| ---: | --- | --- | --- | --- | ---: |
+| 1 | Strict | 23.4 / 24.3 / 21.9 | 17 / 16 / 17 | 44 / 44 / 47 | 5.3 |
+| 1 | Availability | 22.6 / 23.3 / 25.3 | 18 / 16 / 15 | 45 / 45 / 40 | 5.3 |
+| 2 | Strict | 24.6 / 25.1 / 22.4 | 29 / 28 / 33 | 84 / 83 / 90 | 10.4 |
+| 2 | Availability | 24.2 / 23.7 / 24.2 | 32 / 30 / 32 | 88 / 86 / 89 | 11.7 |
+| 4 | Strict | 24.6 / 12.4 / 24.1 | 58 / 58 / 58 | 167 / 803 / 169 | 335.5 |
+| 4 | Availability | 24.3 / 23.8 / 23.2 | 58 / 57 / 59 | 170 / 168 / 173 | 20.1 |
+| 8 | Strict | 24.5 / 24.9 / 24.8 | 110 / 109 / 112 | 341 / 322 / 330 | 42.0 |
+| 8 | Availability | 23.9 / 25.3 / 25.5 | 114 / 107 / 113 | 338 / 339 / 342 | 48.0 |
+| 16 | Strict | 25.9 / 24.7 / 26.6 | 209 / 221 / 204 | 650 / 674 / 610 | 80.3 |
+| 16 | Availability | 24.9 / 26.1 / 26.5 | 218 / 209 / 201 | 651 / 623 / 606 | 78.0 |
+
+Throughput stays near 25 requests per second at every level while completion
+latency grows linearly with concurrency, and the client-observed gap between
+16 KiB frames grows from about 5 ms at one request to about 78 ms at sixteen.
+Both modes write and sync every 16 KiB record on one disk worker, so each frame
+waits behind one synced write per concurrent stream: roughly 5 ms per record on
+this storage, about 125 synced records per second at this payload mix. Adding
+concurrency therefore adds latency rather than throughput once the disk worker is
+busy. One strict run at concurrency four stalled for about 0.8 s on one request
+(803 ms completion p95, 335 ms frame gap); the other two runs at that level did
+not, which is why three runs are reported rather than one.
+
+### Long streams, large uploads, and queue saturation
+
+| Workload | Mode | Completed / failed | Audit gaps | Elapsed s | Payload MiB/s | First byte p95 ms | Completion p50 / p95 ms | Frame gap p50 / p99 / max ms |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Healthy 64 KiB (eight concurrent) | Strict | 32 / 0 | 0 | 1.343 | 1.68 | 171 | 307 / 369 | 34.0 / 64.1 / 64 |
+| Healthy 64 KiB (eight concurrent) | Availability | 32 / 0 | 0 | 1.245 | 1.81 | 106 | 295 / 315 | 34.0 / 38.3 / 39 |
+| 1 MiB uploads, 16 KiB responses (eight concurrent) | Strict | 32 / 0 | 0 | 9.955 | 3.26 | 2,935 | 2,295 / 2,969 | 32.9 / 38.1 / 38 |
+| 1 MiB uploads, 16 KiB responses (eight concurrent) | Availability | 32 / 0 | 0 | 9.880 | 3.29 | 2,848 | 2,320 / 2,888 | 33.1 / 40.0 / 40 |
+| Paced 4 MiB responses (eight concurrent) | Strict | 32 / 0 | 0 | 61.166 | 2.10 | 139 | 14,466 / 17,899 | 34.5 / 147.8 / 788 |
+| Paced 4 MiB responses (eight concurrent) | Availability | 32 / 0 | 0 | 58.391 | 2.20 | 109 | 13,769 / 17,160 | 34.0 / 140.7 / 739 |
+| Eight 32 MiB streams, 16 KiB per 15 ms | Strict | 8 / 0 | 0 | 111.085 | 2.31 | 126 | 111,064 / 111,085 | 34.0 / 54.0 / 737 |
+| Eight 32 MiB streams, 16 KiB per 15 ms | Availability | 8 / 0 | 0 | 109.145 | 2.35 | 115 | 109,128 / 109,145 | 34.0 / 45.5 / 705 |
+| 32 concurrent requests, 128 total | Strict | 66 / 62 | 0 | 3.138 | 1.48 | 286 | 723 / 847 | 82.0 / 114.9 / 123 |
+| 32 concurrent requests, 128 total | Availability | 128 / 0 | 60 | 2.642 | 3.41 | 224 | 584 / 663 | 0.2 / 82.0 / 85 |
+| Log fails after batch one | Strict | 8 / 0 (24 rejected) | 0 | 0.317 | 1.77 | 108 | 298 / 315 | 35.0 / 38.0 / 38 |
+| Log fails after batch one | Availability | 32 / 0 | 24 | 0.340 | 6.61 | 103 | 5 / 321 | 0.1 / 37.1 / 38 |
+
+Every completed response was byte-exact and every completed request's audit
+records summed to its exact upload and download sizes; all runs ended with zero
+active requests and workers and a clean shutdown. The long-stream logs were
+270,099,528 and 270,099,333 bytes, with 24,584 frames per mode.
+
+The eight 32 MiB streams were paced to finish in about 31 s, but took about 110 s
+in both modes: 16,384 records of 16 KiB passed through the single disk worker at
+about 149 synced records per second, or 2.3 MiB/s of logged payload, and the
+client-observed frame gap settled at 34 ms, the same gap the sweep shows for eight
+concurrent streams. The 1 MiB uploads ran at about 209 synced records per second.
+Sustained payload throughput is therefore bounded by the synced-record rate of the
+log device times the chunk size; a larger `chunk_bytes` (up to 1 MiB) raises the
+bytes per sync, and faster storage raises the rate. Both logging modes pay this
+cost while the log is healthy; availability mode only differs after a failure.
+The rare 700 to 800 ms maximum gaps in the paced runs are single stalls of the
+local disk or scheduler, not a steady-state behavior.
+
+The 32-concurrent run exceeds the 16-record audit queue, which refuses an append
+immediately when full. Strict mode failed 62 of 128 requests honestly: each got a
+502 with no body or an aborted body, none produced an audit gap, and 70 requests
+left records (the 66 completed ones in full and four failed ones as a prefix).
+Availability mode completed all 128 with exact bytes and recorded 60 audit gaps.
+Sixteen concurrent requests never hit this limit in any sweep run because each
+request has at most one append outstanding. The documented configuration now
+uses 16 request slots in strict mode for this reason.
+
+### Not measured
+
+CPU utilization, allocator and kernel memory under these workloads, HTTP/1
+keep-alive (none is used), proxy overhead through HAProxy, provider-side pacing
+that resembles real token generation, hostile inputs at the header and handshake
+limits, and any machine other than this laptop and the Ubuntu CI runner. No
+release performance threshold has been set.
+
 ## Repeated admission overload
 
 The ordinary CI test in `server/tests/overload.rs` holds eight real TLS exchanges
@@ -126,11 +223,11 @@ the separate inbound connection cap to isolate request admission; it is a bounde
 burst experiment, not a long-duration soak, latency SLA, or whole-memory theorem.
 Incomplete-connection overload is exercised separately by the server tests.
 
-Remaining measurements include stalled logging under sustained load,
-long-running streams, increasing concurrency, long-duration overload, repeated runs,
-isolated gateway memory, deployment-proxy overhead, and supported Linux storage.
-These remain milestone-four/five work. No load or memory theorem follows from this
-small baseline, and no release performance threshold has been set.
+Stalled logging under load, long-running streams, increasing concurrency,
+long-duration overload, repeated runs, isolated gateway memory, and Linux storage
+are now measured in the sections above and below. Deployment-proxy overhead is
+not. No load or memory theorem follows from these measurements, and no release
+performance threshold has been set.
 
 ## Stalled disk under concurrent traffic
 

@@ -84,7 +84,7 @@ cat >"$work/root.json" <<EOF
   "destinations": ["https://localhost:$closed/v1/messages"],
   "credentials": [{"tenant": 1, "kind": "api_key", "env": "PROVIDER_KEY"}],
   "grants": [{"tenant": 1, "selector": 7, "origin": 0, "credential": 0}],
-  "limits": {"requests": 32, "chunk_bytes": 16384},
+  "limits": {"requests": 16, "chunk_bytes": 16384},
   "logging": "strict"
 }
 EOF
@@ -122,10 +122,10 @@ echo 'ok: /healthz'
 expect_status 200 'GET /readyz' "http://$primary/readyz"
 metrics=$(curl --fail -s "http://$primary/metrics")
 for line in 'soundgate_audit_healthy 1' 'soundgate_admission_healthy 1' 'soundgate_worker_admission_healthy 1' \
-    'soundgate_requests_active 0' 'soundgate_requests_limit 32' 'soundgate_failed_exchanges_total 0'; do
+    'soundgate_requests_active 0' 'soundgate_requests_limit 16' 'soundgate_failed_exchanges_total 0'; do
     grep -qx "$line" <<<"$metrics" || fail "metrics missing '$line': $metrics"
 done
-echo 'ok: /metrics reports healthy strict logging and 32 request slots'
+echo 'ok: /metrics reports healthy strict logging and 16 request slots'
 
 step 'Authorization fails closed'
 body='{"model":"placeholder","max_tokens":1,"messages":[]}'

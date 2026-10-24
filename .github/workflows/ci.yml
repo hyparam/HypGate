@@ -145,3 +145,18 @@ jobs:
         run: docker build --file deploy/Dockerfile --tag soundgate-deploy .
       - name: Deploy the documented configuration inside the container
         run: docker run --rm soundgate-deploy
+
+  benchmarks:
+    name: Release workloads
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Report runner resources
+        run: nproc && free -m && df -h "$RUNNER_TEMP"
+      - name: Run every opt-in TLS/disk workload in release mode
+        run: cargo test -p gateway-runtime --release --locked --lib server::tests::benchmark -- --ignored --nocapture --test-threads=1

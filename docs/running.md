@@ -22,7 +22,7 @@ with the SHA-256 hex digest of a securely generated gateway token):
   "destinations": ["https://api.anthropic.com/v1/messages"],
   "credentials": [{"tenant": 1, "kind": "api_key", "env": "PROVIDER_KEY"}],
   "grants": [{"tenant": 1, "selector": 7, "origin": 0, "credential": 0}],
-  "limits": {"requests": 32, "chunk_bytes": 16384},
+  "limits": {"requests": 16, "chunk_bytes": 16384},
   "logging": "strict"
 }
 ```
@@ -32,6 +32,12 @@ The separate candidate route file selects the permitted grant:
 ```json
 {"routes": [{"tenant": 1, "selector": 7, "origin": 0, "credential": 0}]}
 ```
+
+Keep `requests` at or below the logger's 16 queued records in strict mode: each
+request has one audit append outstanding at a time, so 16 concurrent requests can
+never find the queue full, while a burst of more than 16 makes the extra strict
+requests fail with 502 and makes availability requests record audit gaps. The
+[operational limits](operational-limits.md) list every such limit.
 
 Provision `PROVIDER_KEY` in the process environment through your secret-management
 mechanism. Use at least 32 random bytes of entropy for gateway tokens, encoded in
