@@ -36,7 +36,20 @@ above, is:
 
 This intentionally overcounts reader copies and queue data that may not coexist.
 It is useful for finding missing categories, not for promising a memory ceiling.
-It excludes allocations listed below and is not yet a Verus composition theorem.
+The conditional composition theorem `Buffers::accounted_payload_bound` now proves
+this subtotal in `gateway-core/src/buffer_accounting.rs`. It takes complete ghost
+snapshots of the listed categories, with explicit per-category count and chunk-size
+hypotheses. `bounded_frames` and `DurableFrame::retained_size` derive the 65-byte
+frame overhead from the production encoding; receipts count their actual retained
+frame, not the erased acknowledged-history prefix. `covers_categories` prevents
+an accidentally omitted category from silently weakening the modeled total.
+
+This is a size-composition proof, not proof that every async runtime state supplies
+those snapshots. In particular, each request's stream body and pending read buffer
+must be accounted for exclusively, queue reservations must precede encoding, the
+worker must retain only one active frame, and receipts must be counted until
+consumed or dropped. The runtime correspondence and all excluded allocations
+below remain separate obligations.
 Do not substitute the lower observed concurrent-request count for R when publishing
 configuration guarantees. Multiple gateway/logger instances multiply their budgets.
 
@@ -96,5 +109,5 @@ Remaining work includes correspondence between the full runtime ownership and
 those ghost-map events, dependency/backing-allocation accounting, formal worker-lifetime composition,
 and longer-duration isolated-gateway measurements. A separate gateway-child
 fixture now measures three paced waves per logging mode, excluding provider/client
-memory, and checks audit coverage and clean shutdown; see the [benchmark notes](benchmarks.md#isolated-gateway-process-memory). Until those exist,
+memory, and checks audit coverage and clean shutdown; see the [benchmark notes](benchmarks.md#isolated-gateway-process-memory). Until the remaining obligations are resolved,
 neither the subtotal nor the core's 128 MiB allowance is a whole-process guarantee.

@@ -15,6 +15,9 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("buffer_accounting.rs", "omit_receipt_storage", "+ byte_sum(receipt_bytes(self.receipts)) + byte_sum(self.headers)", "+ byte_sum(self.headers)"),
+    ("buffer_accounting.rs", "underbudget_receipts", "+ (connections + requests) * 16384 + (queue + requests + 1) * (chunk + 65)", "+ (connections + requests) * 16384 + (queue + 1) * (chunk + 65)"),
+    ("journal.rs", "receipt_frame_overhead_too_small", "ensures self.record().len() == self.payload_len() + 65,", "ensures self.record().len() == self.payload_len() + 64,"),
     ("owned_stream.rs", "owned_retirement_skips_release", "registry.release_stream(&self.key, self.stream)", "true"),
     ("owned_stream.rs", "owned_advance_changes_bytes", "{ self.stream.advance(bytes) }", "{ self.stream.advance(Vec::new()) }"),
     ("owned_stream.rs", "owned_cancel_ignored", "{ self.stream.cancel() }", "{ }"),

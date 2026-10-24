@@ -13,3 +13,5 @@ pub mod recovery;
 pub mod audit_journal;
 
 pub mod owned_stream;
+
+pub mod buffer_accounting;

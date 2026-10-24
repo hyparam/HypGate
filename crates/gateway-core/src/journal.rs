@@ -19,6 +19,14 @@ impl DurableFrame {
     pub closed spec fn acknowledged(&self) -> Seq<u8> { self.prefix@ + self.frame.contents() }
     pub closed spec fn checksum(&self) -> Seq<u8> { self.frame.checksum() }
     pub closed spec fn record(&self) -> Seq<u8> { self.frame.contents() }
+    pub closed spec fn payload_len(&self) -> nat { self.frame.payload().len() }
+    pub proof fn retained_size(&self)
+        requires self.valid(),
+        ensures self.record().len() == self.payload_len() + 65,
+    {
+        self.frame.canonical();
+        crate::framing::encoded_header_roundtrip(self.frame.header());
+    }
     pub fn matches_record(&self, h: crate::framing::Header, payload: &[u8]) -> (ok: bool)
         requires self.valid(),
         ensures ok == (crate::framing::valid(h) && h.payload == payload.len()

@@ -196,5 +196,17 @@ modes combined; 181 periodic samples per mode, plus final sampling):
 | Availability | 6,914,048 | 12,763,136 | 12,435,456 / 12,632,064 / 12,763,136 |
 
 Both runs passed all correctness and shutdown checks. RSS rose between waves;
-these samples do not establish a plateau. Linux high-water evidence is pending
-the new CI step's first completed run.
+these samples do not establish a plateau. Linux CI evidence is recorded below.
+
+Ubuntu 24.04 CI at `aec3985` also passed both modes in the Rust test job of
+[run 40043901306](https://github.com/platypii/LogGate/actions/runs/40043901306),
+2026-10-24 UTC. Linux reports the child's kernel RSS high-water mark through the
+end of the workload:
+
+| Mode | Baseline RSS bytes | Kernel peak RSS bytes | Settled RSS bytes after waves 1 / 2 / 3 |
+| --- | ---: | ---: | --- |
+| Strict | 10,301,440 | 14,168,064 | 13,824,000 / 14,102,528 / 14,168,064 |
+| Availability | 10,293,248 | 14,147,584 | 13,905,920 / 14,028,800 / 14,147,584 |
+
+The Linux and macOS runs differ in OS, machine, and storage timing; their values
+are separate workload observations, not a controlled platform performance comparison.
