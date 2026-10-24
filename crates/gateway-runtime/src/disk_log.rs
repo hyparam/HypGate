@@ -19,7 +19,8 @@ pub const MAX_RECORD_BYTES: usize = 1024 * 1024;
 // pages, and thread-local/kernel storage remain separate resource categories.
 const WORKER_STACK_BYTES: usize = 2 * 1024 * 1024;
 
-struct Job { frame: RecordFrame, done: oneshot::Sender<Option<DurableFrame>> }
+type Completion = oneshot::Sender<Option<DurableFrame>>;
+type Job = (RecordFrame, Completion);
 
 /// Clones share one bounded queue and one worker. Never create replacement workers
 /// to escape a stuck filesystem call. A timeout closes logging health permanently.
@@ -78,18 +79,18 @@ impl DiskLog {
         let thread = std::thread::Builder::new().name("soundgate-audit".into()).stack_size(WORKER_STACK_BYTES).spawn(move || {
             let _health_on_exit = UnhealthyOnExit(worker_health.clone(), receiver.clone());
             let mut journal = Journal::new();
-            while let Some(job) = receiver.recv() {
+            while let Some((frame, done)) = receiver.recv() {
                 let receipt = if worker_health.load(Ordering::Acquire) {
-                    match journal.begin(job.frame.bytes().len() as u64) {
-                        Some(ticket) if file.write_all(job.frame.bytes()).is_ok() && file.sync().is_ok() =>
-                            journal.commit_frame(&ticket, job.frame),
+                    match journal.begin(frame.bytes().len() as u64) {
+                        Some(ticket) if file.write_all(frame.bytes()).is_ok() && file.sync().is_ok() =>
+                            journal.commit_frame(&ticket, frame),
                         _ => None,
                     }
                 } else { None };
                 if receipt.is_none() { journal.fail(); worker_health.store(false, Ordering::Release); }
                 // A canceled caller may leave a durable but unsent record. It must
                 // never cause the worker to retry or the gateway to replay traffic.
-                let _ = job.done.send(receipt);
+                let _ = done.send(receipt);
             }
         })?;
         Ok(Self { worker: Arc::new(Mutex::new(Worker { queue, thread: Some(thread) })),
@@ -190,7 +191,7 @@ impl AuditLog for DiskLog {
                 let frame = encode_record(record);
                 let (done, receive) = oneshot::channel();
                 completion = Some(receive);
-                Job { frame, done }
+                (frame, done)
             }).map_err(|error| {
                 if error.kind() == io::ErrorKind::BrokenPipe { self.healthy.store(false, Ordering::Release); }
                 error

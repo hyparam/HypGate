@@ -18,6 +18,7 @@ pub mod buffer_accounting;
 
 pub mod owned_accounting;
 pub mod fixed_queue;
+pub mod frame_queue;
 
 #[cfg(test)]
 #[path = "tests/streaming.rs"]

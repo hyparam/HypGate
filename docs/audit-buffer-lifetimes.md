@@ -12,7 +12,7 @@ supply up to `MAX_RECORD_BYTES` and must account for retained receipts separatel
 | --- | --- | --- |
 | Before reservation | `LogRecord` borrows the request's existing payload. No copied frame exists. | Already in the request chunk term |
 | Encoding | `Queue::push_with` checks a free slot while holding the queue mutex before invoking `encode_record`. The mutex excludes insertion and shutdown until the constructed Job is installed. | One of Q encoding/queued slots |
-| Queued | Verified `FixedQueue::push` transfers the immutable frame and receipt sender into a fixed slot. The caller retains only the receipt receiver. | One of Q encoding/queued slots |
+| Queued | Verified `FrameQueue::push` transfers the immutable frame and receipt sender into a fixed slot. The caller retains only the receipt receiver. | One of Q encoding/queued slots |
 | Writing/syncing/committing | The sole worker receives one Job and owns its frame until failure or journal commit. Dequeue returns queue credit, allowing another producer to encode. | One active frame in addition to Q |
 | Delivering | `commit_frame` moves the same frame into `DurableFrame`; no payload clone is made. Sending moves that receipt into the caller's oneshot. | Active-frame term until transfer, then receipt term |
 | Delivered, awaiting consumption | `Request::audit_current` retains exclusive request ownership across append and checks the exact receipt before dropping it. | At most one receipt per live production request, hence R |
@@ -30,6 +30,14 @@ counts completion oneshots separately; dynamic mpsc blocks now apply to HTTP bod
 channels, not the audit queue.
 
 ## Verified fixed queue and synchronization obligations
+
+`FrameQueue<Completion>` wraps the fixed queue with an invariant that every
+retained frame is structurally valid. Exact tuple contracts preserve each frame's
+completion handle through enqueue, rejection, and dequeue. Its ghost frame
+projection supplies count and validity to the combined buffer theorem without
+another runtime collection. The unconditional queued-frame bound is Q times
+(1 MiB + 65); production K, encoding scratch, active frames, and receipt lifetimes
+still require their separate correspondence arguments.
 
 `gateway-core/src/fixed_queue.rs` owns one vector of Q optional Job slots, a head
 index, and an occupied count. Its invariant states that exactly the occupied

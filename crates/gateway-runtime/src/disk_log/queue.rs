@@ -1,14 +1,14 @@
 //! Trusted mutex/condvar wrapper around the verified fixed-slot FIFO.
-use super::Job;
-use gateway_core::fixed_queue::FixedQueue;
+use super::{Job, Completion};
+use gateway_core::frame_queue::FrameQueue;
 use std::{io, sync::{Condvar, Mutex}};
 
-pub(super) struct Queue { state: Mutex<FixedQueue<Job>>, ready: Condvar }
+pub(super) struct Queue { state: Mutex<FrameQueue<Completion>>, ready: Condvar }
 struct WakeOnDrop<'a>(&'a Condvar);
 impl Drop for WakeOnDrop<'_> { fn drop(&mut self) { self.0.notify_one(); } }
 impl Queue {
     pub(super) fn new(capacity: usize) -> Self {
-        Self { state: Mutex::new(FixedQueue::new(capacity)), ready: Condvar::new() }
+        Self { state: Mutex::new(FrameQueue::new(capacity)), ready: Condvar::new() }
     }
     pub(super) fn is_open(&self) -> bool {
         self.state.lock().map(|state| !state.is_closed()).unwrap_or(false)
@@ -58,9 +58,9 @@ impl Queue {
 mod tests {
     use super::*;
     fn job(chunk: u64) -> Job {
-        Job { frame: super::super::encode_record(crate::transfer::LogRecord {
+        (super::super::encode_record(crate::transfer::LogRecord {
             tenant: 1, request: 1, chunk, direction: crate::transfer::Direction::Upload, bytes: b"record",
-        }), done: tokio::sync::oneshot::channel().0 }
+        }), tokio::sync::oneshot::channel().0)
     }
     #[test]
     fn full_and_closed_queues_never_construct_rejected_jobs_and_close_drains() {
@@ -76,7 +76,7 @@ mod tests {
     async fn worker_exit_discards_queued_receipt_senders() {
         let queue = Queue::new(1);
         let (done, receive) = tokio::sync::oneshot::channel();
-        queue.push_with(|| { let mut value = job(1); value.done = done; value }).unwrap();
+        queue.push_with(|| { let (frame, _) = job(1); (frame, done) }).unwrap();
         queue.abort();
         assert!(receive.await.is_err());
         assert!(queue.recv().is_none()); assert_eq!(queue.len(), 0);

@@ -88,19 +88,40 @@ impl Buffers {
             + byte_sum(frame_bytes(self.queued_log)) + byte_sum(frame_bytes(self.active_log))
             + byte_sum(receipt_bytes(self.receipts)) + byte_sum(self.headers)
     }
-    pub open spec fn valid(&self, requests: nat, chunk: nat, connections: nat, queue: nat) -> bool {
+    pub open spec fn other_categories_valid(&self, requests: nat, chunk: nat, connections: nat) -> bool {
         bounded(self.chunks, requests, chunk)
             && bounded(self.readers, 2 * requests, 32768)
             // Client receivers + sender-only cleanup tails + provider queues.
             && bounded(self.output_queues, connections + 2 * requests, 16384)
-            && self.queued_log.len() <= queue && self.active_log.len() <= 1 && self.receipts.len() <= requests
-            && (forall|i: int| 0 <= i < self.queued_log.len() ==> #[trigger] self.queued_log[i].valid()
-                && self.queued_log[i].payload().len() <= chunk)
+            && self.active_log.len() <= 1 && self.receipts.len() <= requests
             && (forall|i: int| 0 <= i < self.active_log.len() ==> #[trigger] self.active_log[i].valid()
                 && self.active_log[i].payload().len() <= chunk)
             && (forall|i: int| 0 <= i < self.receipts.len() ==> #[trigger] self.receipts[i].valid()
                 && self.receipts[i].payload_len() <= chunk)
             && bounded(self.headers, requests + 1, 33)
+    }
+    pub open spec fn valid(&self, requests: nat, chunk: nat, connections: nat, queue: nat) -> bool {
+        self.other_categories_valid(requests, chunk, connections)
+            && self.queued_log.len() <= queue
+            && (forall|i: int| 0 <= i < self.queued_log.len() ==> #[trigger] self.queued_log[i].valid()
+                && self.queued_log[i].payload().len() <= chunk)
+    }
+
+    // Discharge queued count and frame validity from the actual production
+    // queue. The tighter production chunk limit and other category snapshots
+    // remain explicit premises; no queue count is supplied independently.
+    pub proof fn accounted_payload_with_queue<T>(&self, requests: nat, chunk: nat, connections: nat,
+        queue: &crate::frame_queue::FrameQueue<T>)
+        requires self.other_categories_valid(requests, chunk, connections), queue.valid(),
+            self.queued_log == queue.frames(),
+            forall|i: int| 0 <= i < queue.frames().len() ==> #[trigger] queue.frames()[i].payload().len() <= chunk,
+        ensures self.bytes() <= requests * chunk + 2 * requests * 32768
+            + (connections + 2 * requests) * 16384 + (queue.capacity() + requests + 1) * (chunk + 65)
+            + (requests + 1) * 33,
+    {
+        queue.frame_layout();
+        assert(self.valid(requests, chunk, connections, queue.capacity()));
+        self.accounted_payload_bound(requests, chunk, connections, queue.capacity());
     }
 
     // Guard against accidentally dropping a category from the modeled total.

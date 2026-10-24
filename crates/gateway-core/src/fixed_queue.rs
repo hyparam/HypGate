@@ -18,6 +18,10 @@ impl<T> FixedQueue<T> {
             && forall|i: int| 0 <= i < self.slots.len() ==> (
                 self.slots@[position(self.head as int, i, self.slots.len() as int)].is_some() == (i < self.used))
     }
+    pub proof fn occupancy_bound(&self)
+        requires self.valid(),
+        ensures self.contents().len() <= self.capacity(),
+    {}
     pub fn new(capacity: usize) -> (out: Self)
         requires capacity > 0,
         ensures out.valid(), !out.closed(), out.capacity() == capacity, out.contents() == Seq::<T>::empty(),
