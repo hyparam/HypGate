@@ -15,6 +15,11 @@ fn submission_binds_request_route_and_exact_audited_range() {
         let authority = identity.authorize(7, first.owner()).unwrap();
         let other_route = identity.authorize(8, first.owner()).unwrap();
         let other_request = identity.authorize(7, second.owner()).unwrap();
+        let destinations = vec!["provider zero", "provider one"];
+        let credentials = vec!["credential zero", "credential one"];
+        let resolved = gateway_core::resolved_route::ResolvedRoute::resolve(&authority, &destinations, &credentials).unwrap();
+        let wrong_route = gateway_core::resolved_route::ResolvedRoute::resolve(&other_route, &destinations, &credentials).unwrap();
+        let wrong_request = gateway_core::resolved_route::ResolvedRoute::resolve(&other_request, &destinations, &credentials).unwrap();
         let mut stream = OwnedStream::claim(&registry, first, &authority, strict).ok().unwrap();
         let chunk = stream.advance(vec![1, 2, 3, 4]).unwrap();
         let mut binding = JournalBinding::new();
@@ -35,6 +40,11 @@ fn submission_binds_request_route_and_exact_audited_range() {
         assert!(AuthorizedWrite::prepare(&mut stream, &authority, &binding, 2, 3).is_none());
         if strict { assert!(AuthorizedWrite::prepare(&mut stream, &authority, &binding, 1, 3).is_none()); }
         let write = AuthorizedWrite::prepare(&mut stream, &authority, &binding, 0, 3).unwrap();
+        assert_eq!(resolved.write_bytes(&write, &stream, &authority, &binding, 0), Some(&[1, 2, 3][..]));
+        assert!(wrong_route.write_bytes(&write, &stream, &authority, &binding, 0).is_none());
+        assert!(wrong_request.write_bytes(&write, &stream, &authority, &binding, 0).is_none());
+        assert!(resolved.write_bytes(&write, &stream, &authority, &binding, 1).is_none());
+        assert_eq!(resolved.write_bytes(&write, &stream, &authority, &foreign, 0).is_none(), strict);
         assert_eq!(write.bytes(&stream, &authority, &binding, 0), Some(&[1, 2, 3][..]));
         assert_eq!(write.bytes(&stream, &authority, &foreign, 0).is_none(), strict);
         assert!(write.bytes(&stream, &authority, &binding, 1).is_none());

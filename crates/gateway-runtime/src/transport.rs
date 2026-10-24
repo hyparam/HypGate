@@ -1,5 +1,5 @@
 //! One HTTPS HTTP/1.1 exchange. No redirects, ambient proxies, pooling, or replay.
-use crate::{http_body, http_boundary::{PreparedRequest, prepare_response_parts}, transfer::{self, AuditLog, Direction, TransferStats}};
+use crate::{http_body, http_boundary::{PreparedRequest, prepare_response_parts}, transfer::{AuditLog, Direction, TransferStats}};
 use http::{HeaderMap, StatusCode};
 use hyper_util::rt::TokioIo;
 use std::{future::Future, io, sync::Arc, time::Duration};
@@ -88,7 +88,7 @@ impl HttpsTransport {
         let request = upstream.map(|()| body);
         let operation = async {
             let upload = async {
-                let stats = transfer::copy_body(prepared.stream(), input, &mut body_writer, log, Direction::Upload)
+                let stats = prepared.copy_body(input, &mut body_writer, log, Direction::Upload)
                     .await.map_err(|_| TransportError::Upload)?;
                 body_writer.shutdown().await.map_err(|_| TransportError::Upload)?;
                 Ok::<_, TransportError>(stats)
@@ -98,7 +98,7 @@ impl HttpsTransport {
             let (parts, body) = response.into_parts();
             let (status, headers) = prepare_response_parts(parts).map_err(|_| TransportError::Metadata)?;
             output.start(status, headers).await.map_err(|_| TransportError::Client)?;
-            let download = transfer::copy_body(prepared.stream(), &mut http_body::Reader::new(body), output, log, Direction::Download)
+            let download = prepared.copy_body(&mut http_body::Reader::new(body), output, log, Direction::Download)
                 .await.map_err(|_| TransportError::Download)?;
             output.finish().await.map_err(|_| TransportError::Client)?;
             Ok(ExchangeStats { upload, download })

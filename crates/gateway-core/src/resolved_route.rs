@@ -34,6 +34,31 @@ impl<'a, D, C> ResolvedRoute<'a, D, C> {
         Some(Self { destination: &destinations[route.origin], credential: &credentials[route.credential],
             route, request: authority.request_id() })
     }
+    pub fn write_bytes<'b>(&self, write: &crate::submission::AuthorizedWrite,
+        owner: &'b crate::owned_stream::OwnedStream, authority: &AuthorizedRequest,
+        journal: &crate::journal_binding::JournalBinding, direction: u8) -> (out: Option<&'b [u8]>)
+        requires owner.valid(), authority.valid(),
+        ensures match out {
+            Some(bytes) => self.bound_to(authority) && write.route() == self.route() && write.direction() == direction && direction <= 1 && write.bound_to(authority)
+                && crate::policy::allowed(write.route(), authority.policy().roots(), authority.policy().origins(), authority.policy().credentials()) && write.request() == owner.state().owner()
+                && owner.state().matches(&write.ticket()) && !owner.state().closed()
+                && bytes@ == owner.state().body().subrange(owner.state().position() as int, owner.state().end() as int)
+                && (owner.state().strict() ==> owner.state().end() <= owner.state().durable()
+                    && owner.audited_for(authority, journal) && owner.receipt().is_some()
+                    && owner.receipt().unwrap().valid()
+                    && journal.session() == Some(owner.receipt().unwrap().session())
+                    && owner.receipt().unwrap().record() == crate::framing::encoding(crate::framing::Header {
+                        payload: owner.state().body().len() as u32, tenant: authority.tenant(),
+                        request: authority.request(), chunk: owner.state().chunk(), direction })
+                        + owner.state().body() + owner.receipt().unwrap().checksum()),
+            None => !self.bound_to(authority) || direction > 1 || write.direction() != direction || (owner.state().strict() && (!owner.audited_for(authority, journal) || owner.audit_direction() != direction)) || !write.bound_to(authority) || write.request() != owner.state().owner()
+                || !owner.state().matches(&write.ticket()) || owner.state().closed(),
+        },
+    {
+        if !self.matches(authority) { return None; }
+        let _route = authority.route();
+        write.bytes(owner, authority, journal, direction)
+    }
     pub fn matches(&self, authority: &AuthorizedRequest) -> (ok: bool)
         requires authority.valid(),
         ensures ok == self.bound_to(authority),

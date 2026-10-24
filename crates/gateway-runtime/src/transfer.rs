@@ -44,6 +44,22 @@ impl Drop for CancelOnDrop<'_, '_> {
     fn drop(&mut self) { if self.armed { self.request.cancel(); } }
 }
 
+// Production uses the same resolved owner for dispatch and every body range.
+// The direct binding supports embedders with their own trusted writer mapping.
+pub(crate) trait BodyBinding: Sync {
+    fn bytes<'r>(&self, request: &'r Request<'_>, ticket: &crate::admission::WriteTicket<'_>, direction: Direction) -> Option<&'r [u8]>;
+}
+impl BodyBinding for () {
+    fn bytes<'r>(&self, request: &'r Request<'_>, ticket: &crate::admission::WriteTicket<'_>, direction: Direction) -> Option<&'r [u8]> {
+        request.pending_bytes(ticket, direction)
+    }
+}
+impl<D: Sync, C: Sync> BodyBinding for gateway_core::resolved_route::ResolvedRoute<'_, D, C> {
+    fn bytes<'r>(&self, request: &'r Request<'_>, ticket: &crate::admission::WriteTicket<'_>, direction: Direction) -> Option<&'r [u8]> {
+        request.routed_bytes(self, ticket, direction)
+    }
+}
+
 /// Copy one body sequentially using one outstanding write and one awaited log
 /// append. Successful EOF leaves the request usable for the next direction.
 /// Errors or cancellation close it. EOF/framing correctness belongs to the HTTP
@@ -51,6 +67,12 @@ impl Drop for CancelOnDrop<'_, '_> {
 pub async fn copy_body<R, W, L>(request: &mut Request<'_>, reader: &mut R,
     writer: &mut W, log: &mut L, direction: Direction) -> Result<TransferStats, TransferError>
 where R: AsyncRead + Unpin, W: AsyncWrite + Unpin, L: AuditLog {
+    copy_body_bound(request, reader, writer, log, direction, &()).await
+}
+
+pub(crate) async fn copy_body_bound<R, W, L, B>(request: &mut Request<'_>, reader: &mut R,
+    writer: &mut W, log: &mut L, direction: Direction, binding: &B) -> Result<TransferStats, TransferError>
+where R: AsyncRead + Unpin, W: AsyncWrite + Unpin, L: AuditLog, B: BodyBinding {
     let mut guard = CancelOnDrop { request, armed: true };
     let capacity = guard.request.capacity();
     if capacity == 0 || guard.request.is_closed() { return Err(TransferError::InvalidState); }
@@ -74,7 +96,7 @@ where R: AsyncRead + Unpin, W: AsyncWrite + Unpin, L: AuditLog {
         let mut sent = 0;
         while sent < length {
             let ticket = guard.request.prepare(length - sent, direction).ok_or(TransferError::InvalidState)?;
-            let bytes = guard.request.pending_bytes(&ticket, direction).ok_or(TransferError::InvalidState)?;
+            let bytes = binding.bytes(guard.request, &ticket, direction).ok_or(TransferError::InvalidState)?;
             let count = writer.write(bytes).await.map_err(|_| TransferError::Write)?;
             if !guard.request.complete(&ticket, count) { return Err(TransferError::InvalidState); }
             if count == 0 { return Err(TransferError::WriteZero); }

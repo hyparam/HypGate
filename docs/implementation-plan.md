@@ -7,7 +7,7 @@
 | 3. Crash-safe logging | 15/15 | ✓ |
 | 4. Availability hardening | 16/16 | ✓ |
 | 5. Auditable first release | 9/9 | ✓ |
-| [6. Async ownership and effect composition](#6-async-ownership-and-effect-composition) | 5/8 | ☐ |
+| [6. Async ownership and effect composition](#6-async-ownership-and-effect-composition) | 6/8 | ☐ |
 
 Progress counts completed rows in each milestone's table below. Rows are not
 weighted estimates of effort or proof coverage; an open row can still block the
@@ -320,7 +320,7 @@ Exit criteria:
 | ✓ | TLS jobs after request cancellation: the same credited job/reply path retains handshake state and sockets through blocked polls and unread replies; verified handoff transfers successful results to a live request before releasing pool capacity. Queued cancellation, blocked polls, panic, runtime shutdown, and actual TLS exchange regressions pass under the same adapter assumptions. |
 | ☐ | HTTP cleanup tails: prove retained mailbox/body buffers remain charged to their owners after a request or connection is canceled. Reader substep implemented: production `ReadBuffer` verifies bounded frame load, exact read ranges, and full backing charge through partial consumption; mailbox closure now transfers the exact pending value and its charge to a verified cleanup owner through reported destruction. Global owner-count composition remains open. |
 | ☐ | Compose cleanup-before-capacity-reuse across all owners: connect the worker, connection, HTTP, disk, DNS, and TLS lifecycles to production ownership across cancellation, normal completion, panic, and shutdown. |
-| ☐ | Upstream mediation: direction-bound write capabilities now compose authorization and exact receipt/session evidence; `ResolvedRoute` selects the actual configured destination and credential, and private prepared metadata is checked before connection effects. Remaining: one explicit dispatch-to-write composition and final adapter audit, alongside the separate resource-composition row. |
+| ✓ | Upstream mediation: production HTTPS transfers call `ResolvedRoute::write_bytes` through their privately paired resolved route and request. The checked composition ties policy-authorized destination/credential handles to exact live write ranges and, in strict mode, exact tenant/request/chunk/direction receipts from the designated journal session. Availability retains authorization/routing checks. Concrete table selection is verified; parsing, secret provisioning, initial logger/file identity, Rust ownership, actual writer correspondence, and I/O truth remain explicit adapter assumptions. |
 
 DNS/TLS checkpoint validation: the locked workspace suite and five compile-fail
 doctests pass (opt-in workloads excluded); the pinned Cargo/Verus check reports
@@ -411,6 +411,20 @@ join from this concrete dispatch owner to the body-write capability and the fina
 adapter audit remain to be completed before checking off upstream mediation.
 Validation: 249 Cargo/Verus checks pass, the locked workspace suite and six
 compile-fail doctests pass, and all 208 deliberate mutations are rejected by proof.
+
+Final upstream-mediation checkpoint: `ResolvedRoute::write_bytes` is the checked
+composition gate used by production HTTPS body writes. Both upload and download
+flow through `PreparedRequest::copy_body`, `RoutedRequest::copy_body`, and the
+resolved-route `BodyBinding`; `Request::routed_bytes` invokes the core gate
+immediately before the borrowed bytes reach the existing single `writer.write`
+call. The same immutable resolved owner supplies the configured destination and
+credential. The final source audit and remaining assumptions are recorded in the
+[end-to-end audit](end-to-end-audit.md#milestone-6-final-upstream-mediation-audit).
+This supersedes the earlier open upstream checkpoints above. The separate HTTP
+ownership and cross-owner resource-composition rows remain unfinished.
+Validation: 250 Cargo/Verus checks, the locked workspace suite with six compile-fail
+doctests, and the extended wrong-dispatch regression pass; all 209 deliberate
+mutations are rejected by proof. Milestone 6 is now six of eight rows complete.
 
 Start with the shared wrapper to reduce duplicated trusted lifetime logic. Preserve
 the existing task-capture destruction tests for both lease types and their

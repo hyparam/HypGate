@@ -201,6 +201,12 @@ impl<'a> Request<'a> {
         let Some(LeaseState::Streaming(stream)) = self.lease.state.as_ref() else { return None; };
         ticket.core.bytes(stream, &self.authorized, &self.journal, direction.id())
     }
+    pub(crate) fn routed_bytes<D, C>(&self, route: &gateway_core::resolved_route::ResolvedRoute<'_, D, C>,
+        ticket: &WriteTicket<'_>, direction: Direction) -> Option<&[u8]> {
+        if !std::ptr::eq(ticket.admission, self.lease.admission) { return None; }
+        let Some(LeaseState::Streaming(stream)) = self.lease.state.as_ref() else { return None; };
+        route.write_bytes(&ticket.core, stream, &self.authorized, &self.journal, direction.id())
+    }
     pub fn complete(&mut self, ticket: &WriteTicket<'_>, count: usize) -> bool {
         if !std::ptr::eq(ticket.admission, self.lease.admission) { return false; }
         ticket.core.complete(self.stream_mut(), count)

@@ -16,6 +16,8 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("resolved_route.rs", "dispatch_submits_with_unbound_route", "if !self.matches(authority) { return None; }", ""),
+
     ("resolved_route.rs", "resolved_route_wrong_destination", "destination: &destinations[route.origin]", "destination: &destinations[0]"),
     ("resolved_route.rs", "resolved_route_wrong_credential", "credential: &credentials[route.credential]", "credential: &credentials[0]"),
     ("resolved_route.rs", "resolved_route_ignores_request", "self.request == authority.request_id() && ", ""),

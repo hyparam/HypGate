@@ -317,3 +317,30 @@ and correct response-direction partial writes. These replace the corresponding
 historical transport/configuration joins above, without claiming a proof of
 Hyper/TLS/DNS or peer delivery. One explicit composition between the resolved
 dispatch owner and the body-write capability remains in milestone 6.
+
+
+## Milestone 6 final upstream mediation audit
+
+The current production chain is now explicit:
+
+| Boundary | Checked fact / actual adapter binding |
+| --- | --- |
+| Configuration to resolved dispatch | `ResolvedRoute::resolve` selects the actual immutable destination and credential by the authorized indices, with root-policy permission. `RoutedRequest` privately pairs that owner with the admitted request. |
+| Resolved dispatch to HTTP/TLS | `PreparedRequest::take_upstream` validates configured URI, Host, credential, and method before connection effects; transport derives the socket/TLS host from the same configured destination and sends the origin-form request once. These metadata and I/O bindings are trusted Rust, covered by configuration, HTTP boundary, and real TLS exchange tests. |
+| Resolved dispatch to every body range | Both production transport directions call `PreparedRequest::copy_body`, forwarding the same `RoutedRequest` owner into `copy_body_bound`. Its resolved `BodyBinding` calls `Request::routed_bytes`, which checks admission identity and invokes `ResolvedRoute::write_bytes`. |
+| Core composition | Successful `write_bytes` establishes matching resolved/write/request authority, allowed route/credential, direction, live ticket, and exact pending slice. Strict mode additionally establishes a valid current-chunk receipt with exact tenant/request/chunk/direction/payload and the designated journal session. Availability omits receipt evidence while retaining route/authority/direction checks. |
+| Submission and completion | `copy_body_bound` borrows the returned slice into its one `writer.write` call, then accounts the returned count using the same ticket. Upload uses the provider body channel mapped into this request; download uses the response sink. Cancellation blocks further byte access without erasing issued completion accounting. |
+
+This closes the milestone's upstream mediation row under the explicit adapter
+assumptions: trusted configuration and secret provisioning, initial logger
+selection and unique file-session identity, Rust private ownership/borrows,
+truthful async I/O/count/destructor reports, and Hyper/TLS/DNS/OS behavior. The
+proof covers body submission, not peer receipt or physical power-loss durability.
+The generic public `copy_body` helper deliberately supports embedders with their
+own writer mapping; the production HTTPS path always uses the resolved binding.
+Tests cover wrong resolved request/route, foreign session, mismatched direction,
+exact partial ranges, stale tickets, strict unaudited rejection, availability,
+metadata substitution, and real TLS transport. At this checkpoint 250 Verus
+checks, the locked workspace suite and six compile-fail doctests pass, and all
+209 mutations are rejected. The resource/HTTP ownership composition rows remain
+open; closing this row does not claim a whole-runtime memory or scheduling proof.

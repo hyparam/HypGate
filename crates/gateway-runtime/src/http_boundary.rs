@@ -33,6 +33,11 @@ pub struct PreparedRequest<'a> {
     upstream: Request<()>,
 }
 impl<'a> PreparedRequest<'a> {
+    pub(crate) async fn copy_body<R, W, L>(&mut self, reader: &mut R, writer: &mut W, log: &mut L,
+        direction: crate::transfer::Direction) -> Result<crate::transfer::TransferStats, crate::transfer::TransferError>
+    where R: tokio::io::AsyncRead + Unpin, W: tokio::io::AsyncWrite + Unpin, L: crate::transfer::AuditLog {
+        self.routed.copy_body(reader, writer, log, direction).await
+    }
     pub fn request_id(&self) -> u64 { self.routed.request_id() }
     pub fn tenant_id(&self) -> u64 { self.routed.tenant_id() }
     pub fn destination(&self) -> &Uri { self.routed.destination() }
