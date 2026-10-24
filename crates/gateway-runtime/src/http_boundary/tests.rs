@@ -199,3 +199,57 @@ fn many_connection_tokens_keep_only_distinct_relevant_names_but_validate_all() {
     h.insert("connection", HeaderValue::from_str(&(repeated + ",invalid name")).unwrap());
     assert!(matches!(prep(&c, &h, "/routes/7"), Err(HttpError::BadRequest)));
 }
+
+#[tokio::test]
+async fn maximum_configured_request_head_serializes_below_64_kib() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use http_body_util::BodyExt;
+    use crate::config::{MAX_CREDENTIAL_BYTES, MAX_DESTINATION_BYTES};
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let host = ["h".repeat(63), "h".repeat(63), "h".repeat(63), "h".repeat(61)].join(".");
+        assert_eq!(host.len(), 253);
+        let prefix = format!("https://{host}:65535/");
+        let endpoint = format!("{prefix}{}", "p".repeat(MAX_DESTINATION_BYTES - prefix.len()));
+        let routes = json!([{"tenant":1,"selector":7,"origin":0,"credential":0}]);
+        let root = json!({
+            "identities":[{"tenant":1,"sha256":format!("{:x}",Sha256::digest(b"gateway-token"))}],
+            "destinations":[endpoint], "credentials":[{"tenant":1,"kind":"bearer","env":"KEY"}],
+            "grants":routes,"limits":{"requests":1,"chunk_bytes":4096},"logging":"strict"
+        });
+        let config = GatewayConfig::from_json(&serde_json::to_vec(&root).unwrap(),
+            &serde_json::to_vec(&json!({"routes":routes})).unwrap(), |_| Some("k".repeat(MAX_CREDENTIAL_BYTES))).unwrap();
+        let mut input = HeaderMap::new();
+        input.insert("authorization", HeaderValue::from_static("Bearer gateway-token"));
+        for _ in 0..98 { input.append("accept", HeaderValue::from_static("x")); }
+        let used: usize = input.iter().map(|(n, v)| n.as_str().len() + v.as_bytes().len()).sum();
+        input.append("accept", HeaderValue::from_str(&"a".repeat(MAX_HEADER_BYTES - used - "accept".len())).unwrap());
+        assert_eq!(input.len(), MAX_HEADER_VALUES);
+        let mut prepared = prep(&config, &input, "/routes/7").unwrap();
+        let path = prepared.upstream.uri().path_and_query().unwrap().clone();
+        *prepared.upstream.uri_mut() = Uri::builder().path_and_query(path.clone()).build().unwrap();
+        let (client, mut peer) = tokio::io::duplex(65536);
+        let (mut sender, connection) = hyper::client::conn::http1::Builder::new().writev(true)
+            .handshake(hyper_util::rt::TokioIo::new(client)).await.unwrap();
+        let driver = tokio::spawn(connection);
+        let (mut writer, body) = crate::http_body::channel(16384);
+        let request = std::mem::take(&mut prepared.upstream).map(|()| body);
+        let capture = async {
+            let mut head = Vec::new();
+            while !head.ends_with(b"\r\n\r\n") {
+                head.push(peer.read_u8().await.unwrap());
+                assert!(head.len() <= 65536);
+            }
+            let mut end = [0; 5]; peer.read_exact(&mut end).await.unwrap(); assert_eq!(&end, b"0\r\n\r\n");
+            peer.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await.unwrap();
+            peer.shutdown().await.unwrap();
+            head
+        };
+        let receive = async { sender.send_request(request).await.unwrap().into_body().collect().await.unwrap(); };
+        let upload = async { writer.shutdown().await.unwrap(); };
+        let (head, (), ()) = tokio::join!(capture, receive, upload);
+        assert!(head.len() > 48 * 1024);
+        assert!(head.starts_with(format!("POST {} HTTP/1.1\r\n", path.as_str()).as_bytes()));
+        assert!(String::from_utf8(head).unwrap().contains(&format!("authorization: Bearer {}\r\n", "k".repeat(MAX_CREDENTIAL_BYTES))));
+        drop(sender); driver.await.unwrap().unwrap();
+    }).await.unwrap();
+}

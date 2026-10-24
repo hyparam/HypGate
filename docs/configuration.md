@@ -14,7 +14,9 @@ The root object has exactly these fields:
   characters encoding the hash of a high-entropy gateway token).
 - `destinations`: fixed HTTPS endpoint strings, indexed from zero. For example,
   `https://api.openai.com/v1/responses` or
-  `https://api.anthropic.com/v1/messages`. Each includes its fixed native API path.
+  `https://api.anthropic.com/v1/messages`. Each includes its fixed native API path
+  and is limited to 8,192 ASCII bytes, including scheme and authority. Oversized
+  endpoints are rejected before credential resolution.
 - `credentials`: records containing `tenant`, `kind` (`bearer` or `api_key`), and
   `env` (the name passed to the secret resolver). Secret values are not JSON fields.
 - `grants`: records containing `tenant`, `selector`, `origin` (destination index),
@@ -96,7 +98,8 @@ count, and C the credential count. The immutable configuration retains:
 - I identity structs with a 32-byte digest vector each.
 - A route structs. Root-grant structs, origin count, and credential-owner indices
   are kept only as erased proof snapshots after successful core validation.
-- D parsed URI values and their backing strings.
+- D parsed URI values and their backing strings, with at most 8,192 input bytes
+  per destination.
 - C credential structs and header values. Each value holds at most 8,199 bytes
   including the seven-byte bearer prefix (API keys need at most 8,192).
 - The request registry, with R `u64` slot entries and fixed-size metadata. The

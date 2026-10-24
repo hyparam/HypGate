@@ -103,3 +103,17 @@ fn schemas_reject_unknown_duplicate_and_oversized_input() {
         br#"{"routes":[],"routes":[]}"#, |_| None), Err(ConfigError::Syntax)));
     assert!(matches!(GatewayConfig::from_json(&vec![b' '; MAX_CONFIG + 1], b"{}", |_| None), Err(ConfigError::Limits)));
 }
+
+#[test]
+fn destination_size_is_bounded_before_secret_loading() {
+    let prefix = "https://api.example.com/";
+    let endpoint = format!("{prefix}{}", "p".repeat(MAX_DESTINATION_BYTES - prefix.len()));
+    let mut r = root(); r["destinations"][0] = json!(endpoint);
+    assert!(load(&r, &candidate(&r)).is_ok());
+    r["destinations"][0] = json!(format!("{endpoint}x"));
+    let mut secret_calls = 0;
+    let result = GatewayConfig::from_json(&serde_json::to_vec(&r).unwrap(),
+        &serde_json::to_vec(&candidate(&r)).unwrap(), |_| { secret_calls += 1; Some("secret".into()) });
+    assert!(matches!(result, Err(ConfigError::Destination)));
+    assert_eq!(secret_calls, 0);
+}

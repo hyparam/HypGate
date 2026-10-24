@@ -16,7 +16,7 @@ another milestone or treat adapter assumptions as proved runtime behavior.
 | Mutation tests reject corruption, cross-request writes, duplicate advancement, capacity violations, and strict-mode forwarding before durability | All 139 mutations are rejected by proof obligations; the script verifies the unmodified library first. Named defects include wrong owner/generation, full-write substitution, omitted payload/receipt storage, queue overwrite/reopening, and advancing beyond durability. Mutations test the strength of specified contracts, not the completeness of the threat model. | Covered for listed defect classes |
 | Verified admission issues private authorization tied to identity/policy/origin/credential; candidate configuration cannot expand root grants | Policy validation, authentication, and tenant-scoped authorization establish those relationships. AuthorizedRequest construction is private and its policy borrow binds the immutable snapshot. Runtime dispatch consumes PreparedRequest; concrete URI/DNS/TLS/secret binding remains trusted and tested. | Covered at the verified admission boundary |
 
-The current workspace has 156 passing regular tests and five compile-fail doctests.
+The current workspace has 158 passing regular tests and five compile-fail doctests.
 The raw-construction, raw-claim, and raw-release negative examples require the
 private-method diagnostic; existing examples prohibit mutable stream extraction
 and completing a read while its mutable buffer borrow remains live. Low-level
@@ -51,7 +51,9 @@ without reopening the external API.
    flattening; partial non-vectored fallback preserves both request/response bytes.
    The pinned-source queued-output audit now bounds retained original streaming
    payloads including the partial front, with allocation-lifetime regression
-   coverage. Header/parser capacities and descriptor/allocator overhead remain. Hyper parser/output backing capacity,
+   coverage. Destination inputs are now capped at 8 KiB, and a serialized-head
+   inventory plus maximum-input wire test bounds request/response heads below
+   64 KiB. Header/parser capacities and descriptor/allocator overhead remain. Hyper parser/output backing capacity,
    metadata collections, TLS handshake/cache active owners, task/waker storage,
    and allocator/OS storage remain outside the subtotal. The dependency audit
    distinguishes known control-object counts and stack reservations from unresolved

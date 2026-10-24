@@ -68,10 +68,15 @@ Consequently, each filtered request or response owns at most 32 KiB of copied
 value contents. Requests additionally insert the configured Host, credential,
 and `accept-encoding: identity`. If H is the configured authority spelling length,
 a conservative outgoing request name/value subtotal is 41,007 + H bytes, with at
-most 103 values. H and the serialized request path must be budgeted from the
-configuration; the 253-byte DNS hostname limit is not a bound on the entire URI.
-HTTP status/request lines, wire separators, HeaderMap storage, value metadata,
-allocator slack, and Hyper's serialization buffers are outside these subtotals.
+most 103 values. The configured full HTTPS URI is now capped at 8,192 bytes. If P is its
+origin-form path length, H + P is conservatively at most 8,192 (including default
+path handling); this uses the whole-URI limit, not an assumption about port
+spelling length. Configuration validation rejects oversize before secret loading.
+Wire separators and start lines are budgeted in the
+[serialization audit](dependency-resources.md#serialized-head-lengths), which puts
+production request and response heads below 64 KiB under the pinned serializer.
+HeaderMap storage, value metadata, allocator slack, and Hyper's backing capacities
+remain outside these logical wire-length bounds.
 
 Connection-header processing validates every comma-separated token, including
 unknown names, but retains only distinct names relevant to the allowlist: at most

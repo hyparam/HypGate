@@ -7,6 +7,8 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 const MAX_CONFIG: usize = 1024 * 1024;
+pub(crate) const MAX_DESTINATION_BYTES: usize = 8192;
+pub(crate) const MAX_CREDENTIAL_BYTES: usize = 8192;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ConfigError { Syntax, Limits, Identity, Destination, Credential, Policy }
@@ -69,7 +71,7 @@ pub struct RoutedRequest<'a> {
 
 fn destination(text: &str) -> Result<Uri, ConfigError> {
     // Keep spelling strict rather than rely on permissive URL normalization.
-    if !text.starts_with("https://") || !text.is_ascii()
+    if text.len() > MAX_DESTINATION_BYTES || !text.starts_with("https://") || !text.is_ascii()
         || text.bytes().any(|b| b <= 32 || b == 127 || b == b'\\' || b == b'#') {
         return Err(ConfigError::Destination);
     }
@@ -141,7 +143,7 @@ impl GatewayConfig {
                 return Err(ConfigError::Credential);
             }
             let raw = secret(&input.env).ok_or(ConfigError::Credential)?;
-            if raw.is_empty() || raw.len() > 8192 || !raw.bytes().all(|b| (33..=126).contains(&b)) {
+            if raw.is_empty() || raw.len() > MAX_CREDENTIAL_BYTES || !raw.bytes().all(|b| (33..=126).contains(&b)) {
                 return Err(ConfigError::Credential);
             }
             let text = match input.kind { CredentialKind::Bearer => format!("Bearer {raw}"), CredentialKind::ApiKey => raw };

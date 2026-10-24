@@ -138,6 +138,51 @@ retain a large source owner through that copy. Connection-option storage retains
 at most five/six relevant distinct names. See [metadata accounting](http-boundary.md#metadata-ownership-and-allocation)
 for inserted credential/Host bytes and excluded serialization/collection storage.
 
+### Serialized head lengths
+
+A root-configured destination is now limited to 8,192 ASCII bytes before secret
+loading. Previously, a path could consume nearly the one-MiB config input limit
+and be serialized again for each admitted request. The new limit bounds that
+amplification while retaining fixed native provider paths. Credential values
+remain capped at 8,192 bytes before the optional seven-byte bearer prefix.
+
+For a production POST, let H be configured authority length and P the origin-form
+path length. The complete URI limit implies H + P <= 8,192, even with unusually
+long numeric port spelling; the DNS hostname limit alone would not establish
+this. The following conservative wire-length inventory uses the filtered header
+allowlists and Hyper 1.12.0's default serialization:
+
+| Request-head part | Byte allowance |
+| --- | ---: |
+| Forwarded plus injected header names/values, excluding Host value | 41,007 |
+| Separators and CRLF for up to 103 fields | 412 |
+| Host value plus request path | 8,192 |
+| POST/version/spaces/start-line CRLF | 16 |
+| Generated Transfer-Encoding: chunked line | 28 |
+| Final CRLF | 2 |
+| Total | 49,657 |
+
+Response forwarding retains at most 32,768 name/value bytes and 100 fields. A
+128-byte allowance covers Hyper's canonical status line; 37 bytes cover Date,
+19 cover Connection: close, and 66 conservatively cover generated framing lines.
+Together with separators and the final CRLF, this is at most 33,420 bytes. The
+upstream's arbitrary reason phrase is not forwarded: only its StatusCode is kept.
+Generated fixed responses have small fixed headers within this allowance.
+
+Both inventories fit 64 KiB. `maximum_configured_request_head_serializes_below_64_kib`
+uses the real client serializer with an exact-limit URI, a 253-byte DNS name,
+a five-digit port, an 8,192-byte bearer secret, and 100 inbound fields filling the
+32 KiB name/value budget. It captures the complete outgoing head, checks the
+exact path/credential, and completes the empty streamed exchange. The config
+boundary test accepts 8,192 bytes, rejects 8,193, and observes no secret calls
+on rejection. These are adapter/source bounds and regressions, not Verus proofs.
+
+Hyper requests an initial 8,192-byte header vector and can grow it while encoding
+a larger head. A bound on serialized length does not itself bound Vec spare
+capacity, allocator rounding, or overlap between old and replacement allocations.
+Those remain explicit backing-storage obligations; body data uses queue mode and
+does not extend this header vector during streaming.
+
 ### Header collections and parser scratch
 
 The explicit wire-head limit includes the request/status line, field separators,
