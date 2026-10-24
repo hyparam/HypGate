@@ -161,7 +161,7 @@ fn receipt(record: gateway_runtime::transfer::LogRecord<'_>) -> gateway_runtime:
         chunk: record.chunk, direction: match record.direction {
             gateway_runtime::transfer::Direction::Upload => 0, gateway_runtime::transfer::Direction::Download => 1 },
     }, record.bytes).unwrap().seal(&[0; 32]);
-    let mut journal = gateway_core::journal::Journal::new();
+    let mut journal = gateway_core::journal::Journal::new(0);
     let ticket = journal.begin(frame.bytes().len() as u64).unwrap();
     journal.commit_frame(&ticket, frame).unwrap()
 }

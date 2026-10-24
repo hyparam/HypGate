@@ -60,7 +60,7 @@ impl DiskWorker {
     pub open spec fn owns_finished<C>(&self, job: &FinishedAppend<C>) -> bool {
         self.busy() && self.session() == job.session() && self.next() == job.generation() + 1
             && match job.receipt() {
-                Some(receipt) => self.frame().is_some() && receipt.record() == self.frame().unwrap().contents(),
+                Some(receipt) => receipt.session() == self.session() && self.frame().is_some() && receipt.record() == self.frame().unwrap().contents(),
                 None => true,
             }
     }
@@ -134,11 +134,11 @@ impl DiskWorker {
         storage: &mut S, enabled: bool) -> (out: FinishedAppend<C>)
         requires self.valid(), self.owns(&job), job.valid(), old(journal).valid(), old(storage).valid(),
             !old(journal).failed() ==> old(storage).written() == old(journal).history(),
-        ensures final(journal).valid(), final(storage).valid(), out.valid(),
-            (!enabled || old(journal).failed()) ==> *final(storage) == *old(storage), self.owns_finished(&out),
+        ensures final(journal).session() == old(journal).session(), final(journal).valid(), final(storage).valid(), out.valid(),
+            (!enabled || old(journal).failed() || old(journal).session() != self.session()) ==> *final(storage) == *old(storage), self.owns_finished(&out),
             out.generation() == job.generation(), out.session() == job.session(), out.completion() == job.completion(),
             match out.receipt() {
-                Some(receipt) => enabled && !old(journal).failed() && !final(journal).failed()
+                Some(receipt) => receipt.session() == self.session() && receipt.session() == old(journal).session() && enabled && !old(journal).failed() && !final(journal).failed()
                     && receipt.record() == job.frame().contents()
                     && receipt.acknowledged() == final(journal).history()
                     && final(journal).history() == old(journal).history() + job.frame().contents()
@@ -179,11 +179,11 @@ impl<C: Completion> ActiveAppend<C> {
         -> (out: FinishedAppend<C>)
         requires self.valid(), old(journal).valid(), old(storage).valid(),
             !old(journal).failed() ==> old(storage).written() == old(journal).history(),
-        ensures final(journal).valid(), final(storage).valid(), out.valid(),
-            (!enabled || old(journal).failed()) ==> *final(storage) == *old(storage),
+        ensures final(journal).session() == old(journal).session(), final(journal).valid(), final(storage).valid(), out.valid(),
+            (!enabled || old(journal).failed() || old(journal).session() != self.session()) ==> *final(storage) == *old(storage),
             out.generation() == self.generation(), out.session() == self.session(), out.completion() == self.completion(),
             match out.receipt() {
-                Some(receipt) => enabled && !old(journal).failed() && !final(journal).failed()
+                Some(receipt) => receipt.session() == self.session() && receipt.session() == old(journal).session() && enabled && !old(journal).failed() && !final(journal).failed()
                     && receipt.record() == self.frame().contents()
                     && receipt.acknowledged() == final(journal).history()
                     && final(journal).history() == old(journal).history() + self.frame().contents()
@@ -193,7 +193,7 @@ impl<C: Completion> ActiveAppend<C> {
             },
     {
         let mut receipt = None;
-        if enabled {
+        if enabled && journal.session_id() == self.session {
             if let Some(ticket) = journal.begin(self.frame.bytes().len() as u64) {
                 if storage.write_all(self.frame.bytes()) && storage.sync() {
                     receipt = journal.commit_frame(&ticket, self.frame);
@@ -206,7 +206,7 @@ impl<C: Completion> ActiveAppend<C> {
 }
 impl<C> FinishedAppend<C> {
     pub closed spec fn valid(&self) -> bool {
-        match self.receipt { Some(r) => r.valid(), None => true }
+        match self.receipt { Some(r) => r.valid() && r.session() == self.session, None => true }
     }
     pub closed spec fn receipt(&self) -> Option<DurableFrame> { self.receipt }
     pub closed spec fn completion(&self) -> C { self.completion }

@@ -109,7 +109,7 @@ impl DiskLog {
         let worker_health = healthy.clone();
         let thread = std::thread::Builder::new().name("soundgate-audit".into()).stack_size(WORKER_STACK_BYTES).spawn(move || {
             let _health_on_exit = UnhealthyOnExit(worker_health.clone(), receiver.clone());
-            let mut journal = Journal::new();
+            let mut journal = Journal::new(u128::from_le_bytes(session));
             let mut storage = Storage(file);
             let mut owner = gateway_core::disk_worker::DiskWorker::new(payload_limit, u128::from_le_bytes(session));
             while let Some(job) = receiver.recv(&mut owner) {

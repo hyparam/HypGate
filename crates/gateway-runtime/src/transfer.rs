@@ -88,7 +88,7 @@ pub(crate) fn receipt_for_test(record: LogRecord<'_>) -> DurableFrame {
         payload: record.bytes.len() as u32, tenant: record.tenant, request: record.request,
         chunk: record.chunk, direction: match record.direction { Direction::Upload => 0, Direction::Download => 1 },
     }, record.bytes).unwrap().seal(&[0; 32]);
-    let mut journal = gateway_core::journal::Journal::new();
+    let mut journal = gateway_core::journal::Journal::new(0);
     let ticket = journal.begin(frame.bytes().len() as u64).unwrap();
     journal.commit_frame(&ticket, frame).unwrap()
 }

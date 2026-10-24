@@ -16,6 +16,12 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("journal.rs", "journal_session_wrong_ticket", "Some(Append { session: self.session,", "Some(Append { session: 0,"),
+    ("journal.rs", "journal_session_wrong_receipt", "Some(DurableFrame { session: self.session,", "Some(DurableFrame { session: 0,"),
+    ("journal.rs", "journal_session_accepts_foreign_ticket", "if self.failed || t.session != self.session || t.start != self.written", "if self.failed || t.start != self.written"),
+    ("journal.rs", "journal_session_commits_foreign_ticket", "if t.session != self.session || t.start", "if t.start"),
+    ("disk_worker.rs", "disk_session_accepts_foreign_journal", "if enabled && journal.session_id() == self.session {", "if enabled {"),
+
     ("disk_worker.rs", "disk_syncs_after_permanent_failure", "let mut receipt = None;", "let mut receipt = None; let _ = storage.sync();"),
     ("disk_worker.rs", "disk_release_accepts_another_session", " || token.session != self.session", ""),
     ("disk_worker.rs", "disk_dequeues_while_active", "if self.busy || self.next == u64::MAX", "if self.next == u64::MAX"),
@@ -25,7 +31,7 @@ MUTATIONS = [
     ("disk_worker.rs", "disk_ignores_payload_budget", " || queue.payload_capacity() > self.payload_limit", ""),
     ("disk_worker.rs", "disk_commits_without_write", "storage.write_all(self.frame.bytes()) && storage.sync()", "storage.sync()"),
     ("disk_worker.rs", "disk_commits_without_sync", "storage.write_all(self.frame.bytes()) && storage.sync()", "storage.write_all(self.frame.bytes())"),
-    ("disk_worker.rs", "disk_writes_when_disabled", "if enabled {", "if true {"),
+    ("disk_worker.rs", "disk_writes_when_disabled", "if enabled && journal.session_id() == self.session {", "if journal.session_id() == self.session {"),
     ("disk_worker.rs", "disk_bound_omits_active_credit", "<= (queue.capacity() + 1) * (self.payload_limit() + 65),", "<= queue.capacity() * (self.payload_limit() + 65),"),
     ("task_credit.rs", "task_handoff_without_live_owner", " || !owner.is_live(registry)", ""),
     ("task_credit.rs", "task_handoff_wrong_owner", "Phase::HandedOff(owner.owner_id())", "Phase::HandedOff(0)"),
@@ -143,9 +149,9 @@ MUTATIONS = [
     ("framing.rs", "discard_recovered_payload", "RecoveredRecord { header: fields, bytes }", "RecoveredRecord { header: fields, bytes: Vec::new() }"),
     ("stream.rs", "wrong_log_chunk_id", "ensures out == self.chunk(),\n    { self.chunk }", "ensures out == self.chunk(),\n    { 0 }"),
     ("journal.rs", "deny_valid_append", "if self.failed || self.pending != 0 || length == 0 || length > u64::MAX - self.written", "if true"),
-    ("journal.rs", "deny_written_record", "if self.failed || t.start != self.written || t.end != self.pending", "if true || t.start != self.written || t.end != self.pending"),
+    ("journal.rs", "deny_written_record", "if self.failed || t.session != self.session || t.start != self.written || t.end != self.pending", "if true || t.start != self.written || t.end != self.pending"),
     ("journal.rs", "deny_ready_sync", "if self.failed || self.pending != 0 { return false; }", "if true { return false; }"),
-    ("journal.rs", "deny_durable_ack", "if self.failed || t.start != self.acknowledged || t.end <= t.start || self.durable < t.end", "if true"),
+    ("journal.rs", "deny_durable_ack", "if self.failed || t.session != self.session || t.start != self.acknowledged || t.end <= t.start || self.durable < t.end", "if true"),
     ("resource.rs", "ignore_combined_budget", "total <= 134217728", "true"),
     ("resource.rs", "allow_zero_request_budget", "requests == 0 || ", ""),
     ("resource.rs", "hide_active_requests", "(active, self.slots.len())", "(0, self.slots.len())"),

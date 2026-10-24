@@ -106,3 +106,11 @@ operators, concurrent external file modification, and unavailable storage hardwa
 are outside this assumption. Raw bodies can contain secrets; file permissions do
 not substitute for retention, encryption, or operator access policy. The current
 format records body chunks, not completion/abort events or HTTP status metadata.
+
+
+Journal identity is now explicit in the checked core: append tickets and durable
+receipts carry the immutable file-session ID. The worker refuses a journal from
+another session before any write or sync. Production initializes both owners
+from the same random file-header session. Uniqueness of that session and its
+correspondence to the actual file remain trusted. Request-side receipt-session
+validation is a separate unfinished milestone 6 obligation.

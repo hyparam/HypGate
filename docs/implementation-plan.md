@@ -320,7 +320,7 @@ Exit criteria:
 | ✓ | TLS jobs after request cancellation: the same credited job/reply path retains handshake state and sockets through blocked polls and unread replies; verified handoff transfers successful results to a live request before releasing pool capacity. Queued cancellation, blocked polls, panic, runtime shutdown, and actual TLS exchange regressions pass under the same adapter assumptions. |
 | ☐ | HTTP cleanup tails: prove retained mailbox/body buffers remain charged to their owners after a request or connection is canceled. Reader substep implemented: production `ReadBuffer` verifies bounded frame load, exact read ranges, and full backing charge through partial consumption; mailbox closure now transfers the exact pending value and its charge to a verified cleanup owner through reported destruction. Global owner-count composition remains open. |
 | ☐ | Compose cleanup-before-capacity-reuse across all owners: connect the worker, connection, HTTP, disk, DNS, and TLS lifecycles to production ownership across cancellation, normal completion, panic, and shutdown. |
-| ☐ | Authorization and journal-session receipts for upstream writes: prove every submitted body range belongs to the admitted request and its authorized destination/credential binding; strict-mode ranges additionally require an exact matching durable receipt from the request's designated journal session. |
+| ☐ | Authorization and journal-session receipts for upstream writes: prove every submitted body range belongs to the admitted request and its authorized destination/credential binding; strict-mode ranges additionally require an exact matching durable receipt from the request's designated journal session. Journal-side provenance is implemented: tickets and receipts carry an immutable session, and the disk worker refuses a mismatched journal before I/O. Request-side session binding and the authorization/submission composition remain open. |
 
 DNS/TLS checkpoint validation: the locked workspace suite and five compile-fail
 doctests pass (opt-in workloads excluded); the pinned Cargo/Verus check reports
@@ -345,6 +345,18 @@ rejected by proof. The locked workspace suite and six compile-fail doctests pass
 including cleanup extraction, repeated closure, and panicking-destruction cases.
 The actual destructor report and enclosing task correspondence
 remain trusted, and the global HTTP ownership count is still unfinished.
+
+Milestone 6 journal-session checkpoint: `Journal` and `AuditJournal` now require
+an explicit session ID; all transitions preserve it, foreign-session append
+reservations are rejected, and successful commits issue receipts from that exact
+session. The production worker constructs its journal from the file header's
+random session and checks the job/session match before I/O. Session uniqueness
+and the file-to-journal correspondence remain adapter assumptions. This closes
+the journal-side prerequisite only: `Request`/`Stream` receipt acceptance still
+needs to enforce the designated session, so upstream mediation remains unfinished.
+Validation: Cargo/Verus reports 233 checks and zero errors; the locked workspace
+suite and six compile-fail doctests pass, the real-file receipt/session regression
+passes, and all 182 deliberate mutations are rejected by proof.
 
 Start with the shared wrapper to reduce duplicated trusted lifetime logic. Preserve
 the existing task-capture destruction tests for both lease types and their

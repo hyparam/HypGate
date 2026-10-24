@@ -12,6 +12,8 @@ pub open spec fn encoded_frames(frames: Seq<RecordFrame>) -> Seq<u8>
 
 pub struct AuditJournal { inner: Journal, frames: Ghost<Seq<RecordFrame>> }
 impl AuditJournal {
+    pub closed spec fn session(&self) -> u128 { self.inner.session() }
+    pub fn session_id(&self) -> (out: u128) ensures out == self.session(), { self.inner.session_id() }
     pub closed spec fn frames(&self) -> Seq<RecordFrame> { self.frames@ }
     pub closed spec fn history(&self) -> Seq<u8> { self.inner.history() }
     pub closed spec fn failed(&self) -> bool { self.inner.failed() }
@@ -23,14 +25,14 @@ impl AuditJournal {
             && self.inner.history() == encoded_frames(self.frames@)
             && forall|i: int| 0 <= i < self.frames@.len() ==> #[trigger] self.frames@[i].valid()
     }
-    pub fn new() -> (out: Self)
-        ensures out.valid(), out.frames() == Seq::<RecordFrame>::empty(),
+    pub fn new(session: u128) -> (out: Self)
+        ensures out.session() == session, out.valid(), out.frames() == Seq::<RecordFrame>::empty(),
             out.history() == Seq::<u8>::empty(), !out.failed(),
-    { AuditJournal { inner: Journal::new(), frames: Ghost(Seq::empty()) } }
+    { AuditJournal { inner: Journal::new(session), frames: Ghost(Seq::empty()) } }
 
     pub fn begin(&mut self, length: u64) -> (out: Option<Append>)
         requires old(self).valid(),
-        ensures final(self).valid(), final(self).frames() == old(self).frames(),
+        ensures final(self).session() == old(self).session(), final(self).valid(), final(self).frames() == old(self).frames(),
             final(self).history() == old(self).history(), final(self).failed() == old(self).failed(),
             out.is_some() == (!old(self).failed() && old(self).idle()
                 && 0 < length && length <= u64::MAX - old(self).history().len()),
@@ -45,11 +47,11 @@ impl AuditJournal {
 
     pub fn commit_frame(&mut self, ticket: &Append, frame: RecordFrame) -> (out: Option<DurableFrame>)
         requires old(self).valid(), frame.valid(),
-        ensures final(self).valid(),
+        ensures final(self).session() == old(self).session(), final(self).valid(),
             out.is_some() == (!old(self).failed() && old(self).matches(ticket)
                 && frame.contents().len() == ticket.end() - ticket.start()),
             match out {
-                Some(receipt) => receipt.valid() && receipt.record() == frame.contents()
+                Some(receipt) => receipt.session() == old(self).session() && receipt.valid() && receipt.record() == frame.contents()
                     && receipt.acknowledged() == final(self).history()
                     && final(self).frames() == old(self).frames().push(frame)
                     && final(self).history() == old(self).history() + frame.contents()
@@ -75,7 +77,7 @@ impl AuditJournal {
 
     pub fn fail(&mut self)
         requires old(self).valid(),
-        ensures final(self).valid(), final(self).failed(),
+        ensures final(self).session() == old(self).session(), final(self).valid(), final(self).failed(),
             final(self).history() == old(self).history(), final(self).frames() == old(self).frames(),
     { self.inner.fail(); }
 

@@ -244,3 +244,18 @@ line references. Rust destructor behavior, mutex serialization, and the mapping
 from HTTP owners to admitted worker/connection slots remain explicit trusted or
 unfinished composition joins. Dequeued frames handed to Hyper remain in the
 separate dependency allocation account.
+
+
+## Milestone 6 journal-session follow-up
+
+`Journal` and `AuditJournal` now take the file session explicitly. Checked
+transitions preserve that identity; append tickets cannot be substituted across
+distinct sessions even when their offsets match. A successful `commit_frame`
+issues a receipt carrying that journal's identity. `DiskWorker::run` checks the
+worker/job session against the journal before write or sync; mismatch fails the
+journal without a storage effect or receipt. Production uses the same random
+file-header session for the journal and worker. Session uniqueness and the real
+file correspondence remain trusted. This is not yet the end-to-end mediation
+proof: stream receipt matching still checks content without requiring the
+request's designated journal session, and that remaining acceptance boundary is
+tracked in milestone 6.

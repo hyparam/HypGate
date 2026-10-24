@@ -80,7 +80,8 @@ async fn maximum_record_roundtrips_and_excess_is_rejected_without_poisoning() {
 async fn actual_file_acknowledgments_are_readable_and_existing_files_are_not_overwritten() {
     let dir = TempDir::new(); let path = dir.0.join("traffic.log");
     let mut log = DiskLog::create(&path, 2, Duration::from_secs(5)).unwrap();
-    log.append(record(b"data: hello\n\n", 1)).await.unwrap();
+    let receipt = log.append(record(b"data: hello\n\n", 1)).await.unwrap();
+    assert_eq!(receipt.session_id(), u128::from_le_bytes(log.session()));
     log.append(record(b"data: [DONE]\n\n", 2)).await.unwrap();
     let mut reader = LogReader::new(File::open(&path).unwrap()).unwrap();
     assert_eq!(reader.session(), log.session());

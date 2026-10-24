@@ -34,7 +34,7 @@ fn active_capacity_survives_io_and_receipt_delivery_until_matching_release() {
     let replies = Replies::default();
     let mut queue = FrameQueue::with_payload_limit(1, 3);
     let mut worker = DiskWorker::new(3, 1);
-    let mut journal = AuditJournal::new();
+    let mut journal = AuditJournal::new(1);
     let mut disk = Disk::default();
     push(&mut queue, 1, &replies);
     let active = worker.take(&mut queue).unwrap();
@@ -72,7 +72,7 @@ fn abandoned_active_or_finished_job_cannot_return_credit() {
         push(&mut queue, 1, &replies);
         let active = worker.take(&mut queue).unwrap();
         if finish {
-            drop(worker.run(active, &mut AuditJournal::new(), &mut Disk::default(), true));
+            drop(worker.run(active, &mut AuditJournal::new(1), &mut Disk::default(), true));
         } else { drop(active); }
         push(&mut queue, 2, &replies);
         assert!(worker.is_busy());
@@ -88,7 +88,7 @@ fn disabled_write_and_sync_failure_never_acknowledge_or_retry() {
         let replies = Replies::default();
         let mut queue = FrameQueue::with_payload_limit(1, 3);
         let mut worker = DiskWorker::new(3, 1);
-        let mut journal = AuditJournal::new();
+        let mut journal = AuditJournal::new(1);
         let mut disk = Disk { fail_write: mode == 1, fail_sync: mode == 2, ..Disk::default() };
         for id in 1..=2 {
             push(&mut queue, id, &replies);
@@ -117,7 +117,7 @@ fn mismatched_payload_budget_does_not_dequeue_and_closed_queue_drains() {
     queue.close();
     let mut worker = DiskWorker::new(3, 1);
     let active = worker.take(&mut queue).unwrap();
-    let finished = worker.run(active, &mut AuditJournal::new(), &mut Disk::default(), true);
+    let finished = worker.run(active, &mut AuditJournal::new(1), &mut Disk::default(), true);
     assert!(worker.release(finished.deliver()));
     assert!(worker.take(&mut queue).is_none());
 }
@@ -132,8 +132,25 @@ fn completion_from_another_session_cannot_release_active_capacity() {
     let one = first.take(&mut queue).unwrap();
     push(&mut queue, 2, &replies);
     let two = second.take(&mut queue).unwrap();
-    let released = first.run(one, &mut AuditJournal::new(), &mut Disk::default(), true).deliver();
+    let released = first.run(one, &mut AuditJournal::new(1), &mut Disk::default(), true).deliver();
     assert!(!second.release(released));
     assert!(first.is_busy()); assert!(second.is_busy());
-    assert!(second.release(second.run(two, &mut AuditJournal::new(), &mut Disk::default(), true).deliver()));
+    assert!(second.release(second.run(two, &mut AuditJournal::new(2), &mut Disk::default(), true).deliver()));
+}
+
+#[test]
+fn mismatched_journal_session_fails_before_any_storage_effect() {
+    let replies = Replies::default();
+    let mut queue = FrameQueue::with_payload_limit(1, 3);
+    let mut worker = DiskWorker::new(3, 1);
+    let mut journal = AuditJournal::new(2);
+    let mut disk = Disk::default();
+    push(&mut queue, 1, &replies);
+    let active = worker.take(&mut queue).unwrap();
+    let finished = worker.run(active, &mut journal, &mut disk, true);
+    assert!(finished.failed());
+    assert_eq!((disk.writes, disk.syncs), (0, 0));
+    assert!(worker.release(finished.deliver()));
+    assert!(replies.lock().unwrap()[0].1.is_none());
+    assert!(journal.begin(68).is_none());
 }

@@ -135,7 +135,7 @@ mod tests {
         use gateway_core::{disk_worker::DiskWorker, audit_journal::AuditJournal};
         let queue = Queue::with_payload_limit(1, 3);
         let mut owner = DiskWorker::new(3, 1);
-        let mut journal = AuditJournal::new();
+        let mut journal = AuditJournal::new(0);
         // Disabled logging exercises ownership/delivery without a filesystem.
         struct Unused;
         impl super::super::DurableWrite for Unused { fn sync(&mut self) -> std::io::Result<()> { panic!("disabled sync"); } }
