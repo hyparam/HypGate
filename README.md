@@ -84,7 +84,8 @@ opaque body contents or survival of permanent storage loss.
 The [implementation milestones](docs/implementation-plan.md) are the active plan,
 with milestones 1–5 complete and [milestone 6: async ownership and effect
 composition](docs/implementation-plan.md#6-async-ownership-and-effect-composition)
-at 6/8. Global HTTP owner counts and cross-owner lifecycle proofs remain open.
+at 7/8. HTTP ownership counts and cleanup are proved under the documented adapter
+assumptions; whole-runtime lifecycle composition remains open.
 The [first streaming-core increment](docs/streaming-core-progress.md) records the
 current interface, checked behavior, and remaining milestone-one work.
 The [proof index](docs/proof-index.md) maps advertised guarantees to exact source
@@ -159,8 +160,8 @@ cargo verus verify -p gateway-core --locked -- --triggers-mode silent
 VERUS=/path/to/verus python3 scripts/check_mutations.py
 ```
 
-Validation on 2026-10-24: 272 core verification checks passed, 241 workspace tests and six compile-fail doctests
-passed, and all 235 deliberate mutations failed their proof obligations. The opt-in TLS proxy/gateway
+Validation on 2026-10-24: 293 core verification checks passed, 247 workspace tests and six compile-fail doctests
+passed, and all 248 deliberate mutations failed their proof obligations. The opt-in TLS proxy/gateway
 process-failover test and six load/fault workloads passed on 2026-10-23.
 Two ten-minute overload runs and the final 100-wave-per-mode isolated memory soak
 also passed; measurements and limits are in the benchmark notes.

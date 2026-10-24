@@ -53,12 +53,21 @@ impl HttpsTransport {
     ) -> Result<ExchangeStats, TransportError> {
         // The owner lives outside the timed future, which borrows it and owns
         // connection/body futures. Their cleanup precedes returning its credit.
-        tokio::time::timeout(self.deadline, self.run(&mut prepared, input, output, log))
+        tokio::time::timeout(self.deadline, self.run(&mut prepared, input, output, log, None))
+            .await.map_err(|_| TransportError::Timeout)?
+    }
+
+    pub(crate) async fn exchange_with_http<R: AsyncRead + Unpin, W: ResponseSink, L: AuditLog>(
+        &self, mut prepared: PreparedRequest<'_>, input: &mut R, output: &mut W, log: &mut L,
+        http: &http_body::WorkerHttp,
+    ) -> Result<ExchangeStats, TransportError> {
+        tokio::time::timeout(self.deadline, self.run(&mut prepared, input, output, log, Some(http)))
             .await.map_err(|_| TransportError::Timeout)?
     }
 
     async fn run<R: AsyncRead + Unpin, W: ResponseSink, L: AuditLog>(
         &self, prepared: &mut PreparedRequest<'_>, input: &mut R, output: &mut W, log: &mut L,
+        http: Option<&http_body::WorkerHttp>,
     ) -> Result<ExchangeStats, TransportError> {
         let upstream = prepared.take_upstream().map_err(|_| TransportError::Metadata)?;
         let host = prepared.destination().host().ok_or(TransportError::Metadata)?
@@ -82,7 +91,10 @@ impl HttpsTransport {
             .writev(true).max_headers(crate::http_boundary::MAX_HEADER_VALUES)
             .max_header_size(crate::http_boundary::MAX_HEADER_BYTES)
             .max_buf_size(http_body::MAX_INPUT_FRAME).handshake(TokioIo::new(crate::http_io::ReadLimited::new(tls_io::DrainBeforeWrite(tls)))).await.map_err(|_| TransportError::Http)?;
-        let (mut body_writer, body) = http_body::channel(16 * 1024);
+        let (mut body_writer, body) = match http {
+            Some(http) => http.upload(16 * 1024).ok_or(TransportError::Http)?,
+            None => http_body::channel(16 * 1024),
+        };
         // Direct HTTP/1 connection uses origin-form; authority was already bound
         // to the TCP/TLS destination and the trusted Host header.
         let request = upstream.map(|()| body);
@@ -98,7 +110,11 @@ impl HttpsTransport {
             let (parts, body) = response.into_parts();
             let (status, headers) = prepare_response_parts(parts).map_err(|_| TransportError::Metadata)?;
             output.start(status, headers).await.map_err(|_| TransportError::Client)?;
-            let download = prepared.copy_body(&mut http_body::Reader::new(body), output, log, Direction::Download)
+            let mut reader = match http {
+                Some(http) => http.output(body).ok_or(TransportError::Http)?,
+                None => http_body::Reader::new(body),
+            };
+            let download = prepared.copy_body(&mut reader, output, log, Direction::Download)
                 .await.map_err(|_| TransportError::Download)?;
             output.finish().await.map_err(|_| TransportError::Client)?;
             Ok(ExchangeStats { upload, download })

@@ -74,6 +74,10 @@ impl Gateway {
         let Some((writer, body)) = responses.channel(16 * 1024) else {
             return Ok(fixed(StatusCode::SERVICE_UNAVAILABLE, "response unavailable\n"));
         };
+        let http = lease.http();
+        let Some(writer) = http.response_writer(writer) else {
+            return Ok(fixed(StatusCode::SERVICE_UNAVAILABLE, "workers unavailable\n"));
+        };
         let app = self.clone();
         let cancel = self.cancel_workers.clone();
         let task = lease.spawn(async move {
@@ -99,7 +103,8 @@ impl Gateway {
             }
             let mut log = ObservedLog { log: app.log.clone(), gaps: &app.audit_gaps,
                 availability: !app.config.requires_audit(), reported: false };
-            let result = app.transport.exchange(prepared, &mut http_body::Reader::new(input), &mut output, &mut log).await;
+            let Some(mut input) = http.input(input) else { return; };
+            let result = app.transport.exchange_with_http(prepared, &mut input, &mut output, &mut log, &http).await;
             match result {
                 Ok(_) => {
                     let _ = output.shutdown().await; // only success sends the clean EOF marker

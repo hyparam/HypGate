@@ -16,6 +16,19 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("http_worker.rs", "worker_http_duplicate_role", " || self.slots[issuer.index].issued[role]", ""),
+    ("http_worker.rs", "worker_http_late_issuance", "self.slots[issuer.index].retired || ", ""),
+    ("http_worker.rs", "worker_http_foreign_issuer", " || self.slots[issuer.index].owner != issuer.owner", ""),
+    ("http_worker.rs", "worker_http_wrong_role", "HttpPermit { index: issuer.index, owner: issuer.owner, role }", "HttpPermit { index: issuer.index, owner: issuer.owner, role: 0 }"),
+    ("http_worker.rs", "worker_http_loses_charge", "self.slots[issuer.index].active[role] = true;", "self.slots[issuer.index].active[role] = false;"),
+    ("http_worker.rs", "worker_http_foreign_cleanup", " || self.slots[permit.index].owner != permit.owner", ""),
+    ("http_worker.rs", "worker_http_clears_wrong_role", "self.slots[permit.index].active[permit.role] = false;", "self.slots[permit.index].active[0] = false;"),
+    ("http_worker.rs", "worker_http_releases_live_resource", " || self.slots[index].is_active()", ""),
+    ("http_worker.rs", "worker_http_release_allows_late_issue", "self.slots[index].retired = true;", "self.slots[index].retired = false;"),
+    ("http_worker.rs", "worker_http_failure_keeps_admission_open", "if !ok { self.admission.close(); }", ""),
+    ("http_worker.rs", "worker_http_omits_active_roles", "if self.slots[i].active[role] { count = count + 1; }", "if false { count = count + 1; }"),
+    ("http_accounting.rs", "http_accounting_omits_sender_tails", " + crate::http_worker::role_count(workers.slots(), RESPONSE_WRITER as int)", ""),
+    ("http_accounting.rs", "http_accounting_omits_output_readers", " + crate::http_worker::role_count(workers.slots(), OUTPUT_READER as int)", ""),
     ("http_connection.rs", "response_registry_reissues_after_cleanup", "let ok = self.responses[response.index].finish(response.permit);", "let ok = self.responses[response.index].finish(response.permit); self.responses[response.index].issued = false;"),
     ("http_connection.rs", "response_registry_overwrites_live_slot", "self.responses.set(index, slot);", "self.responses.set(0, slot);"),
     ("http_connection.rs", "response_registry_accepts_stale_issuer", " || self.responses[issuer.index].owner != issuer.owner", ""),

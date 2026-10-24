@@ -1,16 +1,16 @@
 //! Worker credits use verified registry transitions. Mutex serialization, private
 //! key ownership, field drop order, and task cancellation remain trusted Rust.
-use gateway_core::{task_credit::TaskCredit, drain::DrainRegistry};
+use gateway_core::{task_credit::TaskCredit, http_worker::WorkerRegistry};
 use std::{future::Future, sync::{Arc, Mutex}};
 use super::leased_task::{LeasedTask, TaskLease};
 use tokio_util::task::{TaskTracker, task_tracker::TaskTrackerToken};
 
-pub(super) struct WorkerSlots { registry: Mutex<DrainRegistry> }
+pub(super) struct WorkerSlots { registry: Arc<Mutex<WorkerRegistry>> }
 
 // Unregister and release under one mutex: replacements cannot overlap tracking,
 // and a drain observer can synchronize with completion of credit destruction.
 pub(super) struct WorkerLease {
-    tracked: Option<TaskTrackerToken>, slots: Arc<WorkerSlots>, credit: Option<TaskCredit>,
+    tracked: Option<TaskTrackerToken>, slots: Arc<WorkerSlots>, credit: Option<TaskCredit>, http: crate::http_body::WorkerHttp,
 }
 
 impl TaskLease for WorkerLease {
@@ -18,6 +18,7 @@ impl TaskLease for WorkerLease {
 }
 
 impl WorkerLease {
+    pub(super) fn http(&self) -> crate::http_body::WorkerHttp { self.http.clone() }
     pub(super) fn spawn<F: Future<Output = ()> + Send + 'static>(self, work: F) -> tokio::task::JoinHandle<()> {
         tokio::spawn(LeasedTask::new(work, self))
     }
@@ -29,10 +30,7 @@ impl Drop for WorkerLease {
         if let Ok(mut registry) = self.slots.registry.lock() {
             self.tracked.take();
             let credit = self.credit.take().expect("live worker lease");
-            let ready = credit.can_release();
-            if !ready { registry.close(); }
-            let released = credit.release_worker(&mut registry);
-            debug_assert_eq!(released, ready, "worker credit must own its registry slot");
+            registry.release_task(credit);
         }
     }
 }
@@ -40,7 +38,7 @@ impl Drop for WorkerLease {
 impl WorkerSlots {
     pub(super) fn new(limit: usize) -> Arc<Self> {
         // Worker keys never create streams or allocate payload buffers.
-        Arc::new(Self { registry: Mutex::new(DrainRegistry::new(limit)) })
+        Arc::new(Self { registry: Arc::new(Mutex::new(WorkerRegistry::new(limit))) })
     }
     pub(super) fn healthy(&self) -> bool {
         self.registry.lock().is_ok_and(|registry| !registry.is_closed())
@@ -59,8 +57,9 @@ impl WorkerSlots {
     }
     pub(super) fn acquire(self: &Arc<Self>, tracker: &TaskTracker) -> Option<WorkerLease> {
         let mut registry = self.registry.lock().ok()?;
-        let key = registry.acquire()?;
-        let lease = WorkerLease { tracked: Some(tracker.token()), slots: self.clone(), credit: Some(TaskCredit::new(key)) };
+        let (credit, issuer) = registry.acquire()?;
+        let http = crate::http_body::WorkerHttp::new(self.registry.clone(), issuer);
+        let lease = WorkerLease { tracked: Some(tracker.token()), slots: self.clone(), credit: Some(credit), http };
         drop(registry);
         Some(lease)
     }
@@ -90,11 +89,13 @@ mod tests {
         let connections = ConnectionSlots::new(1);
         let tracker = TaskTracker::new();
         let connection_lease = connections.acquire().unwrap();
-        let (mut writer, mut body) = connection_lease.responses().channel(4).unwrap();
+        let (writer, mut body) = connection_lease.responses().channel(4).unwrap();
+        let worker_lease = workers.acquire(&tracker).unwrap();
+        let mut writer = worker_lease.http().response_writer(writer).unwrap();
         let (sent, queued) = tokio::sync::oneshot::channel();
         let (release, drain) = tokio::sync::oneshot::channel();
         let (received, observed) = tokio::sync::oneshot::channel();
-        let worker = workers.acquire(&tracker).unwrap().spawn(async move {
+        let worker = worker_lease.spawn(async move {
             writer.write_all(b"data").await.unwrap();
             sent.send(()).unwrap();
             std::future::pending::<()>().await;
@@ -156,7 +157,8 @@ mod tests {
             let slots = WorkerSlots::new(1);
             let tracker = TaskTracker::new();
             let dropped = Arc::new(AtomicBool::new(false));
-            let mut reader = crate::http_body::Reader::new(Source { slots: slots.clone(), tracker: tracker.clone(), dropped: dropped.clone() });
+            let lease = slots.acquire(&tracker).unwrap();
+            let mut reader = lease.http().input(Source { slots: slots.clone(), tracker: tracker.clone(), dropped: dropped.clone() }).unwrap();
             let (ready, started) = tokio::sync::oneshot::channel();
             let work = async move {
                 let mut first = [0];
@@ -166,7 +168,7 @@ mod tests {
                 std::future::pending::<()>().await;
                 drop(reader);
             };
-            let task = LeasedTask::new(work, slots.acquire(&tracker).unwrap());
+            let task = LeasedTask::new(work, lease);
             if polled {
                 let task = tokio::spawn(task);
                 started.await.unwrap();
@@ -176,6 +178,36 @@ mod tests {
             assert!(dropped.load(Ordering::SeqCst));
             assert_eq!(slots.usage(), Some((0, 1)));
             assert!(tracker.is_empty());
+        }
+    }
+
+    #[test]
+    fn escaped_http_owners_keep_worker_capacity_after_task_cleanup() {
+        use bytes::Bytes;
+        use http_body_util::Full;
+        for role in 0..4 {
+            let slots = WorkerSlots::new(1);
+            let tracker = TaskTracker::new();
+            let lease = slots.acquire(&tracker).unwrap();
+            let http = lease.http();
+            let retained: Box<dyn std::any::Any> = match role {
+                0 => Box::new(http.input(Full::new(Bytes::from_static(b"data"))).unwrap()),
+                1 => Box::new(http.output(Full::new(Bytes::from_static(b"data"))).unwrap()),
+                2 => Box::new(http.upload(4).unwrap()),
+                _ => {
+                    let (writer, body) = crate::http_body::channel(4);
+                    Box::new((http.response_writer(writer).unwrap(), body))
+                },
+            };
+            drop(LeasedTask::new(async {}, lease));
+            assert_eq!(slots.registry.lock().unwrap().role_usage(role), 1);
+            assert_eq!(slots.usage(), Some((1, 1)));
+            assert!(!slots.healthy());
+            assert!(slots.acquire(&tracker).is_none());
+            drop(retained);
+            assert_eq!(slots.registry.lock().unwrap().role_usage(role), 0);
+            assert_eq!(slots.usage(), Some((1, 1)));
+            assert!(slots.acquire(&tracker).is_none());
         }
     }
 

@@ -393,3 +393,16 @@ are preserved. `ConnectionSlots`, `ConnectionResponses`, and body destruction us
 this same registry under one mutex. The aggregate client-receiver count is now
 mechanized; worker-side HTTP counts and the complete cross-owner composition are
 still open. Tests inspect the actual global charge during payload destruction.
+
+### HTTP ownership completion audit
+
+The [HTTP ownership audit](http-ownership.md) closes the HTTP cleanup-tail row.
+The production worker registry now checks four one-shot HTTP roles and refuses
+worker release until every active role completes. Reader and response-writer
+cleanup explicitly destroys owned buffers before permit completion; one shared
+upload charge covers both endpoints and permanently records a cleanup panic.
+`http_owner_bounds` composes the worker and connection count invariants without
+independent count premises. The private gateway path passes its worker context
+through `exchange_with_http`; the public embedding transport API remains outside
+this gateway count claim. The remaining milestone row is whole-runtime lifecycle
+composition across request, worker, connection, HTTP, disk, DNS, and TLS owners.

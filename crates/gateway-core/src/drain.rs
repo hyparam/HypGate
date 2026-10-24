@@ -7,11 +7,11 @@ verus! {
 pub struct DrainRegistry { registry: ResourceAdmission, closed: bool }
 impl DrainRegistry {
     pub closed spec fn state(&self) -> ResourceAdmission { self.registry }
-    pub closed spec fn valid(&self) -> bool { self.registry.valid() }
+    pub open spec fn valid(&self) -> bool { self.state().valid() }
     pub closed spec fn closed(&self) -> bool { self.closed }
-    pub closed spec fn remaining(&self) -> nat { crate::resource::occupied(self.registry.entries()) }
-    pub closed spec fn limit(&self) -> nat { self.registry.limit() }
-    pub closed spec fn owns(&self, key: &RequestKey) -> bool { self.registry.owns(key) }
+    pub open spec fn remaining(&self) -> nat { crate::resource::occupied(self.state().entries()) }
+    pub open spec fn limit(&self) -> nat { self.state().limit() }
+    pub open spec fn owns(&self, key: &RequestKey) -> bool { self.state().owns(key) }
 
     pub fn new(limit: usize) -> (out: Self)
         ensures out.valid(), !out.closed(), out.remaining() == 0, out.limit() == limit,

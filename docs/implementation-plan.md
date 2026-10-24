@@ -7,7 +7,7 @@
 | 3. Crash-safe logging | 15/15 | ✓ |
 | 4. Availability hardening | 16/16 | ✓ |
 | 5. Auditable first release | 9/9 | ✓ |
-| [6. Async ownership and effect composition](#6-async-ownership-and-effect-composition) | 6/8 | ☐ |
+| [6. Async ownership and effect composition](#6-async-ownership-and-effect-composition) | 7/8 | ☐ |
 
 Progress counts completed rows in each milestone's table below. Rows are not
 weighted estimates of effort or proof coverage; an open row can still block the
@@ -318,7 +318,7 @@ Exit criteria:
 | ✓ | Disk jobs after request cancellation: production `DiskWorker` verifies queue-to-active ownership, the combined Q+1 frame bound, exact write/sync/commit order, and session/generation-checked release only after consuming completion delivery. Stalled I/O and abandoned handles retain active credit; fault/cancellation regressions and eleven deliberate mutations cover the protocol. Syscall truth, consuming channel delivery, and file-session identity remain explicit adapter assumptions. |
 | ✓ | DNS jobs after request cancellation: production `CreditedJob` and `Reply` retain verified `TaskCredit` through queued/running lookup work and unread results; cleanup gates release, or `handoff_to` checks a live admitted owner before result adoption. Blocked/canceled lookup, queued cancellation, panic, reply retention, and adoption regressions pass. Rust destruction/channel behavior and registry identity remain explicit adapter assumptions. |
 | ✓ | TLS jobs after request cancellation: the same credited job/reply path retains handshake state and sockets through blocked polls and unread replies; verified handoff transfers successful results to a live request before releasing pool capacity. Queued cancellation, blocked polls, panic, runtime shutdown, and actual TLS exchange regressions pass under the same adapter assumptions. |
-| ☐ | HTTP cleanup tails: prove retained mailbox/body buffers remain charged to their owners after a request or connection is canceled. Reader substep implemented: production `ReadBuffer` verifies bounded frame load, exact read ranges, and full backing charge through partial consumption; mailbox closure now transfers the exact pending value and its charge to a verified cleanup owner through reported destruction. Output frames now use the verified immutable `OutputFrame` constructor and exact consuming handoff. The client-receiver count now comes from the production `ResponseRegistry`; worker reader/upload/tail counts and combined composition remain open. |
+| ✓ | HTTP cleanup tails: production `WorkerRegistry` and `ResponseRegistry` preserve active HTTP ownership through allocation, cancellation, cleanup, and slot reuse. Each worker issues at most one permit for each reader, upload channel, and response writer; each connection issues one response permit. Actual Reader/Writer/ChannelBody destructors retain these charges through buffer destruction, including shared upload endpoint cleanup and panic. `http_owner_bounds` derives the two-reader and C+2R queue bounds from the production registries. Rust/Arc ownership, mutex identity, truthful destruction, and dependency-buffer accounting remain explicit assumptions; see the [HTTP ownership audit](http-ownership.md). |
 | ☐ | Compose cleanup-before-capacity-reuse across all owners: connect the worker, connection, HTTP, disk, DNS, and TLS lifecycles to production ownership across cancellation, normal completion, panic, and shutdown. |
 | ✓ | Upstream mediation: production HTTPS transfers call `ResolvedRoute::write_bytes` through their privately paired resolved route and request. The checked composition ties policy-authorized destination/credential handles to exact live write ranges and, in strict mode, exact tenant/request/chunk/direction receipts from the designated journal session. Availability retains authorization/routing checks. Concrete table selection is verified; parsing, secret provisioning, initial logger/file identity, Rust ownership, actual writer correspondence, and I/O truth remain explicit adapter assumptions. |
 
@@ -495,6 +495,19 @@ Validation: 272 Verus checks, 241 workspace tests (including the new targeted
 regression), and six compile-fail doctests pass; all 235 deliberate mutations are
 rejected by proof. Worker-owned readers, upload channels, sender tails, and their
 composition with disk/DNS/TLS remain open; milestone 6 is still 6/8.
+
+HTTP ownership completion checkpoint: the worker registry now stores all four
+HTTP roles alongside closeable worker admission. The production gateway issues
+and attaches these permits to both readers, the shared upload channel, and the
+response writer. The combined HTTP theorem derives reader and mailbox counts
+from the two actual registries and includes category-coverage obligations.
+Cancellation, escaped owners, panic, poisoned state, and stale generations cannot
+return capacity while an HTTP role remains active. The [HTTP ownership
+audit](http-ownership.md) records the physical mapping and trusted Rust/dependency
+joins. Validation: 293 Verus checks, 247 tests including the new targeted
+escaped-owner regression, six compile-fail doctests, and 248 rejected mutations.
+The HTTP row is complete; milestone 6 is 7/8. The remaining row must compose these
+HTTP lifecycles with worker/connection, request, disk, DNS, and TLS ownership.
 
 Start with the shared wrapper to reduce duplicated trusted lifetime logic. Preserve
 the existing task-capture destruction tests for both lease types and their

@@ -24,6 +24,8 @@ pub mod read_buffer;
 pub mod output_frame;
 pub mod http_message;
 pub mod http_connection;
+pub mod http_worker;
+pub mod http_accounting;
 pub mod buffer_accounting;
 pub mod owned_accounting;
 

@@ -10,14 +10,23 @@ use std::{io, pin::Pin, task::{Context, Poll}};
 use tokio::{io::{AsyncRead, AsyncWrite, ReadBuf}, sync::oneshot};
 use std::future::Future;
 mod slot;
+mod worker;
+pub(crate) use worker::WorkerHttp;
 
 // Matches the inbound and upstream HTTP/1 parser buffer limits. This bounds
 // the reader-owned copy. Hyper's own parser/body allocations remain separate.
 pub(crate) const MAX_INPUT_FRAME: usize = 32 * 1024;
 
-pub(crate) struct Reader<B> { body: B, buffered: ReadBuffer, ended: bool }
+pub(crate) struct Reader<B> { body: Option<B>, buffered: ReadBuffer, ended: bool, charge: Option<worker::Charge> }
 impl<B> Reader<B> {
-    pub(crate) fn new(body: B) -> Self { Self { body, buffered: ReadBuffer::new(MAX_INPUT_FRAME), ended: false } }
+    pub(crate) fn new(body: B) -> Self { Self { body: Some(body), buffered: ReadBuffer::new(MAX_INPUT_FRAME), ended: false, charge: None } }
+}
+impl<B> Drop for Reader<B> {
+    fn drop(&mut self) {
+        drop(self.body.take());
+        drop(std::mem::replace(&mut self.buffered, ReadBuffer::new(MAX_INPUT_FRAME)));
+        if let Some(charge) = self.charge.take() { charge.finish(); }
+    }
 }
 impl<B: Body<Data = Bytes> + Unpin> AsyncRead for Reader<B> {
     fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, out: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
@@ -32,7 +41,7 @@ impl<B: Body<Data = Bytes> + Unpin> AsyncRead for Reader<B> {
                 return Poll::Ready(Ok(()));
             }
             if this.ended { return Poll::Ready(Ok(())); }
-            match Pin::new(&mut this.body).poll_frame(cx) {
+            match Pin::new(this.body.as_mut().expect("live reader")).poll_frame(cx) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(None) => { this.ended = true; return Poll::Ready(Ok(())); }
                 Poll::Ready(Some(Err(_))) => { this.ended = true; return Poll::Ready(Err(io::ErrorKind::UnexpectedEof.into())); },
@@ -70,10 +79,11 @@ fn message_data(message: Message) -> Option<Bytes> { message.into_payload().map(
 fn message_data(message: Message) -> Option<Bytes> {
     match message { Message::Data(frame) => Some(Bytes::from(frame.into_vec())), Message::Probe(bytes) => Some(bytes), Message::End => None }
 }
-pub(crate) struct Writer { sender: slot::Sender<Message>, max_frame: usize, ended: bool, drained: oneshot::Receiver<()>, complete: bool }
+pub(crate) struct Writer { sender: Option<slot::Sender<Message>>, charge: Option<worker::Charge>, upload: Option<std::sync::Arc<worker::UploadCharge>>, max_frame: usize, ended: bool, drained: oneshot::Receiver<()>, complete: bool }
 pub(crate) struct ChannelBody {
     receiver: Option<slot::Receiver<Message>>, ended: bool, drained: Option<oneshot::Sender<()>>,
     response: Option<ResponseOwnership>,
+    upload: Option<std::sync::Arc<worker::UploadCharge>>,
 }
 
 // Cloning the issuer does not clone a permit: the checked slot issues once.
@@ -100,6 +110,7 @@ impl ConnectionResponses {
 }
 impl Drop for ChannelBody {
     fn drop(&mut self) {
+        let _upload_cleanup = worker::UploadCleanup::new(&self.upload);
         // Explicit normal-return boundary: a panic must not return the permit
         // through automatic field cleanup while payload destruction unwinds.
         drop(self.receiver.take());
@@ -113,8 +124,15 @@ impl Drop for ChannelBody {
 pub(crate) fn channel(max_frame: usize) -> (Writer, ChannelBody) {
     let (sender, receiver) = slot::channel();
     let (done, drained) = oneshot::channel();
-    (Writer { sender, max_frame, ended: false, drained, complete: false },
-        ChannelBody { receiver: Some(receiver), ended: false, drained: Some(done), response: None })
+    (Writer { sender: Some(sender), charge: None, upload: None, max_frame, ended: false, drained, complete: false },
+        ChannelBody { receiver: Some(receiver), ended: false, drained: Some(done), response: None, upload: None })
+}
+impl Drop for Writer {
+    fn drop(&mut self) {
+        let _upload_cleanup = worker::UploadCleanup::new(&self.upload);
+        drop(self.sender.take());
+        if let Some(charge) = self.charge.take() { charge.finish(); }
+    }
 }
 impl AsyncWrite for Writer {
     fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, bytes: &[u8]) -> Poll<io::Result<usize>> {
@@ -122,7 +140,7 @@ impl AsyncWrite for Writer {
         if this.ended || this.max_frame == 0 { return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into())); }
         if bytes.is_empty() { return Poll::Ready(Ok(0)); }
         let mut n = 0;
-        match this.sender.poll_send_with(cx, || {
+        match this.sender.as_mut().expect("live sender").poll_send_with(cx, || {
             let frame = OutputFrame::copy_prefix(bytes, this.max_frame);
             n = frame.len();
             Message::Data(frame)
@@ -140,7 +158,7 @@ impl AsyncWrite for Writer {
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         if this.complete { return Poll::Ready(Ok(())); }
-        if !this.ended { match this.sender.poll_send_with(cx, || Message::End) {
+        if !this.ended { match this.sender.as_mut().expect("live sender").poll_send_with(cx, || Message::End) {
             Poll::Pending => return Poll::Pending,
             Poll::Ready(Err(_)) => return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into())),
             Poll::Ready(Ok(())) => {
@@ -201,7 +219,7 @@ mod tests {
         let responses = ConnectionResponses::new(registry.clone(), issuer);
         let (mut writer, body) = responses.channel(4).unwrap();
         let mut context = Context::from_waker(std::task::Waker::noop());
-        assert!(matches!(writer.sender.poll_send_with(&mut context,
+        assert!(matches!(writer.sender.as_mut().expect("live sender").poll_send_with(&mut context,
             || Message::Probe(Bytes::from_owner(Payload(registry.clone())))), Poll::Ready(Ok(()))));
         drop(body);
         assert_eq!(registry.lock().unwrap().response_count(), 0);
@@ -220,7 +238,7 @@ mod tests {
         let responses = ConnectionResponses::new(registry.clone(), issuer);
         let (mut writer, body) = responses.channel(4).unwrap();
         let mut context = Context::from_waker(std::task::Waker::noop());
-        assert!(matches!(writer.sender.poll_send_with(&mut context,
+        assert!(matches!(writer.sender.as_mut().expect("live sender").poll_send_with(&mut context,
             || Message::Probe(Bytes::from_owner(Payload))), Poll::Ready(Ok(()))));
         assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(body))).is_err());
         assert!(!registry.lock().unwrap().release_task(task));
@@ -447,7 +465,7 @@ mod tests {
                     tokio::task::yield_now().await;
                     assert!(response.as_mut().poll(&mut cx).is_pending());
                     assert!(connection.as_mut().poll(&mut cx).is_pending());
-                    match writer.sender.poll_send_with(&mut cx, || {
+                    match writer.sender.as_mut().expect("live sender").poll_send_with(&mut cx, || {
                         live.fetch_add(frame_size, Ordering::SeqCst);
                         Message::Probe(Bytes::from_owner(Payload { bytes: vec![42; frame_size], live: live.clone() }))
                     }) {
@@ -621,12 +639,12 @@ mod tests {
         let dropped = Arc::new(AtomicUsize::new(0));
         let (mut writer, body) = channel(4);
         let mut context = Context::from_waker(std::task::Waker::noop());
-        assert!(matches!(writer.sender.poll_send_with(&mut context, || Message::Probe(Bytes::from_owner(Payload {
+        assert!(matches!(writer.sender.as_mut().expect("live sender").poll_send_with(&mut context, || Message::Probe(Bytes::from_owner(Payload {
             bytes: *b"data", dropped: dropped.clone(),
         }))), Poll::Ready(Ok(()))));
         drop(body);
         assert_eq!(dropped.load(Ordering::SeqCst), 1);
-        assert!(matches!(writer.sender.poll_send_with(&mut context, || panic!("late allocation")), Poll::Ready(Err(()))));
+        assert!(matches!(writer.sender.as_mut().expect("live sender").poll_send_with(&mut context, || panic!("late allocation")), Poll::Ready(Err(()))));
         assert!(matches!(Pin::new(&mut writer).poll_write(&mut context, b"more"), Poll::Ready(Err(_))));
         drop(writer);
         assert_eq!(dropped.load(Ordering::SeqCst), 1);

@@ -173,7 +173,9 @@ impl TaskCredit {
             final(registry).limit() == old(registry).limit(),
             ok == (self.releasable() && !self.key().stream_claimed() && old(registry).owns(&self.key())),
             ok ==> !self.retaining() && !final(registry).owns(&self.key())
-                && final(registry).remaining() + 1 == old(registry).remaining(),
+                && final(registry).remaining() + 1 == old(registry).remaining()
+                && (forall|i: int| 0 <= i < old(registry).limit() && i != self.key().slot()
+                    ==> #[trigger] final(registry).state().entries()[i] == old(registry).state().entries()[i]),
             !ok ==> *final(registry) == *old(registry),
             self.retaining() ==> *final(registry) == *old(registry),
     {
