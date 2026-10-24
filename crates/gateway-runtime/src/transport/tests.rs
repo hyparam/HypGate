@@ -106,6 +106,42 @@ async fn untrusted_certificate_is_rejected_before_http_credentials_are_sent() {
 }
 
 #[tokio::test]
+async fn oversized_handshake_is_rejected_from_its_length_before_upload() {
+    use tokio::io::AsyncReadExt;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        for declared in [65535usize, 65536] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let config = config(listener.local_addr().unwrap().port());
+            let provider = async {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut record = [0; 5]; socket.read_exact(&mut record).await.unwrap();
+                assert_eq!(record[0], 22); // ClientHello handshake record.
+                let size = u16::from_be_bytes([record[3], record[4]]) as usize;
+                assert!(size <= 18432);
+                let mut hello = vec![0; size]; socket.read_exact(&mut hello).await.unwrap();
+                // Send only a ServerHello header, withhold its entire payload,
+                // and keep the socket open. The within-limit control must wait;
+                // the oversized declaration must be rejected without EOF/data.
+                socket.write_all(&[22, 3, 3, 0, 4, 2,
+                    (declared >> 16) as u8, (declared >> 8) as u8, declared as u8]).await.unwrap();
+                let mut tail = Vec::new(); socket.read_to_end(&mut tail).await.unwrap();
+                assert!(!tail.windows(b"provider-secret".len()).any(|w| w == b"provider-secret"));
+            };
+            let transport = HttpsTransport::with_roots(RootCertStore::empty(), Duration::from_secs(1)).unwrap();
+            let mut output = Output::new(); let mut log = Log::default();
+            let mut input = &b"secret body"[..];
+            let (result, ()) = tokio::join!(transport.exchange(prepare(&config), &mut input, &mut output, &mut log), provider);
+            let expected = if declared == 65535 { TransportError::Timeout } else { TransportError::Tls };
+            assert!(matches!(result, Err(ref error) if *error == expected));
+            assert_eq!(input, b"secret body");
+            assert!(output.status.is_none()); assert!(output.bytes.is_empty());
+            assert!(log.upload.is_empty()); assert!(log.download.is_empty());
+            assert_eq!(config.usage(), Some((0, 1)));
+        }
+    }).await.unwrap();
+}
+
+#[tokio::test]
 async fn redirects_are_returned_without_opening_a_second_connection() {
     let (listener, acceptor, roots) = tls().await;
     let config = config(listener.local_addr().unwrap().port());

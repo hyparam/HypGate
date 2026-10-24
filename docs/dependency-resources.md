@@ -437,6 +437,39 @@ are working-length limits, not allocator-capacity bounds. Certificate parsing,
 verification scratch, decrypted messages, and handshake state need separate
 accounting, including overlapping lifetimes.
 
+### TLS deframer backing capacity
+
+The TCP `ConnectionCommon::read_tls` path calls
+`DeframerVecBuffer::read` / `prepare_read`. It exposes only the initialized
+`buf[used..]` slice to the reader. Resizing requests at most 65,535 bytes, growing
+in steps of up to 4,096; ordinary record buffering uses the smaller 18,437-byte
+limit. `discard` moves retained bytes within this same vector rather than creating
+shared views. The unconstrained `DeframerVecBuffer::extend` path is used by QUIC,
+which this transport does not enable.
+
+Using the pinned Rust Vec growth policy audited above, one deframer retains at
+most 128 KiB of requested capacity. Growth can overlap an old capacity below
+64 KiB with a new capacity below 128 KiB; shrink can overlap an old capacity at
+most 128 KiB with a new request below 64 KiB. Budget 192 KiB during either
+replacement. Shrinking the vector's length alone is not counted as freeing its
+capacity. Allocator rounding, internal reallocation scratch, and retained freed
+pages are excluded. The deframer has one owner in the client TLS connection;
+handshake payloads copied into owned messages are additional allocations.
+
+`HandshakeDeframer::coalesce` independently rejects declared handshake payloads
+larger than 65,535 before needing their full contents. The raw-peer regression
+`oversized_handshake_is_rejected_from_its_length_before_upload` sends only the
+four-byte ServerHello handshake header and keeps the socket open. A declared
+65,536-byte payload yields `TransportError::Tls`; the 65,535-byte incomplete
+control instead waits until the configured exchange timeout. Both leave the
+request body unread, produce no audit/body/status output, and release admission.
+This tests the real connector's early rejection and cleanup, not heap capacity.
+
+These bounds cover only the deframer's byte vector. Its handshake span vector,
+owned decoded messages, certificate verification/decompression, session values,
+and TLS application/control queues still require separate composition. They do
+not turn the 64 KiB application buffer setting into a total TLS-memory bound.
+
 ## Shared TLS session storage
 
 `HttpsTransport` explicitly selects `Resumption::in_memory_sessions(256)` and
