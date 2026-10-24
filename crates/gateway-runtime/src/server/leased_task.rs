@@ -23,11 +23,13 @@ impl<F, L: TaskLease> LeasedTask<F, L> {
 
 impl<F, L: TaskLease> Drop for LeasedTask<F, L> {
     fn drop(&mut self) {
-        assert!(self.lease.credit().begin_cleanup(), "live task credit");
-        drop(self.work.take());
+        let mut cleanup = self.lease.credit().begin_cleanup_with(self.work.take())
+            .unwrap_or_else(|_| panic!("live task credit"));
+        drop(cleanup.take());
+        assert!(cleanup.finish(), "future destruction returned");
         // This is the trusted correspondence point: only normal return from
         // destruction may report that future-owned resources are gone.
-        assert!(self.lease.credit().finish_cleanup(), "completed task cleanup");
+        assert!(self.lease.credit().finish_cleanup_with(&cleanup), "completed task cleanup");
     }
 }
 

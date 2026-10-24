@@ -16,6 +16,11 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("task_credit.rs", "task_cleanup_accepts_unfinished_owner", "if !cleanup.cleanup.is_finished() || cleanup.owner != self.key.owner()", "if cleanup.owner != self.key.owner()"),
+    ("task_credit.rs", "task_cleanup_accepts_foreign_owner", "if !cleanup.cleanup.is_finished() || cleanup.owner != self.key.owner()", "if !cleanup.cleanup.is_finished()"),
+    ("task_credit.rs", "task_cleanup_issues_wrong_identity", "TaskCleanup { owner: self.key.owner(),", "TaskCleanup { owner: 0,"),
+    ("task_credit.rs", "task_cleanup_issues_without_transition", "if !self.begin_cleanup() { return Err(value); }", "if false { return Err(value); }"),
+
     ("http_message.rs", "http_message_omits_data_bytes", "Self::Data(frame) => frame.contents()", "Self::Data(frame) => Seq::empty()"),
 
     ("http_message.rs", "http_message_cleanup_releases_on_extraction", "if cleanup.finished() { 0 }", "if cleanup.started() { 0 }"),

@@ -42,8 +42,9 @@ by connection tasks, containing:
    while holding the same mutex.
 
 Construction calls the verified `TaskCredit::start`. The wrapper's destructor
-calls `begin_cleanup`, takes and destroys the entire future, and only on normal
-return calls `finish_cleanup`. The lease destructor then consumes the credit
+moves the entire future into `begin_cleanup_with`, extracts and destroys it, and
+only on normal return marks its task-bound `TaskCleanup` token finished.
+`finish_cleanup_with` checks that the completed token belongs to this task. The lease destructor then consumes the credit
 through its verified release gate. If destruction inside the wrapper panics,
 the credit remains cleaning and release refuses to change registry occupancy;
 worker admission also closes permanently. A connection credit is likewise

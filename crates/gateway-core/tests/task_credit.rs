@@ -99,3 +99,43 @@ fn cleanup_returns_worker_capacity_without_reopening_admission() {
     assert_eq!(registry.usage(), (0, 1));
     assert!(registry.acquire().is_none());
 }
+
+#[test]
+fn task_cleanup_requires_its_own_completed_value_owner() {
+    let mut registry = ResourceAdmission::new(2, 0);
+    let mut first = TaskCredit::new(registry.acquire().unwrap());
+    let mut second = TaskCredit::new(registry.acquire().unwrap());
+    assert!(first.start()); assert!(second.start());
+    let mut one = first.begin_cleanup_with(vec![1, 2]).ok().unwrap();
+    let mut two = second.begin_cleanup_with(vec![3, 4]).ok().unwrap();
+    assert!(!one.finish());
+    assert!(!first.finish_cleanup_with(&one));
+    let value = one.take().unwrap();
+    assert_eq!(value, vec![1, 2]);
+    assert!(one.take().is_none());
+    assert!(!first.finish_cleanup_with(&one));
+    assert!(!first.can_release());
+    drop(value);
+    assert!(one.finish());
+    assert!(!second.finish_cleanup_with(&one));
+    assert!(!second.can_release());
+    assert!(first.finish_cleanup_with(&one));
+    assert!(first.release(&mut registry));
+    assert_eq!(registry.usage(), (1, 2));
+    assert_eq!(two.take().unwrap(), vec![3, 4]);
+    assert!(two.finish());
+    assert!(second.finish_cleanup_with(&two));
+    assert!(second.release(&mut registry));
+    assert_eq!(registry.usage(), (0, 2));
+}
+
+#[test]
+fn abandoned_task_cleanup_strands_its_registry_slot() {
+    let mut registry = ResourceAdmission::new(1, 0);
+    let mut credit = TaskCredit::new(registry.acquire().unwrap());
+    assert!(credit.start());
+    let cleanup = credit.begin_cleanup_with(vec![7]).ok().unwrap();
+    drop(cleanup);
+    assert!(!credit.release(&mut registry));
+    assert!(registry.acquire().is_none());
+}

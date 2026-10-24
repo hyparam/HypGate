@@ -454,6 +454,17 @@ checked before worker/tracker release for never-polled and partially-read tasks.
 All six worker lifecycle tests pass, including both new cases. These are runtime
 correspondence checks; the two remaining proof rows stay open at 6/8.
 
+Task-bound cleanup checkpoint: production worker/connection futures and DNS/TLS
+job captures and unread replies now move their actual values into `TaskCleanup`.
+The verified token binds the exact value to its task credit: extraction alone
+cannot complete the task, and an unfinished or foreign-task token cannot release
+its credit. Normal destructor return reports completion; a panic or abandoned
+token strands capacity. Registry identity and truthful destructor reporting
+remain trusted adapter assumptions. Validation: 253 Verus checks, 231 workspace
+tests and six compile-fail doctests pass; all 220 deliberate mutations are rejected
+by proof. Global HTTP owner counts and cross-owner lifecycle preservation remain
+open, so milestone 6 remains 6/8 complete.
+
 Start with the shared wrapper to reduce duplicated trusted lifetime logic. Preserve
 the existing task-capture destruction tests for both lease types and their
 poison, tracker-registration, and drain behavior. Generalize ownership mechanics

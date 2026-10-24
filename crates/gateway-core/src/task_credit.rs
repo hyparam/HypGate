@@ -6,6 +6,31 @@ use crate::{drain::DrainRegistry, resource::{ResourceAdmission, RequestKey}};
 verus! {
 pub enum Phase { Reserved, Running, AwaitingAdoption, Cleaning, Cleaned, HandedOff(u64) }
 
+// Non-cloneable cleanup owner issued by the exact task that enters Cleaning.
+// The value is the real future/captures/reply supplied by the runtime adapter.
+pub struct TaskCleanup<T> { owner: u64, cleanup: crate::mailbox::Cleanup<T> }
+impl<T> TaskCleanup<T> {
+    pub closed spec fn owner(&self) -> u64 { self.owner }
+    pub closed spec fn valid(&self) -> bool { self.cleanup.valid() }
+    pub closed spec fn original(&self) -> Option<T> { self.cleanup.original() }
+    pub closed spec fn finished(&self) -> bool { self.cleanup.finished() }
+    pub closed spec fn started(&self) -> bool { self.cleanup.started() }
+    pub fn take(&mut self) -> (out: Option<T>)
+        requires old(self).valid(),
+        ensures final(self).valid(), final(self).owner() == old(self).owner(),
+            final(self).original() == old(self).original(), final(self).finished() == old(self).finished(),
+            final(self).started(), out == (if old(self).started() { None } else { old(self).original() }),
+    { self.cleanup.begin() }
+    // Adapter reports normal return from destruction of the extracted value.
+    pub fn finish(&mut self) -> (ok: bool)
+        requires old(self).valid(),
+        ensures final(self).valid(), final(self).owner() == old(self).owner(),
+            final(self).original() == old(self).original(), ok ==> final(self).finished(),
+            ok == (old(self).started() && !old(self).finished()),
+            !old(self).finished() && !ok ==> !final(self).finished(),
+    { self.cleanup.finish() }
+}
+
 pub struct TaskCredit { key: RequestKey, phase: Phase }
 impl TaskCredit {
     pub closed spec fn key(&self) -> RequestKey { self.key }
@@ -53,6 +78,31 @@ impl TaskCredit {
         if !matches!(self.phase, Phase::Cleaning) { return false; }
         self.phase = Phase::Cleaned;
         true
+    }
+
+    pub fn begin_cleanup_with<T>(&mut self, value: T) -> (out: Result<TaskCleanup<T>, T>)
+        ensures final(self).key() == old(self).key(),
+            match out {
+                Ok(cleanup) => cleanup.valid() && cleanup.original() == Some(value)
+                    && cleanup.owner() == old(self).key().id() && !cleanup.finished()
+                    && final(self).phase() == Phase::Cleaning && final(self).retaining(),
+                Err(returned) => returned == value && *final(self) == *old(self)
+                    && old(self).phase() != Phase::Running && old(self).phase() != Phase::AwaitingAdoption,
+            },
+    {
+        if !self.begin_cleanup() { return Err(value); }
+        Ok(TaskCleanup { owner: self.key.owner(), cleanup: crate::mailbox::Cleanup::new(Some(value)) })
+    }
+    pub fn finish_cleanup_with<T>(&mut self, cleanup: &TaskCleanup<T>) -> (ok: bool)
+        requires cleanup.valid(),
+        ensures final(self).key() == old(self).key(),
+            ok == (old(self).phase() == Phase::Cleaning && cleanup.finished() && cleanup.owner() == old(self).key().id()),
+            ok ==> final(self).phase() == Phase::Cleaned,
+            !ok ==> *final(self) == *old(self),
+            !cleanup.finished() && old(self).retaining() ==> final(self).retaining(),
+    {
+        if !cleanup.cleanup.is_finished() || cleanup.owner != self.key.owner() { return false; }
+        self.finish_cleanup()
     }
 
     pub fn can_release(&self) -> (ok: bool)

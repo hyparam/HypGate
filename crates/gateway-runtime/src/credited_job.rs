@@ -48,9 +48,11 @@ impl<T> Drop for Reply<T> {
     fn drop(&mut self) {
         if let Some(credit) = self.credit.as_mut() {
             let state = credit.state.as_mut().expect("live reply credit");
-            assert!(state.begin_cleanup(), "live reply");
-            drop(self.value.take());
-            assert!(state.finish_cleanup(), "reply value destroyed");
+            let mut cleanup = state.begin_cleanup_with(self.value.take())
+                .unwrap_or_else(|_| panic!("live reply"));
+            drop(cleanup.take());
+            assert!(cleanup.finish(), "reply value destroyed");
+            assert!(state.finish_cleanup_with(&cleanup), "reply cleanup belongs to credit");
         }
     }
 }
@@ -81,11 +83,12 @@ impl<T, F> Drop for Job<T, F> {
     fn drop(&mut self) {
         if let Some(credit) = self.credit.as_mut() {
             let state = credit.state.as_mut().expect("live job credit");
-            assert!(state.begin_cleanup(), "live job");
-            drop(self.work.take());
-            drop(self.send.take());
+            let mut cleanup = state.begin_cleanup_with((self.work.take(), self.send.take()))
+                .unwrap_or_else(|_| panic!("live job"));
+            drop(cleanup.take());
             // A queued capture destructor panic skips this and strands capacity.
-            assert!(state.finish_cleanup(), "job captures destroyed");
+            assert!(cleanup.finish(), "job captures destroyed");
+            assert!(state.finish_cleanup_with(&cleanup), "job cleanup belongs to credit");
         }
     }
 }

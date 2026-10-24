@@ -12,6 +12,14 @@ pub struct Cleanup<T> {
     original: Ghost<Option<T>>,
 }
 impl<T> Cleanup<T> {
+    pub fn new(value: Option<T>) -> (out: Self)
+        ensures out.valid(), !out.started(), !out.finished(), out.original() == value,
+            out.charged() == (if value.is_some() { 1nat } else { 0nat }),
+    {
+        let occupied = value.is_some();
+        let ghost original = value;
+        Self { value, occupied, started: false, finished: false, original: Ghost(original) }
+    }
     pub closed spec fn original(&self) -> Option<T> { self.original@ }
     pub closed spec fn started(&self) -> bool { self.started }
     pub closed spec fn finished(&self) -> bool { self.finished }
@@ -23,6 +31,9 @@ impl<T> Cleanup<T> {
     pub closed spec fn charged(&self) -> nat {
         if self.occupied && !self.finished { 1 } else { 0 }
     }
+    pub fn is_finished(&self) -> (out: bool)
+        ensures out == self.finished(),
+    { self.finished }
     pub fn retained_count(&self) -> (out: usize)
         ensures out == self.charged(),
     { if self.occupied && !self.finished { 1 } else { 0 } }
@@ -119,9 +130,7 @@ impl<T> Mailbox<T> {
             final(self).retained_count() + out.charged() == old(self).retained_count(),
     {
         let value = self.close_receiver();
-        let occupied = value.is_some();
-        let ghost original = value;
-        Cleanup { value, occupied, started: false, finished: false, original: Ghost(original) }
+        Cleanup::new(value)
     }
     pub proof fn slot_bound(&self)
         requires self.valid(),
