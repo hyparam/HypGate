@@ -57,7 +57,7 @@ valid earlier records remain reported. Scanning never replays or truncates data.
 See the [storage crash contract](storage-crash-contract.md) for its limits.
 
 GET `/healthz` reports process responsiveness. GET `/readyz` fails when the
-admission registry is poisoned in either logging mode, or when the logger is
+admission or worker registry is poisoned in either logging mode, or when the logger is
 unhealthy in strict mode. Availability mode stays ready despite logging loss but
 never overrides admission failure.
 Readiness does not yet probe upstream availability, request capacity, or disk space.
@@ -70,7 +70,9 @@ or credentials. It also exposes `soundgate_requests_active`,
 `soundgate_requests_limit`, and `soundgate_admission_healthy`; occupancy is a
 verified count of live registry slots, sampled under the runtime lock. Poisoned
 admission omits the occupancy gauges and reports health zero. These gauges are
-not process memory or connection counts. Counters live in memory and crashes reset them. Failed exchanges
+not process memory or connection counts. `soundgate_worker_admission_healthy`
+separately reports whether the worker registry is unpoisoned; worker registry
+failure also makes readiness fail in both logging modes. Counters live in memory and crashes reset them. Failed exchanges
 count transport errors returned to the worker, not all externally canceled tasks.
 The gap counter increments once per availability-mode request at its first failed
 log append, even if the generation later fails or is canceled. It reports potential

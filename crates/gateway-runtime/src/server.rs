@@ -10,25 +10,25 @@ use hyper::{body::Incoming, service::service_fn};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use std::{convert::Infallible, future::Future, io, pin::Pin, sync::{Arc, atomic::{AtomicU64, Ordering}},
     task::{Context, Poll}, time::Duration};
-use tokio::{io::{AsyncWrite, AsyncWriteExt}, net::TcpListener, sync::{oneshot, Semaphore, OwnedSemaphorePermit}, task::{JoinHandle, JoinSet}};
-use tokio_util::task::{TaskTracker, task_tracker::TaskTrackerToken};
+use tokio::{io::{AsyncWrite, AsyncWriteExt}, net::TcpListener, sync::oneshot, task::{JoinHandle, JoinSet}};
+use tokio_util::task::TaskTracker;
 
-// Field drop order removes tracking before making the worker credit reusable.
-struct WorkerLease { _tracked: TaskTrackerToken, _permit: OwnedSemaphorePermit }
+mod workers;
+use workers::WorkerSlots;
 
 pub struct Gateway {
     config: Arc<GatewayConfig>,
     transport: HttpsTransport,
     log: DiskLog,
     workers: TaskTracker,
-    worker_slots: Arc<Semaphore>,
+    worker_slots: Arc<WorkerSlots>,
     audit_gaps: AtomicU64,
     failed_exchanges: AtomicU64,
 }
 impl Gateway {
     pub fn new(config: GatewayConfig, transport: HttpsTransport, log: DiskLog) -> Arc<Self> {
         let limit = config.usage().map(|(_, limit)| limit).unwrap_or(0);
-        Arc::new(Self { worker_slots: Arc::new(Semaphore::new(limit)), config: Arc::new(config), transport, log, workers: TaskTracker::new(),
+        Arc::new(Self { worker_slots: WorkerSlots::new(limit), config: Arc::new(config), transport, log, workers: TaskTracker::new(),
             audit_gaps: AtomicU64::new(0), failed_exchanges: AtomicU64::new(0) })
     }
     pub fn audit_gaps(&self) -> u64 { self.audit_gaps.load(Ordering::Relaxed) }
@@ -38,6 +38,7 @@ impl Gateway {
         if request.method() == http::Method::GET && request.uri().path() == "/metrics" {
             let mut text = format!("soundgate_audit_gap_requests_total {}\nsoundgate_failed_exchanges_total {}\nsoundgate_audit_healthy {}\n",
                 self.audit_gaps(), self.failed_exchanges(), u8::from(self.log.healthy()));
+            text.push_str(&format!("soundgate_worker_admission_healthy {}\n", u8::from(self.worker_slots.healthy())));
             match self.config.usage() {
                 Some((active, limit)) => text.push_str(&format!("soundgate_admission_healthy 1\nsoundgate_requests_active {active}\nsoundgate_requests_limit {limit}\n")),
                 None => text.push_str("soundgate_admission_healthy 0\n"),
@@ -50,24 +51,22 @@ impl Gateway {
             return Ok(fixed(StatusCode::OK, "ok\n"));
         }
         if request.method() == http::Method::GET && request.uri().path() == "/readyz" {
-            if !self.config.admission_healthy() {
+            if !self.config.admission_healthy() || !self.worker_slots.healthy() {
                 return Ok(fixed(StatusCode::SERVICE_UNAVAILABLE, "admission unavailable\n"));
             }
             let ready = !self.config.requires_audit() || self.log.healthy();
             return Ok(fixed(if ready { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE },
                 if ready { "ready\n" } else { "audit unavailable\n" }));
         }
-        let permit = match self.worker_slots.clone().try_acquire_owned() {
-            Ok(permit) => permit,
-            Err(_) => return Ok(fixed(StatusCode::SERVICE_UNAVAILABLE, "workers at capacity\n")),
+        let lease = match self.worker_slots.acquire(&self.workers) {
+            Some(lease) => lease,
+            None => return Ok(fixed(StatusCode::SERVICE_UNAVAILABLE, "workers unavailable\n")),
         };
-        let lease = WorkerLease { _tracked: self.workers.token(), _permit: permit };
         let (parts, input) = request.into_parts();
         let (head, headers) = oneshot::channel();
         let (writer, body) = http_body::channel(16 * 1024);
         let app = self.clone();
-        let task = tokio::spawn(async move {
-            let _lease = lease;
+        let task = lease.spawn(async move {
             let mut output = Output { head: Some(head), writer };
             let prepared = match http_boundary::prepare(&app.config, &parts.method, &parts.uri, &parts.headers) {
                 Ok(p) => p,

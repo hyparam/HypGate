@@ -525,8 +525,7 @@ async fn worker_budget_covers_cleanup_without_consuming_request_slots() {
             DiskLog::create(&dir.0.join("workers.log"), 2, Duration::from_secs(1)).unwrap());
         // Hold a worker lifetime with no request lease, as during rejected-request
         // or post-EOF cleanup. Registry-only admission cannot bound this state.
-        let lease = WorkerLease { _tracked: app.workers.token(),
-            _permit: app.worker_slots.clone().try_acquire_owned().unwrap() };
+        let lease = app.worker_slots.acquire(&app.workers).unwrap();
         assert_eq!(app.config.usage(), Some((0, 1)));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -550,17 +549,55 @@ async fn worker_budget_covers_cleanup_without_consuming_request_slots() {
         assert_eq!(app.config.usage(), Some((0, 1)));
         assert!(tokio::time::timeout(Duration::from_millis(20), upstream.accept()).await.is_err());
         // Cancel before the task's first poll: its captured lease must still drop.
-        let worker = tokio::spawn(async move { let _lease = lease; std::future::pending::<()>().await; });
+        let worker = lease.spawn(async move { std::future::pending::<()>().await; });
         worker.abort(); assert!(worker.await.unwrap_err().is_cancelled());
         assert!(app.workers.is_empty());
-        assert_eq!(app.worker_slots.available_permits(), 1);
+        assert_eq!(app.worker_slots.usage(), Some((0, 1)));
         let (response, connection) = send(port, "/routes/7", "invalid", "POST").await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         response.collect().await.unwrap(); connection.await.unwrap();
         while !app.workers.is_empty() { tokio::task::yield_now().await; }
-        assert_eq!(app.worker_slots.available_permits(), 1);
+        assert_eq!(app.worker_slots.usage(), Some((0, 1)));
         shutdown.send(()).unwrap(); gateway.await.unwrap().unwrap();
     }).await.unwrap();
 }
 
 mod memory;
+
+#[tokio::test]
+async fn poisoned_worker_registry_is_unready_and_fail_closed_in_both_modes() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        for availability in [false, true] {
+            let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let dir = TempDir::new();
+            let app = Gateway::new(config(upstream.local_addr().unwrap().port(), availability),
+                HttpsTransport::with_roots(RootCertStore::empty(), Duration::from_secs(2)).unwrap(),
+                DiskLog::create(&dir.0.join("audit.log"), 2, Duration::from_secs(1)).unwrap());
+            // Poison with a live key, then release it: Drop must not recover the
+            // registry or make it usable again, even with healthy core admission.
+            let lease = app.worker_slots.acquire(&app.workers).unwrap();
+            app.worker_slots.poison_for_test();
+            drop(lease);
+            assert!(app.workers.is_empty());
+            assert_eq!(app.worker_slots.usage(), None);
+            assert_eq!(app.config.usage(), Some((0, 1)));
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let (shutdown, stopped) = oneshot::channel();
+            let gateway = tokio::spawn(serve(listener, app.clone(), 4, Duration::from_secs(3), async { let _ = stopped.await; }));
+            for (path, method, status) in [("/healthz", "GET", 200), ("/readyz", "GET", 503), ("/routes/7", "POST", 503)] {
+                let (response, connection) = send(port, path, "gateway", method).await;
+                assert_eq!(response.status().as_u16(), status);
+                response.collect().await.unwrap(); connection.await.unwrap();
+            }
+            let (response, connection) = send(port, "/metrics", "", "GET").await;
+            let metrics = response.collect().await.unwrap().to_bytes(); connection.await.unwrap();
+            let metrics = std::str::from_utf8(&metrics).unwrap();
+            assert!(metrics.contains("soundgate_worker_admission_healthy 0\n"));
+            assert!(metrics.contains("soundgate_admission_healthy 1\n"));
+            assert!(tokio::time::timeout(Duration::from_millis(20), upstream.accept()).await.is_err());
+            shutdown.send(()).unwrap(); gateway.await.unwrap().unwrap();
+            assert!(app.workers.is_empty());
+        }
+    }).await.unwrap();
+}

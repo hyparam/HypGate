@@ -240,4 +240,14 @@ final audit validation; RSS sampling ends before gateway shutdown.
 | Availability | 362.660 | 6,897,664 | 13,025,280 | All 13,025,280 | 6,046 |
 
 These observed plateaus are specific to this workload and sampling interval.
-The dedicated Linux CI job has been added; its results are not yet recorded here.
+The dedicated Ubuntu 24.04 soak job at `4816c00` passed both modes in
+[run 40048074140](https://github.com/platypii/LogGate/actions/runs/40048074140)
+on 2026-10-24 UTC, before the subsequent worker-registry change:
+
+| Mode | Elapsed seconds | Baseline RSS bytes | Kernel peak RSS bytes | Final 20 settled RSS range, bytes |
+| --- | ---: | ---: | ---: | ---: |
+| Strict | 109.103 | 10,289,152 | 14,696,448 | 14,540,800–14,684,160 |
+| Availability | 99.533 | 10,371,072 | 14,426,112 | 14,336,000–14,401,536 |
+
+Linux settled samples varied; this is not the flat sequence seen in the macOS
+run. Both are bounded-duration observations, not a proven memory ceiling.

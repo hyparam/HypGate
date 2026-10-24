@@ -66,7 +66,7 @@ HTTP metadata into Hyper, leaving the verified stream/key owner in the outer
 future. Success, error, timeout, and cancellation drop the borrowed network future
 before the outer request can release its slot. This is enforced by Rust lifetimes
 and future ownership, not a Verus proof of Tokio or socket syscalls. No connection
-task is detached. The separate server worker permit continues through response
+task is detached. The separate server worker credit continues through response
 cleanup after exchange completion.
 
 A real-socket cancellation test waits until the peer receives a TLS handshake

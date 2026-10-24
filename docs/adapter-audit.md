@@ -24,11 +24,13 @@ driver uses verified `audit_record` to bind authority, current chunk, and bytes,
 never caller headers.
 
 The async server spawns bounded connection tasks and tracked request workers.
-A separate semaphore limits all request-worker lifetimes to the configured request
-count, including authentication rejection and post-EOF cleanup. It is acquired
-before response-channel allocation or spawning; saturation returns 503. A private
-lease removes tracking before returning worker credit, including cancellation
-before the first task poll. Health/readiness/metrics do not consume worker credit.
+A separate verified resource registry limits request-worker lifetimes to the
+configured request count, including authentication rejection and post-EOF cleanup.
+Credit is acquired before response-channel allocation or spawning; saturation
+returns 503. A `WorkerTask` drops its entire pinned future before its private lease,
+which removes tracking before returning credit, including cancellation before the
+first task poll. The [worker audit](worker-lifetimes.md) separates checked registry
+transitions from trusted Rust/Tokio lifetime correspondence. Health/readiness/metrics do not consume worker credit.
 Each response body owns an abort guard for its worker; the header-wait path also
 holds that guard. Successful body EOF acknowledges the drained application queue
 and allows accounting to finish. Connection failure/body drop cancels the worker.

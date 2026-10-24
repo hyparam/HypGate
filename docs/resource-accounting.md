@@ -18,14 +18,14 @@ at most 32 KiB of frame data into its own bounded copy. One DiskLog owns one dis
 | --- | --- | --- |
 | Core chunk or next transfer buffer | At most K per admitted exchange in the production sequential driver | `OwnedStream::payload_bound` proves the combined stream/read-buffer logical length stays within K, with only one nonempty at a time. The driver reads into the owner and verified completion moves the filled prefix into its stream. External `Request::advance` still rejects excessive vector capacity. Slice I/O correspondence, Vec backing capacity, and allocator size remain trusted. |
 | Inbound/outbound reader copies | At most 32 KiB of copied payload per reader; conservatively two readers per admitted exchange | `http_body::Reader` copies accepted visible frame bytes and releases its input reference before yielding; it clears the copy immediately when consumed. It cannot retain a large input owner through a small slice. Upload and download run sequentially; the inbound reader object remains alive. Allocator overhead and references retained inside Hyper remain separate. |
-| Client response channel | One data message of at most 16 KiB per connection with a response body | Created before authorization but after acquiring a worker permit in `Gateway::handle`; charging this solely to authorized request leases is incorrect. A consumed message leaves this queue and becomes Hyper-owned. End markers carry no payload. |
+| Client response channel | One data message of at most 16 KiB per connection with a response body | Created before authorization but after acquiring worker credit in `Gateway::handle`; charging this solely to authorized request leases is incorrect. A consumed message leaves this queue and becomes Hyper-owned. End markers carry no payload. |
 | Provider upload channel | One data message of at most 16 KiB per admitted exchange | Constructed in `HttpsTransport::run`; `Writer::poll_write` reserves queue credit before copying bytes. Hyper may retain previously consumed frames outside the channel. |
 | Disk frames being encoded or queued | At most Q reserved/queued records, each at most K + 65 bytes for production requests | `DiskLog::append` reserves before encoding. Encoding and enqueueing are serialized under the worker mutex. Other library callers may supply up to 1 MiB per record independently of K. |
 | Active disk frame | One additional frame of at most K + 65 bytes | The worker owns the job after receiving it, through write, sync, and acknowledgment. Cancellation of its caller does not reclaim or duplicate that frame. A stalled worker is never replaced. |
 | Delivered durable receipts | At most one frame of at most K + 65 bytes per admitted exchange | The job oneshot transfers its owned frame to the waiting request. Exact receipt validation then drops it; cancellation drops undelivered receipts. The worker can advance to another job before delivery is consumed. Custom library callers retaining receipts must budget separately. |
 | Encoding/comparison scratch | One 33-byte header vector per logger encoder plus one per validating request | `framing::encode_payload` copies a canonical header into the reserved frame. Receipt validation also encodes the expected 33-byte header, then compares payload slices without copying the payload. SHA-256 state and the 32-byte digest are additional fixed-size implementation state. |
 | Inbound connection tasks | At most C entries in the server JoinSet | Admission checks the set before spawning; completed-but-unreaped entries also consume the limit. Excess accepted sockets are closed. The listener and one just-accepted socket are additional objects. |
-| Server request workers, including rejection and cleanup | At most R worker leases | A semaphore permit is acquired before allocating response channels or spawning. A private lease drops its task-tracker token before returning the permit; cancellation before first poll also releases it. This is trusted Rust/Tokio behavior, not a Verus theorem. |
+| Server request workers, including rejection and cleanup | At most R worker leases | A separate verified `ResourceAdmission` registry issues a private key before response allocation or spawning. `WorkerTask` drops the entire boxed task future before its lease; the lease drops tracking before returning the key. Registry transitions are verified; mutex serialization, Rust field drop order, and Tokio cancellation remain trusted. |
 | Admitted exchanges and upstream connections | At most R live leases; one upstream connection per exchange | Verified slot transitions plus trusted ownership. The outer exchange owns admission while the timed TCP/TLS/HTTP future borrows it, so network-future cleanup precedes request release. No pooling, replay, or detached upstream connection task. Failed authentication can still create a tracked server worker without a lease. |
 | Disk operations | One worker, one sequential write/sync operation | A timeout bounds caller waiting, not syscall duration. Outstanding work retains its frame until completion or process exit. |
 
@@ -73,6 +73,10 @@ before handshake; control traffic and record overhead have separate accounting.
   allocation bounds or backing-storage sizes.
 - rustls handshake and record buffers, certificate/root-store data, TLS overhead,
   DNS resolution, and kernel socket buffers.
+- The worker registry adds R `u64` entries (8 × R logical bytes, at most 512 KiB
+  with validated limits), plus vector spare capacity and mutex/registry metadata.
+  Acquisition scans at most R slots under a synchronous mutex; it creates no async
+  waiter. Each `WorkerTask` additionally boxes its future to enforce safe drop order.
 - Tokio task/future state, task trackers, queue nodes, channel permits/oneshots,
   thread stacks, allocator rounding/fragmentation, and runtime bookkeeping.
 - Immutable policy, routes, credential strings, configuration parsing scratch,
@@ -81,19 +85,25 @@ before handshake; control traffic and record overhead have separate accounting.
   with cumulative traffic; bounded in-memory queues do not bound disk usage.
 
 The request tracker includes rejected/unauthenticated requests and completion tails
-after body EOF. It has a separate R-permit gate, so a free core slot does not imply
-that a new worker can start. The worker lease retains its permit through task
-cleanup and removes tracking before returning credit. Saturation returns 503 without
+after body EOF. It has a separate R-slot verified registry, so a free stream slot does not imply
+that a new worker can start. A `WorkerTask` owns the pinned task future followed
+by its lease: Rust field drop order destroys all captures before returning credit,
+including cancellation before the first poll. The lease removes tracking before
+returning its key to its original registry. Saturation returns 503 without
 spawning a waiter or worker. Health, readiness, and metrics bypass this worker gate
 but remain subject to the inbound connection limit. A poisoned registry at gateway
-construction produces a zero-worker gate, preserving fail-closed behavior.
+construction produces a zero-worker gate, preserving fail-closed behavior. Worker
+registry poisoning also permanently closes that gate and fails readiness in both
+logging modes. Exhausted registry IDs refuse new work rather than wrap.
 
 The real-socket worker-budget test holds a cleanup lease with all core slots free,
 checks sixteen excess requests plus health endpoints, observes no upstream
 connection, and verifies permit recovery when an unpolled task is aborted. Existing
 stream, disconnect, and shutdown tests exercise normal worker lifetimes. Formal
-composition still depends on proving these trusted semaphore/drop relationships;
+composition still depends on the trusted mutex/private-key/drop relationships;
 the Tokio executor may also retain completed task bookkeeping outside our lease.
+[Worker lifetime notes](worker-lifetimes.md) map the checked transitions to the
+production wrapper and document the remaining assumptions.
 
 ## Evidence and outstanding work
 
