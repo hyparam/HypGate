@@ -383,3 +383,13 @@ return capacity. Registry identity, Rust ownership, mutex ordering, and truthful
 normal-destructor reporting remain adapter assumptions. This closes the local
 connection/response release gate; the aggregate HTTP owner map and whole-runtime
 lifecycle composition remain unfinished.
+
+The production `ResponseRegistry` now stores connection admission and all response
+states together. Its invariant and `response_count_bound` prove active responses
+are bounded by occupied slots and the configured connection limit across every
+allocation, issuance, completion, and release. Generation checks reject stale
+issuers after reuse; cleanup preserves the issued bit, and unrelated live slots
+are preserved. `ConnectionSlots`, `ConnectionResponses`, and body destruction use
+this same registry under one mutex. The aggregate client-receiver count is now
+mechanized; worker-side HTTP counts and the complete cross-owner composition are
+still open. Tests inspect the actual global charge during payload destruction.

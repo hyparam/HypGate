@@ -78,26 +78,24 @@ pub(crate) struct ChannelBody {
 
 // Cloning the issuer does not clone a permit: the checked slot issues once.
 #[derive(Clone)]
-pub(crate) struct ConnectionResponses(std::sync::Arc<std::sync::Mutex<gateway_core::http_connection::ResponseSlot>>);
+pub(crate) struct ConnectionResponses(std::sync::Arc<ResponseSource>);
+struct ResponseSource {
+    registry: std::sync::Arc<std::sync::Mutex<gateway_core::http_connection::ResponseRegistry>>,
+    issuer: gateway_core::http_connection::ResponseIssuer,
+}
 struct ResponseOwnership {
     issuer: ConnectionResponses,
-    permit: gateway_core::http_connection::ResponsePermit,
+    permit: gateway_core::http_connection::RegisteredResponse,
 }
 impl ConnectionResponses {
-    pub(crate) fn reserve(key: gateway_core::resource::RequestKey) -> (Self, gateway_core::task_credit::TaskCredit) {
-        let (slot, task) = gateway_core::http_connection::ResponseSlot::reserve(key);
-        (Self(std::sync::Arc::new(std::sync::Mutex::new(slot))), task)
-    }
+    pub(crate) fn new(registry: std::sync::Arc<std::sync::Mutex<gateway_core::http_connection::ResponseRegistry>>,
+        issuer: gateway_core::http_connection::ResponseIssuer) -> Self
+    { Self(std::sync::Arc::new(ResponseSource { registry, issuer })) }
     pub(crate) fn channel(&self, max_frame: usize) -> Option<(Writer, ChannelBody)> {
-        let permit = self.0.lock().ok()?.issue()?;
+        let permit = self.0.registry.lock().ok()?.issue(&self.0.issuer)?;
         let (writer, mut body) = channel(max_frame);
         body.response = Some(ResponseOwnership { issuer: self.clone(), permit });
         Some((writer, body))
-    }
-    pub(crate) fn release_task(&self, task: gateway_core::task_credit::TaskCredit,
-        registry: &mut gateway_core::resource::ResourceAdmission) -> bool
-    {
-        self.0.lock().is_ok_and(|mut slot| slot.release_task(task, registry))
     }
 }
 impl Drop for ChannelBody {
@@ -106,8 +104,8 @@ impl Drop for ChannelBody {
         // through automatic field cleanup while payload destruction unwinds.
         drop(self.receiver.take());
         if let Some(response) = self.response.take() {
-            if let Ok(mut slot) = response.issuer.0.lock() {
-                assert!(slot.finish(response.permit), "response belongs to connection");
+            if let Ok(mut registry) = response.issuer.0.registry.lock() {
+                assert!(registry.finish(response.permit), "response belongs to connection");
             }
         }
     }
@@ -187,19 +185,46 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
+    fn response_payload_destruction_precedes_global_charge_return() {
+        type Registry = std::sync::Arc<std::sync::Mutex<gateway_core::http_connection::ResponseRegistry>>;
+        struct Payload(Registry);
+        impl AsRef<[u8]> for Payload { fn as_ref(&self) -> &[u8] { b"data" } }
+        impl Drop for Payload {
+            fn drop(&mut self) {
+                let registry = self.0.lock().unwrap();
+                assert_eq!(registry.response_count(), 1);
+                assert_eq!(registry.usage(), (1, 1));
+            }
+        }
+        let registry = std::sync::Arc::new(std::sync::Mutex::new(gateway_core::http_connection::ResponseRegistry::new(1)));
+        let (task, issuer) = registry.lock().unwrap().acquire().unwrap();
+        let responses = ConnectionResponses::new(registry.clone(), issuer);
+        let (mut writer, body) = responses.channel(4).unwrap();
+        let mut context = Context::from_waker(std::task::Waker::noop());
+        assert!(matches!(writer.sender.poll_send_with(&mut context,
+            || Message::Probe(Bytes::from_owner(Payload(registry.clone())))), Poll::Ready(Ok(()))));
+        drop(body);
+        assert_eq!(registry.lock().unwrap().response_count(), 0);
+        assert!(registry.lock().unwrap().release_task(task));
+        assert_eq!(registry.lock().unwrap().usage(), (0, 1));
+        drop(writer);
+    }
+
+    #[test]
     fn panicking_response_payload_strands_its_connection_permit() {
         struct Payload;
         impl AsRef<[u8]> for Payload { fn as_ref(&self) -> &[u8] { b"data" } }
         impl Drop for Payload { fn drop(&mut self) { panic!("injected response cleanup panic"); } }
-        let mut registry = gateway_core::resource::ResourceAdmission::new(1, 0);
-        let (responses, task) = ConnectionResponses::reserve(registry.acquire().unwrap());
+        let registry = std::sync::Arc::new(std::sync::Mutex::new(gateway_core::http_connection::ResponseRegistry::new(1)));
+        let (task, issuer) = registry.lock().unwrap().acquire().unwrap();
+        let responses = ConnectionResponses::new(registry.clone(), issuer);
         let (mut writer, body) = responses.channel(4).unwrap();
         let mut context = Context::from_waker(std::task::Waker::noop());
         assert!(matches!(writer.sender.poll_send_with(&mut context,
             || Message::Probe(Bytes::from_owner(Payload))), Poll::Ready(Ok(()))));
         assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(body))).is_err());
-        assert!(!responses.release_task(task, &mut registry));
-        assert!(registry.acquire().is_none());
+        assert!(!registry.lock().unwrap().release_task(task));
+        assert!(registry.lock().unwrap().acquire().is_none());
         assert!(responses.channel(4).is_none());
     }
 

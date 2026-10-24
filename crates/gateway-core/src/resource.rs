@@ -62,6 +62,9 @@ impl RequestKey {
     pub closed spec fn stream_claimed(&self) -> bool { self.stream_claimed }
     pub closed spec fn slot(&self) -> nat { self.slot as nat }
     pub closed spec fn id(&self) -> u64 { self.id }
+    pub fn slot_index(&self) -> (out: usize)
+        ensures out == self.slot(),
+    { self.slot }
     pub fn owner(&self) -> (out: u64)
         ensures out == self.id(),
     { self.id }

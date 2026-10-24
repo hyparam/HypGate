@@ -1,9 +1,9 @@
 //! Shared connection credits survive canceled serve invocations until task cleanup.
-use gateway_core::{task_credit::TaskCredit, resource::ResourceAdmission};
+use gateway_core::{task_credit::TaskCredit, http_connection::ResponseRegistry};
 use std::{future::Future, sync::{Arc, Mutex}};
 use super::leased_task::{LeasedTask, TaskLease};
 
-pub(super) struct ConnectionSlots { registry: Mutex<ResourceAdmission>, limit: usize }
+pub(super) struct ConnectionSlots { registry: Arc<Mutex<ResponseRegistry>>, limit: usize }
 pub(super) struct ConnectionLease { slots: Arc<ConnectionSlots>, credit: Option<TaskCredit>, responses: crate::http_body::ConnectionResponses }
 
 impl TaskLease for ConnectionLease {
@@ -21,18 +21,18 @@ impl Drop for ConnectionLease {
         if let Ok(mut registry) = self.slots.registry.lock() {
             let credit = self.credit.take().expect("live connection lease");
             // A retained or leaked response body independently forbids reuse.
-            self.responses.release_task(credit, &mut registry);
+            registry.release_task(credit);
         }
     }
 }
 impl ConnectionSlots {
     pub(super) fn new(limit: usize) -> Arc<Self> {
-        Arc::new(Self { registry: Mutex::new(ResourceAdmission::new(limit, 0)), limit })
+        Arc::new(Self { registry: Arc::new(Mutex::new(ResponseRegistry::new(limit))), limit })
     }
     pub(super) fn limit(&self) -> usize { self.limit }
     pub(super) fn acquire(self: &Arc<Self>) -> Option<ConnectionLease> {
-        let key = self.registry.lock().ok()?.acquire()?;
-        let (responses, credit) = crate::http_body::ConnectionResponses::reserve(key);
+        let (credit, issuer) = self.registry.lock().ok()?.acquire()?;
+        let responses = crate::http_body::ConnectionResponses::new(self.registry.clone(), issuer);
         Some(ConnectionLease { slots: self.clone(), credit: Some(credit), responses })
     }
     #[cfg(test)]
@@ -58,7 +58,14 @@ mod tests {
         assert!(responses.channel(4).is_none());
         // An empty sender tail does not retain the receiver's connection credit.
         drop(writer);
-        assert!(slots.acquire().is_some());
+        let replacement = slots.acquire().unwrap();
+        assert!(responses.channel(4).is_none());
+        let (writer, body) = replacement.responses().channel(4).unwrap();
+        assert_eq!(slots.registry.lock().unwrap().response_count(), 1);
+        drop(replacement.task(async move { drop(body); }));
+        drop(writer);
+        assert_eq!(slots.registry.lock().unwrap().response_count(), 0);
+        assert_eq!(slots.usage(), Some((0, 1)));
     }
 
     #[test]
@@ -68,10 +75,12 @@ mod tests {
         let responses = lease.responses();
         let (writer, body) = responses.channel(4).unwrap();
         drop(lease.task(async {}));
+        assert_eq!(slots.registry.lock().unwrap().response_count(), 1);
         assert_eq!(slots.usage(), Some((1, 1)));
         assert!(slots.acquire().is_none());
         drop(body);
         drop(writer);
+        assert_eq!(slots.registry.lock().unwrap().response_count(), 0);
         assert!(slots.acquire().is_none());
         assert!(responses.channel(4).is_none());
     }

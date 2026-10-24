@@ -318,7 +318,7 @@ Exit criteria:
 | ✓ | Disk jobs after request cancellation: production `DiskWorker` verifies queue-to-active ownership, the combined Q+1 frame bound, exact write/sync/commit order, and session/generation-checked release only after consuming completion delivery. Stalled I/O and abandoned handles retain active credit; fault/cancellation regressions and eleven deliberate mutations cover the protocol. Syscall truth, consuming channel delivery, and file-session identity remain explicit adapter assumptions. |
 | ✓ | DNS jobs after request cancellation: production `CreditedJob` and `Reply` retain verified `TaskCredit` through queued/running lookup work and unread results; cleanup gates release, or `handoff_to` checks a live admitted owner before result adoption. Blocked/canceled lookup, queued cancellation, panic, reply retention, and adoption regressions pass. Rust destruction/channel behavior and registry identity remain explicit adapter assumptions. |
 | ✓ | TLS jobs after request cancellation: the same credited job/reply path retains handshake state and sockets through blocked polls and unread replies; verified handoff transfers successful results to a live request before releasing pool capacity. Queued cancellation, blocked polls, panic, runtime shutdown, and actual TLS exchange regressions pass under the same adapter assumptions. |
-| ☐ | HTTP cleanup tails: prove retained mailbox/body buffers remain charged to their owners after a request or connection is canceled. Reader substep implemented: production `ReadBuffer` verifies bounded frame load, exact read ranges, and full backing charge through partial consumption; mailbox closure now transfers the exact pending value and its charge to a verified cleanup owner through reported destruction. Output frames now use the verified immutable `OutputFrame` constructor and exact consuming handoff. Global owner-count composition remains open. |
+| ☐ | HTTP cleanup tails: prove retained mailbox/body buffers remain charged to their owners after a request or connection is canceled. Reader substep implemented: production `ReadBuffer` verifies bounded frame load, exact read ranges, and full backing charge through partial consumption; mailbox closure now transfers the exact pending value and its charge to a verified cleanup owner through reported destruction. Output frames now use the verified immutable `OutputFrame` constructor and exact consuming handoff. The client-receiver count now comes from the production `ResponseRegistry`; worker reader/upload/tail counts and combined composition remain open. |
 | ☐ | Compose cleanup-before-capacity-reuse across all owners: connect the worker, connection, HTTP, disk, DNS, and TLS lifecycles to production ownership across cancellation, normal completion, panic, and shutdown. |
 | ✓ | Upstream mediation: production HTTPS transfers call `ResolvedRoute::write_bytes` through their privately paired resolved route and request. The checked composition ties policy-authorized destination/credential handles to exact live write ranges and, in strict mode, exact tenant/request/chunk/direction receipts from the designated journal session. Availability retains authorization/routing checks. Concrete table selection is verified; parsing, secret provisioning, initial logger/file identity, Rust ownership, actual writer correspondence, and I/O truth remain explicit adapter assumptions. |
 
@@ -479,6 +479,22 @@ Validation: 258 Verus checks, 238 workspace tests and six compile-fail doctests
 pass; all 227 deliberate mutations are rejected by proof.
 The global registry-to-response map and worker-side reader/upload/tail counts
 still need a composed preservation proof; neither remaining row is closed.
+
+Shared response-registry checkpoint: connection admission and response permits now
+share the production `ResponseRegistry`. Its fixed slot array holds the actual
+response state beside the admission registry. Allocation, issuance, completion,
+and task release preserve the checked invariant that every active response maps
+to an occupied connection slot; `response_count_bound` derives the aggregate
+count from those states, without a caller-supplied count premise. Allocation and
+release preserve existing active charges, completion cannot reset issuance, and
+stale issuers cannot create bodies after a slot changes generation. The registry
+is private behind the same runtime mutex used by admission and body cleanup;
+there is no separate response pool or changed connection limit. Tests cover slot
+reuse, retained responses, and actual payload destruction before charge return.
+Validation: 272 Verus checks, 241 workspace tests (including the new targeted
+regression), and six compile-fail doctests pass; all 235 deliberate mutations are
+rejected by proof. Worker-owned readers, upload channels, sender tails, and their
+composition with disk/DNS/TLS remain open; milestone 6 is still 6/8.
 
 Start with the shared wrapper to reduce duplicated trusted lifetime logic. Preserve
 the existing task-capture destruction tests for both lease types and their

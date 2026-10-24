@@ -105,6 +105,10 @@ impl TaskCredit {
         self.finish_cleanup()
     }
 
+    pub fn slot_index(&self) -> (out: usize)
+        ensures out == self.key().slot(),
+    { self.key.slot_index() }
+
     pub fn owner_id(&self) -> (out: u64)
         ensures out == self.key().id(),
     { self.key.owner() }
@@ -151,7 +155,10 @@ impl TaskCredit {
             final(registry).next_id() == old(registry).next_id(),
             ok == (self.releasable() && !self.key().stream_claimed() && old(registry).owns(&self.key())),
             ok ==> !self.retaining() && !final(registry).owns(&self.key())
-                && crate::resource::occupied(final(registry).entries()) + 1 == crate::resource::occupied(old(registry).entries()),
+                && crate::resource::occupied(final(registry).entries()) + 1 == crate::resource::occupied(old(registry).entries())
+                && final(registry).entries()[self.key().slot() as int] == 0
+                && (forall|i: int| 0 <= i < old(registry).limit() && i != self.key().slot()
+                    ==> #[trigger] final(registry).entries()[i] == old(registry).entries()[i]),
             !ok ==> *final(registry) == *old(registry),
             self.retaining() ==> *final(registry) == *old(registry),
     {

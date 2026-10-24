@@ -51,3 +51,50 @@ fn retiring_an_unused_connection_prevents_late_issuance() {
     assert!(slot.issue().is_none());
     assert!(registry.acquire().is_some());
 }
+
+#[test]
+fn registry_counts_live_responses_and_rejects_stale_issuers_after_reuse() {
+    use gateway_core::http_connection::ResponseRegistry;
+    let mut registry = ResponseRegistry::new(2);
+    let (first, old_issuer) = registry.acquire().unwrap();
+    let (second, second_issuer) = registry.acquire().unwrap();
+    let first_body = registry.issue(&old_issuer).unwrap();
+    let second_body = registry.issue(&second_issuer).unwrap();
+    assert_eq!(registry.response_count(), 2);
+    assert!(registry.issue(&old_issuer).is_none());
+    assert!(registry.acquire().is_none());
+    assert!(registry.finish(first_body));
+    assert!(registry.issue(&old_issuer).is_none());
+    assert_eq!(registry.response_count(), 1);
+    assert!(registry.release_task(first));
+    assert_eq!(registry.usage(), (1, 2));
+    let (replacement, new_issuer) = registry.acquire().unwrap();
+    assert!(registry.issue(&old_issuer).is_none());
+    let replacement_body = registry.issue(&new_issuer).unwrap();
+    assert_eq!(registry.response_count(), 2);
+    assert!(registry.finish(second_body));
+    assert!(registry.release_task(second));
+    assert_eq!(registry.response_count(), 1);
+    assert_eq!(registry.usage(), (1, 2));
+    assert!(registry.finish(replacement_body));
+    assert!(registry.release_task(replacement));
+    assert_eq!(registry.response_count(), 0);
+    assert_eq!(registry.usage(), (0, 2));
+}
+
+#[test]
+fn registry_preserves_response_charge_after_failed_task_release() {
+    use gateway_core::http_connection::ResponseRegistry;
+    let mut registry = ResponseRegistry::new(1);
+    let (task, issuer) = registry.acquire().unwrap();
+    let body = registry.issue(&issuer).unwrap();
+    assert!(!registry.release_task(task));
+    assert_eq!(registry.response_count(), 1);
+    assert_eq!(registry.usage(), (1, 1));
+    assert!(registry.acquire().is_none());
+    assert!(registry.issue(&issuer).is_none());
+    assert!(registry.finish(body));
+    assert_eq!(registry.response_count(), 0);
+    assert_eq!(registry.usage(), (1, 1));
+    assert!(registry.acquire().is_none());
+}
