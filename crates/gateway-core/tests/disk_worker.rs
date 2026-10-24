@@ -1,0 +1,139 @@
+use gateway_core::{audit_journal::AuditJournal, disk_worker::{Completion, DiskWorker, Storage},
+    frame_queue::FrameQueue, framing::{Header, RecordBody, RecordFrame}, journal::DurableFrame};
+use std::sync::{Arc, Mutex};
+
+#[derive(Default)]
+struct Disk { bytes: Vec<u8>, stable: Vec<u8>, writes: usize, syncs: usize, fail_write: bool, fail_sync: bool }
+impl Storage for Disk {
+    fn write_all(&mut self, bytes: &Vec<u8>) -> bool {
+        self.writes += 1;
+        if self.fail_write { self.bytes.extend_from_slice(&bytes[..3]); return false; }
+        self.bytes.extend_from_slice(bytes); true
+    }
+    fn sync(&mut self) -> bool {
+        self.syncs += 1;
+        if self.fail_sync { return false; }
+        self.stable = self.bytes.clone(); true
+    }
+}
+type Replies = Arc<Mutex<Vec<(u64, Option<DurableFrame>)>>>;
+struct Reply { id: u64, replies: Replies }
+impl Completion for Reply {
+    fn complete(self, receipt: Option<DurableFrame>) { self.replies.lock().unwrap().push((self.id, receipt)); }
+}
+fn frame(id: u64) -> RecordFrame {
+    RecordBody::new(Header { tenant: 1, request: 1, chunk: id, direction: 0, payload: 3 }, b"abc")
+        .unwrap().seal(&[0; 32])
+}
+fn push(queue: &mut FrameQueue<Reply>, id: u64, replies: &Replies) {
+    assert!(queue.push((frame(id), Reply { id, replies: replies.clone() })).is_ok());
+}
+
+#[test]
+fn active_capacity_survives_io_and_receipt_delivery_until_matching_release() {
+    let replies = Replies::default();
+    let mut queue = FrameQueue::with_payload_limit(1, 3);
+    let mut worker = DiskWorker::new(3, 1);
+    let mut journal = AuditJournal::new();
+    let mut disk = Disk::default();
+    push(&mut queue, 1, &replies);
+    let active = worker.take(&mut queue).unwrap();
+    assert!(worker.is_busy()); assert!(!worker.can_take());
+    // Queue credit can be reused, but the independent active credit cannot.
+    push(&mut queue, 2, &replies);
+    assert!(worker.take(&mut queue).is_none()); assert_eq!(queue.len(), 1);
+    let finished = worker.run(active, &mut journal, &mut disk, true);
+    assert!(!finished.failed());
+    assert_eq!(disk.writes, 1); assert_eq!(disk.syncs, 1);
+    assert_eq!(disk.stable, *frame(1).bytes());
+    assert!(worker.take(&mut queue).is_none());
+    let released = finished.deliver();
+    assert!(worker.take(&mut queue).is_none());
+    assert!(worker.release(released));
+    assert!(worker.can_take());
+    let active = worker.take(&mut queue).unwrap();
+    let finished = worker.run(active, &mut journal, &mut disk, true);
+    assert!(worker.release(finished.deliver()));
+    let replies = replies.lock().unwrap();
+    assert_eq!(replies.iter().map(|r| r.0).collect::<Vec<_>>(), vec![1, 2]);
+    for (id, receipt) in replies.iter() {
+        assert!(receipt.as_ref().unwrap().matches_record(Header {
+            tenant: 1, request: 1, chunk: *id, direction: 0, payload: 3,
+        }, b"abc"));
+    }
+}
+
+#[test]
+fn abandoned_active_or_finished_job_cannot_return_credit() {
+    for finish in [false, true] {
+        let replies = Replies::default();
+        let mut queue = FrameQueue::with_payload_limit(1, 3);
+        let mut worker = DiskWorker::new(3, 1);
+        push(&mut queue, 1, &replies);
+        let active = worker.take(&mut queue).unwrap();
+        if finish {
+            drop(worker.run(active, &mut AuditJournal::new(), &mut Disk::default(), true));
+        } else { drop(active); }
+        push(&mut queue, 2, &replies);
+        assert!(worker.is_busy());
+        assert!(worker.take(&mut queue).is_none());
+        assert_eq!(queue.len(), 1);
+        assert!(replies.lock().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn disabled_write_and_sync_failure_never_acknowledge_or_retry() {
+    for mode in 0..3 {
+        let replies = Replies::default();
+        let mut queue = FrameQueue::with_payload_limit(1, 3);
+        let mut worker = DiskWorker::new(3, 1);
+        let mut journal = AuditJournal::new();
+        let mut disk = Disk { fail_write: mode == 1, fail_sync: mode == 2, ..Disk::default() };
+        for id in 1..=2 {
+            push(&mut queue, id, &replies);
+            let active = worker.take(&mut queue).unwrap();
+            // The second attempt remains disabled by journal failure even when
+            // the caller supplies true and the external faults have recovered.
+            let finished = worker.run(active, &mut journal, &mut disk, mode != 0 || id == 2);
+            assert!(finished.failed());
+            assert!(worker.release(finished.deliver()));
+            disk.fail_write = false; disk.fail_sync = false;
+        }
+        assert_eq!(disk.writes, usize::from(mode != 0));
+        assert_eq!(disk.syncs, usize::from(mode == 2));
+        assert!(replies.lock().unwrap().iter().all(|(_, receipt)| receipt.is_none()));
+    }
+}
+
+#[test]
+fn mismatched_payload_budget_does_not_dequeue_and_closed_queue_drains() {
+    let replies = Replies::default();
+    let mut queue = FrameQueue::with_payload_limit(1, 3);
+    let mut small = DiskWorker::new(2, 1);
+    push(&mut queue, 1, &replies);
+    assert!(small.take(&mut queue).is_none());
+    assert_eq!(queue.len(), 1); assert!(!small.is_busy());
+    queue.close();
+    let mut worker = DiskWorker::new(3, 1);
+    let active = worker.take(&mut queue).unwrap();
+    let finished = worker.run(active, &mut AuditJournal::new(), &mut Disk::default(), true);
+    assert!(worker.release(finished.deliver()));
+    assert!(worker.take(&mut queue).is_none());
+}
+
+#[test]
+fn completion_from_another_session_cannot_release_active_capacity() {
+    let replies = Replies::default();
+    let mut queue = FrameQueue::with_payload_limit(1, 3);
+    let mut first = DiskWorker::new(3, 1);
+    let mut second = DiskWorker::new(3, 2);
+    push(&mut queue, 1, &replies);
+    let one = first.take(&mut queue).unwrap();
+    push(&mut queue, 2, &replies);
+    let two = second.take(&mut queue).unwrap();
+    let released = first.run(one, &mut AuditJournal::new(), &mut Disk::default(), true).deliver();
+    assert!(!second.release(released));
+    assert!(first.is_busy()); assert!(second.is_busy());
+    assert!(second.release(second.run(two, &mut AuditJournal::new(), &mut Disk::default(), true).deliver()));
+}

@@ -16,6 +16,17 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("disk_worker.rs", "disk_syncs_after_permanent_failure", "let mut receipt = None;", "let mut receipt = None; let _ = storage.sync();"),
+    ("disk_worker.rs", "disk_release_accepts_another_session", " || token.session != self.session", ""),
+    ("disk_worker.rs", "disk_dequeues_while_active", "if self.busy || self.next == u64::MAX", "if self.next == u64::MAX"),
+    ("disk_worker.rs", "disk_forgets_active_charge", "self.busy = true;", "self.busy = false;"),
+    ("disk_worker.rs", "disk_reuses_active_generation", "self.next += 1;", "self.next = self.next;"),
+    ("disk_worker.rs", "disk_release_accepts_wrong_generation", " || token.generation != self.next - 1", ""),
+    ("disk_worker.rs", "disk_ignores_payload_budget", " || queue.payload_capacity() > self.payload_limit", ""),
+    ("disk_worker.rs", "disk_commits_without_write", "storage.write_all(self.frame.bytes()) && storage.sync()", "storage.sync()"),
+    ("disk_worker.rs", "disk_commits_without_sync", "storage.write_all(self.frame.bytes()) && storage.sync()", "storage.write_all(self.frame.bytes())"),
+    ("disk_worker.rs", "disk_writes_when_disabled", "if enabled {", "if true {"),
+    ("disk_worker.rs", "disk_bound_omits_active_credit", "<= (queue.capacity() + 1) * (self.payload_limit() + 65),", "<= queue.capacity() * (self.payload_limit() + 65),"),
     ("task_credit.rs", "task_handoff_without_live_owner", " || !owner.is_live(registry)", ""),
     ("task_credit.rs", "task_handoff_wrong_owner", "Phase::HandedOff(owner.owner_id())", "Phase::HandedOff(0)"),
     ("task_credit.rs", "task_handoff_before_result", "if !matches!(self.phase, Phase::AwaitingAdoption) || !owner.is_live(registry)", "if !owner.is_live(registry)"),

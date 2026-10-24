@@ -16,6 +16,10 @@ supported deployment filesystems and their crash guarantees still need validatio
 One worker thread owns the file. Cloned logger handles share its bounded queue.
 Each append reserves a queue slot before copying its record; the worker performs
 `write_all` followed by `sync_all` before returning a positive acknowledgment.
+The production `DiskWorker` core verifies that sequence and retains an independent
+active credit from dequeue through completion delivery. Only a private token
+matching its file session and generation permits another dequeue; see
+[audit-buffer ownership](audit-buffer-lifetimes.md#verified-active-worker-ownership).
 There is no retry after write or sync failure. Such failures poison logger health,
 and later appends fail. A full queue parks the caller, in arrival order, until the
 worker frees a slot; nothing is reserved or encoded while it waits, and a canceled

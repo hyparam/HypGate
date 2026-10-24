@@ -7,7 +7,7 @@
 | 3. Crash-safe logging | 15/15 | ✓ |
 | 4. Availability hardening | 16/16 | ✓ |
 | 5. Auditable first release | 9/9 | ✓ |
-| [6. Async ownership and effect composition](#6-async-ownership-and-effect-composition) | 4/8 | ☐ |
+| [6. Async ownership and effect composition](#6-async-ownership-and-effect-composition) | 5/8 | ☐ |
 
 Progress counts completed rows in each milestone's table below. Rows are not
 weighted estimates of effort or proof coverage; an open row can still block the
@@ -315,7 +315,7 @@ Exit criteria:
 | :---: | --- |
 | ✓ | Consolidated worker and connection task wrappers into private `server/leased_task.rs::LeasedTask`, retaining distinct registry/tracking behavior and unit output. Lifecycle tests cover both lease types, including deterministic never-polled destruction. |
 | ✓ | Worker and connection release gates: production `TaskCredit` gates release on reported cleanup completion; lifecycle/non-reuse contracts and seven mutations checked, with deterministic unpolled and cleanup-panic regressions. Actual destructor correspondence remains trusted. |
-| ☐ | Disk jobs after request cancellation: prove queued and active audit work retains its own capacity until completion or cleanup, including a stuck write or sync. |
+| ✓ | Disk jobs after request cancellation: production `DiskWorker` verifies queue-to-active ownership, the combined Q+1 frame bound, exact write/sync/commit order, and session/generation-checked release only after consuming completion delivery. Stalled I/O and abandoned handles retain active credit; fault/cancellation regressions and eleven deliberate mutations cover the protocol. Syscall truth, consuming channel delivery, and file-session identity remain explicit adapter assumptions. |
 | ✓ | DNS jobs after request cancellation: production `CreditedJob` and `Reply` retain verified `TaskCredit` through queued/running lookup work and unread results; cleanup gates release, or `handoff_to` checks a live admitted owner before result adoption. Blocked/canceled lookup, queued cancellation, panic, reply retention, and adoption regressions pass. Rust destruction/channel behavior and registry identity remain explicit adapter assumptions. |
 | ✓ | TLS jobs after request cancellation: the same credited job/reply path retains handshake state and sockets through blocked polls and unread replies; verified handoff transfers successful results to a live request before releasing pool capacity. Queued cancellation, blocked polls, panic, runtime shutdown, and actual TLS exchange regressions pass under the same adapter assumptions. |
 | ☐ | HTTP cleanup tails: prove retained mailbox/body buffers remain charged to their owners after a request or connection is canceled. |
@@ -326,6 +326,11 @@ DNS/TLS checkpoint validation: the locked workspace suite and five compile-fail
 doctests pass (opt-in workloads excluded); the pinned Cargo/Verus check reports
 204 verified checks and no errors; all 11 lifecycle/reply/handoff mutations are
 rejected by proof. The remaining rows are not covered by that checkpoint.
+
+Disk checkpoint validation: the locked workspace suite and six compile-fail
+doctests pass (opt-in workloads excluded); Cargo/Verus reports 217 verified checks
+and no errors; all 11 disk ownership/order mutations are rejected by proof.
+HTTP tails, cross-owner composition, and upstream mediation remain unfinished.
 
 Start with the shared wrapper to reduce duplicated trusted lifetime logic. Preserve
 the existing task-capture destruction tests for both lease types and their

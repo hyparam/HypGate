@@ -19,7 +19,18 @@ pub const MAX_RECORD_BYTES: usize = 1024 * 1024;
 // pages, and thread-local/kernel storage remain separate resource categories.
 const WORKER_STACK_BYTES: usize = 2 * 1024 * 1024;
 
-type Completion = oneshot::Sender<Option<DurableFrame>>;
+struct Completion(oneshot::Sender<Option<DurableFrame>>);
+impl gateway_core::disk_worker::Completion for Completion {
+    fn complete(self, receipt: Option<DurableFrame>) {
+        // Ownership goes to the request's reply channel, or the unsent value is
+        // destroyed here. No worker-owned payload survives this synchronous call.
+        let _ = self.0.send(receipt);
+    }
+}
+#[cfg(test)]
+impl Completion {
+    fn send(self, receipt: Option<DurableFrame>) -> Result<(), Option<DurableFrame>> { self.0.send(receipt) }
+}
 type Job = (RecordFrame, Completion);
 
 /// Clones share one bounded queue and one worker. Never create replacement workers
@@ -44,6 +55,14 @@ impl Drop for UnhealthyOnExit {
 
 trait DurableWrite: Write + Send + 'static { fn sync(&mut self) -> io::Result<()>; }
 impl DurableWrite for File { fn sync(&mut self) -> io::Result<()> { self.sync_all() } }
+
+// Trusted syscall bindings for the verified worker. Successful returns mean
+// exact append and durable sync under the documented storage crash contract.
+struct Storage<W>(W);
+impl<W: DurableWrite> gateway_core::disk_worker::Storage for Storage<W> {
+    fn write_all(&mut self, bytes: &Vec<u8>) -> bool { self.0.write_all(bytes).is_ok() }
+    fn sync(&mut self) -> bool { self.0.sync().is_ok() }
+}
 
 impl DiskLog {
     /// Startup operation: creates a new file, syncs its header and parent directory,
@@ -82,7 +101,7 @@ impl DiskLog {
         Self::start_limited(file, capacity, deadline, session, MAX_RECORD_BYTES)
     }
 
-    fn start_limited<W: DurableWrite>(mut file: W, capacity: usize, deadline: Duration, session: [u8; 16], payload_limit: usize) -> io::Result<Self> {
+    fn start_limited<W: DurableWrite>(file: W, capacity: usize, deadline: Duration, session: [u8; 16], payload_limit: usize) -> io::Result<Self> {
         if payload_limit == 0 || payload_limit > MAX_RECORD_BYTES || capacity == 0 || capacity > 1024 { return Err(io::ErrorKind::InvalidInput.into()); }
         let queue = Arc::new(Queue::with_payload_limit(capacity, payload_limit));
         let receiver = queue.clone();
@@ -91,18 +110,15 @@ impl DiskLog {
         let thread = std::thread::Builder::new().name("soundgate-audit".into()).stack_size(WORKER_STACK_BYTES).spawn(move || {
             let _health_on_exit = UnhealthyOnExit(worker_health.clone(), receiver.clone());
             let mut journal = Journal::new();
-            while let Some((frame, done)) = receiver.recv() {
-                let receipt = if worker_health.load(Ordering::Acquire) {
-                    match journal.begin(frame.bytes().len() as u64) {
-                        Some(ticket) if file.write_all(frame.bytes()).is_ok() && file.sync().is_ok() =>
-                            journal.commit_frame(&ticket, frame),
-                        _ => None,
-                    }
-                } else { None };
-                if receipt.is_none() { journal.fail(); worker_health.store(false, Ordering::Release); }
+            let mut storage = Storage(file);
+            let mut owner = gateway_core::disk_worker::DiskWorker::new(payload_limit, u128::from_le_bytes(session));
+            while let Some(job) = receiver.recv(&mut owner) {
+                let finished = owner.run(job, &mut journal, &mut storage, worker_health.load(Ordering::Acquire));
+                if finished.failed() { worker_health.store(false, Ordering::Release); }
                 // A canceled caller may leave a durable but unsent record. It must
                 // never cause the worker to retry or the gateway to replay traffic.
-                let _ = done.send(receipt);
+                let released = finished.deliver();
+                assert!(owner.release(released), "completed disk job owns active credit");
             }
         })?;
         Ok(Self { worker: Arc::new(Mutex::new(Worker { queue, thread: Some(thread) })),

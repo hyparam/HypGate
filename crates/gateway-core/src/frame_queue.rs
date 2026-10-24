@@ -5,6 +5,9 @@ use crate::{fixed_queue::FixedQueue, framing::RecordFrame};
 verus! {
 pub struct FrameQueue<T> { queue: FixedQueue<(RecordFrame, T)>, payload_limit: usize, reserved: bool }
 impl<T> FrameQueue<T> {
+    pub fn payload_capacity(&self) -> (out: usize)
+        ensures out == self.payload_limit(),
+    { self.payload_limit }
     pub closed spec fn reserved(&self) -> bool { self.reserved }
     pub open spec fn charged_slots(&self) -> nat { self.items().len() + if self.reserved() { 1nat } else { 0nat } }
     pub closed spec fn items(&self) -> Seq<(RecordFrame, T)> { self.queue.contents() }

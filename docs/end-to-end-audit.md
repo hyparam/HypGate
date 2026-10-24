@@ -29,6 +29,14 @@ their result first. The historical effect sites below remain the same, but pool
 release now includes this checked lifecycle/handoff gate. Destructor/channel
 correspondence and the full cross-category composition are still explicit joins.
 
+Disk follow-up: `disk_worker::DiskWorker` now owns the queue-to-active transfer,
+write/sync/commit sequence, and session/generation-checked release. The runtime
+queue uses its `take` while locked; the worker uses `run`, consuming `deliver`,
+then `release`. The actual file effects are isolated in `disk_log::Storage`,
+and consuming oneshot delivery in `disk_log::Completion`. Those adapter contracts
+remain trusted; the sequencing, exact frame binding, active credit, and Q+1 bound
+are checked. See [audit-buffer ownership](audit-buffer-lifetimes.md).
+
 Related records: the [proof index](proof-index.md) lists every contract, the
 [adapter audit](adapter-audit.md) records milestone 2 bindings, the
 [storage contract](storage-crash-contract.md) and [shutdown proof](shutdown-proof.md)

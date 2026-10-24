@@ -49,7 +49,8 @@ impl AuditJournal {
             out.is_some() == (!old(self).failed() && old(self).matches(ticket)
                 && frame.contents().len() == ticket.end() - ticket.start()),
             match out {
-                Some(receipt) => receipt.valid() && receipt.acknowledged() == final(self).history()
+                Some(receipt) => receipt.valid() && receipt.record() == frame.contents()
+                    && receipt.acknowledged() == final(self).history()
                     && final(self).frames() == old(self).frames().push(frame)
                     && final(self).history() == old(self).history() + frame.contents()
                     && !final(self).failed(),

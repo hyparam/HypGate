@@ -18,7 +18,7 @@ impl EncodingPermit<'_> {
             .expect("validated reserved audit record");
         let frame = super::seal_record(body);
         let (done, receive) = oneshot::channel();
-        ((frame, done), receive)
+        ((frame, Completion(done)), receive)
     }
 }
 
@@ -73,16 +73,27 @@ impl Queue {
         }
         Ok(())
     }
-    pub(super) fn recv(&self) -> Option<Job> {
+    pub(super) fn recv(&self, owner: &mut gateway_core::disk_worker::DiskWorker)
+        -> Option<gateway_core::disk_worker::ActiveAppend<Completion>>
+    {
+        if !owner.can_take() { return None; }
         let job = {
             let mut state = self.state.lock().ok()?;
             loop {
-                if let Some(job) = state.pop() { break job; }
-                if state.is_closed() { return None; }
+                if let Some(job) = owner.take(&mut state) { break job; }
+                // A nonempty queue refused by the owner means mismatched limits;
+                // fail closed instead of waiting for an impossible dequeue.
+                if state.is_closed() || state.len() != 0 { return None; }
                 state = self.ready.wait(state).ok()?;
             }
         };
         // Every pop frees exactly one slot, after the lock is released.
+        self.slots.add_permits(1);
+        Some(job)
+    }
+    #[cfg(test)]
+    fn recv_raw_for_test(&self) -> Option<Job> {
+        let job = self.state.lock().ok()?.pop()?;
         self.slots.add_permits(1);
         Some(job)
     }
@@ -117,7 +128,36 @@ mod tests {
     fn job(chunk: u64) -> Job {
         (super::super::encode_record(crate::transfer::LogRecord {
             tenant: 1, request: 1, chunk, direction: crate::transfer::Direction::Upload, bytes: b"record",
-        }), tokio::sync::oneshot::channel().0)
+        }), Completion(tokio::sync::oneshot::channel().0))
+    }
+    #[tokio::test]
+    async fn production_dequeue_requires_active_credit_and_delivery_returns_it() {
+        use gateway_core::{disk_worker::DiskWorker, audit_journal::AuditJournal};
+        let queue = Queue::with_payload_limit(1, 3);
+        let mut owner = DiskWorker::new(3, 1);
+        let mut journal = AuditJournal::new();
+        // Disabled logging exercises ownership/delivery without a filesystem.
+        struct Unused;
+        impl super::super::DurableWrite for Unused { fn sync(&mut self) -> std::io::Result<()> { panic!("disabled sync"); } }
+        impl std::io::Write for Unused {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> { panic!("disabled write"); }
+            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        }
+        let mut storage = super::super::Storage(Unused);
+        let record = |chunk| LogRecord { tenant: 1, request: 2, chunk,
+            direction: super::super::Direction::Upload, bytes: b"abc" };
+        let first = queue.enqueue(record(1)).await.unwrap();
+        let active = queue.recv(&mut owner).unwrap();
+        drop(first); // caller cancellation does not return active credit
+        let second = queue.enqueue(record(2)).await.unwrap();
+        assert!(queue.recv(&mut owner).is_none()); assert_eq!(queue.len(), 1);
+        let finished = owner.run(active, &mut journal, &mut storage, false);
+        assert!(queue.recv(&mut owner).is_none());
+        assert!(owner.release(finished.deliver()));
+        let active = queue.recv(&mut owner).unwrap();
+        assert!(owner.release(owner.run(active, &mut journal, &mut storage, false).deliver()));
+        assert!(second.await.unwrap().is_none());
+        queue.close(); assert!(queue.recv(&mut owner).is_none());
     }
     #[tokio::test]
     async fn production_enqueue_preserves_pairing_waits_while_full_and_refuses_closed_before_encoding() {
@@ -132,19 +172,19 @@ mod tests {
         // A valid waiter is admitted as soon as the worker pops the first job, in order.
         let mut waiter = Box::pin(queue.enqueue(record(b"def")));
         assert!(tokio::time::timeout(Duration::from_millis(50), &mut waiter).await.is_err());
-        let (frame, done) = queue.recv().unwrap();
+        let (frame, done) = queue.recv_raw_for_test().unwrap();
         assert_eq!(frame.bytes(), super::super::encode_record(record(b"abc")).bytes());
         assert!(done.send(None).is_ok());
         assert!(completion.await.unwrap().is_none());
         let second = waiter.await.unwrap();
         assert_eq!(queue.len(), 1);
-        let (frame, done) = queue.recv().unwrap();
+        let (frame, done) = queue.recv_raw_for_test().unwrap();
         assert_eq!(frame.bytes(), super::super::encode_record(record(b"def")).bytes());
         assert!(done.send(None).is_ok());
         assert!(second.await.unwrap().is_none());
         queue.close();
         assert!(matches!(queue.enqueue(record(b"oversized")).await, Err(e) if e.kind() == io::ErrorKind::BrokenPipe));
-        assert!(queue.recv().is_none());
+        assert!(queue.recv_raw_for_test().is_none());
     }
     #[tokio::test]
     async fn closing_wakes_waiting_callers_without_constructing_their_jobs() {
@@ -162,7 +202,7 @@ mod tests {
         assert_eq!(tokio::time::timeout(Duration::from_secs(2), waiter).await.unwrap().unwrap(), io::ErrorKind::BrokenPipe);
         // The admitted job survives closure; the waiter never reserved anything.
         assert_eq!(queue.len(), 1);
-        assert!(queue.recv().is_some()); assert!(queue.recv().is_none());
+        assert!(queue.recv_raw_for_test().is_some()); assert!(queue.recv_raw_for_test().is_none());
     }
     #[tokio::test]
     async fn dropped_waiter_leaves_no_reservation_and_later_callers_proceed() {
@@ -172,11 +212,11 @@ mod tests {
         let _queued = queue.enqueue(record(b"abc")).await.unwrap();
         drop(tokio::time::timeout(Duration::from_millis(20), queue.enqueue(record(b"def"))).await);
         assert_eq!(queue.len(), 1);
-        assert!(queue.recv().is_some());
+        assert!(queue.recv_raw_for_test().is_some());
         // The freed slot goes to the next caller, not to the canceled waiter.
         let later = tokio::time::timeout(Duration::from_secs(2), queue.enqueue(record(b"ghi"))).await.unwrap().unwrap();
         assert_eq!(queue.len(), 1);
-        let (frame, done) = queue.recv().unwrap();
+        let (frame, done) = queue.recv_raw_for_test().unwrap();
         assert_eq!(frame.bytes(), super::super::encode_record(record(b"ghi")).bytes());
         assert!(done.send(None).is_ok()); assert!(later.await.unwrap().is_none());
     }
@@ -187,17 +227,17 @@ mod tests {
         assert_eq!(queue.push_with(|_| panic!("full queue allocated a job")).unwrap_err().kind(), io::ErrorKind::WouldBlock);
         queue.close();
         assert_eq!(queue.push_with(|_| panic!("closed queue allocated a job")).unwrap_err().kind(), io::ErrorKind::BrokenPipe);
-        assert!(queue.recv().is_some()); assert!(queue.recv().is_none());
+        assert!(queue.recv_raw_for_test().is_some()); assert!(queue.recv_raw_for_test().is_none());
         assert!(!queue.is_open()); assert_eq!(queue.len(), 0);
     }
     #[tokio::test]
     async fn worker_exit_discards_queued_receipt_senders() {
         let queue = Queue::new(1);
         let (done, receive) = tokio::sync::oneshot::channel();
-        queue.push_with(|_| { let (frame, _) = job(1); (frame, done) }).unwrap();
+        queue.push_with(|_| { let (frame, _) = job(1); (frame, Completion(done)) }).unwrap();
         queue.abort();
         assert!(receive.await.is_err());
-        assert!(queue.recv().is_none()); assert_eq!(queue.len(), 0);
+        assert!(queue.recv_raw_for_test().is_none()); assert_eq!(queue.len(), 0);
     }
     #[test]
     fn close_serializes_with_job_construction_and_preserves_admitted_job() {
@@ -223,7 +263,7 @@ mod tests {
         complete.recv_timeout(Duration::from_secs(2)).unwrap(); closer.join().unwrap();
         assert!(!queue.is_open()); assert_eq!(queue.len(), 1);
         assert_eq!(queue.push_with(|_| panic!("post-close construction")).unwrap_err().kind(), io::ErrorKind::BrokenPipe);
-        assert!(queue.recv().is_some()); assert!(queue.recv().is_none());
+        assert!(queue.recv_raw_for_test().is_some()); assert!(queue.recv_raw_for_test().is_none());
     }
     #[test]
     fn construction_panic_permanently_closes_queue_admission() {
@@ -233,6 +273,6 @@ mod tests {
         })).is_err());
         assert!(!queue.is_open());
         assert_eq!(queue.push_with(|_| panic!("poisoned queue constructed a job")).unwrap_err().kind(), io::ErrorKind::BrokenPipe);
-        assert!(queue.recv().is_none());
+        assert!(queue.recv_raw_for_test().is_none());
     }
 }

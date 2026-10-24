@@ -211,7 +211,8 @@ impl Journal {
                 && old(self).acked_len() == old(self).written_len()
                 && frame.contents().len() == t.end() - t.start()),
             match out {
-            Some(receipt) => receipt.valid() && receipt.prefix() == old(self).history()
+            Some(receipt) => receipt.valid() && receipt.record() == frame.contents()
+                && receipt.prefix() == old(self).history()
                 && receipt.acknowledged() == final(self).acked()
                 && final(self).acked() == final(self).history()
                 && final(self).history() == old(self).history() + frame.contents()
