@@ -65,7 +65,8 @@ impl HttpsTransport {
         let port = prepared.destination().port_u16().unwrap_or(443);
         let server = ServerName::try_from(host.clone()).map_err(|_| TransportError::Metadata)?;
         let tcp = {
-            let addresses = self.resolver.resolve(host.clone(), port).await.map_err(|_| TransportError::Connect)?;
+            let addresses = self.resolver.resolve(host.clone(), port).await.map_err(|_| TransportError::Connect)?
+                .adopt(prepared.routed.stream()).map_err(|_| TransportError::Connect)?;
             TcpStream::connect(addresses.as_slice()).await.map_err(|_| TransportError::Connect)?
         };
         let connector = self.connector.clone();
@@ -73,7 +74,8 @@ impl HttpsTransport {
             connector.connect_with(server, tcp, |connection| {
                 connection.set_buffer_limit(Some(TLS_APPLICATION_BUFFER));
             }).await
-        }).await.map_err(|_| TransportError::Tls)?;
+        }).await.map_err(|_| TransportError::Tls)?
+            .adopt(prepared.routed.stream()).map_err(|_| TransportError::Tls)?;
         // Explicit queue strategy keeps body-buffer accounting stable across TLS adapters.
         let (mut sender, connection) = hyper::client::conn::http1::Builder::new()
             .writev(true).max_headers(crate::http_boundary::MAX_HEADER_VALUES)

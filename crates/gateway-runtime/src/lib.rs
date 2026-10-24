@@ -9,4 +9,5 @@ pub mod disk_log;
 pub mod transport;
 mod http_body;
 mod http_io;
+mod credited_job;
 pub mod server;

@@ -1,7 +1,9 @@
 //! Bounded blocking DNS work. Request cancellation cannot return a running
 //! lookup's credit; dedicated threads do not hold Tokio runtime shutdown open.
-use gateway_core::resource::{RequestKey, ResourceAdmission};
+use gateway_core::resource::ResourceAdmission;
+use crate::credited_job::{CreditedJob as Job, Reply};
 use std::{io, net::{IpAddr, SocketAddr, ToSocketAddrs}, sync::{Arc, Mutex, mpsc}};
+#[cfg(test)]
 use tokio::sync::oneshot;
 
 const LOOKUPS: usize = 32;
@@ -9,26 +11,7 @@ const WORKERS: usize = 4;
 const ADDRESSES: usize = 64;
 const STACK_BYTES: usize = 2 * 1024 * 1024;
 
-type Lookup = Box<dyn FnOnce(&str, u16) -> io::Result<Vec<SocketAddr>> + Send>;
 pub(super) struct Resolver { slots: Arc<Mutex<ResourceAdmission>>, sender: mpsc::SyncSender<Job> }
-struct Credit { slots: Arc<Mutex<ResourceAdmission>>, key: RequestKey }
-impl Drop for Credit {
-    fn drop(&mut self) {
-        if let Ok(mut slots) = self.slots.lock() {
-            let released = slots.release(&self.key);
-            debug_assert!(released, "DNS credit must belong to its registry");
-        }
-    }
-}
-
-// Explicit drop order keeps credit through lookup/host/result destruction.
-struct Job { lookup: Lookup, host: String, port: u16, send: oneshot::Sender<io::Result<Vec<SocketAddr>>>, _credit: Credit }
-impl Job {
-    fn run(self) {
-        let result = (self.lookup)(&self.host, self.port);
-        let _ = self.send.send(result); // closed receiver drops the result here
-    }
-}
 impl Resolver {
     pub(super) fn new() -> io::Result<Self> { Self::with_limit(LOOKUPS) }
     fn with_limit(limit: usize) -> io::Result<Self> {
@@ -43,7 +26,6 @@ impl Resolver {
                         receiver.recv()
                     };
                     let Ok(job) = job else { break; };
-                    if job.send.is_closed() { continue; } // skip canceled queued work
                     // A lookup panic drops its job/credit and closes the reply;
                     // it must not silently remove a worker from the fixed pool.
                     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job.run()));
@@ -51,22 +33,23 @@ impl Resolver {
         }
         Ok(Self { slots: Arc::new(Mutex::new(ResourceAdmission::new(limit, 0))), sender })
     }
-    pub(super) async fn resolve(&self, host: String, port: u16) -> io::Result<Vec<SocketAddr>> {
-        if let Ok(ip) = host.parse::<IpAddr>() { return Ok(vec![SocketAddr::new(ip, port)]); }
+    pub(super) async fn resolve(&self, host: String, port: u16) -> io::Result<Reply<Vec<SocketAddr>>> {
+        if let Ok(ip) = host.parse::<IpAddr>() { return Ok(Reply::direct(vec![SocketAddr::new(ip, port)])); }
         self.resolve_with(host, port, |host, port| {
             // The system resolver can allocate before returning its iterator.
             // Detach a bounded result instead of reusing that iterator's backing.
             bounded_addresses((host, port).to_socket_addrs()?)
         }).await
     }
-    async fn resolve_with<F>(&self, host: String, port: u16, lookup: F) -> io::Result<Vec<SocketAddr>>
+    async fn resolve_with<F>(&self, host: String, port: u16, lookup: F) -> io::Result<Reply<Vec<SocketAddr>>>
         where F: FnOnce(&str, u16) -> io::Result<Vec<SocketAddr>> + Send + 'static,
     {
         let key = self.slots.lock().map_err(|_| io::Error::from(io::ErrorKind::Other))?
             .acquire().ok_or(io::ErrorKind::WouldBlock)?;
-        let credit = Credit { slots: self.slots.clone(), key };
-        let (send, receive) = oneshot::channel();
-        let job = Job { lookup: Box::new(lookup), host, port, send, _credit: credit };
+        let (job, receive) = Job::new(self.slots.clone(), key, move |send| {
+            if send.is_closed() { return None; } // skip canceled queued work
+            Some(lookup(&host, port))
+        });
         self.sender.try_send(job).map_err(|error| io::Error::from(match error {
             mpsc::TrySendError::Full(_) => io::ErrorKind::WouldBlock,
             mpsc::TrySendError::Disconnected(_) => io::ErrorKind::Other,
@@ -125,7 +108,7 @@ mod tests {
         }
         assert_eq!(calls.load(Ordering::SeqCst), 4);
         assert_eq!(resolver.slots.lock().unwrap().usage(), (5, 5));
-        assert_eq!(resolver.resolve("::1".into(), 8443).await.unwrap(),
+        assert_eq!(resolver.resolve("::1".into(), 8443).await.unwrap().into_inner_for_test(),
             vec!["[::1]:8443".parse::<SocketAddr>().unwrap()]);
         drop(release);
         tokio::time::timeout(Duration::from_secs(2), async {
@@ -133,7 +116,7 @@ mod tests {
         }).await.unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 4); // canceled queued job was skipped
         assert_eq!(resolver.resolve_with("later.example".into(), 8443, |_, port|
-            Ok(vec![SocketAddr::from(([127, 0, 0, 1], port))])).await.unwrap(),
+            Ok(vec![SocketAddr::from(([127, 0, 0, 1], port))])).await.unwrap().into_inner_for_test(),
             vec!["127.0.0.1:8443".parse::<SocketAddr>().unwrap()]);
     }
 
@@ -170,7 +153,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(2), async {
             while resolver.slots.lock().unwrap().usage().0 != 0 { tokio::task::yield_now().await; }
             assert_eq!(resolver.resolve_with("later.example".into(), 443, |_, _|
-                Ok(vec!["127.0.0.1:443".parse().unwrap()])).await.unwrap().len(), 1);
+                Ok(vec!["127.0.0.1:443".parse().unwrap()])).await.unwrap().into_inner_for_test().len(), 1);
         }).await.unwrap();
     }
 

@@ -20,6 +20,15 @@ to cancellation, task panic, and shutdown. A wrapper-cleanup panic strands the
 credit and closes worker admission. These checked transitions do not mechanize
 the destructor correspondence or independent cleanup tails assumed by this audit.
 
+DNS/TLS follow-up: both pools now use `credited_job::CreditedJob` and `Reply`.
+Queued/running work and unread replies keep their own verified credit. The
+transport calls `Reply::adopt` before TCP use or HTTP handshake; the target
+request's actual registry and stream supply the verified `handoff_to` check.
+Only a live admitted target enables background release. Dropped replies destroy
+their result first. The historical effect sites below remain the same, but pool
+release now includes this checked lifecycle/handoff gate. Destructor/channel
+correspondence and the full cross-category composition are still explicit joins.
+
 Related records: the [proof index](proof-index.md) lists every contract, the
 [adapter audit](adapter-audit.md) records milestone 2 bindings, the
 [storage contract](storage-crash-contract.md) and [shutdown proof](shutdown-proof.md)

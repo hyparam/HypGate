@@ -99,6 +99,16 @@ impl OwnedStream {
         ensures *out == self.state(),
     { &self.stream }
 
+    pub fn is_live(&self, registry: &ResourceAdmission) -> (out: bool)
+        requires self.valid(), registry.valid(),
+        ensures out == (registry.owns(&self.key()) && !self.state().closed()),
+    { registry.capacity(&self.key).is_some() && !self.stream.is_closed() }
+
+    pub fn owner_id(&self) -> (out: u64)
+        requires self.valid(),
+        ensures out == self.key().id(), out == self.state().owner(),
+    { self.stream.owner_id() }
+
     pub fn retire(mut self, registry: &mut ResourceAdmission) -> (ok: bool)
         requires self.valid(), old(registry).valid(),
         ensures final(registry).valid(),

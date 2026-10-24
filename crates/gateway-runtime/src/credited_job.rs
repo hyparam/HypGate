@@ -1,0 +1,192 @@
+//! Verified credits follow background work through queued replies. The request
+//! adopts a successful result before its independent background credit returns.
+use gateway_core::{resource::{RequestKey, ResourceAdmission}, task_credit::TaskCredit};
+use std::{io, sync::{Arc, Mutex}};
+use tokio::sync::oneshot;
+
+struct Credit { slots: Arc<Mutex<ResourceAdmission>>, state: Option<TaskCredit> }
+impl Drop for Credit {
+    fn drop(&mut self) {
+        if let Ok(mut slots) = self.slots.lock() {
+            let state = self.state.take().expect("live job credit");
+            let ready = state.can_release();
+            let released = state.release(&mut slots);
+            debug_assert_eq!(released, ready, "job credit belongs to its registry");
+        }
+    }
+}
+
+/// Owns a result still charged to its background registry. There is no raw value
+/// extraction in production: adoption requires a live admitted request.
+pub(crate) struct Reply<T> { value: Option<T>, credit: Option<Credit> }
+impl<T> std::fmt::Debug for Reply<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("CreditedReply") }
+}
+impl<T> Reply<T> {
+    // Literal IP resolution performs no background work and creates one address
+    // directly in the caller's request future, already charged to that request.
+    pub(crate) fn direct(value: T) -> Self { Self { value: Some(value), credit: None } }
+    pub(crate) fn adopt(mut self, request: &mut crate::admission::Request<'_>) -> io::Result<T> {
+        if let Some(credit) = self.credit.as_mut() {
+            if !request.adopt_background(credit.state.as_mut().expect("live reply credit")) {
+                return Err(io::ErrorKind::BrokenPipe.into());
+            }
+        }
+        let value = self.value.take().expect("owned reply value");
+        // The exclusive request borrow is still live at the checked handoff.
+        // Its outer owner outlives this synchronous transfer and subsequent I/O.
+        drop(self.credit.take());
+        Ok(value)
+    }
+    #[cfg(test)]
+    pub(crate) fn into_inner_for_test(mut self) -> T {
+        // Unit tests own the result directly, outside production request budgets.
+        self.value.take().expect("test reply value")
+    }
+}
+impl<T> Drop for Reply<T> {
+    fn drop(&mut self) {
+        if let Some(credit) = self.credit.as_mut() {
+            let state = credit.state.as_mut().expect("live reply credit");
+            assert!(state.begin_cleanup(), "live reply");
+            drop(self.value.take());
+            assert!(state.finish_cleanup(), "reply value destroyed");
+        }
+    }
+}
+
+type Sender<T> = oneshot::Sender<io::Result<Reply<T>>>;
+trait Runnable: Send { fn run(self: Box<Self>); }
+pub(crate) struct CreditedJob(Box<dyn Runnable>);
+struct Job<T, F> { work: Option<F>, send: Option<Sender<T>>, credit: Option<Credit> }
+impl<T: Send + 'static, F: FnOnce(&mut Sender<T>) -> Option<io::Result<T>> + Send + 'static> Runnable for Job<T, F> {
+    fn run(mut self: Box<Self>) {
+        let work = self.work.take().expect("job runs once");
+        // FnOnce destroys its captures before returning or unwinding. Credit
+        // remains in this owner throughout a blocked lookup or handshake poll.
+        let result = work(self.send.as_mut().expect("job reply sender"));
+        match result {
+            Some(Ok(value)) => {
+                assert!(self.credit.as_mut().unwrap().state.as_mut().unwrap().finish_work(),
+                    "work and captures finished before creating reply");
+                let reply = Reply { value: Some(value), credit: self.credit.take() };
+                let _ = self.send.take().unwrap().send(Ok(reply));
+            }
+            Some(Err(error)) => { let _ = self.send.take().unwrap().send(Err(error)); }
+            None => {},
+        }
+    }
+}
+impl<T, F> Drop for Job<T, F> {
+    fn drop(&mut self) {
+        if let Some(credit) = self.credit.as_mut() {
+            let state = credit.state.as_mut().expect("live job credit");
+            assert!(state.begin_cleanup(), "live job");
+            drop(self.work.take());
+            drop(self.send.take());
+            // A queued capture destructor panic skips this and strands capacity.
+            assert!(state.finish_cleanup(), "job captures destroyed");
+        }
+    }
+}
+impl CreditedJob {
+    pub(crate) fn new<T: Send + 'static>(slots: Arc<Mutex<ResourceAdmission>>, key: RequestKey,
+        work: impl FnOnce(&mut Sender<T>) -> Option<io::Result<T>> + Send + 'static)
+        -> (Self, oneshot::Receiver<io::Result<Reply<T>>>)
+    {
+        let mut state = TaskCredit::new(key);
+        assert!(state.start(), "fresh job reservation");
+        let (send, receive) = oneshot::channel();
+        (Self(Box::new(Job { work: Some(work), send: Some(send),
+            credit: Some(Credit { slots, state: Some(state) }) })), receive)
+    }
+    pub(crate) fn run(self) { self.0.run(); }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reply_adoption_requires_live_request_and_preserves_value() {
+        use gateway_core::policy::{Identity, Policy, Route};
+        let route = || Route { tenant: 1, selector: 7, origin: 0, credential: 0 };
+        let policy = Policy::validate(vec![Identity { tenant: 1, digest: vec![11; 32] }],
+            vec![route()], vec![route()], 1, vec![1]).unwrap();
+        let admission = crate::admission::Admission::new(policy, 1, 4, false);
+        for canceled in [false, true] {
+            let mut request = admission.admit(&[11; 32], 7).unwrap();
+            let slots = Arc::new(Mutex::new(ResourceAdmission::new(1, 0)));
+            let key = slots.lock().unwrap().acquire().unwrap();
+            let (job, mut receive) = CreditedJob::new(slots.clone(), key, |_| Some(Ok(vec![1, 2, 3])));
+            job.run();
+            let reply = receive.try_recv().unwrap().unwrap();
+            assert_eq!(slots.lock().unwrap().usage(), (1, 1));
+            if canceled { request.cancel(); }
+            let result = reply.adopt(&mut request);
+            if canceled { assert_eq!(result.unwrap_err().kind(), io::ErrorKind::BrokenPipe); }
+            else { assert_eq!(result.unwrap(), vec![1, 2, 3]); }
+            assert_eq!(slots.lock().unwrap().usage(), (0, 1));
+            assert_eq!(admission.usage().unwrap(), (1, 1));
+            drop(request);
+            assert_eq!(admission.usage().unwrap(), (0, 1));
+        }
+    }
+
+    struct Capture(Arc<Mutex<ResourceAdmission>>);
+    impl Drop for Capture {
+        fn drop(&mut self) {
+            let mut slots = self.0.lock().unwrap();
+            assert_eq!(slots.usage(), (1, 1));
+            assert!(slots.acquire().is_none());
+        }
+    }
+
+    #[test]
+    fn queued_running_and_reply_captures_drop_before_credit() {
+        for exit in 0..4 {
+            let slots = Arc::new(Mutex::new(ResourceAdmission::new(1, 0)));
+            let key = slots.lock().unwrap().acquire().unwrap();
+            let capture = Capture(slots.clone());
+            let (job, mut receive) = CreditedJob::new(slots.clone(), key, move |_| {
+                if exit == 2 { panic!("injected running job panic"); }
+                Some(Ok(capture))
+            });
+            if exit == 3 { receive.close(); }
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if exit == 0 { drop(job); } else { job.run(); }
+            }));
+            assert_eq!(result.is_err(), exit == 2);
+            if exit == 1 {
+                // Successful send alone is not cleanup: the unread reply retains
+                // its own background credit even before the receiver is polled.
+                assert_eq!(slots.lock().unwrap().usage(), (1, 1));
+                let reply = receive.try_recv().unwrap().unwrap();
+                assert_eq!(slots.lock().unwrap().usage(), (1, 1));
+                drop(reply);
+            }
+            assert_eq!(slots.lock().unwrap().usage(), (0, 1));
+        }
+    }
+
+    #[test]
+    fn queued_and_reply_cleanup_panics_strand_credit() {
+        struct Panics;
+        impl Drop for Panics { fn drop(&mut self) { panic!("injected cleanup panic"); } }
+        for delivered in [false, true] {
+            let slots = Arc::new(Mutex::new(ResourceAdmission::new(1, 0)));
+            let key = slots.lock().unwrap().acquire().unwrap();
+            let capture = Panics;
+            let (job, mut receive) = CreditedJob::new(slots.clone(), key, move |_| Some(Ok(capture)));
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if delivered {
+                    job.run();
+                    drop(receive.try_recv().unwrap().unwrap());
+                } else { drop(job); }
+            }));
+            assert!(result.is_err());
+            assert_eq!(slots.lock().unwrap().usage(), (1, 1));
+            assert!(slots.lock().unwrap().acquire().is_none());
+        }
+    }
+}

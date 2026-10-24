@@ -1,26 +1,15 @@
 //! Fixed handshake threads isolate synchronous certificate work from the I/O
 //! executor. Cancellation retains credit until the current poll returns.
-use gateway_core::resource::{RequestKey, ResourceAdmission};
+use gateway_core::resource::ResourceAdmission;
+use crate::credited_job::{CreditedJob as Job, Reply};
 use std::{future::Future, io, sync::{Arc, Mutex, mpsc}};
+#[cfg(test)]
 use tokio::sync::oneshot;
 
 const LIMIT: usize = 32;
 const WORKERS: usize = 4;
 const STACK_BYTES: usize = 2 * 1024 * 1024;
-type Work = Box<dyn FnOnce() + Send>;
 pub(super) struct Pool { sender: mpsc::SyncSender<Job>, slots: Arc<Mutex<ResourceAdmission>> }
-struct Credit { slots: Arc<Mutex<ResourceAdmission>>, key: RequestKey }
-impl Drop for Credit {
-    fn drop(&mut self) {
-        if let Ok(mut slots) = self.slots.lock() {
-            let released = slots.release(&self.key);
-            debug_assert!(released);
-        }
-    }
-}
-// Work (including an unpolled future) is destroyed before its credit.
-struct Job { work: Work, _credit: Credit }
-impl Job { fn run(self) { (self.work)(); } }
 impl Pool {
     pub(super) fn new() -> io::Result<Self> { Self::with_limits(LIMIT, WORKERS) }
     fn with_limits(limit: usize, workers: usize) -> io::Result<Self> {
@@ -42,23 +31,21 @@ impl Pool {
     }
     pub(super) async fn run<T: Send + 'static>(
         &self, future: impl Future<Output = io::Result<T>> + Send + 'static,
-    ) -> io::Result<T> {
+    ) -> io::Result<Reply<T>> {
         let key = self.slots.lock().map_err(|_| io::Error::from(io::ErrorKind::Other))?
             .acquire().ok_or(io::ErrorKind::WouldBlock)?;
-        let credit = Credit { slots: self.slots.clone(), key };
-        let (mut send, receive) = oneshot::channel();
         let runtime = tokio::runtime::Handle::current();
-        let job = Job { work: Box::new(move || {
+        let (job, receive) = Job::new(self.slots.clone(), key, move |send| {
             // The socket stays registered with the caller's reactor. Only polling
             // the handshake moves threads; successful streams return to that caller.
             runtime.block_on(async move {
                 tokio::select! {
                     biased;
-                    _ = send.closed() => {},
-                    result = future => { let _ = send.send(result); }
+                    _ = send.closed() => None,
+                    result = future => Some(result),
                 }
-            });
-        }), _credit: credit };
+            })
+        });
         self.sender.try_send(job).map_err(|error| io::Error::from(match error {
             mpsc::TrySendError::Full(_) => io::ErrorKind::WouldBlock,
             mpsc::TrySendError::Disconnected(_) => io::ErrorKind::Other,
@@ -97,7 +84,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(2), async {
             while pool.slots.lock().unwrap().usage().0 != 0 { tokio::task::yield_now().await; }
         }).await.unwrap();
-        assert_eq!(pool.run(async { Ok(7) }).await.unwrap(), 7);
+        assert_eq!(pool.run(async { Ok(7) }).await.unwrap().into_inner_for_test(), 7);
     }
 
     #[tokio::test]

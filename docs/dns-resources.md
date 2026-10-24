@@ -12,14 +12,28 @@ timeouts. Production no longer passes hostname strings to Tokio's TCP connector.
 Each `HttpsTransport` owns one resolver with four dedicated threads and a separate
 32-slot `ResourceAdmission` registry. Acquisition precedes constructing/enqueueing
 a lookup job; excess work is refused immediately. The bounded channel also has
-32 slots. Active and queued jobs share the same 32-credit limit, rather than each
+32 slots. Active, queued, and unadopted replies share the same 32-credit limit, rather than each
 having 32 additional credits. No replacement threads are spawned for slow lookups.
 
-Each job retains its original registry key through lookup execution, result
-handoff, and capture destruction. The existing Verus contracts establish empty
-initialization, capacity refusal, and exact acquire/release occupancy changes.
+Each job uses shared `credited_job::CreditedJob` and retains its original registry
+key in a verified `TaskCredit` through lookup execution and capture destruction.
+Successful results move that credit into `Reply`; sending is not permission to
+return the slot. An unread reply remains charged even after its worker finishes.
+Dropping a job or reply enters verified cleanup, destroys its owned value, then
+reports cleanup complete; a panic during that wrapper cleanup strands capacity.
+The Verus contracts establish empty initialization, capacity refusal, exact
+acquire/release occupancy changes, and refusal to release running/cleaning credits.
 Mutex serialization, private key ownership, Rust destruction, and channel behavior
 are trusted runtime bindings. The resolver wrapper itself is not Verus-verified.
+
+`HttpsTransport::run` adopts a successful reply while exclusively borrowing its
+admitted request. `Request::adopt_background` locks that request's own registry
+and calls `TaskCredit::handoff_to` with its actual `OwnedStream`. The checked
+transition requires a completed-work reply credit and a live, non-closed admitted
+owner, records its exact ID, and only then permits background release. The adapter
+moves the unchanged result into the borrowing request before further asynchronous
+I/O. A canceled/poisoned request cannot adopt; the reply destroys the result under
+its original credit. Core keys remain scoped by private runtime registry owners.
 
 A canceled caller drops its reply receiver, not the queued/running job. Workers
 skip queued jobs whose receivers are closed. A lookup already started may finish
@@ -63,8 +77,9 @@ Per transport instance, separately from per-request payloads:
 - One 32-entry `u64` registry and its mutex, plus one bounded channel and shared
   receiver. The production closure captures no request payload or provider secret.
 - Each completed reply or connection attempt retains at most 64 socket addresses.
-  Replies waiting for consumption belong to live request futures; canceled replies
-  drop their vectors. A currently sending worker can additionally own one result.
+  Replies waiting for consumption retain background credits; adopted vectors
+  belong to the admitted request until the TCP attempt finishes. Canceled replies
+  destroy their vectors before returning their credits.
 - Up to four system-resolver invocations can allocate internally. libc/NSS lookup
   buffers and external resolver modules are not bounded by the 64-address output
   cap. This remains a dependency allocation assumption, not a whole-process theorem.
@@ -90,3 +105,11 @@ pool, exact 64-address acceptance, excess rejection, and detachment from an over
 source allocation. Existing TLS, deadline, cancellation, overload, and CLI tests
 exercise the integrated transport. These are deterministic adapter tests, not a
 proof that every operating-system resolver terminates or bounds its own memory.
+
+Shared `credited_job` tests additionally cover unread/delivered reply retention,
+closed receivers, queued and reply destructor panics, and exact value adoption
+into live versus canceled requests. Core tests exercise absent/canceled target
+owners and repeated handoff. Four reply/handoff mutations reject missing target
+liveness, a wrong target ID, transfer before work finishes, and release of an
+unread result; the seven cleanup
+mutations still reject early release and invalid lifecycle transitions.

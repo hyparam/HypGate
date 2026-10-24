@@ -15,6 +15,10 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("task_credit.rs", "task_handoff_without_live_owner", " || !owner.is_live(registry)", ""),
+    ("task_credit.rs", "task_handoff_wrong_owner", "Phase::HandedOff(owner.owner_id())", "Phase::HandedOff(0)"),
+    ("task_credit.rs", "task_handoff_before_result", "if !matches!(self.phase, Phase::AwaitingAdoption) || !owner.is_live(registry)", "if !owner.is_live(registry)"),
+    ("task_credit.rs", "task_completed_work_releases_unread_reply", "self.phase = Phase::AwaitingAdoption;", "self.phase = Phase::Cleaned;"),
     ("task_credit.rs", "task_start_keeps_credit_releasable", "self.phase = Phase::Running;", "self.phase = Phase::Reserved;"),
     ("task_credit.rs", "task_cleanup_start_releases_early", "self.phase = Phase::Cleaning;", "self.phase = Phase::Cleaned;"),
     ("task_credit.rs", "task_cleanup_finish_denies_release", "self.phase = Phase::Cleaned;", "self.phase = Phase::Cleaning;"),

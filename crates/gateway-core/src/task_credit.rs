@@ -4,14 +4,14 @@ use vstd::prelude::*;
 use crate::{drain::DrainRegistry, resource::{ResourceAdmission, RequestKey}};
 
 verus! {
-pub enum Phase { Reserved, Running, Cleaning, Cleaned }
+pub enum Phase { Reserved, Running, AwaitingAdoption, Cleaning, Cleaned, HandedOff(u64) }
 
 pub struct TaskCredit { key: RequestKey, phase: Phase }
 impl TaskCredit {
     pub closed spec fn key(&self) -> RequestKey { self.key }
     pub closed spec fn phase(&self) -> Phase { self.phase }
     pub open spec fn retaining(&self) -> bool {
-        self.phase() == Phase::Running || self.phase() == Phase::Cleaning
+        self.phase() == Phase::Running || self.phase() == Phase::AwaitingAdoption || self.phase() == Phase::Cleaning
     }
     pub open spec fn releasable(&self) -> bool { !self.retaining() }
 
@@ -32,12 +32,12 @@ impl TaskCredit {
 
     pub fn begin_cleanup(&mut self) -> (ok: bool)
         ensures final(self).key() == old(self).key(),
-            ok == (old(self).phase() == Phase::Running),
+            ok == (old(self).phase() == Phase::Running || old(self).phase() == Phase::AwaitingAdoption),
             ok ==> final(self).phase() == Phase::Cleaning,
             !ok ==> *final(self) == *old(self),
             old(self).retaining() ==> final(self).retaining(),
     {
-        if !matches!(self.phase, Phase::Running) { return false; }
+        if !matches!(self.phase, Phase::Running | Phase::AwaitingAdoption) { return false; }
         self.phase = Phase::Cleaning;
         true
     }
@@ -57,7 +57,37 @@ impl TaskCredit {
 
     pub fn can_release(&self) -> (ok: bool)
         ensures ok == self.releasable(),
-    { matches!(self.phase, Phase::Reserved | Phase::Cleaned) }
+    { matches!(self.phase, Phase::Reserved | Phase::Cleaned | Phase::HandedOff(_)) }
+
+    /// Report that work/captures have finished and only its owned result remains.
+    /// The reply still retains capacity; completion is not release or adoption.
+    pub fn finish_work(&mut self) -> (ok: bool)
+        ensures final(self).key() == old(self).key(),
+            ok == (old(self).phase() == Phase::Running),
+            ok ==> final(self).phase() == Phase::AwaitingAdoption && final(self).retaining(),
+            !ok ==> *final(self) == *old(self),
+    {
+        if !matches!(self.phase, Phase::Running) { return false; }
+        self.phase = Phase::AwaitingAdoption;
+        true
+    }
+
+    /// Move result accounting to an actually live admitted stream before the
+    /// background registry can release its credit. The adapter moves the value.
+    pub fn handoff_to(&mut self, registry: &ResourceAdmission,
+        owner: &crate::owned_stream::OwnedStream) -> (ok: bool)
+        requires registry.valid(), owner.valid(),
+        ensures final(self).key() == old(self).key(),
+            ok == (old(self).phase() == Phase::AwaitingAdoption && registry.owns(&owner.key())
+                && !owner.state().closed()),
+            ok ==> final(self).phase() == Phase::HandedOff(owner.key().id())
+                && final(self).releasable() && registry.owns(&owner.key()),
+            !ok ==> *final(self) == *old(self),
+    {
+        if !matches!(self.phase, Phase::AwaitingAdoption) || !owner.is_live(registry) { return false; }
+        self.phase = Phase::HandedOff(owner.owner_id());
+        true
+    }
 
     pub fn release(self, registry: &mut ResourceAdmission) -> (ok: bool)
         requires old(registry).valid(),

@@ -103,6 +103,14 @@ pub struct WriteTicket<'a> {
 }
 
 impl<'a> Request<'a> {
+    /// The caller transfers an owned background result into this request while
+    /// retaining its exclusive borrow. No background slot is released first.
+    pub(crate) fn adopt_background(&mut self, credit: &mut gateway_core::task_credit::TaskCredit) -> bool {
+        let Ok(registry) = self.lease.admission.registry.lock() else { return false; };
+        let Some(LeaseState::Streaming(owner)) = self.lease.state.as_ref() else { return false; };
+        credit.handoff_to(&registry, owner)
+    }
+
     fn stream(&self) -> &StreamChunk {
         match self.lease.state.as_ref().expect("live lease") {
             LeaseState::Streaming(stream) => stream.stream(),

@@ -88,7 +88,7 @@ disabled. [Dependency accounting](dependency-resources.md#shared-tls-session-sto
 records persistent and transient cache storage separately from active requests.
 
 Hostname resolution uses a [separate bounded resolver](dns-resources.md): four
-threads and at most 32 queued/running lookups per transport. Canceled requests do
+threads and at most 32 queued/running lookups or unadopted replies per transport. Canceled requests do
 not release lookup credit before the actual system call finishes. Only bounded
 socket-address results enter the TCP connector; TLS authenticates the original
 configured hostname. These DNS workers can outlive a canceled network future,
@@ -97,7 +97,7 @@ but have separate accounting and cannot hold Tokio shutdown open.
 ## TLS scheduling isolation
 
 The production connector is polled by `transport/handshake.rs` on four dedicated
-threads, with 32 total queued/running jobs per transport. Each thread reserves a
+threads, with 32 total queued/running jobs or unadopted replies per transport. Each thread reserves a
 2 MiB stack. The existing Tokio reactor still drives socket readiness; threads
 use its handle to poll the handshake and return the established stream. HTTP
 processing resumes on the caller's executor. No request body, credentials, stream
@@ -107,8 +107,16 @@ Admission uses the verified resource registry. Full or poisoned pools fail close
 Cancellation closes a reply channel; queued jobs skip polling, and running jobs
 select cancellation when their current poll returns. A blocked verification poll
 retains its job credit, socket, and TLS storage. No replacement thread is created.
-Job field destruction releases the work before credit. Panics are caught outside
-that job so a panic cleans up and does not shrink the fixed pool.
+Shared `credited_job::CreditedJob` uses the verified `TaskCredit` cleanup gate;
+destruction completes before release is enabled. Successful output moves into a
+`Reply` retaining the same credit, including while waiting unread in the oneshot.
+`HttpsTransport::run` adopts that stream through `Request::adopt_background`:
+`TaskCredit::handoff_to` verifies a live admitted target and records its identity
+before the pool slot can return. The borrowing request then owns the stream.
+Canceled replies destroy their sockets/TLS state before release. Panics are caught
+outside the job so normal unwinding does not shrink the fixed pool; a panic during
+wrapper cleanup strands its slot. Rust destruction and channel semantics remain
+trusted correspondence points, not claims that Verus checks Tokio or rustls.
 
 The caller's timeout and other executor work can progress while verification is
 blocked, assuming OS scheduling and the other executor polls return. This is not a
