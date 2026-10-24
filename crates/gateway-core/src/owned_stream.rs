@@ -2,7 +2,6 @@ use vstd::prelude::*;
 use crate::resource::{RequestKey, ResourceAdmission};
 use crate::policy::AuthorizedRequest;
 use crate::stream::{StreamChunk, Ticket};
-use crate::framing::Header;
 
 verus! {
 /// Private ownership pair. No extraction, cloning, or mutable stream reference.
@@ -170,7 +169,7 @@ impl OwnedStream {
         ensures final(self).valid(), final(self).key() == old(self).key(), final(self).state().valid(),
             ok == (!old(self).state().closed() && !old(self).state().failed() && old(self).state().owner() != 0
                 && old(self).state().owner() == authority.request() && old(self).state().body().len() <= 1048576
-                && direction <= 1 && receipt.record() == crate::framing::encoding(Header {
+                && direction <= 1 && receipt.record() == crate::framing::encoding(crate::framing::Header {
                     payload: old(self).state().body().len() as u32, tenant: authority.tenant(),
                     request: old(self).state().owner(), chunk: old(self).state().chunk(), direction })
                     + old(self).state().body() + receipt.checksum()),
@@ -183,7 +182,7 @@ impl OwnedStream {
             final(self).state().capacity() == old(self).state().capacity(),
             ok ==> final(self).state().durable() == old(self).state().body().len()
                 && receipt.acknowledged() == receipt.prefix()
-                    + crate::framing::encoding(Header { payload: old(self).state().body().len() as u32,
+                    + crate::framing::encoding(crate::framing::Header { payload: old(self).state().body().len() as u32,
                         tenant: authority.tenant(), request: old(self).state().owner(),
                         chunk: old(self).state().chunk(), direction })
                     + old(self).state().body() + receipt.checksum(),

@@ -57,3 +57,20 @@ remain trusted and tested rather than Verus-verified. The 32 KiB Hyper connectio
 buffer setting and bounded channel do not prove whole-process memory bounds.
 The inbound server, executable, response completion/abort integration, health/readiness,
 and an end-to-end disk test now exist; broader fault and concurrency coverage remain.
+
+## Admission lifetime through network cleanup
+
+`exchange` owns the prepared request outside its timeout future. The inner `run`
+borrows that owner mutably for the entire TCP/TLS/HTTP operation; it moves only
+HTTP metadata into Hyper, leaving the verified stream/key owner in the outer
+future. Success, error, timeout, and cancellation drop the borrowed network future
+before the outer request can release its slot. This is enforced by Rust lifetimes
+and future ownership, not a Verus proof of Tokio or socket syscalls. No connection
+task is detached. The separate server worker permit continues through response
+cleanup after exchange completion.
+
+A real-socket cancellation test waits until the peer receives a TLS handshake
+record, checks that the request slot remains occupied, then drops the exchange.
+The peer must reach EOF, capacity must be reusable, and no HTTP response, body
+bytes, or audit record may have been produced. The existing deadline test covers
+timeout cleanup; this additional test explicitly covers dropping a pending future.

@@ -220,3 +220,37 @@ async fn interim_response_does_not_replace_final_status_or_payload() {
     assert_eq!(log.upload, b"{}"); assert_eq!(log.download, b"{}");
     assert!(config.admit(b"gateway", 7).is_ok());
 }
+
+#[tokio::test]
+async fn canceling_tls_handshake_drops_socket_and_returns_owned_request_credit() {
+    use tokio::io::AsyncReadExt;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let (listener, _acceptor, roots) = tls().await;
+        let config = config(listener.local_addr().unwrap().port());
+        let transport = HttpsTransport::with_roots(roots, Duration::from_secs(30)).unwrap();
+        let mut output = Output::new(); let mut log = Log::default(); let mut input = &b"{}"[..];
+        let mut exchange = Box::pin(transport.exchange(prepare(&config), &mut input, &mut output, &mut log));
+        // Accept TCP but never answer the TLS ClientHello. No provider HTTP
+        // request should have been submitted at this cancellation point.
+        let (mut socket, _) = tokio::select! {
+            accepted = listener.accept() => accepted.unwrap(),
+            result = &mut exchange => panic!("exchange finished before cancellation: {}", result.is_ok()),
+        };
+        let mut record_header = [0; 5];
+        tokio::select! {
+            read = socket.read_exact(&mut record_header) => { read.unwrap(); },
+            result = &mut exchange => panic!("exchange finished during handshake: {}", result.is_ok()),
+        }
+        assert_eq!(record_header[0], 22); // TLS handshake record
+        assert!(config.admit(b"gateway", 7).is_err());
+        drop(exchange);
+        let replacement = config.admit(b"gateway", 7).unwrap();
+        let mut handshake_bytes = Vec::new();
+        socket.read_to_end(&mut handshake_bytes).await.unwrap();
+        assert!(output.status.is_none());
+        assert!(output.bytes.is_empty());
+        assert!(log.upload.is_empty());
+        assert!(log.download.is_empty());
+        drop(replacement);
+    }).await.unwrap();
+}

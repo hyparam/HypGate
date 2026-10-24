@@ -36,14 +36,16 @@ impl HttpsTransport {
     /// Consumes authority and retains its lease through all response processing.
     /// The connection future is polled inline, never spawned or transparently retried.
     pub async fn exchange<R: AsyncRead + Unpin, W: ResponseSink, L: AuditLog>(
-        &self, prepared: PreparedRequest<'_>, input: &mut R, output: &mut W, log: &mut L,
+        &self, mut prepared: PreparedRequest<'_>, input: &mut R, output: &mut W, log: &mut L,
     ) -> Result<ExchangeStats, TransportError> {
-        tokio::time::timeout(self.deadline, self.run(prepared, input, output, log))
+        // The owner lives outside the timed future, which borrows it and owns
+        // connection/body futures. Their cleanup precedes returning its credit.
+        tokio::time::timeout(self.deadline, self.run(&mut prepared, input, output, log))
             .await.map_err(|_| TransportError::Timeout)?
     }
 
     async fn run<R: AsyncRead + Unpin, W: ResponseSink, L: AuditLog>(
-        &self, mut prepared: PreparedRequest<'_>, input: &mut R, output: &mut W, log: &mut L,
+        &self, prepared: &mut PreparedRequest<'_>, input: &mut R, output: &mut W, log: &mut L,
     ) -> Result<ExchangeStats, TransportError> {
         let host = prepared.destination().host().ok_or(TransportError::Metadata)?
             .trim_start_matches('[').trim_end_matches(']').to_owned();
@@ -60,7 +62,7 @@ impl HttpsTransport {
         // to the TCP/TLS destination and the trusted Host header.
         let path = prepared.upstream.uri().path_and_query().ok_or(TransportError::Metadata)?.clone();
         *prepared.upstream.uri_mut() = http::Uri::builder().path_and_query(path).build().map_err(|_| TransportError::Metadata)?;
-        let request = prepared.upstream.map(|()| body);
+        let request = std::mem::take(&mut prepared.upstream).map(|()| body);
         let operation = async {
             let upload = async {
                 let stats = transfer::copy_body(prepared.routed.stream(), input, &mut body_writer, log, Direction::Upload)
