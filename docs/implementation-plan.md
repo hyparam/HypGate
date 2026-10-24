@@ -83,7 +83,9 @@ The production TLS adapter now drains queued ciphertext before scalar/vectored
 plaintext writes, preventing repeated enqueue during stalled output. Full TLS
 allocation composition remains in milestone 1. Real TLS with stalled output
 now validates stable queue length across 3,000 key-update/data rounds and exact
-byte delivery after resumption; see [the resource audit](dependency-resources.md#control-traffic-is-not-covered-by-the-application-buffer-limit).
+byte delivery after resumption. Ordinary application-record overhead is now
+checked for six cipher suites with scalar/vectored writes; automatic refresh
+and control/handshake allocation composition remain open. See [the resource audit](dependency-resources.md#control-traffic-is-not-covered-by-the-application-buffer-limit).
 
 ## 2. Minimal working gateway
 

@@ -622,6 +622,37 @@ new byte, and leaves zero queued ciphertext. This validates the guarded
 interleaving and recovery without depending on OS socket-buffer saturation;
 it does not enumerate all TLS control paths or prove an allocation bound.
 
+### Application-write record subtotal
+
+For an established connection with the production default fragment size,
+`MessageFragmenter::Chunker` splits the logical payload at 16,384 bytes even
+when the input consists of many `IoSlice`s. A single ordinary
+`send_appdata_encrypt` call accepts at most 65,536 plaintext bytes, hence creates
+at most four application records. It subtracts existing queued ciphertext from
+the allowance before accepting plaintext. Pinned ring record overhead, including
+the five-byte TLS header, is 22 bytes for TLS 1.3, 29 for TLS 1.2 AES-GCM, and
+21 for TLS 1.2 ChaCha20-Poly1305. If the queue starts at or below the allowance, ordinary application encryption
+cannot take its logical bytes above 65,652 (65,536 plus four times 29). If it
+already exceeds the allowance, the call accepts no further application bytes.
+This subtotal excludes control records appended outside that call.
+
+`tls_application_write_fragment_overhead_is_bounded_for_pinned_suites` checks
+six suites (all three TLS 1.3 suites and the three ECDSA-authenticated TLS 1.2
+suites) with scalar input and 65,537 one-byte vectored slices. Each case accepts
+65,536 bytes, emits exactly four records with the expected cipher overhead,
+and decrypts to the exact accepted prefix. The fixture certificate is ECDSA;
+RSA-authenticated TLS 1.2 suites use the same record ciphers but are not separately
+exercised by this test.
+
+Automatic key refresh must still be added to a complete buffered-writer bound.
+`send_plaintext` may call `buffer_plaintext` again after refreshing keys; its
+output is not just one invocation of the ordinary encryption function.
+Pinned ring TCP confidentiality limits are at least 2^24 records, so the
+fresh key budget is much larger than one four-record application batch, but
+sequence-boundary control records and pending-reply ordering remain part of
+the composed bound. Neither the record-length test nor this logical subtotal
+bounds Vec capacity, descriptor storage, allocator overhead, or total TLS heap.
+
 ### Established-connection control paths
 
 The remaining read-side paths must be separated from plaintext writes. In the
@@ -645,6 +676,9 @@ In particular, `queue_tls_message` first transfers a pending key-update reply,
 so a fatal alert can add both that reply and its own record while output is
 stalled. The guard does not promise that read polls never grow the output queue.
 
+The record-layer read sequence soft limit can also call `send_close_notify`
+before decrypting a record (`conn.rs` deframing path). This is another read-side
+control source, even though reaching it is impractical in the fixture.
 Local `send_close_notify` suppresses duplicate close notifications using
 `sent_fatal_alert`; tokio-rustls shutdown invokes it separately from reads.
 Automatic traffic-key refresh also has a separate output path:

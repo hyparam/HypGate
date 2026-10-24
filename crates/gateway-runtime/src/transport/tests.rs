@@ -206,6 +206,73 @@ async fn tls_drain_guard_holds_control_queue_stable_and_resumes_exact_bytes() {
     }).await.unwrap();
 }
 
+#[test]
+fn tls_application_write_fragment_overhead_is_bounded_for_pinned_suites() {
+    use std::io::{Read, Write};
+    use tokio_rustls::rustls::{ClientConnection, ServerConnection, CipherSuite};
+    let suites = tokio_rustls::rustls::crypto::ring::default_provider().cipher_suites;
+    let mut exercised = 0;
+    for suite in suites {
+        let overhead = match suite.suite() {
+            CipherSuite::TLS13_AES_128_GCM_SHA256 | CipherSuite::TLS13_AES_256_GCM_SHA384
+                | CipherSuite::TLS13_CHACHA20_POLY1305_SHA256 => 22,
+            CipherSuite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+                | CipherSuite::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 => 29,
+            CipherSuite::TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 => 21,
+            _ => continue, // Fixture certificate is ECDSA; RSA uses the same record ciphers.
+        };
+        for vectored in [false, true] {
+            let cert = generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+            let mut roots = RootCertStore::empty(); roots.add(cert.cert.der().clone()).unwrap();
+            let mut crypto = tokio_rustls::rustls::crypto::ring::default_provider();
+            crypto.cipher_suites = vec![suite]; let crypto = Arc::new(crypto);
+            let server_config = ServerConfig::builder_with_provider(crypto.clone())
+                .with_protocol_versions(&[suite.version()]).unwrap().with_no_client_auth().with_single_cert(
+                    vec![cert.cert.der().clone()], PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()).into()).unwrap();
+            let client_config = ClientConfig::builder_with_provider(crypto)
+                .with_protocol_versions(&[suite.version()]).unwrap().with_root_certificates(roots).with_no_client_auth();
+            let mut client = ClientConnection::new(Arc::new(client_config), ServerName::try_from("localhost").unwrap()).unwrap();
+            let mut server = ServerConnection::new(Arc::new(server_config)).unwrap();
+            for _ in 0..10 {
+                let mut wire = Vec::new(); client.write_tls(&mut wire).unwrap();
+                if !wire.is_empty() { server.read_tls(&mut &wire[..]).unwrap(); server.process_new_packets().unwrap(); }
+                let mut wire = Vec::new(); server.write_tls(&mut wire).unwrap();
+                if !wire.is_empty() { client.read_tls(&mut &wire[..]).unwrap(); client.process_new_packets().unwrap(); }
+                if !client.is_handshaking() && !server.is_handshaking() && !client.wants_write() && !server.wants_write() { break; }
+            }
+            assert!(!client.is_handshaking() && !server.is_handshaking());
+            assert!(!client.wants_write() && !server.wants_write());
+            assert_eq!(client.negotiated_cipher_suite().unwrap().suite(), suite.suite());
+            client.set_buffer_limit(Some(TLS_APPLICATION_BUFFER));
+            let payload = vec![42; TLS_APPLICATION_BUFFER + 1];
+            let accepted = if vectored {
+                let slices: Vec<_> = payload.chunks(1).map(io::IoSlice::new).collect();
+                client.writer().write_vectored(&slices).unwrap()
+            } else { client.writer().write(&payload).unwrap() };
+            assert_eq!(accepted, TLS_APPLICATION_BUFFER);
+            let mut wire = Vec::new(); client.write_tls(&mut wire).unwrap();
+            assert_eq!(wire.len(), TLS_APPLICATION_BUFFER + 4 * overhead);
+            let mut offset = 0; let mut records = 0;
+            while offset < wire.len() {
+                assert_eq!(wire[offset], 23);
+                let len = u16::from_be_bytes([wire[offset + 3], wire[offset + 4]]) as usize;
+                assert_eq!(len + 5, 16384 + overhead);
+                offset += 5 + len; records += 1;
+            }
+            assert_eq!(records, 4); assert_eq!(offset, wire.len());
+            let mut incoming = &wire[..]; let mut actual = Vec::new();
+            while !incoming.is_empty() {
+                assert!(server.read_tls(&mut incoming).unwrap() > 0);
+                let available = server.process_new_packets().unwrap().plaintext_bytes_to_read();
+                let start = actual.len(); actual.resize(start + available, 0);
+                server.reader().read_exact(&mut actual[start..]).unwrap();
+            }
+            assert_eq!(actual, payload[..accepted]); exercised += 1;
+        }
+    }
+    assert_eq!(exercised, 12);
+}
+
 // Dependency-level counterexample, not a production HTTP scheduling test.
 #[test]
 fn tls_control_replies_can_exceed_application_buffer_limit() {
