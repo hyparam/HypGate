@@ -20,6 +20,9 @@ pub struct ExchangeStats { pub upload: TransferStats, pub download: TransferStat
 // Application-data buffering only; handshake/control traffic and record overhead
 // have separate rustls limits. See docs/dependency-resources.md.
 const TLS_APPLICATION_BUFFER: usize = 64 * 1024;
+// rustls 0.23 rounds this ticket budget to 32 server entries, with eight
+// TLS 1.3 tickets and one TLS 1.2 session per server. Not a heap-byte limit.
+const TLS_SESSION_CACHE: usize = 256;
 
 pub struct HttpsTransport { connector: TlsConnector, deadline: Duration }
 impl HttpsTransport {
@@ -29,7 +32,9 @@ impl HttpsTransport {
     }
     pub(crate) fn with_roots(roots: RootCertStore, deadline: Duration) -> io::Result<Self> {
         if deadline.is_zero() || deadline > Duration::from_secs(3600) { return Err(io::ErrorKind::InvalidInput.into()); }
-        let config = ClientConfig::builder().with_root_certificates(roots).with_no_client_auth();
+        let mut config = ClientConfig::builder().with_root_certificates(roots).with_no_client_auth();
+        config.resumption = tokio_rustls::rustls::client::Resumption::in_memory_sessions(TLS_SESSION_CACHE);
+        config.enable_early_data = false;
         Ok(Self { connector: TlsConnector::from(Arc::new(config)), deadline })
     }
 

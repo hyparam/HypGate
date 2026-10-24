@@ -65,6 +65,10 @@ implementation's thresholds, extra queues, and retained storage. In particular,
 HTTP buffer thresholds and TLS application-data limits are not hard heap caps.
 The upstream explicitly configures a 64 KiB TLS application-data buffer limit
 before handshake; control traffic and record overhead have separate accounting.
+Its explicit session-cache policy retains up to 32 server entries after cache
+operations (33 transiently during insertion), independent of active requests;
+the dependency audit accounts for ticket/certificate/secret byte contents and
+identifies excluded metadata and active owners.
 
 
 - Hyper parser and output buffers, incoming-body channels, HTTP headers and URIs,

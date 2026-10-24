@@ -57,18 +57,66 @@ are working-length limits, not allocator-capacity bounds. Certificate parsing,
 verification scratch, decrypted messages, and handshake state need separate
 accounting, including overlapping lifetimes.
 
-The shared ClientConfig also owns roots and a resumption cache across exchanges.
-In this version `Resumption::default` requests 256 sessions; the constructor in
-[client/handy.rs](https://docs.rs/crate/rustls/0.23.46/source/src/client/handy.rs)
-rounds that to 32 server entries, with up to eight TLS 1.3 tickets per server plus
-TLS 1.2/key-exchange state. Entry count does not bound ticket/certificate byte size.
-This storage is charged per transport instance, not once per active exchange.
+## Shared TLS session storage
+
+`HttpsTransport` explicitly selects `Resumption::in_memory_sessions(256)` and
+sets `enable_early_data` to false. This preserves the pinned library's previous
+resumption behavior while making the budget independent of future defaults.
+It does not disable TLS resumption or change the no-replay HTTP policy.
+
+In [client/handy.rs](https://docs.rs/crate/rustls/0.23.46/source/src/client/handy.rs),
+256 is rounded to **32 server entries**, each holding up to eight TLS 1.3 tickets,
+one TLS 1.2 session, and a fixed-size key-exchange hint. Tickets are removed when
+used; TLS 1.2 lookup clones the stored session. This storage belongs to the shared
+transport, not to one active exchange, and can survive when no requests are live.
+
+[limited_cache.rs](https://docs.rs/crate/rustls/0.23.46/source/src/limited_cache.rs)
+maintains the insertion-order keys and map under the cache mutex. It inserts
+before evicting, so an insertion can transiently hold **33 server entries**.
+It stores server-name keys twice. Production DNS names are at most 253 bytes;
+IPv4/IPv6 names have fixed-size representations. Allocation capacity, map buckets,
+and temporary caller-owned names are separate from this logical key-byte count.
+
+[Session values](https://docs.rs/crate/rustls/0.23.46/source/src/msgs/persist.rs)
+retain ticket bytes, secret bytes, a certificate chain, and fixed-size metadata.
+For this TCP transport and pinned ring cipher suites, a conservative subtotal of
+these three variable byte contents per cached session is:
+
+- At most 65,535 ticket bytes, parsed with the TLS u16 length field.
+- At most 65,536 certificate DER bytes. Certificate lists and TLS 1.3 certificate
+  decompression use `CERTIFICATE_MAX_SIZE_LIMIT` in `msgs/handshake.rs`; ordinary
+  handshake deframing imposes an additional 65,535-byte message limit. Cached
+  chains originate from these checked peer-certificate messages.
+- At most 48 secret bytes: the TLS 1.2 master secret is a 48-byte array; TLS 1.3
+  ticket secrets use the negotiated SHA-256 or SHA-384 output length with ring.
+  QUIC parameters are empty on this TCP path.
+
+Counting all nine sessions independently, even where Arc-backed contents overlap,
+gives **32 × 9 × (65,535 + 65,536 + 48) = 37,762,272 bytes** of these variable
+contents after a cache operation. Substituting 33 for 32 conservatively covers
+entries during insertion before eviction. This is a source-derived payload
+subtotal, **not a cache heap bound**: it excludes certificate-entry vectors,
+Arc/Weak headers, hash-map/deque storage and spare capacity, session metadata,
+allocator overhead, and values held by active connections or awaiting the mutex.
+TLS 1.2 clones and taken TLS 1.3 tickets can keep data alive after cache eviction;
+the active-connection allocation account must include those owners separately.
+The root store, verifier, and client configuration also remain separate.
+
+The real TLS regression test
+`tls_session_cache_bounds_servers_and_tickets_without_disabling_resumption` exercises
+both TLS 1.2 and TLS 1.3 with the production connector: a second connection resumes,
+32 other authenticated server names evict the original entry, and the original
+name then performs a full handshake followed by successful resumption again.
+The TLS 1.3 provider deliberately issues 24 tickets; when replacement tickets
+are disabled, exactly eight subsequent handshakes resume and the ninth is full.
+This checks server/ticket eviction and continued functionality, not all retained byte sizes or
+adversarial certificate/ticket inputs. Re-audit the source on dependency upgrades.
 
 ## Remaining closure work
 
 The bounded counts above help identify retained allocations but cannot be summed
 as a proven RSS ceiling. Still needed are backing-capacity/lifetime bounds for
-Hyper parser/output storage, TLS handshake and cache entries, task/channel nodes,
+Hyper parser/output storage, TLS handshake state and the cache metadata/active owners excluded above, task/channel nodes,
 configuration and credential storage, allocator/thread overhead, and kernel socket
 buffers. Source-level inspection and isolated process measurements must distinguish
 these from the verified logical payload budget. The current milestone remains open;

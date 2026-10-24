@@ -74,3 +74,9 @@ record, checks that the request slot remains occupied, then drops the exchange.
 The peer must reach EOF, capacity must be reusable, and no HTTP response, body
 bytes, or audit record may have been produced. The existing deadline test covers
 timeout cleanup; this additional test explicitly covers dropping a pending future.
+
+The shared TLS session cache is explicitly configured for the pinned rustls
+256-session policy (32 server entries, eight TLS 1.3 tickets and one TLS 1.2
+session per server). TLS resumption remains enabled; early data is explicitly
+disabled. [Dependency accounting](dependency-resources.md#shared-tls-session-storage)
+records persistent and transient cache storage separately from active requests.

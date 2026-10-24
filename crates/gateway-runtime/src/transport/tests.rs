@@ -254,3 +254,62 @@ async fn canceling_tls_handshake_drops_socket_and_returns_owned_request_credit()
         drop(replacement);
     }).await.unwrap();
 }
+
+#[tokio::test]
+async fn tls_session_cache_bounds_servers_and_tickets_without_disabling_resumption() {
+    use tokio::io::AsyncReadExt;
+    use tokio_rustls::rustls::{HandshakeKind, version::{TLS12, TLS13}};
+    async fn connect(listener: &TcpListener, acceptor: &TlsAcceptor, transport: &HttpsTransport,
+        name: &str, expected: HandshakeKind) {
+        let provider = async {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut stream = acceptor.accept(tcp).await.unwrap();
+            assert_eq!(stream.get_ref().1.handshake_kind(), Some(expected));
+            assert_eq!(stream.get_ref().1.server_name(), Some(name));
+            stream.write_all(b"ticket delivery").await.unwrap();
+            stream.shutdown().await.unwrap();
+        };
+        let client = async {
+            let tcp = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+            let mut stream = transport.connector.connect(
+                ServerName::try_from(name.to_owned()).unwrap(), tcp).await.unwrap();
+            assert_eq!(stream.get_ref().1.handshake_kind(), Some(expected));
+            // Reading through close_notify processes post-handshake tickets.
+            let mut received = Vec::new(); stream.read_to_end(&mut received).await.unwrap();
+            assert_eq!(received, b"ticket delivery");
+        };
+        tokio::join!(provider, client);
+    }
+    tokio::time::timeout(Duration::from_secs(15), async {
+        for version in [&TLS12, &TLS13] {
+            // 33 distinct names exceed the production cache's 32-server capacity.
+            let names: Vec<_> = (0..33).map(|i| format!("provider-{i}.example")).collect();
+            let cert = generate_simple_self_signed(names.clone()).unwrap();
+            let mut roots = RootCertStore::empty(); roots.add(cert.cert.der().clone()).unwrap();
+            let mut server = ServerConfig::builder_with_protocol_versions(&[version])
+                .with_no_client_auth().with_single_cert(vec![cert.cert.der().clone()],
+                    PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()).into()).unwrap();
+            server.send_tls13_tickets = 24; // deliberately exceeds the eight-ticket client budget
+            let acceptor = TlsAcceptor::from(Arc::new(server.clone()));
+            server.send_tls13_tickets = 0; // shares server-side session storage with the first config
+            let no_tickets = TlsAcceptor::from(Arc::new(server));
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let transport = HttpsTransport::with_roots(roots, Duration::from_secs(5)).unwrap();
+            let mut order = vec![(0, HandshakeKind::Full), (0, HandshakeKind::Resumed)];
+            order.extend((1..33).map(|i| (i, HandshakeKind::Full)));
+            order.push((0, HandshakeKind::Full)); // oldest entry was evicted
+            order.push((0, HandshakeKind::Resumed)); // replacement remains usable
+            for (index, expected) in order {
+                connect(&listener, &acceptor, &transport, &names[index], expected).await;
+            }
+            if version.version == TLS13.version {
+                // Only eight of the last 24 issued tickets may remain. Consume
+                // them without replacement; the ninth connection must be full.
+                for _ in 0..8 {
+                    connect(&listener, &no_tickets, &transport, &names[0], HandshakeKind::Resumed).await;
+                }
+                connect(&listener, &no_tickets, &transport, &names[0], HandshakeKind::Full).await;
+            }
+        }
+    }).await.unwrap();
+}
