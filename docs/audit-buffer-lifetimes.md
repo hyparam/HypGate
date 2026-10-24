@@ -11,8 +11,8 @@ supply up to `MAX_RECORD_BYTES` and must account for retained receipts separatel
 | Stage | Owner and credit | Frame count charged |
 | --- | --- | --- |
 | Before reservation | `LogRecord` borrows the request's existing payload. No copied frame exists. | Already in the request chunk term |
-| Encoding | `Queue::push_with` checks a free slot while holding the queue mutex before invoking `encode_record`. The mutex excludes insertion and shutdown until the constructed Job is installed. | One of Q encoding/queued slots |
-| Queued | Verified `FrameQueue::push` transfers the immutable frame and receipt sender into a fixed slot. The caller retains only the receipt receiver. | One of Q encoding/queued slots |
+| Encoding | `Queue::push_with` calls verified `FrameQueue::reserve` while holding the queue mutex before invoking `encode_record`. The mutex excludes insertion and shutdown until the constructed Job is installed. | One of Q encoding/queued slots |
+| Queued | Verified `FrameQueue::finish_reserved` transfers the immutable frame and receipt sender into a fixed slot. The caller retains only the receipt receiver. | One of Q encoding/queued slots |
 | Writing/syncing/committing | The sole worker receives one Job and owns its frame until failure or journal commit. Dequeue returns queue credit, allowing another producer to encode. | One active frame in addition to Q |
 | Delivering | `commit_frame` moves the same frame into `DurableFrame`; no payload clone is made. Sending moves that receipt into the caller's oneshot. | Active-frame term until transfer, then receipt term |
 | Delivered, awaiting consumption | `Request::audit_current` retains exclusive request ownership across append and checks the exact receipt before dropping it. | At most one receipt per live production request, hence R |
@@ -42,6 +42,20 @@ the bound while preserving the rejected frame/completion tuple. The default libr
 constructor uses 1 MiB. Encoding scratch, active frames, and receipt lifetimes
 still require their separate correspondence arguments.
 
+The core now records one encoding reservation. `reserve` accepts exactly when
+open, unreserved, and below capacity; repeated reservation and direct `push` are
+refused while it is held. `finish_reserved` releases that reservation and either
+inserts the exact frame/completion tuple or returns it unchanged if closed or
+oversized. Close and dequeue preserve the reservation. The invariant bounds
+queued count plus the reservation by Q. `encoding_and_queued_bound` includes one
+in-progress encoding in the same Q-frame subtotal, conditional on its bytes
+fitting the configured limit plus framing overhead. The actual temporary byte
+owner and its size correspondence remain adapter obligations.
+
+A construction panic leaves the reservation charged in poisoned queue state;
+the adapter never recovers that state to admit more work. This deliberately avoids
+claiming that an unwinding or abandoned producer has already released its storage.
+
 `gateway-core/src/fixed_queue.rs` owns one vector of Q optional Job slots, a head
 index, and an occupied count. Its invariant states that exactly the occupied
 logical prefix contains values, including across wraparound. Checked constructor,
@@ -56,7 +70,7 @@ records or manufacture an empty result. Repeated closure is harmless. All arithm
 is checked. No new assumed lemma or external-body
 contract hides queue behavior.
 
-The production wrapper uses a mutex and condvar. A producer checks capacity under
+The production wrapper uses a mutex and condvar. A producer reserves capacity under
 the same lock held through encoding and verified insertion; no await or reservation
 escapes it. The sole worker pops under that lock, then releases it before file I/O.
 Canceling an append caller only drops its completion receiver; it cannot remove

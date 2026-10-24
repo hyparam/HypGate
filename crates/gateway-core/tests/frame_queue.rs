@@ -44,3 +44,44 @@ fn configured_payload_limit_rejects_oversize_without_losing_capacity_or_identity
         queue.close(); assert!(queue.push((record, completion)).is_err());
     }
 }
+
+#[test]
+fn encoding_reservation_blocks_competing_admission_and_survives_close() {
+    let mut queue = FrameQueue::with_payload_limit(2, 3);
+    assert!(queue.push((frame(b"one", 1), 1)).is_ok());
+    assert!(queue.reserve()); assert!(!queue.reserve());
+    let candidate = queue.push((frame(b"two", 2), 2)).err().unwrap();
+    assert_eq!(queue.len(), 1);
+    assert!(queue.finish_reserved(candidate).is_ok());
+    assert!(!queue.reserve());
+    assert_eq!(queue.pop().unwrap().1, 1);
+    assert!(queue.reserve());
+    queue.close();
+    let rejected = queue.finish_reserved((frame(b"end", 3), 3)).err().unwrap();
+    assert_eq!(rejected.1, 3); assert_eq!(queue.pop().unwrap().1, 2);
+    assert!(queue.pop().is_none()); assert!(!queue.reserve());
+}
+
+#[test]
+fn rejected_encoding_releases_reservation_without_consuming_a_slot() {
+    let mut queue = FrameQueue::with_payload_limit(1, 3);
+    assert!(queue.reserve());
+    let rejected = queue.finish_reserved((frame(b"over", 1), 9)).err().unwrap();
+    assert_eq!(rejected.1, 9); assert_eq!(queue.len(), 0);
+    assert!(queue.reserve());
+    assert!(queue.finish_reserved((frame(b"fit", 2), 10)).is_ok());
+    assert_eq!(queue.pop().unwrap().1, 10);
+}
+
+#[test]
+fn dequeue_does_not_release_an_unfinished_encoding_reservation() {
+    let mut queue = FrameQueue::with_payload_limit(2, 3);
+    assert!(queue.push((frame(b"old", 1), 1)).is_ok());
+    assert!(queue.reserve());
+    assert_eq!(queue.pop().unwrap().1, 1);
+    assert!(!queue.reserve());
+    let record = queue.push((frame(b"new", 2), 2)).err().unwrap();
+    assert!(queue.finish_reserved(record).is_ok());
+    assert_eq!(queue.pop().unwrap().1, 2);
+    assert!(queue.reserve());
+}

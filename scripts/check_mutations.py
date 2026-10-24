@@ -15,9 +15,13 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("frame_queue.rs", "queue_reservation_not_charged", "self.reserved = true;", "self.reserved = false;"),
+    ("frame_queue.rs", "queue_push_steals_reserved_slot", "if self.reserved { return Err(item); }", "if false { return Err(item); }"),
+    ("frame_queue.rs", "queue_finish_leaks_reservation", "self.reserved = false;", "self.reserved = true;"),
+    ("frame_queue.rs", "queue_allows_oversize_encoding_bound", "requires self.valid(), encoding_bytes <= self.payload_limit() + 65,", "requires self.valid(), encoding_bytes <= self.payload_limit() + 66,"),
     ("frame_queue.rs", "frame_queue_ignores_payload_limit", "if item.0.bytes().len() > self.payload_limit + 65 { return Err(item); }", "if false { return Err(item); }"),
     ("frame_queue.rs", "frame_queue_snapshot_omits_records", "self.items().map(|i: int, item: (RecordFrame, T)| item.0)", "Seq::empty()"),
-    ("frame_queue.rs", "frame_queue_understates_overhead", "<= self.capacity() * (self.payload_limit() + 65),", "<= self.capacity() * (self.payload_limit() + 64),"),
+    ("frame_queue.rs", "frame_queue_understates_overhead", "frame_bytes(self.frames())) <= self.capacity() * (self.payload_limit() + 65),", "frame_bytes(self.frames())) <= self.capacity() * (self.payload_limit() + 64),"),
     ("frame_queue.rs", "frame_queue_loses_dequeued_job", "let out = self.queue.pop();", "let _out = self.queue.pop(); let out = None;"),
     ("frame_queue.rs", "frame_queue_denies_valid_job", "let out = self.queue.push(item);", "let out = Err(item);"),
     ("fixed_queue.rs", "queue_admits_after_close", "if self.closed || self.used == self.slots.len() { return Err(value); }", "if self.used == self.slots.len() { return Err(value); }"),
@@ -166,7 +170,7 @@ with tempfile.TemporaryDirectory(prefix="gateway-mutations-") as temporary:
         try:
             result = subprocess.run(command(target), capture_output=True, text=True)
             output = result.stdout + result.stderr
-            markers = ["postcondition not satisfied", "precondition not satisfied", "assertion failed", "invariant not satisfied"]
+            markers = ["postcondition not satisfied", "precondition not satisfied", "error: requires not satisfied", "assertion failed", "invariant not satisfied"]
             if result.returncode == 0 or not any(marker in output for marker in markers):
                 raise RuntimeError(f"{name}: expected a proof failure, got:\n{output}")
             print(f"{name}: rejected by proof", flush=True)

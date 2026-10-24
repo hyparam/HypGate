@@ -20,7 +20,7 @@ at most 32 KiB of frame data into its own bounded copy. One DiskLog owns one dis
 | Inbound/outbound reader copies | At most 32 KiB of copied payload per reader; conservatively two readers per admitted exchange | `http_body::Reader` copies accepted visible frame bytes and releases its input reference before yielding; it clears the copy immediately when consumed. It cannot retain a large input owner through a small slice. Upload and download run sequentially; the inbound reader object remains alive. Allocator overhead and references retained inside Hyper remain separate. |
 | Client response channel | At most C + R channels, one data message of at most 16 KiB each | Created before authorization but after acquiring worker credit in `Gateway::handle`; charging this solely to authorized request leases is incorrect. Live receivers are charged to C; sender-only cleanup tails are charged to R because an existing permit can send after receiver destruction. A consumed message becomes Hyper-owned. End markers carry no payload. |
 | Provider upload channel | One data message of at most 16 KiB per admitted exchange | Constructed in `HttpsTransport::run`; `Writer::poll_write` reserves queue credit before copying bytes. Hyper may retain previously consumed frames outside the channel. |
-| Disk frames being encoded or queued | At most Q reserved/queued records, each at most K + 65 bytes for production requests | `Queue::push_with` checks a free fixed slot before encoding, then inserts through verified `FrameQueue::push` under the same queue mutex. The executable passes validated K to `DiskLog::create_with_payload_limit`; append rejects larger payloads before encoding, and the verified queue independently rejects oversized frames. The default library constructor retains the 1 MiB limit. |
+| Disk frames being encoded or queued | At most Q reserved/queued records, each at most K + 65 bytes for production requests | `Queue::push_with` calls verified `FrameQueue::reserve` before encoding, then inserts through verified `FrameQueue::finish_reserved` under the same queue mutex. The executable passes validated K to `DiskLog::create_with_payload_limit`; append rejects larger payloads before encoding, and the verified queue independently rejects oversized frames. The default library constructor retains the 1 MiB limit. |
 | Active disk frame | One additional frame of at most K + 65 bytes | The worker owns the job after receiving it, through write, sync, and acknowledgment. Cancellation of its caller does not reclaim or duplicate that frame. A stalled worker is never replaced. |
 | Delivered durable receipts | At most one frame of at most K + 65 bytes per admitted exchange | The job oneshot transfers its owned frame to the waiting request. Exact receipt validation then drops it; cancellation drops undelivered receipts. The worker can advance to another job before delivery is consumed. Custom library callers retaining receipts must budget separately. |
 | Encoding/comparison scratch | One 33-byte header vector per logger encoder plus one per validating request | `framing::encode_payload` copies a canonical header into the reserved frame. Receipt validation also encodes the expected 33-byte header, then compares payload slices without copying the payload. SHA-256 state and the 32-byte digest are additional fixed-size implementation state. |
@@ -90,7 +90,11 @@ The queue invariant now proves every retained payload fits its immutable limit.
 The executable initializes that limit from validated K; the composition theorem
 requires the queue limit to be at most K instead of a premise for every frame.
 Other category snapshots and the trusted startup configuration binding remain.
-Encoding scratch, the active worker frame, and delivered receipts are separate.
+`encoding_and_queued_bound` charges one in-progress encoding together with queued
+frames to Q, using the actual reservation bit and an explicit encoding-size premise.
+The adapter binds that reservation to the temporary frame under its mutex; encoding
+allocation capacity/scratch, the active worker frame, and delivered receipts remain
+separate obligations.
 
 This is a size-composition proof, not proof that every async runtime state supplies
 those snapshots. The verified owner now enforces exclusive accounting of each request's stream body

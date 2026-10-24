@@ -21,10 +21,11 @@ impl Queue {
         let _wake = WakeOnDrop(&self.ready);
         let mut state = self.state.lock().map_err(|_| io::ErrorKind::BrokenPipe)?;
         if state.is_closed() { return Err(io::ErrorKind::BrokenPipe.into()); }
-        if state.is_full() { return Err(io::ErrorKind::WouldBlock.into()); }
-        // Capacity is checked before allocating the frame, under the same lock
-        // as insertion and shutdown. No reservation can escape this section.
-        if state.push(make()).is_err() {
+        if !state.reserve() { return Err(io::ErrorKind::WouldBlock.into()); }
+        // Capacity is reserved before allocating the frame, under the same lock
+        // as insertion and shutdown. A panic leaves the reservation charged
+        // in poisoned state, which is never recovered for new admission.
+        if state.finish_reserved(make()).is_err() {
             state.close();
             self.ready.notify_all();
             return Err(io::ErrorKind::BrokenPipe.into());
