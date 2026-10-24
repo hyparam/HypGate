@@ -446,6 +446,14 @@ remain open; this checkpoint does not change the 6/8 milestone count. Validation
 247 Verus checks, 227 workspace tests and six compile-fail doctests pass; all 216
 deliberate mutations are rejected by proof.
 
+HTTP cross-owner regression checkpoint: the actual worker/connection wrappers
+now demonstrate that a queued response survives worker cancellation under the
+connection credit, while worker capacity may be reused. The connection credit
+cannot be reused until its own joined cleanup. Actual Reader destruction is also
+checked before worker/tracker release for never-polled and partially-read tasks.
+All six worker lifecycle tests pass, including both new cases. These are runtime
+correspondence checks; the two remaining proof rows stay open at 6/8.
+
 Start with the shared wrapper to reduce duplicated trusted lifetime logic. Preserve
 the existing task-capture destruction tests for both lease types and their
 poison, tracker-registration, and drain behavior. Generalize ownership mechanics

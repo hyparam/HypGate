@@ -81,6 +81,103 @@ impl WorkerSlots {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn canceled_worker_response_stays_owned_by_connection_until_its_cleanup() {
+        use crate::{http_body, server::connections::ConnectionSlots};
+        use http_body_util::BodyExt;
+        use tokio::io::AsyncWriteExt;
+        let workers = WorkerSlots::new(1);
+        let connections = ConnectionSlots::new(1);
+        let tracker = TaskTracker::new();
+        let (mut writer, mut body) = http_body::channel(4);
+        let (sent, queued) = tokio::sync::oneshot::channel();
+        let (release, drain) = tokio::sync::oneshot::channel();
+        let (received, observed) = tokio::sync::oneshot::channel();
+        let worker = workers.acquire(&tracker).unwrap().spawn(async move {
+            writer.write_all(b"data").await.unwrap();
+            sent.send(()).unwrap();
+            std::future::pending::<()>().await;
+            drop(writer);
+        });
+        let connection = tokio::spawn(connections.acquire().unwrap().task(async move {
+            drain.await.unwrap();
+            let frame = body.frame().await.unwrap().unwrap().into_data().unwrap();
+            assert_eq!(frame.as_ref(), b"data");
+            drop(frame);
+            // Canceling the producer did not turn its incomplete response into
+            // clean EOF, nor destroy the exact queued bytes before draining.
+            assert_eq!(body.frame().await.unwrap().unwrap_err().kind(), std::io::ErrorKind::UnexpectedEof);
+            received.send(()).unwrap();
+            std::future::pending::<()>().await;
+            drop(body);
+        }));
+        queued.await.unwrap();
+        assert_eq!(workers.usage(), Some((1, 1)));
+        assert_eq!(connections.usage(), Some((1, 1)));
+        worker.abort();
+        assert!(worker.await.unwrap_err().is_cancelled());
+        assert_eq!(workers.usage(), Some((0, 1)));
+        assert!(tracker.is_empty());
+        let replacement = workers.acquire(&tracker).unwrap();
+        assert!(connections.acquire().is_none());
+        release.send(()).unwrap();
+        observed.await.unwrap();
+        assert!(connections.acquire().is_none());
+        connection.abort();
+        assert!(connection.await.unwrap_err().is_cancelled());
+        assert_eq!(connections.usage(), Some((0, 1)));
+        drop(replacement);
+        assert_eq!(workers.usage(), Some((0, 1)));
+    }
+
+    #[tokio::test]
+    async fn actual_http_reader_destruction_precedes_worker_capacity_reuse() {
+        use std::{pin::Pin, task::{Context, Poll}, sync::atomic::{AtomicBool, Ordering}};
+        use bytes::Bytes;
+        use tokio::io::AsyncReadExt;
+        struct Source { slots: Arc<WorkerSlots>, tracker: TaskTracker, dropped: Arc<AtomicBool> }
+        impl http_body::Body for Source {
+            type Data = Bytes;
+            type Error = std::io::Error;
+            fn poll_frame(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Result<http_body::Frame<Bytes>, std::io::Error>>> {
+                Poll::Ready(Some(Ok(http_body::Frame::data(Bytes::from_static(b"data")))))
+            }
+        }
+        impl Drop for Source {
+            fn drop(&mut self) {
+                assert_eq!(self.slots.usage(), Some((1, 1)));
+                assert_eq!(self.tracker.len(), 1);
+                assert!(self.slots.acquire(&self.tracker).is_none());
+                self.dropped.store(true, Ordering::SeqCst);
+            }
+        }
+        for polled in [false, true] {
+            let slots = WorkerSlots::new(1);
+            let tracker = TaskTracker::new();
+            let dropped = Arc::new(AtomicBool::new(false));
+            let mut reader = crate::http_body::Reader::new(Source { slots: slots.clone(), tracker: tracker.clone(), dropped: dropped.clone() });
+            let (ready, started) = tokio::sync::oneshot::channel();
+            let work = async move {
+                let mut first = [0];
+                reader.read_exact(&mut first).await.unwrap(); // three copied bytes remain
+                assert_eq!(first, [b'd']);
+                ready.send(()).unwrap();
+                std::future::pending::<()>().await;
+                drop(reader);
+            };
+            let task = LeasedTask::new(work, slots.acquire(&tracker).unwrap());
+            if polled {
+                let task = tokio::spawn(task);
+                started.await.unwrap();
+                task.abort();
+                assert!(task.await.unwrap_err().is_cancelled());
+            } else { drop(task); }
+            assert!(dropped.load(Ordering::SeqCst));
+            assert_eq!(slots.usage(), Some((0, 1)));
+            assert!(tracker.is_empty());
+        }
+    }
+
     #[test]
     fn panicking_capture_strands_worker_credit_and_closes_admission() {
         struct Capture;

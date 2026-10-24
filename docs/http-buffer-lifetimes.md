@@ -138,3 +138,21 @@ release load/fault workloads pass. A three-wave isolated process run in each mod
 also passes, with sampled peaks of 12,992,512 bytes in strict mode and 12,959,744
 bytes in availability mode on macOS. These observations are regression evidence,
 not a memory ceiling or a comparative performance benchmark.
+
+
+## Cross-owner cancellation regression
+
+`server::workers::tests::canceled_worker_response_stays_owned_by_connection_until_its_cleanup`
+uses the actual HTTP channel, WorkerSlots, ConnectionSlots, and leased task wrappers.
+It queues a frame, cancels and joins its worker, admits a replacement worker, and
+confirms that the original connection slot still cannot be reused. The connection
+then receives the exact queued bytes and reports incomplete EOF; only cancellation
+and joined cleanup of that connection returns its slot. This exercises the live
+receiver category independently of worker lifetime.
+
+`actual_http_reader_destruction_precedes_worker_capacity_reuse` captures an actual
+Reader in a worker task, both never polled and canceled after a partial frame read.
+Its source destructor observes the still-occupied worker slot and tracker, and
+cannot acquire replacement capacity. Capacity becomes available only after task
+cleanup. These are adapter regressions, not the missing global owner-count or
+cross-owner preservation theorem.

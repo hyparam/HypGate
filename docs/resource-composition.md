@@ -208,3 +208,15 @@ production path is charged to exactly one owner with a bounded count and a
 bounded requested size. The remaining obligations are the assumptions
 themselves, which later milestones may narrow but which this document does not
 hide.
+
+
+## Milestone 6 cross-owner HTTP regression
+
+The worker lifecycle suite now exercises the actual HTTP channel across two
+separately credited tasks: canceling the writer's worker allows worker reuse while
+the receiver's connection credit remains occupied and its queued frame remains
+intact. Canceling and joining that connection then returns its credit. A second
+regression checks actual Reader destruction before worker-slot/tracker release,
+including a retained partial frame. This strengthens the production correspondence
+evidence above; it does not change the conditional snapshot theorem into the
+still-pending milestone 6 lifecycle/composition theorem.
