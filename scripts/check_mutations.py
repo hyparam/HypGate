@@ -15,10 +15,13 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
-    ("fixed_queue.rs", "queue_overwrites_full", "if self.used == self.slots.len() { return Err(value); }", "if false { return Err(value); }"),
+    ("fixed_queue.rs", "queue_admits_after_close", "if self.closed || self.used == self.slots.len() { return Err(value); }", "if self.used == self.slots.len() { return Err(value); }"),
+    ("fixed_queue.rs", "queue_reopens_when_drained", "self.used -= 1;", "self.used -= 1; self.closed = false;"),
+    ("fixed_queue.rs", "queue_close_is_ignored", "{ self.closed = true; }", "{ }"),
+    ("fixed_queue.rs", "queue_overwrites_full", "if self.closed || self.used == self.slots.len() { return Err(value); }", "if self.closed { return Err(value); }"),
     ("fixed_queue.rs", "queue_discards_oldest", "assert(value == Some(old(self).contents()[0]));", "assert(value == Some(old(self).contents()[0])); value = None;"),
     ("fixed_queue.rs", "queue_does_not_advance", "self.head = if self.head == self.slots.len() - 1 { 0 } else { self.head + 1 };", "self.head = self.head;"),
-    ("fixed_queue.rs", "queue_denies_valid_push", "if self.used == self.slots.len() { return Err(value); }", "if true { return Err(value); }"),
+    ("fixed_queue.rs", "queue_denies_valid_push", "if self.closed || self.used == self.slots.len() { return Err(value); }", "if true { return Err(value); }"),
     ("owned_accounting.rs", "owned_total_omits_pending_read", "Some(o) => o.state().body() + o.read_bytes(),", "Some(o) => o.state().body(),"),
     ("owned_accounting.rs", "owned_replacement_ignores_capacity", "replacement.state().capacity() <= capacity,", "true,"),
     ("owned_accounting.rs", "owned_retirement_retains_payload", "ensures owners_match(slots.update(index, 0), owners.update(index, None), capacity),", "ensures owners_match(slots.update(index, 0), owners, capacity),"),

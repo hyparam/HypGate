@@ -2,6 +2,26 @@ use gateway_core::fixed_queue::FixedQueue;
 use std::collections::VecDeque;
 
 #[test]
+fn closing_is_permanent_and_preserves_wrapped_pending_values() {
+    let mut queue = FixedQueue::new(3);
+    assert!(!queue.is_closed());
+    for value in [1, 2, 3] { queue.push(value).unwrap(); }
+    assert_eq!(queue.pop(), Some(1)); assert_eq!(queue.pop(), Some(2));
+    queue.push(4).unwrap(); queue.push(5).unwrap();
+    queue.close(); queue.close();
+    assert!(queue.is_closed()); assert_eq!(queue.len(), 3);
+    assert_eq!(queue.push(6), Err(6));
+    for value in [3, 4, 5] {
+        assert_eq!(queue.pop(), Some(value));
+        assert!(queue.is_closed()); assert_eq!(queue.push(6), Err(6));
+    }
+    assert!(queue.pop().is_none()); assert!(!queue.is_full());
+    assert!(queue.is_closed()); assert_eq!(queue.push(6), Err(6));
+    let mut empty: FixedQueue<u8> = FixedQueue::new(1);
+    empty.close(); assert_eq!(empty.push(1), Err(1)); assert!(empty.pop().is_none());
+}
+
+#[test]
 fn fixed_queue_matches_fifo_through_wraparound_and_full_rejection() {
     for capacity in [1, 2, 31, 32, 33, 1024] {
         let mut queue = FixedQueue::new(capacity);

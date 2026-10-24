@@ -6,8 +6,9 @@ pub open spec fn position(head: int, offset: int, capacity: int) -> int {
     if offset < capacity - head { head + offset } else { offset - (capacity - head) }
 }
 
-pub struct FixedQueue<T> { slots: Vec<Option<T>>, head: usize, used: usize }
+pub struct FixedQueue<T> { slots: Vec<Option<T>>, head: usize, used: usize, closed: bool }
 impl<T> FixedQueue<T> {
+    pub closed spec fn closed(&self) -> bool { self.closed }
     pub closed spec fn capacity(&self) -> nat { self.slots@.len() }
     pub closed spec fn contents(&self) -> Seq<T> {
         Seq::new(self.used as nat, |i: int| self.slots@[position(self.head as int, i, self.capacity() as int)]->Some_0)
@@ -19,7 +20,7 @@ impl<T> FixedQueue<T> {
     }
     pub fn new(capacity: usize) -> (out: Self)
         requires capacity > 0,
-        ensures out.valid(), out.capacity() == capacity, out.contents() == Seq::<T>::empty(),
+        ensures out.valid(), !out.closed(), out.capacity() == capacity, out.contents() == Seq::<T>::empty(),
     {
         let mut slots: Vec<Option<T>> = Vec::with_capacity(capacity);
         while slots.len() < capacity
@@ -27,8 +28,18 @@ impl<T> FixedQueue<T> {
                 forall|i: int| 0 <= i < slots.len() ==> slots@[i].is_none(),
             decreases capacity - slots.len(),
         { slots.push(None); }
-        Self { slots, head: 0, used: 0 }
+        Self { slots, head: 0, used: 0, closed: false }
     }
+    pub fn is_closed(&self) -> (out: bool)
+        requires self.valid(),
+        ensures out == self.closed(),
+    { self.closed }
+    pub fn close(&mut self)
+        requires old(self).valid(),
+        ensures final(self).valid(), final(self).closed(),
+            final(self).capacity() == old(self).capacity(),
+            final(self).contents() == old(self).contents(),
+    { self.closed = true; }
     pub fn len(&self) -> (out: usize)
         requires self.valid(),
         ensures out == self.contents().len(), out <= self.capacity(),
@@ -41,14 +52,15 @@ impl<T> FixedQueue<T> {
     pub fn push(&mut self, value: T) -> (out: Result<(), T>)
         requires old(self).valid(),
         ensures final(self).valid(), final(self).capacity() == old(self).capacity(),
+            final(self).closed() == old(self).closed(),
             match out {
-                Ok(()) => old(self).contents().len() < old(self).capacity()
+                Ok(()) => !old(self).closed() && old(self).contents().len() < old(self).capacity()
                     && final(self).contents() == old(self).contents().push(value),
-                Err(v) => v == value && old(self).contents().len() == old(self).capacity()
+                Err(v) => v == value && (old(self).closed() || old(self).contents().len() == old(self).capacity())
                     && final(self).contents() == old(self).contents(),
             },
     {
-        if self.used == self.slots.len() { return Err(value); }
+        if self.closed || self.used == self.slots.len() { return Err(value); }
         let index = if self.used < self.slots.len() - self.head {
             self.head + self.used
         } else { self.used - (self.slots.len() - self.head) };
@@ -64,6 +76,7 @@ impl<T> FixedQueue<T> {
     pub fn pop(&mut self) -> (out: Option<T>)
         requires old(self).valid(),
         ensures final(self).valid(), final(self).capacity() == old(self).capacity(),
+            final(self).closed() == old(self).closed(),
             match out {
                 Some(value) => old(self).contents().len() > 0 && value == old(self).contents()[0]
                     && final(self).contents() == old(self).contents().drop_first(),

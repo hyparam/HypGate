@@ -37,14 +37,19 @@ logical prefix contains values, including across wraparound. Checked constructor
 query, push, and pop contracts establish empty initialization, exact full/empty
 rejection, FIFO identity/order, occupancy bounds, and unchanged physical slot
 count. Pop moves the oldest Job out and clears its slot; push never overwrites
-an occupied slot. All arithmetic is checked. No new assumed lemma or external-body
+an occupied slot. The core also owns closure: `close` preserves the exact queued
+sequence and capacity, and all later push/pop operations preserve the closed flag.
+Push refuses a closed queue even after it has been completely drained. Pop still
+returns the oldest pending value when closed, so closure cannot discard admitted
+records or manufacture an empty result. Repeated closure is harmless. All arithmetic
+is checked. No new assumed lemma or external-body
 contract hides queue behavior.
 
 The production wrapper uses a mutex and condvar. A producer checks capacity under
 the same lock held through encoding and verified insertion; no await or reservation
 escapes it. The sole worker pops under that lock, then releases it before file I/O.
 Canceling an append caller only drops its completion receiver; it cannot remove
-an admitted Job. Shutdown sets a closed flag and wakes the worker, which drains
+an admitted Job. Shutdown calls verified `close` and wakes the worker, which drains
 existing entries before exiting. Dropping the last DiskLog handle also closes the
 producer side. With an unpoisoned mutex, worker exit closes admission and drops
 queued receipt senders. Queue-mutex poisoning refuses work rather than recovering
@@ -84,7 +89,12 @@ Wrapper tests check that rejected jobs are never constructed, closure drains que
 jobs, worker exit closes pending receipts, construction panic fails closed, and
 dropping the final logger handle releases an idle worker. Deliberate queue mutations
 exercise full overwrite, oldest-value loss, skipped head advancement, and refusal
-of a valid insertion.
+of a valid insertion, plus accepting after closure, reopening during drain, and
+ignoring closure. A wrapped-queue closure test checks repeated close, preserved
+drain order, and refusal before and after draining. The runtime no longer maintains
+a separate unverified closure flag. A two-thread adapter regression holds a producer
+inside job construction while shutdown attempts to close; closure waits for that
+admitted Job, preserves it for drain, and refuses subsequent construction.
 A maximum-record regression writes and scans a full 1 MiB payload through the
 production worker, rejects one byte over the limit without poisoning logging,
 then writes and recovers a subsequent record and checks the exact file extent.
