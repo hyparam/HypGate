@@ -124,6 +124,9 @@ The [local benchmark](docs/benchmarks.md) measures both logging modes through TL
 and real disk logging, with explicit workload and memory-accounting limits.
 The [adapter audit](docs/adapter-audit.md) maps runtime trust obligations to effect
 paths and tests, including concurrent tenants and client disconnects.
+The [end-to-end audit](docs/end-to-end-audit.md) traces one request from
+authorization through every enumerated network and disk effect site, each failure
+exit, and shutdown, marking every step proved, tested, or assumed.
 
 See [language and verification research](docs/verification-research.md) for the
 candidate comparison, agreed scope, proposed proof obligations, and next experiment.

@@ -54,7 +54,9 @@ their formal scope.
 
 There is no single theorem establishing that every byte reaching a provider has
 an authorized tenant, correct credential, and durable audit record under every
-async interleaving and physical crash. The missing steps include complete mediation
+async interleaving and physical crash. The [end-to-end audit](end-to-end-audit.md)
+traces that path step by step, enumerates every production effect site, and marks
+each join as proved, tested, or assumed. The missing steps include complete mediation
 of network effects, async receipt delivery and journal/session ownership, physical syscall and storage-contract validation. The [security contract](security-contract.md)
 and [storage contract](storage-crash-contract.md) specify those boundaries.
 

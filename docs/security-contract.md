@@ -1,7 +1,9 @@
 # Security contract before transport implementation
 
 Status: core authorization, normalized configuration, streaming, and resource
-properties are checked; end-to-end security obligations remain open. See the
+properties are checked. The [end-to-end audit](end-to-end-audit.md) traces dispatch
+mediation through the enumerated effect sites and failure exits at the source level;
+a mechanized end-to-end theorem remains open. See the
 [authorization implementation notes](authorization-core.md) for the exact boundary.
 This contract gates the HTTP adapter milestone and extends the original research.
 

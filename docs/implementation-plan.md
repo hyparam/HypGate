@@ -6,7 +6,7 @@
 | 2. Minimal working gateway | 6/6 | ✓ |
 | 3. Crash-safe logging | 15/15 | ✓ |
 | 4. Availability hardening | 16/16 | ✓ |
-| 5. Auditable first release | 6/9 | ☐ |
+| 5. Auditable first release | 7/9 | ☐ |
 
 Progress counts completed rows in each milestone's table below. Rows are not
 weighted estimates of effort or proof coverage; an open row can still block the
@@ -21,7 +21,10 @@ Milestone 1 is closed under the explicit assumptions in the
 [resource composition](resource-composition.md); the
 [milestone 1 exit audit](milestone-1-exit-audit.md) maps all seven criteria to
 evidence. Milestone 4 is closed under its [availability audit](availability-audit.md)
-and explicit scheduler/I/O assumptions. Next focus is milestone 5, the auditable release.
+and explicit scheduler/I/O assumptions. Next focus is milestone 5, the auditable release;
+the [end-to-end audit](end-to-end-audit.md) now traces one request from authorization
+to the exact network and disk calls, and the remaining rows are clean-environment
+deployment and broader benchmarks.
 See the [streaming-core progress notes](streaming-core-progress.md) and
 [authorization core](authorization-core.md) for completed increments and remaining gaps.
 The [runtime ownership layer](runtime-ownership.md) now ties authorization, a single
@@ -284,7 +287,7 @@ Exit criteria:
 | ✓ | Paced-peer and permanent-log-failure workload results, with a separate paced strict-mode RSS measurement. |
 | ☐ | Demonstrate reproducible full deployment from a clean environment. |
 | ☐ | Complete broader benchmarks and operational-limit reporting. |
-| ☐ | Complete the end-to-end audit from authorization through network/disk effects and failure/shutdown behavior. |
+| ✓ | End-to-end audit traces authorization through the enumerated network/disk effect sites, every failure exit, and shutdown, marking each step proved, tested, or assumed; see the [end-to-end audit](end-to-end-audit.md). |
 
 Pin compiler, verifier, solver, and dependencies; automate proof and mutation checks,
 integration tests, and reproducible build instructions. Publish the exact proved
