@@ -121,6 +121,49 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test]
+    async fn incoming_trailer_parser_enforces_byte_and_field_limits() {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let padded = |size: usize| format!("x-pad: {}\r\n\r\n", "p".repeat(size - 11));
+            for (trailers, accepted, count) in [
+                (padded(MAX_INPUT_FRAME - 1), true, 1),
+                (padded(MAX_INPUT_FRAME), false, 1),
+                (format!("{}\r\n", "x: y\r\n".repeat(100)), true, 100),
+                (format!("{}\r\n", "x: y\r\n".repeat(101)), false, 101),
+            ] {
+                let (client, mut peer) = tokio::io::duplex(128 * 1024);
+                let provider = tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    while !request.ends_with(b"\r\n\r\n") {
+                        request.push(peer.read_u8().await.unwrap());
+                        assert!(request.len() < 1024);
+                    }
+                    let response = format!("HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n1\r\nx\r\n0\r\n{trailers}");
+                    peer.write_all(response.as_bytes()).await.unwrap();
+                    peer.shutdown().await.unwrap();
+                });
+                let (mut sender, connection) = hyper::client::conn::http1::Builder::new()
+                    .max_buf_size(MAX_INPUT_FRAME).max_header_size(MAX_INPUT_FRAME).max_headers(100).writev(true)
+                    .handshake(hyper_util::rt::TokioIo::new(crate::http_io::ReadLimited::new(client))).await.unwrap();
+                let driver = tokio::spawn(connection);
+                let mut body = sender.send_request(http::Request::new(http_body_util::Empty::<Bytes>::new()))
+                    .await.unwrap().into_body();
+                assert_eq!(body.frame().await.unwrap().unwrap().into_data().unwrap(), "x");
+                let next = body.frame().await.expect("trailers or parser error");
+                if accepted {
+                    assert_eq!(next.unwrap().into_trailers().unwrap().len(), count);
+                    assert!(body.frame().await.is_none());
+                } else {
+                    assert!(next.is_err(), "oversized trailers must fail before delivery");
+                }
+                drop(body); drop(sender);
+                let result = driver.await.unwrap();
+                if accepted { result.unwrap(); }
+                provider.await.unwrap();
+            }
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn incoming_body_read_ahead_stays_bounded_with_a_slow_reader() {
         use std::sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}};
         struct Input {

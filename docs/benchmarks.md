@@ -268,3 +268,19 @@ and availability sampled peak was 12,926,976 bytes across three waves per mode.
 The strict memory run overlapped the load workload, so these timings are not a
 controlled performance comparison. The queue's fixed slot-count claim comes from
 its source and checked contracts, not these RSS samples.
+
+After the fixed HTTP mailbox, queued Hyper output, configured destination cap,
+and parser-owner audit, the Ubuntu 24.04 100-wave soak at `b72c839` passed in
+[run 40061075707](https://github.com/platypii/LogGate/actions/runs/40061075707)
+on 2026-10-24 UTC. Each mode completed 800 requests, exact response/audit checks,
+and clean shutdown. The gateway alone was sampled; these are debug-profile
+measurements, not a controlled performance comparison with previous runs.
+
+| Mode | Elapsed seconds | Baseline RSS bytes | Kernel peak RSS bytes | Final 20 settled RSS range, bytes | Periodic samples |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Strict | 93.927 | 11,493,376 | 15,400,960 | 15,396,864–15,400,960 | 1,449 |
+| Availability | 90.055 | 11,366,400 | 15,388,672 | 15,196,160–15,319,040 | 1,372 |
+
+Both remained within this workload's observed range through the final waves.
+This does not establish leak freedom, adversarial-input bounds, or allocator/OS
+memory limits; the dependency and lifetime accounting obligations still apply.

@@ -334,6 +334,36 @@ of a large source owner after copying a small visible frame.
 
 ### Header collections and parser scratch
 
+#### Rejected trailer storage
+
+Rejecting trailer frames in our Reader does not avoid Hyper's prior parsing
+allocations. `decode.rs` assembles trailers in a separate `BytesMut`, starting
+with capacity 64. Each following byte is appended before the length check;
+reaching 32,768 bytes returns an error, so successful trailer blocks are strictly
+smaller than that limit. No more than 100 trailer fields reach `decode_trailers`.
+The buffer is neither split nor shared during assembly. `BufMut::put_u8` reaches
+`BytesMut::chunk_mut`, which reserves 64 when full; with the pinned Vec policy
+its capacities double from 64 through at most 32,768. Allow 49,152 requested
+bytes during the largest old/new replacement, excluding allocator overhead.
+
+During decoding, that assembly buffer overlaps a scratch vector of at most 100
+httparse header views and a newly built HeaderMap. Names and values are copied
+from the assembly buffer, with combined logical contents below 32 KiB; apply the
+parsed-map collection inventory below separately. The assembly and scratch
+vectors drop when decoding returns. The resulting trailer map can then occupy
+Hyper's separate channel `trailers` slot until delivered/rejected or the final
+channel owner drops. Receiver drop alone does not clear this slot either.
+Malformed-header diagnostic formatting is additional error storage, not included
+in the payload or assembly-capacity allowance.
+
+`incoming_trailer_parser_enforces_byte_and_field_limits` uses a real queued
+client connection and raw chunked responses: 32,767 trailer bytes and 100 fields
+are delivered by Hyper, while 32,768 bytes and 101 fields produce body errors
+before a trailer map is delivered. The existing Reader test independently rejects
+delivered trailer frames. Neither test measures private allocator capacity.
+
+#### Head and trailer maps
+
 The explicit wire-head limit includes the request/status line, field separators,
 and terminal CRLF, rather than only the names/values checked by the adapter.
 Hyper checks the completed parsed head length before constructing its HeaderMap;
