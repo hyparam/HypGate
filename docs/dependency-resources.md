@@ -112,6 +112,16 @@ are disabled, exactly eight subsequent handshakes resume and the ninth is full.
 This checks server/ticket eviction and continued functionality, not all retained byte sizes or
 adversarial certificate/ticket inputs. Re-audit the source on dependency upgrades.
 
+## Blocking hostname resolution
+
+Tokio 1.54.1's `net/addr.rs` implements hostname resolution with `spawn_blocking`.
+Canceling its caller does not bound the lifetime of an already started lookup.
+The production [dedicated resolver](dns-resources.md) now owns a fixed worker pool,
+separate verified admission credits, and bounded returned address vectors. This
+closes the accumulation of detached DNS jobs across request timeouts and removes
+DNS from Tokio's shutdown wait, while leaving libc/NSS internal allocations and
+termination as explicit dependencies.
+
 ## Remaining closure work
 
 The bounded counts above help identify retained allocations but cannot be summed

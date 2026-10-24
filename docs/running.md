@@ -122,3 +122,10 @@ deployment hardening remain open. See the milestone checklist for the full scope
 
 See [proxy deployment and failover](deployment.md) for a tested HAProxy example
 with TLS, readiness checks, a standby instance, and generation retries disabled.
+
+DNS resolution has a fixed per-transport budget of four workers and 32 queued or
+running jobs. Saturation fails the exchange without queuing another lookup;
+results above 64 addresses are rejected. Request deadlines include DNS wait time,
+but cannot interrupt a running system lookup. Dedicated resolver threads do not
+block Tokio runtime shutdown. See [DNS accounting](dns-resources.md) for the
+remaining system-resolver assumptions and behavior under a permanent stall.

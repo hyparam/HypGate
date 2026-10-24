@@ -25,7 +25,7 @@ async fn run() -> Result<(), &'static str> {
         GatewayConfig::from_json(&root, &routes, |name| std::env::var(name).ok())
             .map_err(|_| "invalid configuration or missing credential")?
     }; // Source JSON buffers are startup scratch, not server-lifetime storage.
-    let transport = HttpsTransport::new(Duration::from_secs(300)).map_err(|_| "cannot initialize TLS")?;
+    let transport = HttpsTransport::new(Duration::from_secs(300)).map_err(|_| "cannot initialize transport")?;
     let log = DiskLog::create(Path::new(&args[3]), 16, Duration::from_secs(2)).map_err(|_| "cannot create and sync new audit log")?;
     let listener = tokio::net::TcpListener::bind(address).await.map_err(|_| "cannot bind listener")?;
     eprintln!("soundgate listening on {}", listener.local_addr().map_err(|_| "cannot read listen address")?);

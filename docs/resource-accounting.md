@@ -27,6 +27,7 @@ at most 32 KiB of frame data into its own bounded copy. One DiskLog owns one dis
 | Inbound connection tasks | At most C entries in the server JoinSet | Admission checks the set before spawning; completed-but-unreaped entries also consume the limit. Excess accepted sockets are closed. The listener and one just-accepted socket are additional objects. |
 | Server request workers, including rejection and cleanup | At most R worker leases | A separate verified `ResourceAdmission` registry issues a private key before response allocation or spawning. `WorkerTask` drops the entire boxed task future before its lease; the lease drops tracking before returning the key. Registry transitions are verified; mutex serialization, Rust field drop order, and Tokio cancellation remain trusted. |
 | Admitted exchanges and upstream connections | At most R live leases; one upstream connection per exchange | Verified slot transitions plus trusted ownership. The outer exchange owns admission while the timed TCP/TLS/HTTP future borrows it, so network-future cleanup precedes request release. No pooling, replay, or detached upstream connection task. Failed authentication can still create a tracked server worker without a lease. |
+| DNS lookups | Four dedicated threads; at most 32 queued/running jobs per transport | Jobs retain separate verified registry credit across request cancellation. Returned address vectors contain at most 64 addresses. System-resolver internal allocations remain trusted; see [DNS accounting](dns-resources.md). |
 | Disk operations | One worker, one sequential write/sync operation | A timeout bounds caller waiting, not syscall duration. Outstanding work retains its frame until completion or process exit. |
 
 A conservative **visible payload subtotal**, under the ownership relationships
@@ -76,7 +77,9 @@ identifies excluded metadata and active owners.
   32 KiB parser-buffer limit, but that setting alone does not prove total Hyper
   allocation bounds or backing-storage sizes.
 - rustls handshake and record buffers, certificate/root-store data, TLS overhead,
-  DNS resolution, and kernel socket buffers.
+  system-resolver internals, and kernel socket buffers. The
+  [DNS inventory](dns-resources.md) accounts for lookup jobs, dedicated threads,
+  stacks, and bounded returned address vectors separately from request leases.
 - The worker registry adds R `u64` entries (8 × R logical bytes, at most 512 KiB
   with validated limits), plus vector spare capacity and mutex/registry metadata.
   Acquisition scans at most R slots under a synchronous mutex; it creates no async

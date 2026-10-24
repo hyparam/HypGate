@@ -80,3 +80,10 @@ The shared TLS session cache is explicitly configured for the pinned rustls
 session per server). TLS resumption remains enabled; early data is explicitly
 disabled. [Dependency accounting](dependency-resources.md#shared-tls-session-storage)
 records persistent and transient cache storage separately from active requests.
+
+Hostname resolution uses a [separate bounded resolver](dns-resources.md): four
+threads and at most 32 queued/running lookups per transport. Canceled requests do
+not release lookup credit before the actual system call finishes. Only bounded
+socket-address results enter the TCP connector; TLS authenticates the original
+configured hostname. These DNS workers can outlive a canceled network future,
+but have separate accounting and cannot hold Tokio shutdown open.

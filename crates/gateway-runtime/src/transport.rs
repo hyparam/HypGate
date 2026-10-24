@@ -24,7 +24,9 @@ const TLS_APPLICATION_BUFFER: usize = 64 * 1024;
 // TLS 1.3 tickets and one TLS 1.2 session per server. Not a heap-byte limit.
 const TLS_SESSION_CACHE: usize = 256;
 
-pub struct HttpsTransport { connector: TlsConnector, deadline: Duration }
+mod resolver;
+
+pub struct HttpsTransport { connector: TlsConnector, deadline: Duration, resolver: resolver::Resolver }
 impl HttpsTransport {
     pub fn new(deadline: Duration) -> io::Result<Self> {
         let roots = RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -35,7 +37,7 @@ impl HttpsTransport {
         let mut config = ClientConfig::builder().with_root_certificates(roots).with_no_client_auth();
         config.resumption = tokio_rustls::rustls::client::Resumption::in_memory_sessions(TLS_SESSION_CACHE);
         config.enable_early_data = false;
-        Ok(Self { connector: TlsConnector::from(Arc::new(config)), deadline })
+        Ok(Self { connector: TlsConnector::from(Arc::new(config)), deadline, resolver: resolver::Resolver::new()? })
     }
 
     /// Consumes authority and retains its lease through all response processing.
@@ -56,7 +58,10 @@ impl HttpsTransport {
             .trim_start_matches('[').trim_end_matches(']').to_owned();
         let port = prepared.destination().port_u16().unwrap_or(443);
         let server = ServerName::try_from(host.clone()).map_err(|_| TransportError::Metadata)?;
-        let tcp = TcpStream::connect((host.as_str(), port)).await.map_err(|_| TransportError::Connect)?;
+        let tcp = {
+            let addresses = self.resolver.resolve(host.clone(), port).await.map_err(|_| TransportError::Connect)?;
+            TcpStream::connect(addresses.as_slice()).await.map_err(|_| TransportError::Connect)?
+        };
         let tls = self.connector.connect_with(server, tcp, |connection| {
             connection.set_buffer_limit(Some(TLS_APPLICATION_BUFFER));
         }).await.map_err(|_| TransportError::Tls)?;
