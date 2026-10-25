@@ -37,12 +37,13 @@ not a total memory guarantee or a recommended deployment setting.
 ## Destination and credential binding
 
 Destination validation is the verified `gateway_core::destination::parse`. It
-accepts conventional ASCII DNS names or bracketed IPv6 addresses, HTTPS, optional
-nonzero ports, and fixed paths, and rejects userinfo, fragments, queries,
-backslashes, control characters, encoded authorities, ambiguous hosts, and paths
-starting with two slashes. The authority, host, port, and path the runtime uses are
-proved to be exactly the substrings of the configured text; Hyper's URI is parsed
-from the same text and must agree with them. No client path is joined onto
+accepts exactly the texts of the form HTTPS, a conventional ASCII DNS name or
+bracketed IPv6 address, an optional nonzero port, and a fixed path; both
+directions are proved, so every such text is accepted and userinfo, fragments,
+queries, backslashes, control characters, encoded authorities, ambiguous hosts,
+and paths starting with two slashes are rejected. The authority, host, port, and
+path the runtime uses are proved to be exactly the substrings of the configured
+text; Hyper's URI is parsed from the same text and must agree with them. No client path is joined onto
 this endpoint. New API paths need explicitly granted endpoints; this initial
 interface does not support dynamic query parameters.
 

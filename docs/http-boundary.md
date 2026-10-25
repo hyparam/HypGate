@@ -4,7 +4,8 @@ The runtime converts Hyper's header maps to byte fields, hands them to the
 verified projection in `gateway_core::headers`, and converts the result back.
 The route selector and the bearer token are parsed by the verified
 `gateway_core::inbound`; the admission binding is tested Rust. Every header,
-selector, and token rule below is proved. No sockets, TLS, request bodies, response bodies,
+selector, and token rule below is proved in both directions: what is accepted
+is well-formed, and everything well-formed is accepted. No sockets, TLS, request bodies, response bodies,
 or disk effects are implemented in this layer.
 
 Clients use `POST /routes/<selector>` with one `Authorization: Bearer <gateway-token>`
@@ -37,8 +38,8 @@ The gateway requests identity response encoding. If an upstream nevertheless sen
 encoded bytes, it must forward them unchanged with Content-Encoding; there is no
 automatic decompression. Proved by `headers::forward_response`: response metadata
 is limited to Content-Type, Content-Encoding, Cache-Control, Retry-After,
-Request-Id, and X-Request-Id, excluding Connection-nominated fields, and a
-response whose Connection header mentions Content-Encoding is rejected, so an
+Request-Id, and X-Request-Id, excluding every Connection-nominated field, and a
+response whose Connection header nominates Content-Encoding is rejected, so an
 encoding is never dropped while its bytes are kept. Cookies, credential headers,
 and Location are excluded. A future transport must preserve status and return redirects without
 following them; this metadata code cannot itself establish no-redirect behavior.
@@ -95,10 +96,11 @@ remain outside these logical wire-length bounds.
 The verified Connection parsing validates every comma-separated element,
 including unknown names, but retains only distinct allowlisted names: at most
 five for requests and six for responses. A repeated or irrelevant element list
-cannot create an arbitrarily long retained list. Every retained name is proved to
-be an element of some Connection value (soundness); that the parser finds every
-element is not a theorem, which is why the response rule is a substring check
-that covers every nomination.
+cannot create an arbitrarily long retained list. The retained list is proved
+exact: every retained name is a trimmed, lowercased element of some Connection
+value, and every allowlisted name that any element lowercases to is retained
+(`headers::complete`). The response Content-Encoding rule is therefore the exact
+nomination test, not an approximation.
 
 Regression tests supply small headers backed by 256 KiB owners and metadata
 extension drop probes. Both original owners must be destroyed while prepared

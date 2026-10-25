@@ -46,23 +46,25 @@ destination.
   token is accepted exactly when one Authorization field holds `Bearer` and
   one to 512 token characters. Nothing else in a request can pick a route.
 - A configured destination is accepted by a verified parser
-  (`destination::parse`) only as `https://`, a conventional DNS name or a
-  bracketed IPv6 literal, an optional nonzero port, and an origin-form path
-  with no query, and the authority, host, port, and path the runtime
-  connects to, names in TLS, and forwards in Host are proved to be exactly
-  those substrings of the operator's text.
+  (`destination::parse`) exactly when it is `https://`, a conventional DNS
+  name or a bracketed IPv6 literal, an optional nonzero port, and an
+  origin-form path with no query: every such text is accepted and nothing
+  else is. The authority, host, port, and path the runtime connects to,
+  names in TLS, and forwards in Host are proved to be exactly those
+  substrings of the operator's text.
 - The outgoing request head is built by a verified projection
   (`headers::forward_request`): only allowlisted client headers survive, each
-  a byte-for-byte copy of an input field with no Connection-nominated name
-  among them, and exactly one Host, exactly one configured credential (marked
+  a byte-for-byte copy of an input field, and every name any Connection
+  header nominates is dropped (the nomination list is proved complete), and
+  exactly one Host, exactly one configured credential (marked
   sensitive), and exactly one `Accept-Encoding: identity` are added. The
   client's own Authorization never leaves. Uploads carrying Content-Encoding,
   Upgrade, or Trailer, duplicate Content-Type or Anthropic-Version, and heads
   over 100 fields or 32 KiB are refused before a slot is taken. The response
   head (`headers::forward_response`) keeps only allowlisted provider headers
-  and refuses a response whose Connection header mentions its own
-  Content-Encoding. The runtime converts Hyper's map to byte fields and back,
-  and nothing else.
+  that no Connection header nominates and refuses a response that nominates
+  its own Content-Encoding. The runtime converts Hyper's map to byte fields
+  and back, and nothing else.
 - The shipper's enrollment machine refuses to upload without an unexpired
   server-issued credential; a revoked service account stops it for good.
 - Every outgoing shipper request is chosen by the verified machine

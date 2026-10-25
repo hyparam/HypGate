@@ -66,6 +66,7 @@ pub open spec fn element_bounds(value: Seq<u8>, start: int, s: int, e: int, end:
         && (start == 0 || value[start - 1] == 44) && (end == value.len() || value[end] == 44)
         && (forall|k: int| start <= k < s ==> is_blank(#[trigger] value[k]))
         && (forall|k: int| e <= k < end ==> is_blank(#[trigger] value[k]))
+        && (s == e || (!is_blank(value[s]) && !is_blank(value[e - 1])))
         && (forall|k: int| start <= k < end ==> #[trigger] value[k] != 44)
 }
 pub open spec fn element_at(value: Seq<u8>, s: int, e: int) -> bool {
@@ -80,6 +81,21 @@ pub open spec fn nominated_in(fields: Seq<Field>, i: int, s: int, e: int, name: 
 /// Some Connection field nominates `name` as one of its elements.
 pub open spec fn nominated(fields: Seq<Field>, name: Seq<u8>) -> bool {
     exists|i: int, s: int, e: int| #[trigger] nominated_in(fields, i, s, e, name)
+}
+/// Every allowlisted name some Connection field nominates is in `hop`.
+pub open spec fn complete(fields: Seq<Field>, request: bool, hop: Seq<Vec<u8>>) -> bool {
+    forall|name: Seq<u8>| #[trigger] nominated(fields, name) && allowed(request, name) ==> in_list(hop, name)
+}
+/// `complete` restricted to the first `i` fields.
+pub open spec fn complete_upto(fields: Seq<Field>, i: int, request: bool, hop: Seq<Vec<u8>>) -> bool {
+    forall|j: int, s: int, e: int, name: Seq<u8>| 0 <= j < i && #[trigger] nominated_in(fields, j, s, e, name)
+        && allowed(request, name) ==> in_list(hop, name)
+}
+/// Every element of `value` that ends before `limit` and lowercases to an
+/// allowlisted name is in `hop`.
+pub open spec fn elements_covered(value: Seq<u8>, limit: int, request: bool, hop: Seq<Vec<u8>>) -> bool {
+    forall|start: int, s: int, e: int, end: int| #[trigger] element_bounds(value, start, s, e, end) && end < limit
+        && allowed(request, lower_seq(value.subrange(s, e))) ==> in_list(hop, lower_seq(value.subrange(s, e)))
 }
 pub open spec fn names_total(fields: Seq<Field>) -> nat
     decreases fields.len(),
@@ -102,12 +118,6 @@ pub open spec fn in_list(list: Seq<Vec<u8>>, name: Seq<u8>) -> bool {
 pub open spec fn copied_from(fields: Seq<Field>, out: Field) -> bool {
     exists|j: int| 0 <= j < fields.len() && #[trigger] fields[j].name@ == out.name@
         && fields[j].value@ == out.value@ && fields[j].sensitive == out.sensitive
-}
-/// Some Connection field's value contains `name` case-insensitively.
-pub open spec fn connection_mentions(fields: Seq<Field>, name: Seq<u8>) -> bool {
-    exists|i: int, p: int| 0 <= i < fields.len() && #[trigger] fields[i].name@ == CONNECTION@
-        && 0 <= p && p + name.len() <= fields[i].value@.len()
-        && lower_seq(#[trigger] fields[i].value@.subrange(p, p + name.len())) == name
 }
 
 pub fn eq(a: &[u8], b: &[u8]) -> (out: bool)
@@ -261,55 +271,23 @@ proof fn lemma_names_distinct()
     }
 }
 
-/// Does any Connection value mention `name` (case-insensitively, as a
-/// substring)? A conservative test for a hop-by-hop nomination.
-pub fn connection_mentions_name(fields: &Vec<Field>, name: &[u8]) -> (out: bool)
-    requires name.len() > 0,
-    ensures out == connection_mentions(fields@, name@),
+proof fn lemma_in_list_push(list: Seq<Vec<u8>>, name: Seq<u8>, x: Vec<u8>)
+    requires in_list(list, name),
+    ensures in_list(list.push(x), name),
 {
-    let mut i: usize = 0;
-    while i < fields.len()
-        invariant i <= fields.len(), name.len() > 0,
-            forall|a: int, p: int| 0 <= a < i && #[trigger] fields@[a].name@ == CONNECTION@
-                && 0 <= p && p + name@.len() <= fields@[a].value@.len()
-                ==> lower_seq(#[trigger] fields@[a].value@.subrange(p, p + name@.len())) != name@,
-        decreases fields.len() - i,
-    {
-        if eq(fields[i].name.as_slice(), CONNECTION.as_slice()) {
-            let value = fields[i].value.as_slice();
-            if name.len() <= value.len() {
-                let last = value.len() - name.len();
-                let mut p: usize = 0;
-                while p <= last
-                    invariant i < fields.len(), fields@[i as int].name@ == CONNECTION@, value@ == fields@[i as int].value@,
-                        name.len() > 0, name.len() <= value.len(), last == value.len() - name.len(), p <= last + 1,
-                        forall|q: int| 0 <= q < p ==> lower_seq(#[trigger] value@.subrange(q, q + name@.len())) != name@,
-                    decreases last + 1 - p,
-                {
-                    let window = lowercase(vstd::slice::slice_subrange(value, p, p + name.len()));
-                    if eq(window.as_slice(), name) {
-                        proof {
-                            assert(lower_seq(fields@[i as int].value@.subrange(p as int, p as int + name@.len())) == name@);
-                        }
-                        return true;
-                    }
-                    p = p + 1;
-                }
-            }
-        }
-        i = i + 1;
-    }
-    false
+    let j = choose|j: int| 0 <= j < list.len() && #[trigger] list[j]@ == name;
+    assert(list.push(x)[j]@ == name);
 }
 
 /// The names a Connection header nominates as hop-by-hop among the allowlisted
 /// names, lowercased and distinct. `None` when any element is empty or is not
 /// a header-name token. Every returned name is allowlisted and is one element
-/// of some Connection value; only such a name is ever dropped on its account.
+/// of some Connection value, and every allowlisted name that any Connection
+/// value nominates is returned: the list is exactly the nominations.
 pub fn nominations(fields: &Vec<Field>, request: bool) -> (out: Option<Vec<Vec<u8>>>)
     ensures match out {
-        Some(hop) => forall|k: int| 0 <= k < hop.len() ==> allowed(request, #[trigger] hop@[k]@)
-            && nominated(fields@, hop@[k]@),
+        Some(hop) => (forall|k: int| 0 <= k < hop.len() ==> allowed(request, #[trigger] hop@[k]@)
+            && nominated(fields@, hop@[k]@)) && complete(fields@, request, hop@),
         None => true,
     },
 {
@@ -319,6 +297,7 @@ pub fn nominations(fields: &Vec<Field>, request: bool) -> (out: Option<Vec<Vec<u
         invariant i <= fields.len(),
             forall|k: int| 0 <= k < hop.len() ==> allowed(request, #[trigger] hop@[k]@)
                 && nominated(fields@, hop@[k]@),
+            complete_upto(fields@, i as int, request, hop@),
         decreases fields.len() - i,
     {
         if eq(fields[i].name.as_slice(), CONNECTION.as_slice()) {
@@ -332,6 +311,8 @@ pub fn nominations(fields: &Vec<Field>, request: bool) -> (out: Option<Vec<Vec<u
                     start == 0 || value@[start as int - 1] == 44,
                     forall|k: int| 0 <= k < hop.len() ==> allowed(request, #[trigger] hop@[k]@)
                         && nominated(fields@, hop@[k]@),
+                    complete_upto(fields@, i as int, request, hop@),
+                    elements_covered(value@, if more { start as int } else { value@.len() as int + 1 }, request, hop@),
                 decreases value.len() - start, (if more { 1int } else { 0int }),
             {
                 // Find the end of this element.
@@ -361,21 +342,76 @@ pub fn nominations(fields: &Vec<Field>, request: bool) -> (out: Option<Vec<Vec<u
                     t = t + 1;
                 }
                 let name = lowercase(vstd::slice::slice_subrange(value, s, e));
+                proof {
+                    assert(end as int == value@.len() || value@[end as int] == 44);
+                    assert(element_bounds(value@, start as int, s as int, e as int, end as int));
+                    assert(element_at(value@, s as int, e as int));
+                    assert(name@ == lower_seq(fields@[i as int].value@.subrange(s as int, e as int)));
+                    assert(nominated_in(fields@, i as int, s as int, e as int, name@));
+                }
+                let ghost before = hop@;
                 if allowed_name(request, name.as_slice()) && !listed(&hop, name.as_slice()) {
-                    proof {
-                        assert(end as int == value@.len() || value@[end as int] == 44);
-                        assert(element_bounds(value@, start as int, s as int, e as int, end as int));
-                        assert(element_at(value@, s as int, e as int));
-                        assert(fields@[i as int].value@ == value@);
-                        assert(name@ == lower_seq(fields@[i as int].value@.subrange(s as int, e as int)));
-                        assert(nominated_in(fields@, i as int, s as int, e as int, name@));
-                    }
                     hop.push(name);
+                }
+                proof {
+                    // Whatever was covered stays covered, and this element is now covered.
+                    assert forall|st: int, s2: int, e2: int, en: int| #[trigger] element_bounds(value@, st, s2, e2, en)
+                        && en < end + 1 && allowed(request, lower_seq(value@.subrange(s2, e2)))
+                        implies in_list(hop@, lower_seq(value@.subrange(s2, e2))) by {
+                        if en < start {
+                            assert(in_list(before, lower_seq(value@.subrange(s2, e2))));
+                            if hop@ != before { lemma_in_list_push(before, lower_seq(value@.subrange(s2, e2)), name); }
+                        } else {
+                            // The element lies in this comma-delimited segment, so its bounds are ours.
+                            assert(st == start) by {
+                                if st > start { assert(value@[st - 1] == 44); }
+                                if st < start { assert(value@[start as int - 1] == 44); }
+                            }
+                            assert(en == end) by { if en < end { assert(value@[en] == 44); } }
+                            assert(s2 < e2) by { if s2 == e2 { assert(is_blank(value@[s as int])); } }
+                            assert(s2 == s as int) by {
+                                if s2 < s { assert(is_blank(value@[s2])); }
+                                if s2 > s { assert(is_blank(value@[s as int])); }
+                            }
+                            assert(e2 == e as int) by {
+                                if e2 < e { assert(is_blank(value@[e as int - 1])); }
+                                if e2 > e { assert(is_blank(value@[e2 - 1])); }
+                            }
+                            assert(lower_seq(value@.subrange(s2, e2)) == name@);
+                            if hop@ == before { assert(in_list(before, name@)); } else { assert(hop@[hop@.len() - 1]@ == name@); }
+                        }
+                    }
+                    assert forall|j: int, s2: int, e2: int, n: Seq<u8>| 0 <= j < i && #[trigger] nominated_in(fields@, j, s2, e2, n)
+                        && allowed(request, n) implies in_list(hop@, n) by {
+                        assert(in_list(before, n));
+                        if hop@ != before { lemma_in_list_push(before, n, name); }
+                    }
                 }
                 if end == value.len() { more = false; } else { start = end + 1; }
             }
+            proof {
+                assert forall|j: int, s2: int, e2: int, n: Seq<u8>| 0 <= j < i + 1 && #[trigger] nominated_in(fields@, j, s2, e2, n)
+                    && allowed(request, n) implies in_list(hop@, n) by {
+                    if j == i {
+                        let (st, en) = choose|st: int, en: int| #[trigger] element_bounds(value@, st, s2, e2, en);
+                        assert(en < value@.len() as int + 1);
+                    }
+                }
+            }
+        } else {
+            proof {
+                assert forall|j: int, s2: int, e2: int, n: Seq<u8>| 0 <= j < i + 1 && #[trigger] nominated_in(fields@, j, s2, e2, n)
+                    && allowed(request, n) implies in_list(hop@, n) by {
+                    if j == i { assert(fields@[i as int].name@ == CONNECTION@); }
+                }
+            }
         }
         i = i + 1;
+    }
+    proof {
+        assert forall|name: Seq<u8>| #[trigger] nominated(fields@, name) && allowed(request, name) implies in_list(hop@, name) by {
+            let (j, s2, e2) = choose|j: int, s2: int, e2: int| #[trigger] nominated_in(fields@, j, s2, e2, name);
+        }
     }
     Some(hop)
 }
@@ -410,8 +446,8 @@ pub open spec fn request_head_ok(fields: Seq<Field>, out: Seq<Field>, host: Seq<
     // Nothing but allowlisted client headers and the three the gateway sets.
     (forall|k: int| 0 <= k < out.len() ==> request_allowed(#[trigger] out[k].name@)
         || out[k].name@ == HOST@ || out[k].name@ == credential_name || out[k].name@ == ACCEPT_ENCODING@)
-    // Allowlisted fields are copies of input fields.
-    && (forall|k: int| 0 <= k < out.len() && request_allowed(#[trigger] out[k].name@) ==> copied_from(fields, out[k]))
+    // Allowlisted fields are copies of input fields, and none was Connection-nominated.
+    && (forall|k: int| 0 <= k < out.len() && request_allowed(#[trigger] out[k].name@) ==> copied_from(fields, out[k]) && !nominated(fields, out[k].name@))
     // Exactly one Host, one credential, one Accept-Encoding, with these values.
     && count_named(out, HOST@) == 1 && count_named(out, credential_name) == 1 && count_named(out, ACCEPT_ENCODING@) == 1
     && (forall|k: int| 0 <= k < out.len() && #[trigger] out[k].name@ == HOST@ ==> out[k].value@ == host)
@@ -436,7 +472,7 @@ pub open spec fn request_input_ok(fields: Seq<Field>) -> bool {
 /// taken. Returns the hop-by-hop nominations the projection will drop.
 pub fn check_request(fields: &Vec<Field>) -> (out: Result<Vec<Vec<u8>>, Rejection>)
     ensures match out {
-        Ok(hop) => request_input_ok(fields@)
+        Ok(hop) => request_input_ok(fields@) && complete(fields@, true, hop@)
             && forall|k: int| 0 <= k < hop.len() ==> request_allowed(#[trigger] hop@[k]@) && nominated(fields@, hop@[k]@),
         Err(Rejection::TooLarge) => !within_limits(fields@),
         Err(Rejection::BadRequest) => true,
@@ -487,15 +523,17 @@ pub fn forward_request(fields: &Vec<Field>, host: &[u8], credential_name: &[u8],
 
 /// Every checked fact about a forwarded response head.
 pub open spec fn response_head_ok(fields: Seq<Field>, out: Seq<Field>) -> bool {
-    (forall|k: int| 0 <= k < out.len() ==> response_allowed(#[trigger] out[k].name@) && copied_from(fields, out[k]))
-    && within_limits(fields) && !connection_mentions(fields, CONTENT_ENCODING@)
+    (forall|k: int| 0 <= k < out.len() ==> response_allowed(#[trigger] out[k].name@) && copied_from(fields, out[k])
+        && !nominated(fields, out[k].name@))
+    && within_limits(fields) && !nominated(fields, CONTENT_ENCODING@)
     && out.len() <= fields.len()
 }
 
 /// Build the forwarded response head: the allowlisted provider headers that no
 /// Connection header nominated. A response that nominates its own
 /// Content-Encoding is rejected, because dropping the header while keeping the
-/// encoded bytes would change their meaning.
+/// encoded bytes would change their meaning. The nomination list is complete,
+/// so this is the exact rule, not an approximation.
 pub fn forward_response(fields: &Vec<Field>) -> (out: Result<Vec<Field>, Rejection>)
     ensures match out {
         Ok(head) => response_head_ok(fields@, head@),
@@ -505,7 +543,7 @@ pub fn forward_response(fields: &Vec<Field>) -> (out: Result<Vec<Field>, Rejecti
 {
     if !fits(fields) { return Err(Rejection::TooLarge); }
     let hop = match nominations(fields, false) { Some(hop) => hop, None => return Err(Rejection::BadRequest) };
-    if connection_mentions_name(fields, CONTENT_ENCODING.as_slice()) { return Err(Rejection::BadRequest); }
+    if listed(&hop, CONTENT_ENCODING.as_slice()) { return Err(Rejection::BadRequest); }
     Ok(project(fields, false, &hop))
 }
 
