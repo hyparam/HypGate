@@ -49,11 +49,7 @@ impl<T> Reply<T> {
     #[cfg(test)]
     pub(crate) fn into_inner_for_test(self) -> T {
         // Exercise the production handoff even when tests own the result directly.
-        use gateway_core::policy::{Identity, Policy, Route};
-        let route = || Route { tenant: 1, selector: 7, origin: 0, credential: 0 };
-        let policy = Policy::validate(vec![Identity { tenant: 1, digest: vec![11; 32] }],
-            vec![route()], vec![route()], 1, vec![1]).unwrap();
-        let admission = crate::admission::Admission::new(policy, 1, 4, false);
+        let admission = crate::test_support::admission(1, 4, false);
         let mut request = admission.admit(&[11; 32], 7).unwrap();
         self.adopt(&mut request).expect("test request adopts reply")
     }
@@ -165,11 +161,7 @@ mod tests {
 
     #[test]
     fn reply_adoption_requires_live_request_and_preserves_value() {
-        use gateway_core::policy::{Identity, Policy, Route};
-        let route = || Route { tenant: 1, selector: 7, origin: 0, credential: 0 };
-        let policy = Policy::validate(vec![Identity { tenant: 1, digest: vec![11; 32] }],
-            vec![route()], vec![route()], 1, vec![1]).unwrap();
-        let admission = crate::admission::Admission::new(policy, 1, 4, false);
+        let admission = crate::test_support::admission(1, 4, false);
         for canceled in [false, true] {
             let mut request = admission.admit(&[11; 32], 7).unwrap();
             let slots = Arc::new(Mutex::new(ResourceAdmission::new(1, 0)));

@@ -1,5 +1,5 @@
 use super::*;
-use crate::test_support::TempDir;
+use crate::{test_support::{TempDir, admission}, transfer::copy_body};
 use std::{io::Cursor, sync::{Mutex, mpsc as blocking}};
 
 fn record(bytes: &[u8], chunk: u64) -> LogRecord<'_> {
@@ -8,12 +8,7 @@ fn record(bytes: &[u8], chunk: u64) -> LogRecord<'_> {
 
 #[tokio::test]
 async fn strict_transfer_and_real_disk_records_have_identical_payloads() {
-    use crate::{admission::Admission, transfer::copy_body};
-    use gateway_core::policy::{Identity, Policy, Route};
-    let route = || Route { tenant: 1, selector: 7, origin: 0, credential: 0 };
-    let policy = Policy::validate(vec![Identity { tenant: 1, digest: vec![11; 32] }],
-        vec![route()], vec![route()], 1, vec![1]).unwrap();
-    let admission = Admission::new(policy, 1, 3, true);
+    let admission = admission(1, 3, true);
     let mut request = admission.admit(&[11; 32], 7).unwrap();
     let dir = TempDir::new(); let path = dir.0.join("transfer.log");
     let mut log = DiskLog::create_with_payload_limit(&path, 1, Duration::from_secs(5), 3).unwrap();

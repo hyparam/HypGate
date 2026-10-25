@@ -217,3 +217,6 @@ impl<'a> Request<'a> {
     pub fn cancel(&mut self) { self.stream_mut().cancel(); }
     pub fn fail_log(&mut self) { self.log_failed = true; self.stream_mut().fail_log(); }
 }
+
+#[cfg(test)]
+mod tests;

@@ -1,4 +1,6 @@
 //! Fixtures shared by this crate's unit tests.
+use crate::admission::Admission;
+use gateway_core::policy::{Identity, Policy, Route};
 use rcgen::{CertifiedKey, KeyPair};
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -30,3 +32,11 @@ impl TempDir {
     }
 }
 impl Drop for TempDir { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }
+
+/// One tenant, digest `[11; 32]`, granted selector 7 to origin 0 with credential 0.
+pub(crate) fn admission(slots: usize, chunk_bytes: usize, strict: bool) -> Admission {
+    let route = || Route { tenant: 1, selector: 7, origin: 0, credential: 0 };
+    let policy = Policy::validate(vec![Identity { tenant: 1, digest: vec![11; 32] }],
+        vec![route()], vec![route()], 1, vec![1]).unwrap();
+    Admission::new(policy, slots, chunk_bytes, strict)
+}
