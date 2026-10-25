@@ -1,0 +1,545 @@
+//! Verified header projection for both directions of an exchange. Headers are
+//! byte fields (lowercase name, value, sensitivity). The checked facts: an
+//! outgoing request carries only allowlisted client headers plus exactly one
+//! Host, exactly one configured credential, and exactly one Accept-Encoding;
+//! the client's own Authorization never leaves; a response carries only
+//! allowlisted provider headers; nothing is fabricated, every forwarded field
+//! is one of the input fields; Connection-nominated names are dropped; and the
+//! head stays within the field-count and byte limits. The runtime converts
+//! Hyper's header map to and from these fields and does nothing else.
+use vstd::prelude::*;
+use vstd::slice::slice_to_vec;
+
+verus! {
+pub const MAX_FIELDS: usize = 100;
+pub const MAX_BYTES: usize = 32768;
+
+pub const CONTENT_TYPE: [u8; 12] = *b"content-type";
+pub const ACCEPT: [u8; 6] = *b"accept";
+pub const ANTHROPIC_VERSION: [u8; 17] = *b"anthropic-version";
+pub const ANTHROPIC_BETA: [u8; 14] = *b"anthropic-beta";
+pub const OPENAI_BETA: [u8; 11] = *b"openai-beta";
+pub const CONTENT_ENCODING: [u8; 16] = *b"content-encoding";
+pub const CACHE_CONTROL: [u8; 13] = *b"cache-control";
+pub const RETRY_AFTER: [u8; 11] = *b"retry-after";
+pub const REQUEST_ID: [u8; 10] = *b"request-id";
+pub const X_REQUEST_ID: [u8; 12] = *b"x-request-id";
+pub const HOST: [u8; 4] = *b"host";
+pub const AUTHORIZATION: [u8; 13] = *b"authorization";
+pub const X_API_KEY: [u8; 9] = *b"x-api-key";
+pub const ACCEPT_ENCODING: [u8; 15] = *b"accept-encoding";
+pub const IDENTITY: [u8; 8] = *b"identity";
+pub const CONNECTION: [u8; 10] = *b"connection";
+pub const UPGRADE: [u8; 7] = *b"upgrade";
+pub const TRAILER: [u8; 7] = *b"trailer";
+
+/// One header field. Names are lowercase ASCII, as Hyper stores them.
+pub struct Field { pub name: Vec<u8>, pub value: Vec<u8>, pub sensitive: bool }
+
+#[derive(PartialEq, Eq, Structural, Clone, Copy, Debug)]
+pub enum Rejection { TooLarge, BadRequest }
+
+pub open spec fn request_allowed(name: Seq<u8>) -> bool {
+    name == CONTENT_TYPE@ || name == ACCEPT@ || name == ANTHROPIC_VERSION@
+        || name == ANTHROPIC_BETA@ || name == OPENAI_BETA@
+}
+pub open spec fn response_allowed(name: Seq<u8>) -> bool {
+    name == CONTENT_TYPE@ || name == CONTENT_ENCODING@ || name == CACHE_CONTROL@
+        || name == RETRY_AFTER@ || name == REQUEST_ID@ || name == X_REQUEST_ID@
+}
+pub open spec fn allowed(request: bool, name: Seq<u8>) -> bool {
+    if request { request_allowed(name) } else { response_allowed(name) }
+}
+pub open spec fn lower_byte(b: u8) -> u8 { if 65 <= b <= 90 { (b + 32) as u8 } else { b } }
+pub open spec fn lower_seq(s: Seq<u8>) -> Seq<u8> { Seq::new(s.len(), |i: int| lower_byte(s[i])) }
+/// RFC 9110 token characters, the bytes a header name may contain.
+pub open spec fn is_tchar(b: u8) -> bool {
+    (48 <= b <= 57) || (65 <= b <= 90) || (97 <= b <= 122)
+        || b == 33 || (35 <= b <= 39) || b == 42 || b == 43 || b == 45 || b == 46
+        || b == 94 || b == 95 || b == 96 || b == 124 || b == 126
+}
+pub open spec fn is_blank(b: u8) -> bool { b == 32 || b == 9 }
+/// Bytes `[s, e)` of `value` are one comma-delimited element with its
+/// surrounding blanks removed.
+pub open spec fn element_bounds(value: Seq<u8>, start: int, s: int, e: int, end: int) -> bool {
+    0 <= start <= s <= e <= end <= value.len()
+        && (start == 0 || value[start - 1] == 44) && (end == value.len() || value[end] == 44)
+        && (forall|k: int| start <= k < s ==> is_blank(#[trigger] value[k]))
+        && (forall|k: int| e <= k < end ==> is_blank(#[trigger] value[k]))
+        && (forall|k: int| start <= k < end ==> #[trigger] value[k] != 44)
+}
+pub open spec fn element_at(value: Seq<u8>, s: int, e: int) -> bool {
+    exists|start: int, end: int| #[trigger] element_bounds(value, start, s, e, end)
+}
+/// `name` is the lowercased element `[s, e)` of the Connection field at `i`.
+pub open spec fn nominated_in(fields: Seq<Field>, i: int, s: int, e: int, name: Seq<u8>) -> bool {
+    0 <= i < fields.len() && fields[i].name@ == CONNECTION@
+        && 0 <= s <= e <= fields[i].value@.len() && element_at(fields[i].value@, s, e)
+        && name == lower_seq(fields[i].value@.subrange(s, e))
+}
+/// Some Connection field nominates `name` as one of its elements.
+pub open spec fn nominated(fields: Seq<Field>, name: Seq<u8>) -> bool {
+    exists|i: int, s: int, e: int| #[trigger] nominated_in(fields, i, s, e, name)
+}
+pub open spec fn names_total(fields: Seq<Field>) -> nat
+    decreases fields.len(),
+{
+    if fields.len() == 0 { 0 } else { names_total(fields.drop_last()) + fields.last().name@.len() + fields.last().value@.len() }
+}
+pub open spec fn within_limits(fields: Seq<Field>) -> bool {
+    fields.len() <= MAX_FIELDS && names_total(fields) <= MAX_BYTES
+}
+pub open spec fn count_named(fields: Seq<Field>, name: Seq<u8>) -> nat {
+    fields.filter(|f: Field| f.name@ == name).len()
+}
+pub open spec fn has_name(fields: Seq<Field>, name: Seq<u8>) -> bool {
+    exists|i: int| 0 <= i < fields.len() && #[trigger] fields[i].name@ == name
+}
+pub open spec fn in_list(list: Seq<Vec<u8>>, name: Seq<u8>) -> bool {
+    exists|i: int| 0 <= i < list.len() && #[trigger] list[i]@ == name
+}
+/// `out[k]` is a copy of some input field.
+pub open spec fn copied_from(fields: Seq<Field>, out: Field) -> bool {
+    exists|j: int| 0 <= j < fields.len() && #[trigger] fields[j].name@ == out.name@
+        && fields[j].value@ == out.value@ && fields[j].sensitive == out.sensitive
+}
+/// Some Connection field's value contains `name` case-insensitively.
+pub open spec fn connection_mentions(fields: Seq<Field>, name: Seq<u8>) -> bool {
+    exists|i: int, p: int| 0 <= i < fields.len() && #[trigger] fields[i].name@ == CONNECTION@
+        && 0 <= p && p + name.len() <= fields[i].value@.len()
+        && lower_seq(#[trigger] fields[i].value@.subrange(p, p + name.len())) == name
+}
+
+pub fn eq(a: &[u8], b: &[u8]) -> (out: bool)
+    ensures out == (a@ == b@),
+{
+    if a.len() != b.len() { return false; }
+    let mut i: usize = 0;
+    while i < a.len()
+        invariant i <= a.len(), a.len() == b.len(), forall|j: int| 0 <= j < i ==> a@[j] == b@[j],
+        decreases a.len() - i,
+    {
+        if a[i] != b[i] { return false; }
+        i = i + 1;
+    }
+    proof { assert(a@ =~= b@); }
+    true
+}
+
+fn lower(b: u8) -> (out: u8)
+    ensures out == lower_byte(b),
+{ if b >= 65 && b <= 90 { b + 32 } else { b } }
+
+pub fn lowercase(name: &[u8]) -> (out: Vec<u8>)
+    ensures out@ == lower_seq(name@),
+{
+    let mut out: Vec<u8> = Vec::with_capacity(name.len());
+    let mut i: usize = 0;
+    while i < name.len()
+        invariant i <= name.len(), out@.len() == i, forall|j: int| 0 <= j < i ==> out@[j] == lower_byte(name@[j]),
+        decreases name.len() - i,
+    {
+        out.push(lower(name[i]));
+        i = i + 1;
+    }
+    proof { assert(out@ =~= lower_seq(name@)); }
+    out
+}
+
+fn tchar(b: u8) -> (out: bool)
+    ensures out == is_tchar(b),
+{
+    (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122)
+        || b == 33 || (b >= 35 && b <= 39) || b == 42 || b == 43 || b == 45 || b == 46
+        || b == 94 || b == 95 || b == 96 || b == 124 || b == 126
+}
+
+pub fn allowed_name(request: bool, name: &[u8]) -> (out: bool)
+    ensures out == allowed(request, name@),
+{
+    if request {
+        eq(name, CONTENT_TYPE.as_slice()) || eq(name, ACCEPT.as_slice()) || eq(name, ANTHROPIC_VERSION.as_slice())
+            || eq(name, ANTHROPIC_BETA.as_slice()) || eq(name, OPENAI_BETA.as_slice())
+    } else {
+        eq(name, CONTENT_TYPE.as_slice()) || eq(name, CONTENT_ENCODING.as_slice()) || eq(name, CACHE_CONTROL.as_slice())
+            || eq(name, RETRY_AFTER.as_slice()) || eq(name, REQUEST_ID.as_slice()) || eq(name, X_REQUEST_ID.as_slice())
+    }
+}
+
+pub fn count(fields: &Vec<Field>, name: &[u8]) -> (out: usize)
+    ensures out == count_named(fields@, name@),
+{
+    let mut i: usize = 0; let mut n: usize = 0;
+    while i < fields.len()
+        invariant i <= fields.len(), n == count_named(fields@.subrange(0, i as int), name@),
+        decreases fields.len() - i,
+    {
+        proof { reveal(Seq::filter); assert(fields@.subrange(0, i as int + 1).drop_last() =~= fields@.subrange(0, i as int)); }
+        if eq(fields[i].name.as_slice(), name) { n = n + 1; }
+        i = i + 1;
+    }
+    proof { assert(fields@.subrange(0, fields.len() as int) =~= fields@); }
+    n
+}
+
+pub fn has(fields: &Vec<Field>, name: &[u8]) -> (out: bool)
+    ensures out == has_name(fields@, name@),
+{
+    let mut i: usize = 0;
+    while i < fields.len()
+        invariant i <= fields.len(), forall|j: int| 0 <= j < i ==> #[trigger] fields@[j].name@ != name@,
+        decreases fields.len() - i,
+    {
+        if eq(fields[i].name.as_slice(), name) { return true; }
+        i = i + 1;
+    }
+    false
+}
+
+fn listed(list: &Vec<Vec<u8>>, name: &[u8]) -> (out: bool)
+    ensures out == in_list(list@, name@),
+{
+    let mut i: usize = 0;
+    while i < list.len()
+        invariant i <= list.len(), forall|j: int| 0 <= j < i ==> #[trigger] list@[j]@ != name@,
+        decreases list.len() - i,
+    {
+        if eq(list[i].as_slice(), name) { return true; }
+        i = i + 1;
+    }
+    false
+}
+
+/// The head's field count and total name/value bytes are within the limits.
+pub fn fits(fields: &Vec<Field>) -> (out: bool)
+    ensures out == within_limits(fields@),
+{
+    if fields.len() > MAX_FIELDS { return false; }
+    let mut i: usize = 0; let mut total: usize = 0;
+    while i < fields.len()
+        invariant i <= fields.len(), total == names_total(fields@.subrange(0, i as int)), total <= MAX_BYTES,
+        decreases fields.len() - i,
+    {
+        proof { assert(fields@.subrange(0, i as int + 1).drop_last() =~= fields@.subrange(0, i as int)); }
+        let field = &fields[i];
+        if field.name.len() > MAX_BYTES - total || field.value.len() > MAX_BYTES - total - field.name.len() {
+            proof { lemma_total_prefix(fields@, i as int + 1); }
+            return false;
+        }
+        total = total + field.name.len() + field.value.len();
+        i = i + 1;
+    }
+    proof { assert(fields@.subrange(0, fields.len() as int) =~= fields@); }
+    true
+}
+
+// The byte total of a prefix is at most the total of the whole sequence.
+proof fn lemma_total_prefix(fields: Seq<Field>, n: int)
+    requires 0 <= n <= fields.len(),
+    ensures names_total(fields.subrange(0, n)) <= names_total(fields),
+    decreases fields.len() - n,
+{
+    if n < fields.len() {
+        assert(fields.subrange(0, n + 1).drop_last() =~= fields.subrange(0, n));
+        lemma_total_prefix(fields, n + 1);
+    } else {
+        assert(fields.subrange(0, n) =~= fields);
+    }
+}
+
+// The request allowlist and the three injected names are pairwise distinct;
+// their lengths already differ.
+proof fn lemma_names_distinct()
+    ensures CONTENT_TYPE@.len() == 12, ACCEPT@.len() == 6, ANTHROPIC_VERSION@.len() == 17, ANTHROPIC_BETA@.len() == 14,
+        OPENAI_BETA@.len() == 11, HOST@.len() == 4, AUTHORIZATION@.len() == 13, X_API_KEY@.len() == 9, ACCEPT_ENCODING@.len() == 15,
+        forall|name: Seq<u8>| #[trigger] request_allowed(name) ==> name != HOST@ && name != AUTHORIZATION@ && name != X_API_KEY@ && name != ACCEPT_ENCODING@,
+{
+    assert forall|name: Seq<u8>| #[trigger] request_allowed(name)
+        implies name != HOST@ && name != AUTHORIZATION@ && name != X_API_KEY@ && name != ACCEPT_ENCODING@
+    by {
+        assert(name.len() == 12 || name.len() == 6 || name.len() == 17 || name.len() == 14 || name.len() == 11);
+    }
+}
+
+/// Does any Connection value mention `name` (case-insensitively, as a
+/// substring)? A conservative test for a hop-by-hop nomination.
+pub fn connection_mentions_name(fields: &Vec<Field>, name: &[u8]) -> (out: bool)
+    requires name.len() > 0,
+    ensures out == connection_mentions(fields@, name@),
+{
+    let mut i: usize = 0;
+    while i < fields.len()
+        invariant i <= fields.len(), name.len() > 0,
+            forall|a: int, p: int| 0 <= a < i && #[trigger] fields@[a].name@ == CONNECTION@
+                && 0 <= p && p + name@.len() <= fields@[a].value@.len()
+                ==> lower_seq(#[trigger] fields@[a].value@.subrange(p, p + name@.len())) != name@,
+        decreases fields.len() - i,
+    {
+        if eq(fields[i].name.as_slice(), CONNECTION.as_slice()) {
+            let value = fields[i].value.as_slice();
+            if name.len() <= value.len() {
+                let last = value.len() - name.len();
+                let mut p: usize = 0;
+                while p <= last
+                    invariant i < fields.len(), fields@[i as int].name@ == CONNECTION@, value@ == fields@[i as int].value@,
+                        name.len() > 0, name.len() <= value.len(), last == value.len() - name.len(), p <= last + 1,
+                        forall|q: int| 0 <= q < p ==> lower_seq(#[trigger] value@.subrange(q, q + name@.len())) != name@,
+                    decreases last + 1 - p,
+                {
+                    let window = lowercase(vstd::slice::slice_subrange(value, p, p + name.len()));
+                    if eq(window.as_slice(), name) {
+                        proof {
+                            assert(lower_seq(fields@[i as int].value@.subrange(p as int, p as int + name@.len())) == name@);
+                        }
+                        return true;
+                    }
+                    p = p + 1;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    false
+}
+
+/// The names a Connection header nominates as hop-by-hop among the allowlisted
+/// names, lowercased and distinct. `None` when any element is empty or is not
+/// a header-name token. Every returned name is allowlisted and is one element
+/// of some Connection value; only such a name is ever dropped on its account.
+pub fn nominations(fields: &Vec<Field>, request: bool) -> (out: Option<Vec<Vec<u8>>>)
+    ensures match out {
+        Some(hop) => forall|k: int| 0 <= k < hop.len() ==> allowed(request, #[trigger] hop@[k]@)
+            && nominated(fields@, hop@[k]@),
+        None => true,
+    },
+{
+    let mut hop: Vec<Vec<u8>> = Vec::new();
+    let mut i: usize = 0;
+    while i < fields.len()
+        invariant i <= fields.len(),
+            forall|k: int| 0 <= k < hop.len() ==> allowed(request, #[trigger] hop@[k]@)
+                && nominated(fields@, hop@[k]@),
+        decreases fields.len() - i,
+    {
+        if eq(fields[i].name.as_slice(), CONNECTION.as_slice()) {
+            let value = fields[i].value.as_slice();
+            let mut start: usize = 0;
+            let mut more = true;
+            // Each iteration consumes one comma-delimited element.
+            while more
+                invariant i < fields.len(), fields@[i as int].name@ == CONNECTION@, value@ == fields@[i as int].value@,
+                    start <= value.len(),
+                    start == 0 || value@[start as int - 1] == 44,
+                    forall|k: int| 0 <= k < hop.len() ==> allowed(request, #[trigger] hop@[k]@)
+                        && nominated(fields@, hop@[k]@),
+                decreases value.len() - start, (if more { 1int } else { 0int }),
+            {
+                // Find the end of this element.
+                let mut end: usize = start;
+                while end < value.len() && value[end] != 44
+                    invariant start <= end <= value.len(), forall|k: int| start <= k < end ==> #[trigger] value@[k] != 44,
+                    decreases value.len() - end,
+                { end = end + 1; }
+                // Trim blanks.
+                let mut s: usize = start;
+                while s < end && (value[s] == 32 || value[s] == 9)
+                    invariant start <= s <= end <= value.len(), forall|k: int| start <= k < s ==> is_blank(#[trigger] value@[k]),
+                    decreases end - s,
+                { s = s + 1; }
+                let mut e: usize = end;
+                while e > s && (value[e - 1] == 32 || value[e - 1] == 9)
+                    invariant s <= e <= end <= value.len(), forall|k: int| e <= k < end ==> is_blank(#[trigger] value@[k]),
+                    decreases e - s,
+                { e = e - 1; }
+                if s == e { return None; }
+                let mut t: usize = s;
+                while t < e
+                    invariant s <= t <= e <= value.len(), forall|k: int| s <= k < t ==> is_tchar(#[trigger] value@[k]),
+                    decreases e - t,
+                {
+                    if !tchar(value[t]) { return None; }
+                    t = t + 1;
+                }
+                let name = lowercase(vstd::slice::slice_subrange(value, s, e));
+                if allowed_name(request, name.as_slice()) && !listed(&hop, name.as_slice()) {
+                    proof {
+                        assert(end as int == value@.len() || value@[end as int] == 44);
+                        assert(element_bounds(value@, start as int, s as int, e as int, end as int));
+                        assert(element_at(value@, s as int, e as int));
+                        assert(fields@[i as int].value@ == value@);
+                        assert(name@ == lower_seq(fields@[i as int].value@.subrange(s as int, e as int)));
+                        assert(nominated_in(fields@, i as int, s as int, e as int, name@));
+                    }
+                    hop.push(name);
+                }
+                if end == value.len() { more = false; } else { start = end + 1; }
+            }
+        }
+        i = i + 1;
+    }
+    Some(hop)
+}
+
+/// The input fields whose names are allowlisted for this direction and not
+/// nominated hop-by-hop, in input order, each copied byte for byte.
+fn project(fields: &Vec<Field>, request: bool, hop: &Vec<Vec<u8>>) -> (out: Vec<Field>)
+    ensures forall|k: int| 0 <= k < out@.len() ==> allowed(request, #[trigger] out@[k].name@)
+            && !in_list(hop@, out@[k].name@) && copied_from(fields@, out@[k]),
+        out@.len() <= fields@.len(),
+{
+    let mut out: Vec<Field> = Vec::new();
+    let mut i: usize = 0;
+    while i < fields.len()
+        invariant i <= fields.len(), out@.len() <= i,
+            forall|k: int| 0 <= k < out@.len() ==> allowed(request, #[trigger] out@[k].name@)
+                && !in_list(hop@, out@[k].name@) && copied_from(fields@, out@[k]),
+        decreases fields.len() - i,
+    {
+        let field = &fields[i];
+        if allowed_name(request, field.name.as_slice()) && !listed(hop, field.name.as_slice()) {
+            let copy = Field { name: slice_to_vec(field.name.as_slice()), value: slice_to_vec(field.value.as_slice()), sensitive: field.sensitive };
+            out.push(copy);
+        }
+        i = i + 1;
+    }
+    out
+}
+
+/// Every checked fact about an outgoing request head.
+pub open spec fn request_head_ok(fields: Seq<Field>, out: Seq<Field>, host: Seq<u8>, credential_name: Seq<u8>, credential: Seq<u8>) -> bool {
+    // Nothing but allowlisted client headers and the three the gateway sets.
+    (forall|k: int| 0 <= k < out.len() ==> request_allowed(#[trigger] out[k].name@)
+        || out[k].name@ == HOST@ || out[k].name@ == credential_name || out[k].name@ == ACCEPT_ENCODING@)
+    // Allowlisted fields are copies of input fields.
+    && (forall|k: int| 0 <= k < out.len() && request_allowed(#[trigger] out[k].name@) ==> copied_from(fields, out[k]))
+    // Exactly one Host, one credential, one Accept-Encoding, with these values.
+    && count_named(out, HOST@) == 1 && count_named(out, credential_name) == 1 && count_named(out, ACCEPT_ENCODING@) == 1
+    && (forall|k: int| 0 <= k < out.len() && #[trigger] out[k].name@ == HOST@ ==> out[k].value@ == host)
+    && (forall|k: int| 0 <= k < out.len() && #[trigger] out[k].name@ == credential_name ==> out[k].value@ == credential && out[k].sensitive)
+    && (forall|k: int| 0 <= k < out.len() && #[trigger] out[k].name@ == ACCEPT_ENCODING@ ==> out[k].value@ == IDENTITY@)
+    // The client's own Authorization never leaves, nor any other credential header.
+    && (credential_name != AUTHORIZATION@ ==> !has_name(out, AUTHORIZATION@))
+    && (credential_name != X_API_KEY@ ==> !has_name(out, X_API_KEY@))
+    // The input head was within limits and carried no framing or encoding changes.
+    && request_input_ok(fields)
+    && out.len() <= fields.len() + 3
+}
+
+/// The input facts `request_head_ok` records: within limits, no framing or
+/// encoding changes, no duplicate content type or API version.
+pub open spec fn request_input_ok(fields: Seq<Field>) -> bool {
+    within_limits(fields) && !has_name(fields, CONTENT_ENCODING@) && !has_name(fields, UPGRADE@) && !has_name(fields, TRAILER@)
+    && count_named(fields, CONTENT_TYPE@) <= 1 && count_named(fields, ANTHROPIC_VERSION@) <= 1
+}
+
+/// Every rejection rule for an inbound request head, before any slot is
+/// taken. Returns the hop-by-hop nominations the projection will drop.
+pub fn check_request(fields: &Vec<Field>) -> (out: Result<Vec<Vec<u8>>, Rejection>)
+    ensures match out {
+        Ok(hop) => request_input_ok(fields@)
+            && forall|k: int| 0 <= k < hop.len() ==> request_allowed(#[trigger] hop@[k]@) && nominated(fields@, hop@[k]@),
+        Err(Rejection::TooLarge) => !within_limits(fields@),
+        Err(Rejection::BadRequest) => true,
+    },
+{
+    if !fits(fields) { return Err(Rejection::TooLarge); }
+    let hop = match nominations(fields, true) { Some(hop) => hop, None => return Err(Rejection::BadRequest) };
+    if has(fields, CONTENT_ENCODING.as_slice()) || has(fields, UPGRADE.as_slice()) || has(fields, TRAILER.as_slice()) {
+        return Err(Rejection::BadRequest);
+    }
+    if count(fields, CONTENT_TYPE.as_slice()) > 1 || count(fields, ANTHROPIC_VERSION.as_slice()) > 1 {
+        return Err(Rejection::BadRequest);
+    }
+    Ok(hop)
+}
+
+/// Build the outgoing request head: the allowlisted client headers that no
+/// Connection header nominated, then Host, the configured credential, and
+/// `Accept-Encoding: identity`.
+pub fn forward_request(fields: &Vec<Field>, host: &[u8], credential_name: &[u8], credential: &[u8]) -> (out: Result<Vec<Field>, Rejection>)
+    requires credential_name@ == AUTHORIZATION@ || credential_name@ == X_API_KEY@,
+    ensures match out {
+        Ok(head) => request_head_ok(fields@, head@, host@, credential_name@, credential@),
+        Err(Rejection::TooLarge) => !within_limits(fields@),
+        Err(Rejection::BadRequest) => true,
+    },
+{
+    let hop = match check_request(fields) { Ok(hop) => hop, Err(rejection) => return Err(rejection) };
+    let mut head = project(fields, true, &hop);
+    proof {
+        lemma_names_distinct();
+        reveal(Seq::filter);
+        assert(count_named(head@, HOST@) == 0) by { lemma_filter_none(head@, HOST@); }
+        assert(count_named(head@, credential_name@) == 0) by { lemma_filter_none(head@, credential_name@); }
+        assert(count_named(head@, ACCEPT_ENCODING@) == 0) by { lemma_filter_none(head@, ACCEPT_ENCODING@); }
+    }
+    let ghost projected = head@;
+    head.push(Field { name: slice_to_vec(HOST.as_slice()), value: slice_to_vec(host), sensitive: false });
+    head.push(Field { name: slice_to_vec(credential_name), value: slice_to_vec(credential), sensitive: true });
+    head.push(Field { name: slice_to_vec(ACCEPT_ENCODING.as_slice()), value: slice_to_vec(IDENTITY.as_slice()), sensitive: false });
+    proof {
+        reveal(Seq::filter);
+        assert(head@.subrange(0, projected.len() as int) =~= projected);
+        lemma_filter_push_three(projected, head@, HOST@, credential_name@, ACCEPT_ENCODING@);
+    }
+    Ok(head)
+}
+
+/// Every checked fact about a forwarded response head.
+pub open spec fn response_head_ok(fields: Seq<Field>, out: Seq<Field>) -> bool {
+    (forall|k: int| 0 <= k < out.len() ==> response_allowed(#[trigger] out[k].name@) && copied_from(fields, out[k]))
+    && within_limits(fields) && !connection_mentions(fields, CONTENT_ENCODING@)
+    && out.len() <= fields.len()
+}
+
+/// Build the forwarded response head: the allowlisted provider headers that no
+/// Connection header nominated. A response that nominates its own
+/// Content-Encoding is rejected, because dropping the header while keeping the
+/// encoded bytes would change their meaning.
+pub fn forward_response(fields: &Vec<Field>) -> (out: Result<Vec<Field>, Rejection>)
+    ensures match out {
+        Ok(head) => response_head_ok(fields@, head@),
+        Err(Rejection::TooLarge) => !within_limits(fields@),
+        Err(Rejection::BadRequest) => true,
+    },
+{
+    if !fits(fields) { return Err(Rejection::TooLarge); }
+    let hop = match nominations(fields, false) { Some(hop) => hop, None => return Err(Rejection::BadRequest) };
+    if connection_mentions_name(fields, CONTENT_ENCODING.as_slice()) { return Err(Rejection::BadRequest); }
+    Ok(project(fields, false, &hop))
+}
+
+// A sequence with no field of the given name has a zero count for it.
+proof fn lemma_filter_none(fields: Seq<Field>, name: Seq<u8>)
+    requires forall|k: int| 0 <= k < fields.len() ==> #[trigger] fields[k].name@ != name,
+    ensures count_named(fields, name) == 0,
+    decreases fields.len(),
+{
+    reveal(Seq::filter);
+    if fields.len() > 0 {
+        lemma_filter_none(fields.drop_last(), name);
+    }
+}
+
+// Pushing three fields with three distinct names onto a sequence that has
+// none of them gives exactly one of each.
+proof fn lemma_filter_push_three(base: Seq<Field>, out: Seq<Field>, a: Seq<u8>, b: Seq<u8>, c: Seq<u8>)
+    requires a != b, b != c, a != c,
+        count_named(base, a) == 0, count_named(base, b) == 0, count_named(base, c) == 0,
+        out.len() == base.len() + 3, out.subrange(0, base.len() as int) == base,
+        out[base.len() as int].name@ == a, out[base.len() as int + 1].name@ == b, out[base.len() as int + 2].name@ == c,
+    ensures count_named(out, a) == 1, count_named(out, b) == 1, count_named(out, c) == 1,
+{
+    reveal(Seq::filter);
+    let one = out.subrange(0, base.len() as int + 1);
+    let two = out.subrange(0, base.len() as int + 2);
+    assert(one.drop_last() =~= base);
+    assert(two.drop_last() =~= one);
+    assert(out.drop_last() =~= two);
+    assert(one.last() == out[base.len() as int]);
+    assert(two.last() == out[base.len() as int + 1]);
+    assert(out.last() == out[base.len() as int + 2]);
+    assert(count_named(one, a) == 1); assert(count_named(one, b) == 0); assert(count_named(one, c) == 0);
+    assert(count_named(two, a) == 1); assert(count_named(two, b) == 1); assert(count_named(two, c) == 0);
+}
+}

@@ -66,11 +66,11 @@ call was made; this does not establish provider compatibility.
 
 JSON parsing, URI validation, hashing, secret resolution, and the runtime mapping
 are trusted and tested, not formally verified. The core theorem still concerns
-normalized route handles. The HTTP adapter must consume `RoutedRequest`, strip
-gateway/client credential headers, construct Host from its fixed destination,
-disable redirects/proxies/retries, and retain request ownership during effects.
-HTTP authentication header parsing and metadata filtering live in the
-[HTTP boundary](http-boundary.md). DNS and TLS validation, disk logging, and
+normalized route handles. The HTTP adapter consumes `RoutedRequest`; the verified
+header projection strips client credential headers and constructs Host from the
+fixed destination, while disabling redirects/proxies/retries and retaining request
+ownership during effects are adapter obligations. Authentication header parsing
+lives in the [HTTP boundary](http-boundary.md). DNS and TLS validation, disk logging, and
 network-level IP restrictions are not implemented here. Approved destinations may
 resolve to private IPs: this is origin confinement, not an SSRF/IP-range theorem.
 

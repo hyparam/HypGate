@@ -39,8 +39,9 @@ consumes the routed wrapper and uses the same immutable mapping snapshot, withou
 accepting independent destination or credential overrides; see the
 [end-to-end audit](end-to-end-audit.md) for implementation and test evidence.
 Fixed endpoint URI validation and secret loading are tested in the
-[configuration layer](configuration.md). DNS, TLS, proxy/redirect disabling, header
-filtering, and transport credential confinement remain adapter obligations. Root-policy intent is a trusted input;
+[configuration layer](configuration.md). DNS, TLS, and proxy/redirect disabling
+remain adapter obligations; header filtering and credential injection are proved in
+`headers`. Root-policy intent is a trusted input;
 candidate configuration cannot enlarge that policy.
 
 Nonzero request IDs are not inherently unique. Composition with the resource

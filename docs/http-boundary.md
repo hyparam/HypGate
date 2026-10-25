@@ -1,8 +1,10 @@
 # HTTP metadata boundary
 
-The trusted runtime now prepares upstream request metadata. No sockets, TLS,
-request bodies, response bodies, or disk effects are implemented in this layer.
-The boundary is tested Rust, not an additional Verus proof.
+The runtime converts Hyper's header maps to byte fields, hands them to the
+verified projection in `gateway_core::headers`, and converts the result back.
+Selector and bearer parsing and the admission binding are tested Rust; every
+header rule below is proved. No sockets, TLS, request bodies, response bodies,
+or disk effects are implemented in this layer.
 
 Clients use `POST /routes/<selector>` with one `Authorization: Bearer <gateway-token>`
 header. Scheme matching is case-insensitive; duplicate credentials, malformed token
@@ -16,32 +18,36 @@ that endpoint's authority, and its credential is loaded from the same policy
 snapshot. It has no public cloning, mutation, or raw-request extraction API.
 The future transport must consume this object and retain it through response work.
 
-Only Content-Type, Accept, Anthropic-Version, Anthropic-Beta, and OpenAI-Beta are
-copied from client headers. Connection-nominated headers are removed. Gateway
+Proved by `headers::forward_request`: only Content-Type, Accept,
+Anthropic-Version, Anthropic-Beta, and OpenAI-Beta are copied from client headers,
+each byte for byte; Connection-nominated names among them are removed; gateway
 Authorization, caller API keys, cookies, proxy headers, forwarding headers, and
-framing headers are discarded; the root-authorized credential is injected afterward.
-Upload Content-Encoding, Upgrade, and Trailer are rejected. Duplicate Content-Type
-or Anthropic-Version headers are rejected. The HTTP library must generate framing
-from the actual body stream, not discarded client metadata.
+framing headers never appear; the root-authorized credential, Host, and
+`Accept-Encoding: identity` appear exactly once each. Upload Content-Encoding,
+Upgrade, and Trailer are rejected, as are duplicate Content-Type or
+Anthropic-Version headers. The HTTP library must generate framing from the actual
+body stream, not discarded client metadata.
 
-The adapter requests identity response encoding. If an upstream nevertheless sends
+The gateway requests identity response encoding. If an upstream nevertheless sends
 encoded bytes, it must forward them unchanged with Content-Encoding; there is no
-automatic decompression. Response metadata is limited to Content-Type,
-Content-Encoding, Cache-Control, Retry-After, Request-Id, and X-Request-Id, excluding
-Connection-nominated fields. A Connection nomination of Content-Encoding is rejected
-to avoid misrepresenting encoded bytes. Cookies, credential headers, and Location
-are excluded. A future transport must preserve status and return redirects without
+automatic decompression. Proved by `headers::forward_response`: response metadata
+is limited to Content-Type, Content-Encoding, Cache-Control, Retry-After,
+Request-Id, and X-Request-Id, excluding Connection-nominated fields, and a
+response whose Connection header mentions Content-Encoding is rejected, so an
+encoding is never dropped while its bytes are kept. Cookies, credential headers,
+and Location are excluded. A future transport must preserve status and return redirects without
 following them; this metadata code cannot itself establish no-redirect behavior.
 
-Header maps are capped at 100 values and 32 KiB of name/value bytes. These are
-post-parsing checks: the future server must also cap header allocation in its parser.
+Proved: heads over 100 fields or 32 KiB of name and value bytes are refused. These
+are post-parsing checks; the server also caps header allocation in its parser.
 Malformed upstream metadata must become a gateway failure, not successful output.
 Errors contain categories only. Body content remains opaque and may contain or
 echo secrets; header filtering is not arbitrary content secrecy.
 
-Six boundary tests cover fixed destination/credential binding, caller header
-overrides, duplicate/malformed authentication, forbidden paths and methods,
-Connection nominations, header limits, admission cleanup, and response filtering.
+Boundary tests exercise the same rules end to end: fixed destination/credential
+binding, caller header overrides, duplicate/malformed authentication, forbidden
+paths and methods, Connection nominations, header limits, admission cleanup, and
+response filtering.
 Workspace test totals are maintained in the [README](../README.md). No live provider
 was contacted. Network dispatch, body forwarding, and logging are covered by the
 [HTTPS transport](https-transport.md), [async transfer](async-transfer.md), and
@@ -56,8 +62,9 @@ extensions, before the caller can await DNS, response output, or body streaming.
 The borrowed preparation functions remain available for library callers, who own
 and must budget their original input metadata separately.
 
-Filtering copies each allowed HeaderValue's visible bytes with `from_bytes`, then
-preserves its sensitive/redaction flag. It does not clone shared input backing.
+The verified projection copies each allowed field's bytes into a fresh vector;
+the runtime rebuilds each HeaderValue with `from_bytes` and preserves its
+sensitive/redaction flag. Nothing clones shared input backing.
 This matters because a tiny HeaderValue can own a slice of a much larger parser
 buffer, including unrelated headers. Static allowlisted header names require no
 copy of an input name. Configured provider credentials remain shared with their
@@ -80,11 +87,13 @@ production request and response heads below 64 KiB under the pinned serializer.
 HeaderMap storage, value metadata, allocator slack, and Hyper's backing capacities
 remain outside these logical wire-length bounds.
 
-Connection-header processing validates every comma-separated token, including
-unknown names, but retains only distinct names relevant to the allowlist: at most
-five for requests and six for responses. A repeated/irrelevant token list cannot
-create an arbitrarily long retained options vector. Parsing one token still uses
-HeaderName validation scratch; the 32 KiB input limit bounds its visible bytes.
+The verified Connection parsing validates every comma-separated element,
+including unknown names, but retains only distinct allowlisted names: at most
+five for requests and six for responses. A repeated or irrelevant element list
+cannot create an arbitrarily long retained list. Every retained name is proved to
+be an element of some Connection value (soundness); that the parser finds every
+element is not a theorem, which is why the response rule is a substring check
+that covers every nomination.
 
 Regression tests supply small headers backed by 256 KiB owners and metadata
 extension drop probes. Both original owners must be destroyed while prepared

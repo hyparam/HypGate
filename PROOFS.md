@@ -40,6 +40,18 @@ destination.
   receipt all match. Candidate configuration cannot enlarge root grants or
   pick another tenant's credential. The concrete destination and credential
   come from the authorized table indices and nothing else.
+- The outgoing request head is built by a verified projection
+  (`headers::forward_request`): only allowlisted client headers survive, each
+  a byte-for-byte copy of an input field with no Connection-nominated name
+  among them, and exactly one Host, exactly one configured credential (marked
+  sensitive), and exactly one `Accept-Encoding: identity` are added. The
+  client's own Authorization never leaves. Uploads carrying Content-Encoding,
+  Upgrade, or Trailer, duplicate Content-Type or Anthropic-Version, and heads
+  over 100 fields or 32 KiB are refused before a slot is taken. The response
+  head (`headers::forward_response`) keeps only allowlisted provider headers
+  and refuses a response whose Connection header mentions its own
+  Content-Encoding. The runtime converts Hyper's map to byte fields and back,
+  and nothing else.
 - The shipper's enrollment machine refuses to upload without an unexpired
   server-issued credential; a revoked service account stops it for good.
 - Every outgoing shipper request is chosen by the verified machine
@@ -59,7 +71,9 @@ destination.
   fails if the set of allowed sites changes.
 
 **Premises.** HTTP serialization, DNS, TLS, and the system resolver behave as
-specified (no IP-range policy, so not an SSRF theorem); the runtime passes
+specified (no IP-range policy, so not an SSRF theorem); Hyper hands the
+runtime every header field with its lowercase name and serializes the
+projected fields faithfully; the runtime passes
 the gate's bytes to the socket it opened under the permit and the machine's
 requests to the client it built from the configured server; `send_request`
 and `write_all` sites are still enumerated by review rather than lint.
@@ -262,6 +276,9 @@ rather than mechanized; the table below records where.
 - `crates/gateway-core/src/exchange_lifecycle.rs`: the exchange lifecycle
   that maps the terminal event to the outcome code, builds the completion
   payload, and issues the `Closed` token a worker must return.
+- `crates/gateway-core/src/headers.rs`: the header projection for both
+  directions, with the allowlists, Connection handling, limits, and the three
+  fields the gateway adds to a request.
 - `crates/gateway-runtime/src/shipping`: the trusted adapters, held to a
   panic-free standard by clippy and run under `catch_unwind`.
 
@@ -275,7 +292,7 @@ checked definitions for each row.
 | Property | Intended guarantee | Evidence today |
 | --- | --- | --- |
 | Authorization and fail-closed security | Every upstream dispatch requires an authenticated tenant's grant; authentication or policy failures cannot authorize forwarding, in either logging mode. | Core token issuance proved; HTTP binding tested; every production body write passes the checked `ResolvedRoute::write_bytes` gate, and every other socket, lookup, and file-write site is denied by lint. The socket write itself is trusted. |
-| Tenant and credential isolation | Requests, completions, and credentials cannot cross tenant/request boundaries; gateway authentication material never becomes an upstream credential. | Core tenant/credential-handle and ticket checks proved; cross-owner lifecycle composition checked; secret/header handling tested. Audit-file access control is an operator obligation. |
+| Tenant and credential isolation | Requests, completions, and credentials cannot cross tenant/request boundaries; gateway authentication material never becomes an upstream credential. | Core tenant/credential-handle and ticket checks proved; cross-owner lifecycle composition checked; header projection and credential injection proved (`headers::forward_request`); secret loading tested. Audit-file access control is an operator obligation. |
 | Routing and configuration confinement | Candidate configuration and request fields cannot expand operator grants or change the authorized destination/credential binding. | Normalized configuration and route selection proved; URI, DNS, TLS, and actual dispatch remain trusted/tested. |
 | Byte integrity and ordering | Forwarded body bytes form an unchanged, ordered prefix of the input, across chunks and partial writes, without skipped or duplicated advancement. | Core byte-prefix and completion properties proved; async HTTP integration tested. Peer receipt is not proved. |
 | Strict audit-before-forwarding | Every submitted body range in strict mode is covered by a durable log acknowledgment for that request and chunk. | Core gate and exact journal-receipt/stream binding proved; disk sync adapter tested. Filesystem crash guarantees remain open. |

@@ -1,16 +1,14 @@
-//! Trusted HTTP metadata boundary. No networking or body processing occurs here.
+//! HTTP metadata boundary. Header projection is the verified
+//! `gateway_core::headers`: this module converts Hyper's header map to byte
+//! fields and back, parses the route selector and bearer token, and binds the
+//! admitted route. No networking or body processing occurs here.
 use crate::admission::AdmissionError;
 use crate::config::{GatewayConfig, RoutedRequest};
+use gateway_core::headers::{self, Field, Rejection};
 use http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode, Uri};
 
-pub(crate) const MAX_HEADER_BYTES: usize = 32 * 1024;
-pub(crate) const MAX_HEADER_VALUES: usize = 100;
-const FORWARDED_REQUEST_HEADERS: &[&str] = &[
-    "content-type", "accept", "anthropic-version", "anthropic-beta", "openai-beta",
-];
-const FORWARDED_RESPONSE_HEADERS: &[&str] = &[
-    "content-type", "content-encoding", "cache-control", "retry-after", "request-id", "x-request-id",
-];
+pub(crate) const MAX_HEADER_BYTES: usize = headers::MAX_BYTES;
+pub(crate) const MAX_HEADER_VALUES: usize = headers::MAX_FIELDS;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum HttpError { BadRequest, Unauthorized, MethodNotAllowed, HeadersTooLarge, Unavailable }
@@ -105,50 +103,30 @@ pub(crate) fn unix_ms() -> u64 {
         .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)).unwrap_or(0)
 }
 
-fn check_size(headers: &HeaderMap) -> Result<(), HttpError> {
-    let mut size = 0usize;
-    if headers.len() > MAX_HEADER_VALUES { return Err(HttpError::HeadersTooLarge); }
-    for (name, value) in headers {
-        size = size.checked_add(name.as_str().len() + value.as_bytes().len())
-            .ok_or(HttpError::HeadersTooLarge)?;
-        if size > MAX_HEADER_BYTES { return Err(HttpError::HeadersTooLarge); }
-    }
-    Ok(())
+/// Hyper's header map as the verified core's byte fields, in map order,
+/// names lowercase as Hyper stores them.
+fn fields_of(headers: &HeaderMap) -> Vec<Field> {
+    headers.iter().map(|(name, value)| Field {
+        name: name.as_str().as_bytes().to_vec(), value: value.as_bytes().to_vec(), sensitive: value.is_sensitive(),
+    }).collect()
 }
 
-fn connection_options(headers: &HeaderMap, relevant: &[&str]) -> Result<Vec<HeaderName>, HttpError> {
-    let mut options = Vec::new();
-    for value in headers.get_all("connection") {
-        let value = value.to_str().map_err(|_| HttpError::BadRequest)?;
-        for part in value.split(',') {
-            let part = part.trim_matches([' ', '\t']);
-            if part.is_empty() { return Err(HttpError::BadRequest); }
-            let name = HeaderName::from_bytes(part.as_bytes()).map_err(|_| HttpError::BadRequest)?;
-            // Validate every token, but retain only distinct names that can
-            // affect this forwarding allowlist (at most five/six entries).
-            if relevant.iter().any(|candidate| name == *candidate) && !options.contains(&name) {
-                options.push(name);
-            }
-        }
-    }
-    Ok(options)
-}
-
-// The caller has already checked header size and collected `hop`, the
-// Connection-nominated names, for this same header map.
-fn filtered(headers: &HeaderMap, allowed: &[&'static str], hop: &[HeaderName]) -> Result<HeaderMap, HttpError> {
-    let mut out = HeaderMap::new();
-    for &name in allowed {
-        if hop.iter().any(|h| h == name) { continue; }
-        for value in headers.get_all(name) {
-            // A small HeaderValue can share a much larger parser allocation.
-            // Detach only its validated visible bytes, retaining redaction intent.
-            let mut copied = HeaderValue::from_bytes(value.as_bytes()).map_err(|_| HttpError::BadRequest)?;
-            copied.set_sensitive(value.is_sensitive());
-            out.append(HeaderName::from_static(name), copied);
-        }
+/// The verified head as a Hyper header map. Names come from the allowlist or
+/// the input map and values are copies of validated values, so conversion
+/// cannot fail for a head the core produced.
+fn header_map(fields: Vec<Field>) -> Result<HeaderMap, HttpError> {
+    let mut out = HeaderMap::with_capacity(fields.len());
+    for field in fields {
+        let name = HeaderName::from_bytes(&field.name).map_err(|_| HttpError::BadRequest)?;
+        let mut value = HeaderValue::from_bytes(&field.value).map_err(|_| HttpError::BadRequest)?;
+        value.set_sensitive(field.sensitive);
+        out.append(name, value);
     }
     Ok(out)
+}
+
+fn rejected(rejection: Rejection) -> HttpError {
+    match rejection { Rejection::TooLarge => HttpError::HeadersTooLarge, Rejection::BadRequest => HttpError::BadRequest }
 }
 
 fn selector(uri: &Uri) -> Result<u64, HttpError> {
@@ -186,30 +164,24 @@ pub fn prepare<'a>(config: &'a GatewayConfig, method: &Method, uri: &Uri, header
     -> Result<PreparedRequest<'a>, HttpError>
 {
     if method != Method::POST { return Err(HttpError::MethodNotAllowed); }
-    check_size(headers)?;
+    let fields = fields_of(headers);
+    if !headers::fits(&fields) { return Err(HttpError::HeadersTooLarge); }
     let route = selector(uri)?;
     let token = bearer(headers)?;
-    // Validate every header rule before allocating a request slot.
-    let hop = connection_options(headers, FORWARDED_REQUEST_HEADERS)?;
-    let mut outgoing = filtered(headers, FORWARDED_REQUEST_HEADERS, &hop)?;
-    // Compression is deliberately unsupported on uploads; dropping its header
-    // while forwarding compressed bytes would change the request's meaning.
-    if headers.contains_key("content-encoding") || headers.contains_key("upgrade")
-        || headers.contains_key("trailer") { return Err(HttpError::BadRequest); }
-    for name in ["content-type", "anthropic-version"] {
-        if headers.get_all(name).iter().count() > 1 { return Err(HttpError::BadRequest); }
-    }
+    // Every verified header rule runs before a request slot is taken, so a
+    // rejected head never consumes capacity.
+    headers::check_request(&fields).map_err(rejected)?;
     let routed = config.admit(token, route).map_err(|error| match error {
         AdmissionError::Unauthorized => HttpError::Unauthorized,
         AdmissionError::AtCapacity | AdmissionError::Unavailable => HttpError::Unavailable,
     })?;
+    // The verified projection: allowlisted client headers, Host from the
+    // resolved destination, the resolved credential exactly once, and
+    // `Accept-Encoding: identity` so the provider sends opaque bytes.
     let authority = routed.destination().authority().ok_or(HttpError::BadRequest)?;
-    outgoing.insert("host", HeaderValue::from_str(authority.as_str()).map_err(|_| HttpError::BadRequest)?);
     let (name, value) = routed.credential_header();
-    outgoing.insert(HeaderName::from_static(name), value.clone());
-    // Ask for opaque, uncompressed response bytes. Transport must not silently
-    // decode a provider that ignores this preference.
-    outgoing.insert("accept-encoding", HeaderValue::from_static("identity"));
+    let head = headers::forward_request(&fields, authority.as_str().as_bytes(), name.as_bytes(), value.as_bytes()).map_err(rejected)?;
+    let outgoing = header_map(head)?;
     let mut upstream = Request::new(());
     *upstream.method_mut() = Method::POST;
     *upstream.uri_mut() = routed.destination().clone();
@@ -236,12 +208,10 @@ pub(crate) fn prepare_response_parts(parts: http::response::Parts)
 /// Preserve upstream status separately. A 3xx is returned to the client, never
 /// followed by the gateway; Location and cookies are not forwarded.
 pub fn response_headers(headers: &HeaderMap) -> Result<HeaderMap, HttpError> {
-    check_size(headers)?;
-    // Removing a nominated encoding while preserving encoded bytes changes
-    // their meaning. Reject that upstream response instead.
-    let hop = connection_options(headers, FORWARDED_RESPONSE_HEADERS)?;
-    if hop.iter().any(|h| h == "content-encoding") { return Err(HttpError::BadRequest); }
-    filtered(headers, FORWARDED_RESPONSE_HEADERS, &hop)
+    // The verified projection also rejects a response whose Connection header
+    // nominates its own Content-Encoding: dropping that header while keeping
+    // the encoded bytes would change their meaning.
+    header_map(headers::forward_response(&fields_of(headers)).map_err(rejected)?)
 }
 
 #[cfg(test)]

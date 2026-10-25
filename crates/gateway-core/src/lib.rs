@@ -12,6 +12,7 @@ pub mod owned_stream;
 pub mod submission;
 pub mod body_copy;
 pub mod exchange_lifecycle;
+pub mod headers;
 pub mod journal;
 pub mod journal_binding;
 pub mod audit_journal;
