@@ -16,8 +16,7 @@ are not proved, and a checksum is not source authentication.
 
 A valid header has a payload length at most one MiB, a nonzero request ID, and a
 record kind of at most 4. Kinds 0 and 1 are the body directions (`body_kind`);
-kinds 2 to 4 are the metadata records (`metadata_kind`); `kinds_partition` states
-that these two classes are disjoint and together are exactly the valid kinds.
+kinds 2 to 4 are the metadata records (`metadata_kind`).
 Tenant and chunk IDs may use the full u64 range. These are structural checks,
 not authentication or authorization of recorded identities.
 

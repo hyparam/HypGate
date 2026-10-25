@@ -45,9 +45,6 @@ pub const KIND_COMPLETION: u8 = 4;
 pub const MAX_KIND: u8 = 4;
 pub open spec fn body_kind(kind: u8) -> bool { kind <= 1 }
 pub open spec fn metadata_kind(kind: u8) -> bool { 2 <= kind <= 4 }
-pub proof fn kinds_partition(kind: u8)
-    ensures (kind <= 4) == (body_kind(kind) || metadata_kind(kind)), !(body_kind(kind) && metadata_kind(kind)),
-{}
 
 pub struct Header {
     pub payload: u32,

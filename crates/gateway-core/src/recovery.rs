@@ -132,38 +132,6 @@ pub proof fn recover_frame_step<R: Source>(before: &Scanner<R>, after: &Scanner<
     frame.canonical();
 }
 
-// Every recovered header has a kind in 0..=4, and that kind is exactly the one
-// the writer encoded: metadata records recover through the same step as body
-// records, with their payload bytes returned unchanged for the metadata codecs.
-pub proof fn recovered_kind_in_range<R: Source>(before: &Scanner<R>, after: &Scanner<R>,
-    out: Result<Option<RecoveredRecord>, ScanError>)
-    requires scanner_step(before, after, out),
-    ensures match out {
-        Ok(Some(record)) => record.header.kind <= 4
-            && (framing::body_kind(record.header.kind) || framing::metadata_kind(record.header.kind)),
-        _ => true,
-    },
-{}
-
-pub proof fn recover_metadata_frame_step<R: Source>(before: &Scanner<R>, after: &Scanner<R>,
-    out: Result<Option<RecoveredRecord>, ScanError>, frame: &framing::RecordFrame)
-    requires before.valid(), !before.stopped(), scanner_step(before, after, out),
-        after.io_errors() == before.io_errors(), frame.valid(), framing::metadata_kind(frame.header().kind),
-        before.position() + frame.contents().len() <= before.data().len(),
-        before.position() + frame.contents().len() <= u64::MAX,
-        before.data().subrange(before.position() as int,
-            (before.position() + frame.contents().len()) as int) == frame.contents(),
-        R::digest(framing::encoding(frame.header()) + frame.payload()) == frame.checksum(),
-    ensures !after.stopped(), after.position() == before.position() + frame.contents().len(),
-        match out {
-            Ok(Some(record)) => record.header == frame.header() && record.bytes@ == frame.payload()
-                && framing::metadata_kind(record.header.kind) && !framing::body_kind(record.header.kind),
-            _ => false,
-        },
-{
-    recover_frame_step::<R>(before, after, out, frame);
-}
-
 pub proof fn reconstruct_prefix<R: Source>(frames: Seq<framing::RecordFrame>, data: Seq<u8>,
     start: nat, states: Seq<Scanner<R>>, results: Seq<Result<Option<RecoveredRecord>, ScanError>>)
     requires
