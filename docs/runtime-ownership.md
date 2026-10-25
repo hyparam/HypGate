@@ -125,16 +125,17 @@ against the request budget. Rejected vectors are dropped without changing stream
 state. This is a trusted Rust check: the current Verus model describes lengths,
 not allocated capacities. It bounds retained vector capacity, not memory allocated
 by the caller before admission or physical allocator overhead. The production
-transfer driver releases completed storage before allocating the next buffer.
+body-copy machine releases completed storage before allocating the next buffer.
 HTTP/TLS buffers, logger queues, and total process memory remain separate obligations.
 The admission mutex protects only admission and release; no I/O occurs under it.
 
 The eventual transport must own the request for the lifetime of every effect and
 must not detach work that survives its lease. Repeated borrowed views still do not
 authorize repeated submissions. Logging acknowledgments remain trusted events:
-`audit_current` obtains metadata and bytes together through verified
-`StreamChunk::audit_record`, then binds the awaited logger result to the exclusively
-borrowed current chunk. It is the runtime request's only acknowledgment path. The logger returns a
+the body-copy machine's `audit_record` obtains metadata and bytes together through
+verified `StreamChunk::audit_record`, and its `finish_audit` binds the awaited logger
+result to the exclusively borrowed current chunk. With the test-only
+`Request::audit_current`, these are the runtime's only acknowledgment paths. The logger returns a
 private journal receipt, and verified `acknowledge_receipt` compares its canonical
 metadata and exact payload to the current stream before advancing durability.
 A mismatched receipt closes the runtime request, including in availability mode.
@@ -254,8 +255,8 @@ chunk; canceled or invalid completion cannot authorize forwarding. Valid complet
 has an exact acceptance contract and preserves byte history and owner identity.
 Retirement explicitly drops any pending read buffer before releasing its slot.
 
-The async driver now calls `Request::read_next`; it no longer owns a separately
-allocated chunk. That helper borrows the owner's mutable slice through the awaited
+The async loop reads through the machine's `read_buffer`; it owns no separately
+allocated chunk. That accessor borrows the owner's mutable slice through the awaited
 read. Rust slices cannot resize their underlying vector. Because vstd's mutable
 slice projection represents future contents abstractly, the accessor's proof states
 preservation conditional on unchanged slice length; Rust/AsyncRead correspondence

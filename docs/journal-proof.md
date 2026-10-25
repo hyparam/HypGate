@@ -69,8 +69,8 @@ in `u64`. It does not retain past frame allocations at runtime.
 `DurableFrame` only after successful journal acknowledgment. Its ghost prefix and
 owned frame capture exactly the journal's acknowledged history at issuance.
 The worker sends this receipt through the job's oneshot instead of a boolean.
-`AuditLog::append` now returns the receipt, and `Request::audit_current` passes it
-to verified `StreamChunk::acknowledge_receipt` while retaining exclusive ownership.
+`AuditLog::append` returns the receipt, and `BodyCopy::finish_audit` passes it to
+verified `OwnedStream::acknowledge_receipt` while the loop retains exclusive ownership.
 
 The stream checks canonical tenant/request/chunk/direction metadata and exact
 payload bytes, not merely their length or a digest. Success proves that the receipt's

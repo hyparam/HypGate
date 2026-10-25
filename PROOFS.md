@@ -97,6 +97,20 @@ mode, so the log holds bodies and metadata, not the full HTTP exchange.
   request, chunk, direction, and payload (`ResolvedRoute::write_bytes`,
   `StreamChunk::{prepare,pending_bytes,complete}`); the logging-mode
   transitions keep authorization identical in availability mode.
+- The body copy itself is a verified machine (`body_copy::BodyCopy`). It
+  reads a chunk, issues that chunk's audit record unless the request's log
+  has already failed, releases bytes only through the authorization gate one
+  ticket at a time, flushes, and finishes only on a clean end of input with
+  nothing pending. Every failure closes the stream. Its byte count equals the
+  growth of the stream's completed history. The async loop around it performs
+  the effect the machine names and reports the result; it decides nothing.
+- The exchange lifecycle is a verified machine (`exchange_lifecycle::Lifecycle`).
+  It is terminal after exactly one event, a successful download or a named
+  fault; the outcome code is a checked function of that event; the completion
+  payload decodes to that outcome and, on success, to the two body-copy
+  counts; and a worker can finish only by returning the `Closed` token a
+  terminal lifecycle produces, or the one escape for a request refused before
+  admission, which has no records anywhere.
 - Forwarded bytes are an ordered, unchanged prefix of the input across chunks
   and partial writes, with no skipped or duplicated advancement; cancellation
   prevents new submissions and a failed or truncated stream cannot complete as
@@ -140,43 +154,42 @@ mode, so the log holds bodies and metadata, not the full HTTP exchange.
 
 **Premises.** The storage contract (synced bytes survive, see the
 [storage contract](docs/storage-crash-contract.md)); the disk adapter reports
-write and sync outcomes truthfully; hex encoding; the server honors its batch
+write and sync outcomes truthfully; the async loop performs the effect the
+body-copy machine names on the reader, writer, and logger it was given, and
+those report truthfully; hex encoding; the server honors its batch
 ledger and part-id dedup; the projection of an exchange's provider JSON into text and usage is
 faithful (tested against recorded bodies, not proved); the runtime's `Effects`
 implementation performs what it is asked (sends to the configured server,
 returns the log's records in order, writes the checkpoint it is given); the
 scanner reads the same file on restart (the checkpoint names the session).
 
-**Gaps.** What stands between the theorems above and the statement, and
-whether each is a proof we can still write or an assumption we take on.
+**Gaps.** What stands between the theorems above and the statement. Each is
+an assumption we take on; the proofs that could be written have been.
 
-- *The glue between the core and the wire is tested, not proved.* Every theorem
-  is about a synchronous state machine. The Tokio tasks, Hyper framing, socket
-  writes, and the disk thread that feed it are audited by reading the source
-  and by tests. Partly fixable: the request-side body driver can be verified
-  over an effect trait the way `shipping_driver::drive` already is, leaving
-  only "the effect implementation does what it is told" as the premise.
-  Tokio and Hyper themselves stay assumptions.
-- *Every exit writes a completion record.* The core proves a failed stream
-  cannot complete as success, but the claim that every failure path emits a
-  completion with the right outcome code rests on the
-  [end-to-end audit](docs/end-to-end-audit.md) and tests. Fixable: make the
-  exchange lifecycle a verified machine whose only terminal transitions emit
-  the completion or record logger failure, so a slot cannot be released
-  without one. A record missing because the process died stays by design and
-  is reported by its absence.
+- *The effects are trusted; their sequencing is not.* Both body directions run
+  under the verified `BodyCopy` machine, so what is read, logged, released,
+  and counted, and in what order, is proved. The async loop performs the
+  effect the machine names and reports the result. What remains trusted is
+  that the reader, writer, and logger do what they report, that Tokio
+  cancellation reaches the loop's drop guard, and Hyper's framing.
+- *Every admitted exchange reaches its completion record.* The lifecycle is a
+  verified machine that is terminal after exactly one event, and the worker
+  future must return the `Closed` token only a terminal lifecycle produces,
+  with one escape for a request refused before admission. Two cases still
+  end without a record, both by design and both reported by its absence: the
+  logger is already unhealthy, or the task was aborted after the shutdown
+  drain window and never ran its tail.
 - *Durability stops at the storage contract.* Acknowledged records survive
   every crash in the model; the model assumes the filesystem honors sync.
   Tested on ext4 with process kills and full or read-only disks, never with
   power loss. Checksums catch corruption, not deliberate rewriting.
   Assumption: a filesystem cannot be proved from inside the process, only
   tested on named hardware.
-- *The record values are trusted.* The codecs are proved, but the time,
-  status, outcome, and byte counts they encode come from runtime code and the
-  system clock; session uniqueness and the one-registry-per-log mapping are
-  also trusted. Partly fixable: byte counts and outcome can be derived from
-  verified stream state instead of runtime counters. The clock and the HTTP
-  status from Hyper stay assumptions.
+- *Timestamps and the status code are trusted.* The outcome code and the byte
+  counts in the completion record are derived in the verified lifecycle from
+  the body-copy machines' proved counts. The clock, the HTTP status from
+  Hyper, session uniqueness, and the one-registry-per-log mapping remain
+  trusted.
 - *Shipping trusts its edges.* The machine and driver are proved; the HTTPS
   client, JSON and SSE parsing, the projection into HypAware rows, and the
   server's dedup ledger are not, and the projection is lossy by design.
@@ -240,6 +253,12 @@ rather than mechanized; the table below records where.
 - `crates/gateway-core/src/exchange_assembler.rs`: the replay theorem.
   Emission numbering is a function of record kinds and request ids, so a
   restart from a checkpoint skips exactly the resolved exchanges.
+- `crates/gateway-core/src/body_copy.rs`: the body-copy machine that
+  sequences read, audit, gated write, and flush for one body direction and
+  counts the accepted bytes.
+- `crates/gateway-core/src/exchange_lifecycle.rs`: the exchange lifecycle
+  that maps the terminal event to the outcome code, builds the completion
+  payload, and issues the `Closed` token a worker must return.
 - `crates/gateway-runtime/src/shipping`: the trusted adapters, held to a
   panic-free standard by clippy and run under `catch_unwind`.
 

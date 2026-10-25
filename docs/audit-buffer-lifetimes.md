@@ -15,7 +15,7 @@ supply up to `MAX_RECORD_BYTES` and must account for retained receipts separatel
 | Queued | Verified `FrameQueue::finish_reserved` transfers the immutable frame and receipt sender into a fixed slot. The caller retains only the receipt receiver. | One of Q encoding/queued slots |
 | Writing/syncing/committing | Verified `DiskWorker::take` moves the exact queued frame/sender into a private `ActiveAppend` and charges the independent active slot. `DiskWorker::run` owns it across synchronous write and sync calls. Dequeue returns queue credit, allowing another producer to encode. | One active frame in addition to Q |
 | Delivering | `commit_frame` moves the same frame into `DurableFrame`; no payload clone is made. `FinishedAppend::deliver` consumes the receipt/sender into the caller's oneshot or destroys the undeliverable value, then returns a private release token. | Active-frame term until transfer, then receipt term |
-| Delivered, awaiting consumption | `Request::audit_current` retains exclusive request ownership across append and checks the exact receipt before dropping it. | At most one receipt per live production request, hence R |
+| Delivered, awaiting consumption | The body-copy loop retains exclusive request ownership across the append, and `BodyCopy::finish_audit` checks the exact receipt before dropping it. | At most one receipt per live production request, hence R |
 | Dropped/canceled | The frame is dropped at its current owner; dropping the caller alone cannot drop a queued Job or interrupt its syscall. | Credit follows the surviving frame, not the caller's task |
 
 The resulting frame term is `(Q + 1 + R) * (A + 65)` with `A = max(K, 8210)`, the
