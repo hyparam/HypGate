@@ -1,7 +1,7 @@
 # Running the prototype
 
-Build with the pinned Rust toolchain: `cargo build --locked --bin soundgate`.
-Run `target/debug/soundgate ROOT.json ROUTES.json NEW_LOG [127.0.0.1:8080]`.
+Build with the pinned Rust toolchain: `cargo build --locked --bin loggate`.
+Run `target/debug/loggate ROOT.json ROUTES.json NEW_LOG [127.0.0.1:8080]`.
 The log path must not exist; its parent directory must already exist and be private
 to the operator. Configuration and secret-loading failures prevent startup.
 
@@ -56,12 +56,12 @@ and full duplex are outside the current interface.
 
 To upload exchanges to HypAware Cloud, add a `shipping` section to the root
 policy and provide its token through the named environment variable; see
-[cloud shipping](cloud-shipping.md). `soundgate ship ROOT.json LOG` uploads a
+[cloud shipping](cloud-shipping.md). `loggate ship ROOT.json LOG` uploads a
 finished log without starting the gateway.
 
 ## Operational behavior
 
-`target/debug/soundgate scan LOG` reads an existing log without changing it. It
+`target/debug/loggate scan LOG` reads an existing log without changing it. It
 prints newline-delimited JSON metadata for each valid record, then a summary with
 session ID, record count, valid-prefix byte offset, and status. Every record row
 carries `tenant`, `request`, `chunk`, `kind`, `payload_bytes`, and `valid_end`.
@@ -84,15 +84,15 @@ Readiness does not yet probe upstream availability, request capacity, or disk sp
 After authorization, strict-mode requests also receive 503 without opening an
 upstream connection if logger health is already failed; later failures are handled
 by the stream durability gate.
-GET `/metrics` exposes `soundgate_failed_exchanges_total`,
-`soundgate_audit_gap_requests_total`, and `soundgate_audit_healthy` without payloads
-or credentials. It also exposes `soundgate_requests_active`,
-`soundgate_requests_limit`, and `soundgate_admission_healthy`; occupancy is a
+GET `/metrics` exposes `loggate_failed_exchanges_total`,
+`loggate_audit_gap_requests_total`, and `loggate_audit_healthy` without payloads
+or credentials. It also exposes `loggate_requests_active`,
+`loggate_requests_limit`, and `loggate_admission_healthy`; occupancy is a
 verified count of live registry slots, sampled under the runtime lock. Poisoned
 admission omits the occupancy gauges and reports health zero. These gauges are
-not process memory or connection counts. `soundgate_shipping_*` lines appear when the root policy has a `shipping`
+not process memory or connection counts. `loggate_shipping_*` lines appear when the root policy has a `shipping`
 section (see [cloud shipping](cloud-shipping.md)); otherwise
-`soundgate_shipping_enabled 0`. `soundgate_worker_admission_healthy`
+`loggate_shipping_enabled 0`. `loggate_worker_admission_healthy`
 separately reports whether the worker registry is unpoisoned and open; worker registry
 failure also makes readiness fail in both logging modes. Counters live in memory and crashes reset them. Failed exchanges
 count transport errors returned to the worker, not all externally canceled tasks.

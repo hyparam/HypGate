@@ -1,6 +1,6 @@
 # Cloud shipping to HypAware
 
-Status: implemented on one dedicated thread inside `soundgate`, enabled by an
+Status: implemented on one dedicated thread inside `loggate`, enabled by an
 optional `shipping` section of the root policy. Every decision is made by the
 verified shipper machine (`gateway_core::shipper::Machine`): which records
 form which exchange, which exchanges go into the next batch, which request to
@@ -45,7 +45,7 @@ Add to the root policy (all fields but the first three optional):
 "shipping": {
   "server": "https://api.hypaware.ai",
   "token_env": "HYPAWARE_TOKEN",
-  "state_dir": "/var/lib/soundgate/shipping",
+  "state_dir": "/var/lib/loggate/shipping",
   "max_open_exchanges": 64,
   "max_exchange_bytes": 1048576,
   "poll_ms": 1000
@@ -76,7 +76,7 @@ environment resolver as provider keys and moves it into the shipper thread.
 This is an ownership and module boundary inside one process, not a process
 boundary.
 
-`soundgate ship ROOT.json LOG` runs the same loop on the current thread over a
+`loggate ship ROOT.json LOG` runs the same loop on the current thread over a
 finished log and exits when every exchange is resolved; exchanges still open
 after five idle polls are flushed as `incomplete`.
 
@@ -89,7 +89,7 @@ the server does on every request. `POST /v1/identity/refresh` with the current
 credential renews it; the shipper refreshes when less than 24 hours remain or
 once after a rejected upload, and re-enrolls when a refresh is rejected.
 `service_token_revoked` and `service_account_disabled` stop the shipper
-permanently; `soundgate_shipping_stopped` reports it.
+permanently; `loggate_shipping_stopped` reports it.
 
 Upload: `POST /v1/ingest/proxy` with `Authorization: Bearer <credential>`,
 `Content-Type: application/x-ndjson`, and `X-Hyp-Batch-Id`. The batch id is

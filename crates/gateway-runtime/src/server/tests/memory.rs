@@ -10,7 +10,7 @@ impl Drop for Process { fn drop(&mut self) { let _ = self.0.kill(); let _ = self
 
 #[test]
 fn memory_child() {
-    let Some(directory) = std::env::var_os("SOUNDGATE_MEMORY_CHILD") else { return; };
+    let Some(directory) = std::env::var_os("LOGGATE_MEMORY_CHILD") else { return; };
     let directory = std::path::PathBuf::from(directory);
     let port = std::fs::read_to_string(directory.join("upstream")).unwrap().parse().unwrap();
     let availability = std::fs::read_to_string(directory.join("mode")).unwrap() == "availability";
@@ -75,7 +75,7 @@ async fn workload(availability: bool, waves: usize) {
     std::fs::write(dir.0.join("mode"), if availability { "availability" } else { "strict" }).unwrap();
     let mut child = Process(Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "server::tests::memory::memory_child", "--nocapture"])
-        .env("SOUNDGATE_MEMORY_CHILD", &dir.0).stdout(Stdio::null()).stderr(Stdio::inherit())
+        .env("LOGGATE_MEMORY_CHILD", &dir.0).stdout(Stdio::null()).stderr(Stdio::inherit())
         .spawn().unwrap());
     let port = loop {
         assert!(child.0.try_wait().unwrap().is_none(), "gateway child exited during startup");

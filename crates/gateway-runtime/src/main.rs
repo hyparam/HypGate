@@ -19,19 +19,19 @@ fn bounded_file(path: &str) -> io::Result<Vec<u8>> {
 }
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    if let Err(message) = run().await { eprintln!("soundgate: {message}"); std::process::exit(1); }
+    if let Err(message) = run().await { eprintln!("loggate: {message}"); std::process::exit(1); }
 }
 async fn run() -> Result<(), &'static str> {
     let args: Vec<_> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("scan") {
-        if args.len() != 3 { return Err("usage: soundgate scan LOG"); }
+        if args.len() != 3 { return Err("usage: loggate scan LOG"); }
         return scan(&args[2]);
     }
     if args.get(1).map(String::as_str) == Some("ship") {
-        if args.len() != 4 { return Err("usage: soundgate ship ROOT.json LOG"); }
+        if args.len() != 4 { return Err("usage: loggate ship ROOT.json LOG"); }
         return ship(&args[2], &args[3]);
     }
-    if !(4..=5).contains(&args.len()) { return Err("usage: soundgate ROOT.json ROUTES.json NEW_LOG [127.0.0.1:8080]"); }
+    if !(4..=5).contains(&args.len()) { return Err("usage: loggate ROOT.json ROUTES.json NEW_LOG [127.0.0.1:8080]"); }
     let address: SocketAddr = args.get(4).map(String::as_str).unwrap_or("127.0.0.1:8080").parse().map_err(|_| "invalid listen address")?;
     if !address.ip().is_loopback() { return Err("listen address must be loopback; use a trusted TLS reverse proxy for remote clients"); }
     let (config, shipping) = {
@@ -57,15 +57,15 @@ async fn run() -> Result<(), &'static str> {
         None => None,
     };
     let listener = bind(address).await.map_err(|_| "cannot bind listener")?;
-    eprintln!("soundgate listening on {}", listener.local_addr().map_err(|_| "cannot read listen address")?);
+    eprintln!("loggate listening on {}", listener.local_addr().map_err(|_| "cannot read listen address")?);
     let budget = gateway_runtime::budget::compose(gateway_runtime::budget::Limits {
         requests: config.request_limit(), chunk_bytes: config.chunk_bytes(), connections: 128, queue: 16,
     }).ok_or("allocation budget overflow")?;
     // Informational only: a closed stderr must not stop the server.
-    let _ = writeln!(io::stderr().lock(), "soundgate requested-allocation budget {} bytes under docs/resource-composition.md assumptions", budget.total);
+    let _ = writeln!(io::stderr().lock(), "loggate requested-allocation budget {} bytes under docs/resource-composition.md assumptions", budget.total);
     if let Some((open, bytes)) = shipping_limits {
         let extra = gateway_runtime::budget::shipping(open, bytes).ok_or("shipping budget overflow")?;
-        let _ = writeln!(io::stderr().lock(), "soundgate shipping thread adds {extra} bytes to that budget");
+        let _ = writeln!(io::stderr().lock(), "loggate shipping thread adds {extra} bytes to that budget");
     }
     let shutdown = async {
         #[cfg(unix)] {
@@ -81,7 +81,7 @@ async fn run() -> Result<(), &'static str> {
         .await.map_err(|_| "server failed");
     // After request workers and the logger: a bounded window, no replacement.
     if let Some(shipper) = shipper {
-        if shipper.shutdown(Duration::from_secs(2)).is_err() { eprintln!("soundgate: shipping thread did not stop within its window"); }
+        if shipper.shutdown(Duration::from_secs(2)).is_err() { eprintln!("loggate: shipping thread did not stop within its window"); }
     }
     served
 }

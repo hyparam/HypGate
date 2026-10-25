@@ -58,7 +58,7 @@ jobs:
         run: rustup show active-toolchain
       - name: One minute of overload per logging mode
         env:
-          SOUNDGATE_OVERLOAD_SECONDS: 60
+          LOGGATE_OVERLOAD_SECONDS: 60
         run: cargo test -p gateway-runtime --locked --lib sustained_overload -- --ignored --nocapture
 
   verify:
@@ -112,7 +112,7 @@ jobs:
         run: rustup show active-toolchain
       - name: Check gateway-process failover
         env:
-          SOUNDGATE_HAPROXY: /usr/sbin/haproxy
+          LOGGATE_HAPROXY: /usr/sbin/haproxy
         run: cargo test -p gateway-runtime --locked proxy_gateway_process_failover -- --ignored --nocapture
 
   storage:
@@ -149,9 +149,9 @@ jobs:
       - name: Deploy the documented configuration on the runner
         run: bash scripts/check_deployment.sh
       - name: Build, test, and verify in a clean container
-        run: docker build --file deploy/Dockerfile --tag soundgate-deploy .
+        run: docker build --file deploy/Dockerfile --tag loggate-deploy .
       - name: Deploy the documented configuration inside the container
-        run: docker run --rm soundgate-deploy
+        run: docker run --rm loggate-deploy
 
   benchmarks:
     name: Release workloads

@@ -6,16 +6,16 @@ fn json(value: impl Into<serde_json::Value>) -> serde_json::Value { value.into()
 
 #[test]
 fn executable_starts_and_serves_health_with_real_configuration() {
-    let dir = TempDir::new("soundgate-cli");
+    let dir = TempDir::new("loggate-cli");
     let root = dir.0.join("root.json"); let routes = dir.0.join("routes.json"); let log = dir.0.join("audit.log");
     fs::write(&root, br#"{"identities":[],"destinations":[],"credentials":[],"grants":[],"limits":{"requests":1,"chunk_bytes":4},"logging":"strict"}"#).unwrap();
     fs::write(&routes, br#"{"routes":[]}"#).unwrap();
-    let mut child = Process(Command::new(env!("CARGO_BIN_EXE_soundgate"))
+    let mut child = Process(Command::new(env!("CARGO_BIN_EXE_loggate"))
         .args([root.as_os_str(), routes.as_os_str(), log.as_os_str()]).arg("127.0.0.1:0")
         .stderr(Stdio::piped()).spawn().unwrap());
     let mut startup = String::new();
     BufReader::new(child.0.stderr.take().unwrap()).read_line(&mut startup).unwrap();
-    let address = startup.trim().strip_prefix("soundgate listening on ").expect("server startup message");
+    let address = startup.trim().strip_prefix("loggate listening on ").expect("server startup message");
     let mut socket = TcpStream::connect(address).unwrap(); socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
     socket.write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").unwrap();
     let mut response = String::new(); socket.read_to_string(&mut response).unwrap();
@@ -26,7 +26,7 @@ fn executable_starts_and_serves_health_with_real_configuration() {
 
 #[test]
 fn scan_command_reports_valid_prefix_without_printing_payload_or_editing_log() {
-    let dir = TempDir::new("soundgate-scan"); let path = dir.0.join("audit.log");
+    let dir = TempDir::new("loggate-scan"); let path = dir.0.join("audit.log");
     tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
         let mut log = DiskLog::create(&path, 1, Duration::from_secs(2)).unwrap();
         let start = gateway_core::metadata::encode_request_start(1_700_000_000_000, 7, b"https://example.test/v1/messages").unwrap();
@@ -44,7 +44,7 @@ fn scan_command_reports_valid_prefix_without_printing_payload_or_editing_log() {
     for incomplete in [false, true] {
         if incomplete { fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(b"SG").unwrap(); }
         let before = fs::read(&path).unwrap();
-        let result = Command::new(env!("CARGO_BIN_EXE_soundgate")).arg("scan").arg(&path).output().unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_loggate")).arg("scan").arg(&path).output().unwrap();
         assert_eq!(result.status.success(), !incomplete);
         let text = std::str::from_utf8(&result.stdout).unwrap();
         assert!(!text.contains("private-payload-marker")); assert!(!text.contains("private-response-marker"));
@@ -69,34 +69,34 @@ fn scan_command_reports_valid_prefix_without_printing_payload_or_editing_log() {
 
 #[test]
 fn executable_starts_the_shipper_from_the_root_policy_and_reports_it_in_metrics() {
-    let dir = TempDir::new("soundgate-ship");
+    let dir = TempDir::new("loggate-ship");
     let root = dir.0.join("root.json"); let routes = dir.0.join("routes.json"); let log = dir.0.join("audit.log");
     let state = dir.0.join("state"); fs::create_dir(&state).unwrap();
     fs::write(&root, format!(r#"{{"identities":[],"destinations":[],"credentials":[],"grants":[],"limits":{{"requests":1,"chunk_bytes":4}},"logging":"strict",
-        "shipping":{{"server":"https://localhost:1/","token_env":"SOUNDGATE_TEST_HYP_TOKEN","state_dir":"{}","poll_ms":100}}}}"#, state.display())).unwrap();
+        "shipping":{{"server":"https://localhost:1/","token_env":"LOGGATE_TEST_HYP_TOKEN","state_dir":"{}","poll_ms":100}}}}"#, state.display())).unwrap();
     fs::write(&routes, br#"{"routes":[]}"#).unwrap();
     // Without the token the executable refuses to start.
-    let refused = Command::new(env!("CARGO_BIN_EXE_soundgate")).args([root.as_os_str(), routes.as_os_str(), log.as_os_str()]).arg("127.0.0.1:0")
-        .env_remove("SOUNDGATE_TEST_HYP_TOKEN").output().unwrap();
+    let refused = Command::new(env!("CARGO_BIN_EXE_loggate")).args([root.as_os_str(), routes.as_os_str(), log.as_os_str()]).arg("127.0.0.1:0")
+        .env_remove("LOGGATE_TEST_HYP_TOKEN").output().unwrap();
     assert!(!refused.status.success());
     assert!(String::from_utf8_lossy(&refused.stderr).contains("missing token"));
     assert!(!log.exists());
-    let mut child = Process(Command::new(env!("CARGO_BIN_EXE_soundgate"))
+    let mut child = Process(Command::new(env!("CARGO_BIN_EXE_loggate"))
         .args([root.as_os_str(), routes.as_os_str(), log.as_os_str()]).arg("127.0.0.1:0")
-        .env("SOUNDGATE_TEST_HYP_TOKEN", "hsa_0123456789abcdef_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq")
+        .env("LOGGATE_TEST_HYP_TOKEN", "hsa_0123456789abcdef_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq")
         .stderr(Stdio::piped()).spawn().unwrap());
     let mut stderr = BufReader::new(child.0.stderr.take().unwrap());
     let mut startup = String::new(); stderr.read_line(&mut startup).unwrap();
-    let address = startup.trim().strip_prefix("soundgate listening on ").expect("server startup message").to_owned();
+    let address = startup.trim().strip_prefix("loggate listening on ").expect("server startup message").to_owned();
     let mut budget = String::new(); stderr.read_line(&mut budget).unwrap();
     let mut extra = String::new(); stderr.read_line(&mut extra).unwrap();
-    assert!(extra.starts_with("soundgate shipping thread adds "), "{extra}");
+    assert!(extra.starts_with("loggate shipping thread adds "), "{extra}");
     let mut socket = TcpStream::connect(&address).unwrap(); socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
     socket.write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").unwrap();
     let mut response = String::new(); socket.read_to_string(&mut response).unwrap();
-    assert!(response.contains("soundgate_shipping_enabled 1\n"), "{response}");
-    assert!(response.contains("soundgate_shipping_enrolled 0\n"));
-    assert!(response.contains("soundgate_shipping_stopped 0\n"));
+    assert!(response.contains("loggate_shipping_enabled 1\n"), "{response}");
+    assert!(response.contains("loggate_shipping_enrolled 0\n"));
+    assert!(response.contains("loggate_shipping_stopped 0\n"));
     let mut socket = TcpStream::connect(&address).unwrap(); socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
     socket.write_all(b"GET /readyz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").unwrap();
     let mut response = String::new(); socket.read_to_string(&mut response).unwrap();
@@ -104,7 +104,7 @@ fn executable_starts_the_shipper_from_the_root_policy_and_reports_it_in_metrics(
     drop(child);
     // The standalone subcommand needs the section.
     fs::write(&root, br#"{"identities":[],"destinations":[],"credentials":[],"grants":[],"limits":{"requests":1,"chunk_bytes":4},"logging":"strict"}"#).unwrap();
-    let result = Command::new(env!("CARGO_BIN_EXE_soundgate")).arg("ship").arg(&root).arg(&log).output().unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_loggate")).arg("ship").arg(&root).arg(&log).output().unwrap();
     assert!(!result.status.success());
     assert!(String::from_utf8_lossy(&result.stderr).contains("no shipping section"));
     fs::remove_dir_all(&dir.0).unwrap();

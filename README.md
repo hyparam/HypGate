@@ -40,9 +40,9 @@ set your gateway-token digest, and supply `PROVIDER_KEY` through your environmen
 Then run:
 
 ```sh
-cargo build --release --locked --bin soundgate
+cargo build --release --locked --bin loggate
 mkdir -m 700 logs
-target/release/soundgate root.json routes.json logs/session-001.log
+target/release/loggate root.json routes.json logs/session-001.log
 ```
 
 The server listens on `127.0.0.1:8080`; check it with
@@ -199,7 +199,7 @@ cargo test -p gateway-runtime --locked --lib sustained_overload -- --ignored --n
 cargo test -p gateway-runtime --locked --lib isolated_gateway_memory_in_both_logging_modes -- --ignored --nocapture
 cargo test -p gateway-runtime --locked --lib isolated_gateway_memory_soak -- --ignored --nocapture
 cargo test -p gateway-runtime --release --locked server::tests::benchmark -- --ignored --nocapture --test-threads=1
-SOUNDGATE_HAPROXY=/path/to/haproxy cargo test -p gateway-runtime --locked proxy_gateway_process_failover -- --ignored --nocapture
+LOGGATE_HAPROXY=/path/to/haproxy cargo test -p gateway-runtime --locked proxy_gateway_process_failover -- --ignored --nocapture
 ```
 
 Validation on 2026-10-25: 456 core verification checks passed, 295 workspace tests including seven compile-fail

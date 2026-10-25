@@ -52,13 +52,13 @@ impl Gateway {
             match request.uri().path() {
                 "/metrics" => {
                     use std::fmt::Write as _;
-                    let mut text = format!("soundgate_audit_gap_requests_total {}\nsoundgate_failed_exchanges_total {}\nsoundgate_audit_healthy {}\nsoundgate_worker_admission_healthy {}\n",
+                    let mut text = format!("loggate_audit_gap_requests_total {}\nloggate_failed_exchanges_total {}\nloggate_audit_healthy {}\nloggate_worker_admission_healthy {}\n",
                         self.audit_gaps(), self.failed_exchanges(), u8::from(self.log.healthy()), u8::from(self.worker_slots.healthy()));
                     match self.config.usage() {
-                        Some((active, limit)) => { let _ = write!(text, "soundgate_admission_healthy 1\nsoundgate_requests_active {active}\nsoundgate_requests_limit {limit}\n"); }
-                        None => text.push_str("soundgate_admission_healthy 0\n"),
+                        Some((active, limit)) => { let _ = write!(text, "loggate_admission_healthy 1\nloggate_requests_active {active}\nloggate_requests_limit {limit}\n"); }
+                        None => text.push_str("loggate_admission_healthy 0\n"),
                     }
-                    match &self.shipping { Some(metrics) => metrics.render(&mut text), None => text.push_str("soundgate_shipping_enabled 0\n") }
+                    match &self.shipping { Some(metrics) => metrics.render(&mut text), None => text.push_str("loggate_shipping_enabled 0\n") }
                     let mut response = Response::new(GatewayBody::Fixed(Full::new(Bytes::from(text))));
                     response.headers_mut().insert("content-type", http::HeaderValue::from_static("text/plain; version=0.0.4"));
                     return Ok(response);

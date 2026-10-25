@@ -173,9 +173,9 @@ async fn exercise(availability: bool, failed_log: bool, truncated: bool, stop: S
         let (metrics, metrics_connection) = send(port, "/metrics", "", "GET").await;
         let metrics = metrics.collect().await.unwrap().to_bytes(); metrics_connection.await.unwrap();
         let metrics = std::str::from_utf8(&metrics).unwrap();
-        assert!(metrics.contains("soundgate_admission_healthy 1\n"));
-        assert!(metrics.contains("soundgate_requests_active 1\n"));
-        assert!(metrics.contains("soundgate_requests_limit 1\n"));
+        assert!(metrics.contains("loggate_admission_healthy 1\n"));
+        assert!(metrics.contains("loggate_requests_active 1\n"));
+        assert!(metrics.contains("loggate_requests_limit 1\n"));
         if matches!(stop, Stop::Drain | Stop::Abort | Stop::SharedAbort) {
             let started = tokio::time::Instant::now();
             shutdown.send(()).unwrap();
@@ -253,10 +253,10 @@ async fn exercise(availability: bool, failed_log: bool, truncated: bool, stop: S
         let (metrics, metrics_connection) = send(port, "/metrics", "", "GET").await;
         let metrics = metrics.collect().await.unwrap().to_bytes(); metrics_connection.await.unwrap();
         let metrics = std::str::from_utf8(&metrics).unwrap();
-        assert!(metrics.contains("soundgate_requests_active 0\n"));
-        assert!(metrics.contains(&format!("soundgate_audit_gap_requests_total {}\n", u8::from(failed_log && availability))));
-        assert!(metrics.contains(&format!("soundgate_failed_exchanges_total {}\n", u8::from(truncated))));
-        assert!(metrics.contains(&format!("soundgate_audit_healthy {}\n", u8::from(!failed_log))));
+        assert!(metrics.contains("loggate_requests_active 0\n"));
+        assert!(metrics.contains(&format!("loggate_audit_gap_requests_total {}\n", u8::from(failed_log && availability))));
+        assert!(metrics.contains(&format!("loggate_failed_exchanges_total {}\n", u8::from(truncated))));
+        assert!(metrics.contains(&format!("loggate_audit_healthy {}\n", u8::from(!failed_log))));
         shutdown.send(()).unwrap(); gateway.await.unwrap().unwrap();
         assert!(app.workers.is_empty()); assert_eq!(app.failed_exchanges(), u64::from(truncated));
         assert_eq!(app.audit_gaps(), u64::from(failed_log && availability));
@@ -331,8 +331,8 @@ async fn failed_start_record_refuses_in_strict_mode_and_forwards_with_one_gap_in
             let (metrics, metrics_connection) = send(port, "/metrics", "", "GET").await;
             let metrics = metrics.collect().await.unwrap().to_bytes(); metrics_connection.await.unwrap();
             let metrics = std::str::from_utf8(&metrics).unwrap();
-            assert!(metrics.contains(&format!("soundgate_audit_gap_requests_total {}\n", u8::from(availability))));
-            assert!(metrics.contains("soundgate_audit_healthy 1\n"));
+            assert!(metrics.contains(&format!("loggate_audit_gap_requests_total {}\n", u8::from(availability))));
+            assert!(metrics.contains("loggate_audit_healthy 1\n"));
             assert!(app.log.healthy());
             shutdown.send(()).unwrap(); gateway.await.unwrap().unwrap();
             assert_eq!(app.audit_gaps(), u64::from(availability));
@@ -595,10 +595,10 @@ async fn poisoned_admission_is_unready_and_fail_closed_in_both_logging_modes() {
             let (metrics, connection) = send(port, "/metrics", "", "GET").await;
             let metrics = metrics.collect().await.unwrap().to_bytes(); connection.await.unwrap();
             let metrics = std::str::from_utf8(&metrics).unwrap();
-            assert!(metrics.contains("soundgate_admission_healthy 0\n"));
-            assert!(!metrics.contains("soundgate_requests_active"));
-            assert!(!metrics.contains("soundgate_requests_limit"));
-            assert!(metrics.contains("soundgate_audit_healthy 1\n"));
+            assert!(metrics.contains("loggate_admission_healthy 0\n"));
+            assert!(!metrics.contains("loggate_requests_active"));
+            assert!(!metrics.contains("loggate_requests_limit"));
+            assert!(metrics.contains("loggate_audit_healthy 1\n"));
             assert!(tokio::time::timeout(Duration::from_millis(20), upstream.accept()).await.is_err());
             shutdown.send(()).unwrap(); gateway.await.unwrap().unwrap();
             assert!(app.workers.is_empty());
@@ -733,8 +733,8 @@ async fn poisoned_worker_registry_is_unready_and_fail_closed_in_both_modes() {
             let (response, connection) = send(port, "/metrics", "", "GET").await;
             let metrics = response.collect().await.unwrap().to_bytes(); connection.await.unwrap();
             let metrics = std::str::from_utf8(&metrics).unwrap();
-            assert!(metrics.contains("soundgate_worker_admission_healthy 0\n"));
-            assert!(metrics.contains("soundgate_admission_healthy 1\n"));
+            assert!(metrics.contains("loggate_worker_admission_healthy 0\n"));
+            assert!(metrics.contains("loggate_admission_healthy 1\n"));
             assert!(tokio::time::timeout(Duration::from_millis(20), upstream.accept()).await.is_err());
             shutdown.send(()).unwrap(); gateway.await.unwrap().unwrap();
             assert!(app.workers.is_empty());
@@ -934,8 +934,8 @@ async fn shipping_thread_panic_changes_only_metrics() {
         }
         let (text, c) = send(port, "/metrics", "", "GET").await;
         let text = String::from_utf8(text.collect().await.unwrap().to_bytes().to_vec()).unwrap(); c.await.unwrap();
-        assert!(text.contains("soundgate_shipping_enabled 1\n") && text.contains("soundgate_shipping_stopped 1\n"), "{text}");
-        assert!(text.contains("soundgate_shipping_batches_acknowledged_total 0\n"));
+        assert!(text.contains("loggate_shipping_enabled 1\n") && text.contains("loggate_shipping_stopped 1\n"), "{text}");
+        assert!(text.contains("loggate_shipping_batches_acknowledged_total 0\n"));
         shutdown.send(()).unwrap(); gateway.await.unwrap().unwrap();
         let result = tokio::task::spawn_blocking(move || shipper.shutdown(Duration::from_secs(2))).await.unwrap();
         assert_eq!(result.unwrap_err().to_string(), "shipper panicked");
@@ -985,9 +985,9 @@ async fn shipping_uploads_forwarded_exchanges_without_touching_readiness() {
             }
             let (text, c) = send(port, "/metrics", "", "GET").await;
             let text = String::from_utf8(text.collect().await.unwrap().to_bytes().to_vec()).unwrap(); c.await.unwrap();
-            assert!(text.contains("soundgate_shipping_enabled 1\n"), "{text}");
-            assert!(text.contains(&format!("soundgate_shipping_batches_acknowledged_total {}\n", u8::from(!hang))), "{text}");
-            assert!(text.contains("soundgate_shipping_stopped 0\n"));
+            assert!(text.contains("loggate_shipping_enabled 1\n"), "{text}");
+            assert!(text.contains(&format!("loggate_shipping_batches_acknowledged_total {}\n", u8::from(!hang))), "{text}");
+            assert!(text.contains("loggate_shipping_stopped 0\n"));
             shutdown.send(()).unwrap(); gateway.await.unwrap().unwrap();
             let started = std::time::Instant::now();
             let result = tokio::task::spawn_blocking(move || shipper.shutdown(Duration::from_secs(2))).await.unwrap();

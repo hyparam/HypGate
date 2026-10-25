@@ -2,7 +2,7 @@
 
 Every fixed or configurable limit in the runnable gateway, the behavior when a
 caller or peer reaches it, and the evidence behind that behavior. Values are
-those compiled into the `soundgate` executable or accepted by its configuration
+those compiled into the `loggate` executable or accepted by its configuration
 as of 2026-10-24; library callers may choose others within the stated ranges.
 "Proved" means a Verus contract covers the count or transition; "tested" means a
 workspace or opt-in test exercises the limit; "measured" points at the
@@ -67,8 +67,8 @@ requested-allocation accounting that follows from them.
 | Batch | 5,000 rows, 4 MiB, whole exchanges only | The batch is sent and the next one starts; an exchange that fits no batch is poisoned. | `BatchBuilder` proved; drain-mode test. |
 | Request deadline and reply | 30 s, 64 KiB reply | Counted as a transport failure and retried after 2, 4, 6 s, then 30 to 300 s. | `transport_delay` proved; shutdown-under-hang test. |
 | Throttling | `Retry-After` clamped to 1 to 300 s, else 30/60/120/300 s | The same batch is retried under the same id. | `throttle_delay` proved; recovery test. |
-| Poison | 400, 413, 415, 422 | Multi-exchange batches are retried one exchange at a time; the isolated exchange is skipped and counted in `soundgate_shipping_poisoned_batches_total`. | Recovery test. |
-| Enrollment | Credential renewed inside 24 h of expiry or once after a 401; re-enrolled after a rejected refresh; `service_token_revoked` / `service_account_disabled` stop the shipper permanently | `soundgate_shipping_stopped 1`; nothing else changes. | `Enrollment` proved; recovery test. |
+| Poison | 400, 413, 415, 422 | Multi-exchange batches are retried one exchange at a time; the isolated exchange is skipped and counted in `loggate_shipping_poisoned_batches_total`. | Recovery test. |
+| Enrollment | Credential renewed inside 24 h of expiry or once after a 401; re-enrolled after a rejected refresh; `service_token_revoked` / `service_account_disabled` stop the shipper permanently | `loggate_shipping_stopped 1`; nothing else changes. | `Enrollment` proved; recovery test. |
 | Shutdown window | 2 s after request workers and the logger | A thread inside a request is left to finish; no replacement. | `shutdown_returns_within_its_window_while_the_server_hangs`. |
 
 ## Shutdown

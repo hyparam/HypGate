@@ -5,7 +5,7 @@ edition = "2021"
 publish = false
 
 [[bin]]
-name = "soundgate"
+name = "loggate"
 path = "src/main.rs"
 
 [dependencies]

@@ -4,7 +4,7 @@ The [HAProxy example](../deploy/haproxy.cfg) terminates TLS on port 8443 and rou
 to a primary gateway on loopback port 8081 and a standby on 8082. Both gateways
 need the same intended authorization policy but separate new audit files. Start
 them using [the runtime instructions](running.md), with different listen ports.
-Provision an operator-managed certificate/private-key PEM, set `SOUNDGATE_TLS_PEM`
+Provision an operator-managed certificate/private-key PEM, set `LOGGATE_TLS_PEM`
 to its path, validate with `haproxy -c -f deploy/haproxy.cfg`, then start HAProxy
 through the host's service manager. Use a supported, patched HAProxy package.
 The example is a deployment starting point, not a hardened or verified proxy.
@@ -74,12 +74,12 @@ or outside `/routes/<n>` receive 401, 401, 401, 405, and 400 and that an authori
 request whose upstream refuses the connection receives 502, is counted once as a
 failed exchange, releases its slot, leaves no audit gap, and leaves exactly a
 request-start and a completion record (outcome 1) in the log. When HAProxy is on
-`PATH` or named by `SOUNDGATE_HAPROXY`, it also starts a standby instance, generates
+`PATH` or named by `LOGGATE_HAPROXY`, it also starts a standby instance, generates
 fixture TLS material, validates and runs the [example configuration](../deploy/haproxy.cfg)
 with only ports and the certificate path substituted, checks that the public frontend
 exposes only `POST /routes/<n>`, shuts the primary down with SIGTERM, and verifies
 that a new request reaches the standby without any replayed exchange. Finally every
-gateway must exit with status zero after SIGTERM, and `soundgate scan` must report a
+gateway must exit with status zero after SIGTERM, and `loggate scan` must report a
 complete log holding only paired start/completion records with the configured
 destination and no body records, without changing its bytes.
 
@@ -94,8 +94,8 @@ and runs the container on every push.
 
 ```sh
 bash scripts/check_deployment.sh
-docker build --file deploy/Dockerfile --tag soundgate-deploy .
-docker run --rm soundgate-deploy
+docker build --file deploy/Dockerfile --tag loggate-deploy .
+docker run --rm loggate-deploy
 ```
 
 The check demonstrates provisioning, fail-closed startup, authorization, honest

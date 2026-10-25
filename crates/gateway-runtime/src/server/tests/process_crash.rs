@@ -8,7 +8,7 @@ impl Drop for Process { fn drop(&mut self) { let _ = self.0.kill(); let _ = self
 
 #[test]
 fn gateway_child() {
-    let Some(directory) = std::env::var_os("SOUNDGATE_GATEWAY_CRASH_CHILD") else { return; };
+    let Some(directory) = std::env::var_os("LOGGATE_GATEWAY_CRASH_CHILD") else { return; };
     let directory = std::path::PathBuf::from(directory);
     let upstream: u16 = std::fs::read_to_string(directory.join("upstream")).unwrap().parse().unwrap();
     let mut roots = RootCertStore::empty();
@@ -29,7 +29,7 @@ async fn start(directory: &TempDir, root: &[u8], upstream: u16) -> (Process, u16
     std::fs::write(directory.0.join("upstream"), upstream.to_string()).unwrap();
     let mut child = Process(Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "server::tests::process_crash::gateway_child", "--nocapture"])
-        .env("SOUNDGATE_GATEWAY_CRASH_CHILD", &directory.0)
+        .env("LOGGATE_GATEWAY_CRASH_CHILD", &directory.0)
         .stdout(Stdio::null()).stderr(Stdio::inherit()).spawn().unwrap());
     let port = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -47,7 +47,7 @@ async fn start(directory: &TempDir, root: &[u8], upstream: u16) -> (Process, u16
 async fn killed_gateway_truncates_response_preserves_audit_prefix_and_does_not_replay() { exercise(false).await; }
 
 #[tokio::test]
-#[ignore = "requires HAProxy; set SOUNDGATE_HAPROXY and run with --ignored"]
+#[ignore = "requires HAProxy; set LOGGATE_HAPROXY and run with --ignored"]
 async fn proxy_gateway_process_failover_without_replay() { exercise(true).await; }
 
 async fn exercise(with_proxy: bool) {
@@ -170,8 +170,8 @@ async fn start_proxy(directory: &TempDir, primary: u16, standby: u16, pem: &str)
         .replace("127.0.0.1:8082", &format!("127.0.0.1:{standby}"));
     let path = directory.0.join("haproxy.cfg"); std::fs::write(&path, config).unwrap();
     drop(reservation);
-    let mut process = Process(Command::new(std::env::var_os("SOUNDGATE_HAPROXY").unwrap_or_else(|| "haproxy".into()))
-        .arg("-db").arg("-f").arg(&path).env("SOUNDGATE_TLS_PEM", certificate)
+    let mut process = Process(Command::new(std::env::var_os("LOGGATE_HAPROXY").unwrap_or_else(|| "haproxy".into()))
+        .arg("-db").arg("-f").arg(&path).env("LOGGATE_TLS_PEM", certificate)
         .stdout(Stdio::null()).stderr(Stdio::inherit()).spawn().unwrap());
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {

@@ -81,6 +81,6 @@ memory-soak, benchmark, and proxy-failover workloads are in the
 
 The proxy command requires HAProxy and OpenSSL. macOS RSS sampling needs permission
 to inspect the child PID with `ps`. The sustained test holds eight streams for
-five minutes in each mode (one minute in CI through `SOUNDGATE_OVERLOAD_SECONDS`), rejects concurrent 32-request waves, probes health
+five minutes in each mode (one minute in CI through `LOGGATE_OVERLOAD_SECONDS`), rejects concurrent 32-request waves, probes health
 while overloaded, and verifies recovery/reuse afterward. Memory sampling measures
 the separate gateway child, excluding the provider/client fixture processes.

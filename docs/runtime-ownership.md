@@ -100,8 +100,8 @@ the registry unchanged. These contracts compose count changes across arbitrary
 valid synchronous call sequences; they do not prove when async owners drop leases.
 
 The runtime takes this snapshot under the admission mutex. `/metrics` reports
-`soundgate_requests_active`, `soundgate_requests_limit`, and
-`soundgate_admission_healthy`. If the mutex is poisoned, it reports admission health
+`loggate_requests_active`, `loggate_requests_limit`, and
+`loggate_admission_healthy`. If the mutex is poisoned, it reports admission health
 zero and omits occupancy gauges instead of inventing zero utilization. Readiness
 also returns 503 in both logging modes after poisoning, while liveness stays 200
 so operators can distinguish an unusable registry from an unresponsive process.

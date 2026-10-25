@@ -8,9 +8,9 @@ async fn repeated_overload_preserves_active_streams_health_and_reusable_capacity
 }
 
 #[tokio::test]
-#[ignore = "sustained overload workload: five minutes per logging mode unless SOUNDGATE_OVERLOAD_SECONDS says otherwise"]
+#[ignore = "sustained overload workload: five minutes per logging mode unless LOGGATE_OVERLOAD_SECONDS says otherwise"]
 async fn sustained_overload_preserves_active_streams_and_health() {
-    let seconds = std::env::var("SOUNDGATE_OVERLOAD_SECONDS").map_or(300, |value| value.parse().expect("SOUNDGATE_OVERLOAD_SECONDS must be a whole number of seconds"));
+    let seconds = std::env::var("LOGGATE_OVERLOAD_SECONDS").map_or(300, |value| value.parse().expect("LOGGATE_OVERLOAD_SECONDS must be a whole number of seconds"));
     tokio::time::timeout(Duration::from_secs(2 * seconds + 60), async {
         for availability in [false, true] {
             exercise(availability, Duration::from_secs(seconds)).await;

@@ -192,8 +192,8 @@ pub fn rows(session: &[u8; 16], exchange: &Exchange, max_text: usize) -> Vec<Val
         row.insert("provider".into(), json!(provider(&host)));
         row.insert("model".into(), json!(model));
         row.insert("conversation_started_at".into(), json!(iso_timestamp(started)));
-        row.insert("conversation_source".into(), json!("soundgate"));
-        row.insert("client_name".into(), json!("soundgate"));
+        row.insert("conversation_source".into(), json!("loggate"));
+        row.insert("client_name".into(), json!("loggate"));
         row.insert("message_id".into(), json!(hex(&message_key(session, exchange.request, index))));
         row.insert("message_index".into(), json!(index));
         row.insert("part_id".into(), json!(hex(&part_key(session, exchange.request, index, 0))));

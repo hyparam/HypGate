@@ -7,14 +7,14 @@ use common::{Process, TempDir};
 
 #[test]
 fn crash_child() {
-    let Some(path) = std::env::var_os("SOUNDGATE_CRASH_CHILD_LOG") else { return; };
+    let Some(path) = std::env::var_os("LOGGATE_CRASH_CHILD_LOG") else { return; };
     tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
         let mut log = DiskLog::create(std::path::Path::new(&path), 1, Duration::from_secs(5)).unwrap();
         for chunk in 1..=64u64 {
             let bytes = vec![chunk as u8; 64 * 1024];
             log.append(LogRecord { tenant: 7, request: 11, chunk, kind: RecordKind::Upload, bytes: &bytes }).await.unwrap();
-            println!("SOUNDGATE_ACK {chunk}"); std::io::stdout().flush().unwrap();
-            if std::env::var_os("SOUNDGATE_CRASH_PAUSE_AFTER_ACK").is_some() {
+            println!("LOGGATE_ACK {chunk}"); std::io::stdout().flush().unwrap();
+            if std::env::var_os("LOGGATE_CRASH_PAUSE_AFTER_ACK").is_some() {
                 std::future::pending::<()>().await;
             }
         }
@@ -23,12 +23,12 @@ fn crash_child() {
 }
 
 fn kill_and_scan(pause_after_ack: bool) {
-    let dir = TempDir::new("soundgate-crash"); let path = dir.0.join("audit.log");
+    let dir = TempDir::new("loggate-crash"); let path = dir.0.join("audit.log");
     let mut command = Command::new(std::env::current_exe().unwrap());
     command.args(["--exact", "crash_child", "--nocapture"])
-        .env("SOUNDGATE_CRASH_CHILD_LOG", &path).stdout(Stdio::piped()).stderr(Stdio::piped());
-    if pause_after_ack { command.env("SOUNDGATE_CRASH_PAUSE_AFTER_ACK", "1"); }
-    else { command.env_remove("SOUNDGATE_CRASH_PAUSE_AFTER_ACK"); }
+        .env("LOGGATE_CRASH_CHILD_LOG", &path).stdout(Stdio::piped()).stderr(Stdio::piped());
+    if pause_after_ack { command.env("LOGGATE_CRASH_PAUSE_AFTER_ACK", "1"); }
+    else { command.env_remove("LOGGATE_CRASH_PAUSE_AFTER_ACK"); }
     let mut child = Process(command.spawn().unwrap());
     let mut output = BufReader::new(child.0.stdout.take().unwrap());
     let target = if pause_after_ack { 1 } else { 3 };
@@ -36,7 +36,7 @@ fn kill_and_scan(pause_after_ack: bool) {
     while acknowledged < target {
         let mut line = String::new();
         assert!(output.read_line(&mut line).unwrap() > 0, "writer exited before acknowledging records");
-        if let Some((_, value)) = line.split_once("SOUNDGATE_ACK ") { acknowledged = value.trim().parse::<u64>().unwrap(); }
+        if let Some((_, value)) = line.split_once("LOGGATE_ACK ") { acknowledged = value.trim().parse::<u64>().unwrap(); }
     }
     child.0.kill().unwrap(); let exit = child.0.wait().unwrap(); assert!(!exit.success());
     let before = fs::read(&path).unwrap();
