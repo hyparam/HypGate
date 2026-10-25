@@ -30,6 +30,11 @@ pub mod http_accounting;
 pub mod lifecycle_composition;
 pub mod buffer_accounting;
 pub mod owned_accounting;
+pub mod exchange_assembler;
+pub mod shipping_identity;
+pub mod batch_builder;
+pub mod upload_cursor;
+pub mod enrollment;
 
 #[cfg(test)]
 #[path = "tests/streaming.rs"]

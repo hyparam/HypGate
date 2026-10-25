@@ -253,6 +253,18 @@ impl<R: Source> Scanner<R> {
         Ok(Scanner { source, cursor: Cursor::new(56), session })
     }
 
+    /// Continue scanning a file whose header was already validated by `new`,
+    /// from a byte offset that an earlier scanner reported as its valid end.
+    /// The caller supplies a source positioned at that offset over the same
+    /// file; the offset being a record boundary and the session matching the
+    /// file are trusted facts carried by the shipper's checkpoint.
+    pub fn resume(source: R, session: [u8; 16], offset: u64) -> (out: Self)
+        requires source.valid(), source.position() == offset, offset >= 56,
+        ensures out.valid(), out.position() == offset, !out.stopped(),
+            out.data() == source.data(), out.session_id() == session,
+            out.io_errors() == source.io_errors(),
+    { Scanner { source, cursor: Cursor::new(offset), session } }
+
     pub fn session(&self) -> (out: [u8; 16])
         ensures out == self.session_id(),
     { self.session }
