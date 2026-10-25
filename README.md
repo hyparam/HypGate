@@ -144,6 +144,7 @@ Runtime and adapters:
 | [HTTPS transport](docs/https-transport.md) | Upstream TLS exchange and handshake isolation |
 | [Disk logging](docs/disk-logging.md) | Bounded disk worker, sync acknowledgments, recovery scanner |
 | [Cloud shipping](docs/cloud-shipping.md) | HypAware shipper thread: protocol, configuration, proved and trusted parts |
+| [HypAware setup](docs/hypaware.md) | Operator walkthrough: tokens, shipping config, checking rows on the server, live smoke test record |
 | [HTTP ownership](docs/http-ownership.md) | HTTP owner counts derived from the worker and connection registries |
 | [HTTP buffer lifetimes](docs/http-buffer-lifetimes.md) | HTTP body buffers, mailbox credit, and cancellation |
 | [Audit buffer lifetimes](docs/audit-buffer-lifetimes.md) | Audit queue credit, worker ownership, and receipt delivery |
