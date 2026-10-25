@@ -13,7 +13,7 @@ gateway instances.
 | 2. Minimal working gateway | Complete; adapter obligations documented | [Adapter audit](adapter-audit.md) |
 | 3. Crash-safe logging | Complete under the storage/read/checksum assumptions; physical power loss not validated | [Storage crash contract](storage-crash-contract.md#milestone-3-exit-audit) |
 | 4. Availability hardening | Complete under explicit scheduler/I/O assumptions | [Availability audit](availability-audit.md), [shutdown proof](shutdown-proof.md) |
-| 5. Auditable first release | Complete; remote CI currently blocked by an account billing restriction | [End-to-end audit](end-to-end-audit.md), [deployment](deployment.md#clean-environment-reproduction), [benchmarks](benchmarks.md#broader-workloads), [operational limits](operational-limits.md) |
+| 5. Auditable first release | Complete | [End-to-end audit](end-to-end-audit.md), [deployment](deployment.md#clean-environment-reproduction), [benchmarks](benchmarks.md#broader-workloads), [operational limits](operational-limits.md) |
 | 6. Async ownership and effect composition | Complete under the adapter assumptions in the audit | [Milestone 6 exit audit](milestone-6-exit-audit.md) |
 
 Completion means every row of the milestone's checklist is checked within its

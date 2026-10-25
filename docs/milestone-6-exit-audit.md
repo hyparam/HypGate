@@ -102,15 +102,12 @@ the joins specific to this milestone are:
 
 ## Validation and delivery
 
-On 2026-10-24, the pinned verifier reports 288 checks and zero errors; all 252
+On 2026-10-24, the pinned verifier reports 288 checks and zero errors; all 253
 mutations are rejected by proof. The locked full workspace suite passes 249 tests
 and seven compile-fail doctests. Both additional concurrent failed-log workloads
 pass over real TLS, in strict and availability modes. The final cross-owner test
 and source/result handoff tests are included in that full suite.
 
-GitHub Actions is configured to repeat tests/proofs and Linux-specific workloads,
-but the account currently prevents jobs from starting: GitHub's annotation says
-recent payments failed or the spending limit must be increased. No green remote
-CI or new Linux deployment/storage/soak result is claimed. The milestone's local
-proof, mutation, lifecycle, and integration gates above passed; restoring remote
-CI execution requires an account billing change, not a source-code change.
+Those figures are the local gates at milestone close. GitHub Actions repeats the
+tests, proofs, and Linux workloads on every push; current totals are in the
+[README](../README.md).

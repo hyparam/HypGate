@@ -1,6 +1,6 @@
 # Cloud shipping to HypAware
 
-Status: implemented on one dedicated thread inside `loggate`, enabled by an
+The shipper runs on one dedicated thread inside `loggate`, enabled by an
 optional `shipping` section of the root policy. Every decision is made by the
 verified shipper machine (`gateway_core::shipper::Machine`): which records
 form which exchange, which exchanges go into the next batch, which request to

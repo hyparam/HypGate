@@ -1,6 +1,6 @@
 # Static configuration boundary
 
-The runtime now parses two separate JSON inputs: an operator-controlled root policy
+The runtime parses two separate JSON inputs: an operator-controlled root policy
 and an untrusted candidate route selection. `GatewayConfig::from_json` receives an
 operator-controlled secret resolver; the executable resolves named environment
 variables. See [running](running.md) for the command-line interface.
@@ -69,14 +69,14 @@ are trusted and tested, not formally verified. The core theorem still concerns
 normalized route handles. The HTTP adapter must consume `RoutedRequest`, strip
 gateway/client credential headers, construct Host from its fixed destination,
 disable redirects/proxies/retries, and retain request ownership during effects.
-HTTP authentication header parsing and metadata filtering now exist in the
+HTTP authentication header parsing and metadata filtering live in the
 [HTTP boundary](http-boundary.md). DNS and TLS validation, disk logging, and
 network-level IP restrictions are not implemented here. Approved destinations may
 resolve to private IPs: this is origin confinement, not an SSRF/IP-range theorem.
 
 ## Verified normalized resource limits
 
-The JSON adapter now calls `resource::validate_limits` in the production core.
+The JSON adapter calls `resource::validate_limits` in the production core.
 Its result is true exactly when requests are between 1 and 65,536, chunk size is
 between 1 and 1,048,576 bytes, and their mathematical product is at most
 134,217,728 bytes (128 MiB). Guarded conversion and multiplication are proved safe;

@@ -1,14 +1,14 @@
 # Security contract
 
-Status: core authorization, normalized configuration, streaming, resource, and
-upstream-mediation properties are checked. Production body writes pass the checked
-`ResolvedRoute::write_bytes` gate ([milestone 6 exit audit](milestone-6-exit-audit.md));
-the [end-to-end audit](end-to-end-audit.md) traces that mediation through the
-enumerated effect sites and failure exits at the source level. Hyper, TLS, DNS, and
-the OS remain trusted adapters, and there is no single mechanized theorem over the
-async runtime. See the [authorization implementation notes](authorization-core.md)
-for the exact boundary. This contract was written before the transport existed; it
-now records the obligations it imposed and their current status.
+This contract was written before the transport existed. It records the obligations
+it imposed on the implementation and where each one stands. Core authorization,
+normalized configuration, streaming, resource, and upstream-mediation properties
+are checked. Production body writes pass the checked `ResolvedRoute::write_bytes`
+gate ([milestone 6 exit audit](milestone-6-exit-audit.md)), and the
+[end-to-end audit](end-to-end-audit.md) traces that mediation through every effect
+site and failure exit. Hyper, TLS, DNS, and the OS remain trusted adapters, and
+there is no single mechanized theorem over the async runtime. The
+[authorization notes](authorization-core.md) give the exact boundary.
 
 ## Threat and policy boundary
 
@@ -45,13 +45,13 @@ timing noninterference, or security against a malicious approved provider.
 
 ## Make dispatch require verified evidence
 
-The core now issues a private-constructor `AuthorizedRequest` through verified,
+The core issues a private-constructor `AuthorizedRequest` through verified,
 synchronous admission that combines authenticated identity, validated
 configuration, and root policy. Bind the token to the tenant, unique request
 identity, immutable policy snapshot, exact destination, and credential handle.
 Currently the token binds a nonzero request ID; uniqueness and resource ownership
 require composition with the registry. Destinations and credentials are handles;
-the configuration layer now preserves their immutable mapping to actual endpoints
+the configuration layer preserves their immutable mapping to actual endpoints
 and secrets in a routed request, and the transport consumes only that wrapper.
 See [configuration](configuration.md) for tested parser scope and remaining obligations.
 Do not implement public deserialization, arbitrary constructors, or unrestricted

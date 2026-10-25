@@ -23,7 +23,7 @@ runtime behavior; the assumptions remain visible obligations.
 At milestone close the workspace had 179 passing regular tests and five compile-fail
 doctests; current totals are maintained in the [README](../README.md).
 All five CI jobs passed at `154ef03`, the closing commit, in
-[run 40068082114](https://github.com/platypii/LogGate/actions/runs/40068082114):
+[run 40068082114](https://github.com/hyparam/LogGate/actions/runs/40068082114):
 183 production proof checks, all 139 rejected mutations, Rust tests, Linux ext4,
 proxy failover, and the 100-wave memory soak.
 The raw-construction, raw-claim, and raw-release negative examples require the

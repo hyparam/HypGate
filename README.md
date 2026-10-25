@@ -41,24 +41,22 @@ assumption.
 
 ## Why verify an AI gateway?
 
-The gateway sits in the hot path of every AI request and sees your most
-sensitive data: proprietary code, customer information, internal prompts, and
-provider credentials. If it goes down, AI work stops. If it is compromised,
-that data leaks and a shared gateway becomes a path across tenant boundaries.
+The gateway sits in the path of every AI request and sees your most sensitive
+data: proprietary code, customer information, internal prompts, and provider
+credentials. If it goes down, AI work stops. If it is compromised, that data
+leaks, and a shared gateway becomes a path across tenant boundaries.
 
-These risks are concrete. LiteLLM documented a
+This has happened. LiteLLM documented a
 [March 2026 supply-chain compromise](https://docs.litellm.ai/blog/security-townhall-updates)
 of its published Python packages, and a
 [second compromise on October 21, 2026](https://docs.litellm.ai/blog/security-incident-oct-21-2026)
 that shipped credential-stealing malware through PyPI and official container
 registries.
 
-Formal verification lets LogGate prove authorization, isolation, byte
-integrity, and resource bounds across every state its models cover, rather
-than only the examples a test suite happens to exercise. Keeping the gateway
-small is what makes those proofs practical. Proofs complement fault testing,
-redundancy, and secure builds; they do not by themselves stop a compromised
-release pipeline from shipping different code.
+Tests check the examples someone thought of. Proofs cover every input the model
+describes. Keeping the gateway small is what makes the proofs practical. Proofs
+do not replace fault testing, redundancy, or secure builds, and they cannot stop
+a compromised release pipeline from shipping different code.
 
 ## Status
 
@@ -157,8 +155,8 @@ History:
 | [Experiment results](docs/history/experiment-results.md) | Initial feasibility experiments and reproduction notes |
 | [Viability follow-up](docs/history/viability-followup.md) | Byte-level Verus proofs and the decision to drop Perennial |
 
-The historical experiment code (`experiments/`) was removed from the tree and
-remains only in Git history at commit `7869347`.
+The early experiment code was removed from the tree; it is in Git history at
+commit `7869347`.
 
 ## Development
 

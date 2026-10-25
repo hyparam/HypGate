@@ -237,7 +237,7 @@ Exit criteria:
 The [exit audit](../storage-crash-contract.md#milestone-3-exit-audit) maps every criterion
 to the theorem, runtime path, test evidence, and limitations. Linux ext4 tests cover
 actual ENOSPC, read-only startup, and process-death recovery on a private filesystem.
-[CI run 40039148167](https://github.com/platypii/LogGate/actions/runs/40039148167)
+[CI run 40039148167](https://github.com/hyparam/LogGate/actions/runs/40039148167)
 passed all four jobs at `7b9ce21`, including production proofs and deliberate defects.
 Hardware flush behavior, syscall correspondence, and stable read/checksum contracts
 remain explicit assumptions. This milestone does not certify physical power loss.

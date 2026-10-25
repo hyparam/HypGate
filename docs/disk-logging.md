@@ -1,9 +1,10 @@
 # Bounded disk logger and recovery scanner
 
-Status: the [journal acknowledgment state machine](journal-proof.md) is now formally
-verified and used by the disk worker. The [framing core](framing-proof.md) verifies
-header encoding/decoding, frame extents, and recovery cursor transitions. Filesystem operations, checksums, and
-the complete scanner loop remain tested rather than verified. The production HTTP server integrates this logger.
+The disk worker runs the verified [journal acknowledgment state machine](journal-proof.md).
+The [framing core](framing-proof.md) verifies header encoding and decoding, frame
+extents, and recovery cursor transitions. Filesystem operations, checksums, and the
+complete scanner loop are tested rather than verified. The production HTTP server
+uses this logger.
 
 `DiskLog::create` creates a new operator-selected file and never overwrites or
 appends to an existing path. On Unix the requested mode is 0600. Startup writes a
@@ -136,8 +137,7 @@ metadata codecs are verified; the values they carry (clock, status, outcome, byt
 counts, destination text) are supplied by trusted runtime code and tested, and a
 missing completion record means the logger was unhealthy or the process died.
 
-
-Journal identity is now explicit in the checked core: append tickets and durable
+Journal identity is explicit in the checked core: append tickets and durable
 receipts carry the immutable file-session ID. The worker refuses a journal from
 another session before any write or sync. Production initializes both owners
 from the same random file-header session. Uniqueness of that session and its

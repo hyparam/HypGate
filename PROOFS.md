@@ -19,8 +19,8 @@ enumerates every effect site in the runtime that a premise relies on. Tests
 and deliberate proof mutations (`scripts/check_mutations.py`) show the
 contracts are not vacuous; they do not enlarge the formal scope.
 
-Three statements summarize what the proofs buy an operator. Each is followed
-by what is proved today and what is still being moved under the theorem.
+Three guarantees follow. Each gives the claim, what is proved today, and the
+premises about the runtime that join the proof to the world.
 
 ## Guarantee 1: your traffic goes only where you said
 
@@ -116,8 +116,6 @@ implementation performs what it is asked (sends to the configured server,
 returns the log's records in order, writes the checkpoint it is given); the
 scanner reads the same file on restart (the checkpoint names the session).
 
-**In progress.** Nothing; what remains is the trusted projection.
-
 ## Guarantee 3: there is no crash state
 
 **Statement.** The verified core cannot panic. Every reachable shipper state
@@ -155,46 +153,27 @@ denies on unwrap, expect, panic, indexing, and unchecked arithmetic enforce
 panic that does occur; the clock is monotone enough for the enrollment
 windows.
 
-**In progress.** Nothing for the shipper. The gateway's own async
-cancellation and whole-process memory remain documented rather than
-mechanized, as the supporting table below records.
+The gateway's own async cancellation and whole-process memory are documented
+rather than mechanized; the table below records where.
 
-## How the gaps were closed
+## Where the proofs live
 
-Six phases, one logical commit each, on the `hypaware-shipping` branch.
-
-1. **Verified shipper machine (core).** Done. One state machine owning the
-   assembler, cursor, enrollment, queue, backoff, and batching. Operations:
-   admit a record, enqueue its projection, choose the next action, absorb a
-   reply. Theorems: conservation, batch fidelity, token containment, bounded
-   waiting, progress, totality (`crates/gateway-core/src/shipper.rs`).
-2. **Verified driver over an effect trait.** Done. The loop itself is
-   checked against the machine's contracts; the runtime implements read,
-   send, sleep, checkpoint, and now with no decisions in them
-   (`crates/gateway-core/src/shipping_driver.rs`). Clippy denies on unwrap,
-   expect, panic, indexing, and unchecked arithmetic in the shipping adapters.
-3. **One egress permit.** Done. A single verified type that both socket
-   sites require (`crates/gateway-core/src/egress.rs`); with shipping
-   disabled no cloud permit can be built. `clippy.toml` disallows every
-   other socket, lookup, listener, file-write, and secret-read call and
-   `scripts/check_effect_sites.sh` pins the audited sites.
-4. **Replay theorem.** Done. Emission numbering is a proved function of
-   the record kinds and request ids (`exchange_assembler::emitted_requests`);
-   the machine carries it as a ghost sequence tied to every queued and
-   resolved projection (`Machine::replay_numbering`), so restoring a
-   checkpoint skips exactly the resolved exchanges and resends the rest
-   with identical identities. A checkpoint carries only the machine's own
-   resolved count, so a crash causes a resend, never a skip.
-5. **No crash state, tested.** Done. The shipper thread body runs under
-   `catch_unwind`; a panic-injection test shows forwarding, readiness, and
-   shutdown unchanged while only the metrics report it, and a core test
-   crashes the machine after every step of a run and checks the restarted
-   run leaves the ledger identical.
-6. **Documentation.** Done. This file, the [proof index](docs/proof-index.md),
-   the [end-to-end audit](docs/end-to-end-audit.md), the
-   [security contract](docs/security-contract.md), and
-   [cloud shipping](docs/cloud-shipping.md) point at the theorems and name
-   the remaining premises.
+- `crates/gateway-core/src/shipper.rs`: the shipper state machine, which owns
+  the assembler, cursor, enrollment, queue, backoff, and batching. Theorems:
+  conservation, batch fidelity, token containment, bounded waiting, progress,
+  totality.
+- `crates/gateway-core/src/shipping_driver.rs`: the loop that drives the
+  machine, checked against its contracts over an effect trait with no
+  decisions in the runtime side.
+- `crates/gateway-core/src/egress.rs`: the single permit type both socket
+  sites require. With shipping disabled no cloud permit can be built.
+  `clippy.toml` denies every other socket, lookup, listener, file-write, and
+  secret-read call, and `scripts/check_effect_sites.sh` pins the audited sites.
+- `crates/gateway-core/src/exchange_assembler.rs`: the replay theorem.
+  Emission numbering is a function of record kinds and request ids, so a
+  restart from a checkpoint skips exactly the resolved exchanges.
+- `crates/gateway-runtime/src/shipping`: the trusted adapters, held to a
+  panic-free standard by clippy and run under `catch_unwind`.
 
 ## Specific properties proved
 

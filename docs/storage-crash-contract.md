@@ -86,7 +86,7 @@ process-failure experiment; host/power-loss tests remain open.
 with `data=ordered,barrier=1`, and removes it after testing. It never formats a host
 device. The Ubuntu 24.04 CI storage job records the kernel, mount options, and
 e2fsprogs version. The storage job passed on 2026-10-23 in
-[CI run 40039148167](https://github.com/platypii/LogGate/actions/runs/40039148167),
+[CI run 40039148167](https://github.com/hyparam/LogGate/actions/runs/40039148167),
 commit `7b9ce21`: Linux `6.17.0-1022-azure`, e2fsprogs `1.47.0`, observed mounts
 `rw,relatime,data=ordered` and then `ro,relatime,data=ordered`. Barriers were requested
 explicitly; their default enabled state is omitted from the displayed mount options.

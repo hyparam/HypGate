@@ -210,7 +210,7 @@ change the queue refused an append when full, and the same workload at commit
 ### The same workloads on the Ubuntu CI runner
 
 The `Release workloads` job at `b5fffbd`
-([run 40078196998](https://github.com/platypii/LogGate/actions/runs/40078196998),
+([run 40078196998](https://github.com/hyparam/LogGate/actions/runs/40078196998),
 2026-10-24 UTC) ran every workload above on a GitHub-hosted Ubuntu 24.04 runner.
 Thirteen passed; the strict 32-concurrent run failed in the client fixture because
 the audit queue then refused appends when full, which it no longer does. The
@@ -230,7 +230,7 @@ Availability rows were within a few percent of strict at every level. There,
 throughput scales linearly with concurrency and completion stays near 85 to 100 ms
 regardless of level, so the single-threaded TLS and HTTP work, not the disk, sets
 the per-request time. The 32-concurrent row comes from
-[run 40114340604](https://github.com/platypii/LogGate/actions/runs/40114340604)
+[run 40114340604](https://github.com/hyparam/LogGate/actions/runs/40114340604)
 at `033a922`, after appends were made to wait for a queue slot: on this runner the
 16-record queue costs about 30 ms of completion latency at twice its depth, and the
 128-request contention workload completed every request in 0.55 s (strict, 234
@@ -338,7 +338,7 @@ Both runs passed all correctness and shutdown checks. RSS rose between waves;
 these samples do not establish a plateau. Linux CI evidence is recorded below.
 
 Ubuntu 24.04 CI at `aec3985` also passed both modes in the Rust test job of
-[run 40043901306](https://github.com/platypii/LogGate/actions/runs/40043901306),
+[run 40043901306](https://github.com/hyparam/LogGate/actions/runs/40043901306),
 2026-10-24 UTC. Linux reports the child's kernel RSS high-water mark through the
 end of the workload:
 
@@ -377,7 +377,7 @@ final audit validation; RSS sampling ends before gateway shutdown.
 
 These observed plateaus are specific to this workload and sampling interval.
 The dedicated Ubuntu 24.04 soak job at `4816c00` passed both modes in
-[run 40048074140](https://github.com/platypii/LogGate/actions/runs/40048074140)
+[run 40048074140](https://github.com/hyparam/LogGate/actions/runs/40048074140)
 on 2026-10-24 UTC, before the subsequent worker-registry change:
 
 | Mode | Elapsed seconds | Baseline RSS bytes | Kernel peak RSS bytes | Final 20 settled RSS range, bytes |
@@ -407,7 +407,7 @@ its source and checked contracts, not these RSS samples.
 
 After the fixed HTTP mailbox, queued Hyper output, configured destination cap,
 and parser-owner audit, the Ubuntu 24.04 100-wave soak at `b72c839` passed in
-[run 40061075707](https://github.com/platypii/LogGate/actions/runs/40061075707)
+[run 40061075707](https://github.com/hyparam/LogGate/actions/runs/40061075707)
 on 2026-10-24 UTC. Each mode completed 800 requests, exact response/audit checks,
 and clean shutdown. The gateway alone was sampled; these are debug-profile
 measurements, not a controlled performance comparison with previous runs.
