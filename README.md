@@ -159,6 +159,18 @@ cargo verus verify -p gateway-core --locked -- --triggers-mode silent
 VERUS=/path/to/verus python3 scripts/check_mutations.py
 ```
 
+Opt-in load, memory, benchmark, and failover workloads (the last needs HAProxy and
+OpenSSL on PATH; results are discussed in the [benchmarks](docs/benchmarks.md),
+[availability audit](docs/availability-audit.md), and [deployment](docs/deployment.md) notes):
+
+```sh
+cargo test -p gateway-runtime --locked --lib sustained_overload -- --ignored --nocapture
+cargo test -p gateway-runtime --locked --lib isolated_gateway_memory_in_both_logging_modes -- --ignored --nocapture
+cargo test -p gateway-runtime --locked --lib isolated_gateway_memory_soak -- --ignored --nocapture
+cargo test -p gateway-runtime --release --locked server::tests::benchmark -- --ignored --nocapture --test-threads=1
+SOUNDGATE_HAPROXY=/path/to/haproxy cargo test -p gateway-runtime --locked proxy_gateway_process_failover -- --ignored --nocapture
+```
+
 Validation on 2026-10-24: 298 core verification checks passed, 249 workspace tests and seven compile-fail doctests
 passed, and all 253 deliberate mutations failed their proof obligations. The opt-in TLS proxy/gateway
 process-failover test and six load/fault workloads passed on 2026-10-23.

@@ -210,14 +210,11 @@ themselves, which later milestones may narrow but which this document does not
 hide.
 
 
-## Milestone 6 cross-owner HTTP regression
+## Cross-owner regressions and lifecycle composition
 
-The worker lifecycle suite now exercises the actual HTTP channel across two
-separately credited tasks: canceling the writer's worker allows worker reuse while
-the receiver's connection credit remains occupied and its queued frame remains
-intact. Canceling and joining that connection then returns its credit. A second
-regression checks actual Reader destruction before worker-slot/tracker release,
-including a retained partial frame. This strengthens the production correspondence
-evidence above. The [milestone 6 exit audit](milestone-6-exit-audit.md) now records
-the checked lifecycle composition. The older allocation snapshot theorem retains
-its stated correspondence and allocator assumptions.
+The cross-owner cancellation regressions that exercise the actual HTTP channel
+across separately credited worker and connection tasks are described in the
+[HTTP buffer lifetime audit](http-buffer-lifetimes.md#cross-owner-cancellation-regression);
+the checked lifecycle composition they support is recorded in the
+[milestone 6 exit audit](milestone-6-exit-audit.md). The allocation snapshot
+theorem above retains its stated correspondence and allocator assumptions.

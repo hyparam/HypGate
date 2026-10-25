@@ -39,21 +39,16 @@ same mutex before closing the tracker. Thus any successful concurrent acquisitio
 is already tracked before closure can finish; an acquisition after closure fails.
 A tracker becoming empty cannot race with a newly admitted worker.
 
-`LeasedTask` starts a verified `TaskCredit` and explicitly enters cleanup before
-destroying its boxed future, including unpolled captures and network/body owners.
-Only normal return from that destruction marks cleanup finished. Running and
-cleaning credits cannot release capacity. `WorkerLease::drop` then locks the
-issuing registry, removes tracking, and consumes the credit through the verified
-release gate before unlocking. The drain waiter synchronizes with this same mutex
-after the tracker wait, covering the interval between notification and the end
-of that destructor. A replacement cannot reuse the slot while its prior future
-or tracking token remains alive.
-
-No task result exports a worker resource: the result is unit. HTTP mailboxes,
-audit jobs, DNS jobs, and TLS handshake jobs have their own owners and credits
-when data/work leaves the worker. Cancellation therefore cannot erase those
-categories from accounting. See the [resource composition](resource-composition.md),
-[HTTP ownership](http-buffer-lifetimes.md), and [audit ownership](audit-buffer-lifetimes.md).
+The `LeasedTask` wrapper, its `TaskCredit` cleanup gate, and the order in which
+`WorkerLease::drop` removes tracking and releases credit under the registry mutex
+are described in [worker lifetimes](worker-lifetimes.md#task-ownership-covers-captures).
+What the shutdown argument needs from them: the drain waiter synchronizes with that
+same mutex after the tracker wait, covering the interval between notification and
+the end of the destructor, so a replacement cannot reuse a slot while its prior
+future or tracking token remains alive; and the task result is unit, so HTTP
+mailboxes, audit jobs, DNS jobs, and TLS handshake jobs keep their own owners and
+credits when work leaves the worker. See the [resource composition](resource-composition.md),
+[HTTP ownership](http-ownership.md), and [audit ownership](audit-buffer-lifetimes.md).
 
 Mutex poison refuses admission and never recovers registry state to release a
 slot. The healthy-registry rank argument then stops applying to capacity reuse;

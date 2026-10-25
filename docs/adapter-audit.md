@@ -80,8 +80,9 @@ two-second server shutdown deadline; a stuck syscall can outlive that deadline.
 
 ## Remaining limits
 
-The network/disk adapters, JSON/URI/HTTP parsing, TLS, cryptography, DNS, scheduler,
-compiler, standard library, and OS remain in the trusted computing base. Inbound
+The trusted computing base, including the network/disk adapters and their
+dependencies, is listed in the
+[security contract](security-contract.md#trusted-computing-base-and-evidence). Inbound
 TLS termination is external; the command binds loopback only. Bodies may contain
 secrets and are logged verbatim; header filtering does not establish content secrecy.
 Audit files are operator-owned shared logs, not a tenant-facing log retrieval API.

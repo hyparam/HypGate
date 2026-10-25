@@ -91,12 +91,10 @@ execution. Origin confinement is not a resolved-IP-range/SSRF theorem.
 
 ## Verification trust and reproduction
 
-The trusted verification stack includes Verus, its translation/solver, vstd
-specifications, rustc/LLVM, and standard-library/platform behavior. The production
-core introduces no `assume` or `external_body` escape. This does not remove trusted
-specifications supplied by vstd. The runtime additionally trusts Tokio, Hyper,
-rustls, cryptography, DNS/PKI, the OS/filesystem, root-policy provisioning, and
-external TLS termination/proxy behavior.
+The trusted computing base is listed in the
+[security contract](security-contract.md#trusted-computing-base-and-evidence). The
+production core introduces no `assume` or `external_body` escape; this does not
+remove trusted specifications supplied by vstd.
 
 Use the pinned toolchain and commands in the [README](../README.md). The
 [mutation runner](../scripts/check_mutations.py) verifies the unmodified core

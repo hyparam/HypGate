@@ -19,11 +19,8 @@ statistically stable tail-latency estimate or an overload test.
 
 ## Reproduction
 
-Run with the pinned Rust toolchain and locked dependencies:
-
-```sh
-cargo test -p gateway-runtime --release --locked server::tests::benchmark -- --ignored --nocapture --test-threads=1
-```
+Run the benchmark command from the [README](../README.md#development) with the pinned
+Rust toolchain and locked dependencies.
 
 For process memory accounting, first build the library test executable with
 `cargo test -p gateway-runtime --release --locked --lib --no-run`. Cargo prints its
@@ -317,11 +314,8 @@ response contents, no audit gaps or failed exchanges, zero active requests/worke
 and graceful server/logger shutdown. It reads logs after shutdown without storing
 all response payloads. RSS is sampled about every 50 ms; Linux additionally reads
 `VmHWM` from the child's proc status. macOS reports sampled RSS only, which can miss
-brief peaks. Run it with:
-
-```sh
-cargo test -p gateway-runtime --locked --lib isolated_gateway_memory_in_both_logging_modes -- --ignored --nocapture
-```
+brief peaks. Run it with the isolated-memory command from the
+[README](../README.md#development).
 
 CI runs this fixture on Ubuntu 24.04 and emits JSON with baseline, sampled peak,
 kernel high-water mark where available, settled RSS after each wave, and sample
@@ -363,11 +357,8 @@ uses the same fixture for 100 waves per mode: 800 requests and 800 MiB of respon
 payload per gateway child. It checks every response and recovered audit record,
 then checks zero active requests/workers and graceful shutdown. Each mode has a
 600-second timeout. A dedicated CI job runs this test, leaving the short baseline
-in the regular Rust test job. Run it locally with:
-
-```sh
-cargo test -p gateway-runtime --locked --lib isolated_gateway_memory_soak -- --ignored --nocapture
-```
+in the regular Rust test job. Run it locally with the memory-soak command from the
+[README](../README.md#development).
 
 JSON includes wave count, elapsed milliseconds, and all settled RSS samples.
 The extended workload exercises repeated allocation and cleanup; it does not

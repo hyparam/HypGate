@@ -93,49 +93,17 @@ above, is:
 
 This intentionally overcounts reader copies and queue data that may not coexist.
 It is useful for finding missing categories, not for promising a memory ceiling.
-The conditional composition theorem `Buffers::accounted_payload_bound` now proves
-this subtotal in `gateway-core/src/buffer_accounting.rs`. It takes complete ghost
-snapshots of the listed categories, with explicit per-category count and chunk-size
-hypotheses. `bounded_frames` and `DurableFrame::retained_size` derive the 65-byte
-frame overhead from the production encoding; receipts count their actual retained
-frame, not the erased acknowledged-history prefix. `covers_categories` prevents
-an accidentally omitted category from silently weakening the modeled total.
-
-The production queue now stores `FrameQueue<Completion>`, whose ghost projection
-contains exactly its retained frames. `frame_layout` derives their validity and
-count from the actual fixed slots; `accounted_frame_bytes` bounds their encoded
-bytes by Q times (the queue payload limit + 65). `Buffers::accounted_payload_with_queue` uses that
-projection to discharge the combined theorem's queued count and validity premises.
-The queue invariant now proves every retained payload fits its immutable limit.
-The executable initializes that limit from validated K; the composition theorem
-requires the queue limit to be at most K instead of a premise for every frame.
-Other category snapshots and the trusted startup configuration binding remain.
-`encoding_and_queued_bound` charges one in-progress encoding together with queued
-frames to Q, using the actual reservation bit and an explicit encoding-size premise.
-`Buffers::accounted_payload_with_encoding` composes this with every other category:
-its `bytes_with_encoding` total includes the retained-queue snapshot plus the
-separate encoding byte sequence, under the same published subtotal. A coverage
-lemma and omission mutation prevent silently dropping that sequence. The
-queue-only theorem is the empty-encoding specialization. The snapshot must not
-include the in-progress encoding in `queued_log` as well.
-Production now calls verified `encode_reserved` through the mutex-held callback;
-it checks the queue's own payload limit and reservation before building the body.
-The typed body/sealed-frame composition theorems derive encoding bytes from the
-actual container, including 33-byte body or 65-byte sealed overhead. The production
-`enqueue(record)` boundary exposes no callback or core reference; its private
-callback consumes a non-cloneable encoding permit, then pairs the frame with its
-receipt channel. This ownership restriction supports the single-construction
-argument; the queue module and synchronization remain trusted. Independent users
-of the core constructor must still enforce call multiplicity. Allocation capacity/scratch,
-the active worker frame, and delivered receipts remain separate obligations.
-
-This is a size-composition proof, not proof that every async runtime state supplies
-those snapshots. The verified owner now enforces exclusive accounting of each request's stream body
-and pending read buffer under the mutable-slice length contract. Queue reservations
-must still precede encoding, the
-worker must retain only one active frame, and receipts must be counted until
-consumed or dropped. The runtime correspondence and all excluded allocations
-below remain separate obligations.
+`Buffers::accounted_payload_bound` in `gateway-core/src/buffer_accounting.rs`
+proves this subtotal from complete ghost snapshots of the listed categories;
+`Buffers::accounted_payload_with_encoding` adds the in-progress encoding under the
+same Q budget using the queue's `encoding_and_queued_bound`. The mapping from each
+theorem category to its production owner, insertion, and removal event is the
+[runtime correspondence table](resource-composition.md#runtime-correspondence-to-the-combined-theorem);
+the queue reservation, encoding permit, and receipt mechanics are in the
+[audit-buffer lifetime audit](audit-buffer-lifetimes.md). This is a
+size-composition proof, not proof that every async runtime state supplies those
+snapshots; the runtime correspondence and all excluded allocations below remain
+separate obligations.
 Do not substitute the lower observed concurrent-request count for R when publishing
 configuration guarantees. Multiple gateway/logger instances multiply their budgets.
 

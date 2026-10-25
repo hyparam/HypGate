@@ -73,26 +73,14 @@ final destruction. Waker clone/drop/wake behavior and mutex ordering remain trus
 Callbacks are invoked only for bounded byte copies in production. Dequeued frames
 become Hyper-owned, so this slot bound does not cover Hyper output allocations.
 
-## Conservative ownership count
+## Ownership count
 
-Let C be the inbound connection limit and R the worker/request limit. HTTP/1
-keep-alive is disabled and each connection owns at most one client response body.
-
-| Buffer category | Count and lifetime |
-| --- | --- |
-| Client channel with a live receiver | At most C, owned by connection/service/response state |
-| Client channel whose receiver is gone | At most R control objects, owned by a worker's Writer until cleanup; normal receiver drop has already discarded payload |
-| Provider upload channel | At most R, owned within the worker's inline exchange/connection future |
-| Reader copies | At most two per worker, each at most 32 KiB; the verified worker lease encloses destruction of the entire future |
-
-The output-channel term is therefore **(C + 2 × R) × 16 KiB**. It conservatively
-includes sender-only cleanup objects even though ordinary receiver destruction
-now discards their payloads. Upload/download sequencing
-could support a tighter payload estimate, which remains unproved. The conservative
-count covers channel ownership through cancellation independently of that sequencing.
-Worker keys use checked registry transitions; the wrapper's field drop order is
-described in [worker lifetimes](worker-lifetimes.md). Completed task bookkeeping,
-channel control objects, wakers, and allocator overhead remain outside payload lengths.
+The HTTP owner counts (two readers per worker, C + 2R mailboxes and sender-only
+tails, and the resulting `2R × 32 KiB + (C + 2R) × 16 KiB` subtotal) are derived
+from the production `WorkerRegistry` and `ResponseRegistry` by
+`http_accounting::http_owner_bounds`; the owner table, charge attachment, and
+trusted joins are in the [HTTP ownership audit](http-ownership.md). This document
+covers the buffer mechanics behind those counts.
 
 Production readers use `read_buffer::ReadBuffer`, which owns the detached vector
 and its read offset. Checked load refuses replacement of a live frame and rejects
