@@ -67,10 +67,7 @@ async fn isolated_gateway_memory_soak_in_both_logging_modes() {
 
 async fn workload(availability: bool, waves: usize) {
     let started = std::time::Instant::now();
-    let cert = generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-    let tls = ServerConfig::builder().with_no_client_auth().with_single_cert(vec![cert.cert.der().clone()],
-        PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()).into()).unwrap();
-    let acceptor = TlsAcceptor::from(Arc::new(tls));
+    let (cert, acceptor, _) = self_signed();
     let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let dir = TempDir::new();
     std::fs::write(dir.0.join("root.der"), cert.cert.der()).unwrap();

@@ -1,9 +1,9 @@
 use super::*;
-use crate::{config::GatewayConfig, http_boundary, transfer::LogRecord};
+use crate::{config::GatewayConfig, http_boundary, test_support::tls, transfer::LogRecord};
+use rcgen::generate_simple_self_signed;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::{service::service_fn, Response};
-use rcgen::generate_simple_self_signed;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::{convert::Infallible, pin::Pin, task::{Context, Poll}};
@@ -54,13 +54,6 @@ fn worker_http() -> http_body::WorkerHttp {
     let registry = Arc::new(std::sync::Mutex::new(gateway_core::http_worker::WorkerRegistry::new(1)));
     let (_task, issuer) = registry.lock().unwrap().acquire().unwrap();
     http_body::WorkerHttp::new(registry, issuer)
-}
-async fn tls() -> (TcpListener, TlsAcceptor, RootCertStore) {
-    let cert = generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-    let mut roots = RootCertStore::empty(); roots.add(cert.cert.der().clone()).unwrap();
-    let key = PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der());
-    let config = ServerConfig::builder().with_no_client_auth().with_single_cert(vec![cert.cert.der().clone()], key.into()).unwrap();
-    (TcpListener::bind("127.0.0.1:0").await.unwrap(), TlsAcceptor::from(Arc::new(config)), roots)
 }
 
 #[tokio::test]

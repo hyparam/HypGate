@@ -16,12 +16,7 @@ async fn shutdown_with_blocked_disk_returns_error_without_replacement_or_replay(
 
 async fn exercise(availability: bool, shutdown_blocked: bool) {
     const SLOTS: usize = 8;
-    let cert = generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-    let mut roots = RootCertStore::empty(); roots.add(cert.cert.der().clone()).unwrap();
-    let tls = ServerConfig::builder().with_no_client_auth().with_single_cert(vec![cert.cert.der().clone()],
-        PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()).into()).unwrap();
-    let acceptor = TlsAcceptor::from(Arc::new(tls));
-    let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (upstream, acceptor, roots) = tls().await;
     let (log, started, release, writes) = DiskLog::stalled_for_test(2, Duration::from_secs(1));
     let app = Gateway::new(config_with_limits(upstream.local_addr().unwrap().port(), availability, SLOTS, 16384),
         HttpsTransport::with_roots(roots, Duration::from_secs(5)).unwrap(), log);

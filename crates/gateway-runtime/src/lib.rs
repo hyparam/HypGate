@@ -10,4 +10,6 @@ pub mod transport;
 mod http_body;
 mod http_io;
 mod credited_job;
+#[cfg(test)]
+mod test_support;
 pub mod server;

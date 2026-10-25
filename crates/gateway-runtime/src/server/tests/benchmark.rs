@@ -45,12 +45,7 @@ async fn benchmark(availability: bool, profile: Profile) {
         assert!(requests % concurrency == 0 && download % PIECE == 0);
         let failed_log = workload == Workload::FailedLog;
         let forwarded = if failed_log && !availability { concurrency } else { requests };
-        let cert = generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-        let mut roots = RootCertStore::empty(); roots.add(cert.cert.der().clone()).unwrap();
-        let tls = ServerConfig::builder().with_no_client_auth().with_single_cert(vec![cert.cert.der().clone()],
-            PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()).into()).unwrap();
-        let acceptor = TlsAcceptor::from(Arc::new(tls));
-        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (upstream, acceptor, roots) = tls().await;
         let routes = json!([{"tenant":1,"selector":7,"origin":0,"credential":0}]);
         let root = json!({"identities":[{"tenant":1,"sha256":format!("{:x}",Sha256::digest(b"gateway"))}],
             "destinations":[format!("https://localhost:{}/v1/messages", upstream.local_addr().unwrap().port())],

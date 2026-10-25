@@ -22,12 +22,7 @@ async fn exercise(availability: bool, duration: Duration) {
     const SLOTS: usize = 8;
     const BURST: usize = 32;
     const ROUNDS: usize = 4;
-    let cert = generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-    let mut roots = RootCertStore::empty(); roots.add(cert.cert.der().clone()).unwrap();
-    let tls = ServerConfig::builder().with_no_client_auth().with_single_cert(vec![cert.cert.der().clone()],
-        PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()).into()).unwrap();
-    let acceptor = TlsAcceptor::from(Arc::new(tls));
-    let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (upstream, acceptor, roots) = tls().await;
     let dir = TempDir::new(); let path = dir.0.join("overload.log");
     let app = Gateway::new(config_with_limits(upstream.local_addr().unwrap().port(), availability, SLOTS, 16384),
         HttpsTransport::with_roots(roots, Duration::from_secs(360)).unwrap(),

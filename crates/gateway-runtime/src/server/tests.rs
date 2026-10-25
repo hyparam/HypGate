@@ -1,12 +1,12 @@
 use super::*;
 use crate::disk_log::LogReader;
 use http_body_util::BodyExt;
-use rcgen::generate_simple_self_signed;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::{fs::File, sync::Mutex};
 use tokio::net::TcpStream;
-use tokio_rustls::{TlsAcceptor, rustls::{RootCertStore, ServerConfig, pki_types::PrivatePkcs8KeyDer}};
+use tokio_rustls::rustls::RootCertStore;
+use crate::test_support::{self_signed, tls};
 
 struct TempDir(std::path::PathBuf);
 impl TempDir {
@@ -43,12 +43,7 @@ enum Stop { None, Disconnect, Drain, Abort, SharedAbort }
 
 async fn exercise(availability: bool, failed_log: bool, truncated: bool, stop: Stop) {
     tokio::time::timeout(Duration::from_secs(25), async {
-        let cert = generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-        let mut roots = RootCertStore::empty(); roots.add(cert.cert.der().clone()).unwrap();
-        let tls = ServerConfig::builder().with_no_client_auth().with_single_cert(vec![cert.cert.der().clone()],
-            PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()).into()).unwrap();
-        let acceptor = TlsAcceptor::from(Arc::new(tls));
-        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (upstream, acceptor, roots) = tls().await;
         let config = config(upstream.local_addr().unwrap().port(), availability);
         let dir = TempDir::new(); let path = dir.0.join("audit.log");
         let log = DiskLog::create(&path, 4, Duration::from_secs(2)).unwrap();
@@ -231,12 +226,7 @@ async fn truncated_generation_is_an_error_and_still_reports_audit_gap() { exerci
 #[tokio::test]
 async fn concurrent_tenants_keep_credentials_bodies_and_audit_records_isolated() {
     tokio::time::timeout(Duration::from_secs(10), async {
-        let cert = generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-        let mut roots = RootCertStore::empty(); roots.add(cert.cert.der().clone()).unwrap();
-        let tls = ServerConfig::builder().with_no_client_auth().with_single_cert(vec![cert.cert.der().clone()],
-            PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()).into()).unwrap();
-        let acceptor = TlsAcceptor::from(Arc::new(tls));
-        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (upstream, acceptor, roots) = tls().await;
         let routes = json!([
             {"tenant":1,"selector":7,"origin":0,"credential":0},
             {"tenant":2,"selector":7,"origin":0,"credential":1}
@@ -345,12 +335,7 @@ mod benchmark;
 async fn client_disconnect_before_headers_cancels_request_and_upstream_socket() {
     use tokio::io::AsyncReadExt;
     tokio::time::timeout(Duration::from_secs(5), async {
-        let cert = generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-        let mut roots = RootCertStore::empty(); roots.add(cert.cert.der().clone()).unwrap();
-        let tls = ServerConfig::builder().with_no_client_auth().with_single_cert(vec![cert.cert.der().clone()],
-            PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()).into()).unwrap();
-        let acceptor = TlsAcceptor::from(Arc::new(tls));
-        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (upstream, acceptor, roots) = tls().await;
         let dir = TempDir::new();
         let app = Gateway::new(config(upstream.local_addr().unwrap().port(), false),
             HttpsTransport::with_roots(roots, Duration::from_secs(60)).unwrap(),
