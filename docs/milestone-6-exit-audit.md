@@ -102,7 +102,7 @@ the joins specific to this milestone are:
 
 ## Validation and delivery
 
-On 2026-10-24, the pinned verifier reports 298 checks and zero errors; all 253
+On 2026-10-24, the pinned verifier reports 288 checks and zero errors; all 252
 mutations are rejected by proof. The locked full workspace suite passes 249 tests
 and seven compile-fail doctests. Both additional concurrent failed-log workloads
 pass over real TLS, in strict and availability modes. The final cross-owner test
