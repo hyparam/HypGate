@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 use super::*;
 use super::config::ShippingConfig;
 use super::projection::{civil, iso_date, iso_timestamp, rows as project};

@@ -401,6 +401,16 @@ MUTATIONS = [
     ("shipper.rs", "machine_isolates_single_exchange", "                if count > 1 {\n                    self.cursor.abandon();", "                if count > 0 {\n                    self.cursor.abandon();"),
     ("shipper.rs", "machine_adopts_expired_credential", "                    if self.enrollment.enrolled(credential.expires_at, now) {", "                    if self.enrollment.enrolled(credential.expires_at, 0) {"),
     ("shipper.rs", "machine_sleep_keeps_delay", "            let d = self.delay;\n            self.delay = 0;", "            let d = self.delay;"),
+
+    # Verified driver: every token is queued at once, headers are checked before
+    # admission, reads and flushes respect the machine's limits, every send gets
+    # its reply, and checkpoints carry the machine's own progress.
+    ("shipping_driver.rs", "driver_drops_token", "                        Some(token) => settle(machine, effects, token),", "                        Some(_) => {}"),
+    ("shipping_driver.rs", "driver_admits_unchecked_header", "if header_ok(&header, payload.len()) {", "if true {"),
+    ("shipping_driver.rs", "driver_reads_when_unwanted", "    while machine.wants_records()\n", "    while true\n"),
+    ("shipping_driver.rs", "driver_flushes_without_room", "while machine.open_exchanges() > 0 && machine.has_room()", "while machine.open_exchanges() > 0"),
+    ("shipping_driver.rs", "driver_ignores_reply", "let outcome = machine.reply(replied_at, reply);", "let outcome = Outcome::Nothing;"),
+    ("shipping_driver.rs", "driver_checkpoints_stale_progress", "                let (resolved, poisoned) = machine.progress();\n                effects.checkpoint(machine, resolved, poisoned);\n                effects.observe(Event::PoisonedUnsent, machine);", "                let (resolved, poisoned) = machine.progress();\n                effects.checkpoint(machine, 0, poisoned);\n                effects.observe(Event::PoisonedUnsent, machine);"),
 ]
 
 

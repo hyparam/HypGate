@@ -236,6 +236,17 @@ impl Machine {
             && self.delay <= crate::enrollment::MAX_DELAY_SECONDS
     }
 
+    /// What a valid machine guarantees about its counters, for callers outside this module.
+    pub proof fn valid_bounds(&self)
+        requires self.valid(),
+        ensures self.emitted() >= self.skip() ==> self.counted() <= self.emitted(),
+            self.emitted() < self.skip() ==> self.counted() == self.skip(),
+            self.skip() <= self.resolved() <= self.counted(),
+            self.queue().len() == self.counted() - self.resolved(),
+    {
+        self.cursor.bounds();
+    }
+
     /// Everything that progress-neutral operations leave alone.
     pub open spec fn same_progress(&self, other: &Self) -> bool {
         self.history() == other.history() && self.queue() == other.queue()
@@ -281,6 +292,10 @@ impl Machine {
         true
     }
 
+    pub fn has_room(&self) -> (out: bool) ensures out == self.room(), {
+        let outstanding = if self.emitted > self.cursor.counts().0 { self.emitted - self.cursor.counts().0 } else { 0 };
+        outstanding < self.max_open as u64 && self.queue.len() < self.max_open - outstanding as usize
+    }
     pub fn wants_records(&self) -> (out: bool) ensures out == self.wants(), {
         let outstanding = if self.emitted > self.cursor.counts().0 { self.emitted - self.cursor.counts().0 } else { 0 };
         !self.read_failed && !self.at_end && outstanding < self.max_open as u64 && self.queue.len() < self.max_open - outstanding as usize
@@ -329,8 +344,7 @@ impl Machine {
                     && !final(self).read_failed(),
                 None => (final(self).emitted() == old(self).emitted() + 1 && old(self).emitted() < old(self).skip()
                         && !final(self).read_failed())
-                    || (final(self).emitted() == old(self).emitted() && !final(self).read_failed())
-                    || final(self).read_failed(),
+                    || final(self).emitted() == old(self).emitted(),
             },
     {
         match self.assembler.admit(header, payload) {
@@ -345,9 +359,10 @@ impl Machine {
         ensures final(self).valid(), final(self).same_progress(old(self)), final(self).same_credential(old(self)),
             final(self).at_end() == old(self).at_end(),
             match out {
-                Some(t) => t.index() == old(self).emitted() && final(self).emitted() == old(self).emitted() + 1
-                    && t.exchange_value().is_incomplete(),
-                None => old(self).open_count() == 0 || final(self).emitted() == old(self).emitted() + 1 || final(self).read_failed(),
+                Some(t) => t.index() == old(self).emitted() && old(self).emitted() >= old(self).skip()
+                    && final(self).emitted() == old(self).emitted() + 1 && t.exchange_value().is_incomplete(),
+                None => (final(self).emitted() == old(self).emitted() + 1 && old(self).emitted() < old(self).skip())
+                    || (final(self).emitted() == old(self).emitted() && (old(self).open_count() == 0 || final(self).read_failed())),
             },
     {
         match self.assembler.evict_oldest() {
@@ -446,6 +461,7 @@ impl Machine {
         requires old(self).valid(), old(self).awaiting().is_none(),
         ensures final(self).valid(), final(self).history() == old(self).history(),
             final(self).emitted() == old(self).emitted(), final(self).skip() == old(self).skip(),
+            final(self).counted() == old(self).counted(),
             final(self).token() == old(self).token(), final(self).session() == old(self).session(),
             final(self).enrollment() == old(self).enrollment(), final(self).jwt() == old(self).jwt(),
             final(self).read_failed() == old(self).read_failed(),
@@ -651,6 +667,7 @@ impl Machine {
         requires old(self).valid(), old(self).awaiting().is_some(),
         ensures final(self).valid(), final(self).awaiting().is_none(), final(self).in_flight().is_none(),
             final(self).history() == old(self).history(), final(self).emitted() == old(self).emitted(),
+            final(self).counted() == old(self).counted(),
             final(self).skip() == old(self).skip(), final(self).token() == old(self).token(),
             final(self).session() == old(self).session(), final(self).read_failed() == old(self).read_failed(),
             !final(self).at_end(),
@@ -698,6 +715,7 @@ impl Machine {
         requires old(self).valid(), old(self).awaiting() == Some(Path::Ingest),
         ensures final(self).valid(), final(self).awaiting().is_none(), final(self).in_flight().is_none(),
             final(self).history() == old(self).history(), final(self).emitted() == old(self).emitted(),
+            final(self).counted() == old(self).counted(),
             final(self).skip() == old(self).skip(), final(self).token() == old(self).token(),
             final(self).session() == old(self).session(), final(self).read_failed() == old(self).read_failed(),
             !final(self).at_end(),
@@ -782,6 +800,7 @@ impl Machine {
         requires old(self).valid(), old(self).awaiting().is_some(), old(self).awaiting() != Some(Path::Ingest),
         ensures final(self).valid(), final(self).awaiting().is_none(), final(self).in_flight().is_none(),
             final(self).history() == old(self).history(), final(self).emitted() == old(self).emitted(),
+            final(self).counted() == old(self).counted(),
             final(self).skip() == old(self).skip(), final(self).token() == old(self).token(),
             final(self).session() == old(self).session(), final(self).read_failed() == old(self).read_failed(),
             !final(self).at_end(), final(self).queue() == old(self).queue(),

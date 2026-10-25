@@ -68,7 +68,7 @@ environment operations finds only these sites. Code under `#[cfg(test)]` and in
 | Read audit file for recovery | `LogReader::new`/`LogReader::next_record` over `disk_log::ReadSource` | Read-only; never truncates, appends, or replays |
 | Dedicated threads | `DiskLog::start_limited` (1), `handshake::Pool::with_limits` (4), `Resolver::with_limit` (4), `shipping::Shipper::spawn` (1, only with a `shipping` section) | Fixed counts at construction; never replaced after a timeout |
 | Read the cloud token | `std::env::var` through `ShippingConfig::from_root_json` in `main.rs::run` and `ship` | Startup only; the value moves into the shipper thread and is never held by `GatewayConfig` |
-| Open the audit log for shipping | `File::open` in `shipping::Engine::read_records` | Read-only handle on the operator's log path; the verified scanner never writes |
+| Open the audit log for shipping | `File::open` in `shipping::Engine::{open_session,read}` (the `Effects` implementation the verified driver calls) | Read-only handle on the operator's log path; the verified scanner never writes |
 | Write shipper state | `OpenOptions` (create-new, 0600), `write_all`, `sync_all`, `fs::rename` in `shipping::state::write_private` | Only `identity.json` and `checkpoint.json` under the configured state directory; contents are the server credential, a token fingerprint, and counters |
 | Cloud DNS, TCP, TLS, and HTTP | `to_socket_addrs`, `TcpStream::connect`, `TlsConnector::connect`, `handshake`, `send_request` in `shipping::client::Client::run` | Host and port come only from the validated `shipping.server`; called only from the shipper thread with the server-issued credential, never a provider credential |
 

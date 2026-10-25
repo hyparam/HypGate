@@ -36,6 +36,7 @@ pub mod batch_builder;
 pub mod upload_cursor;
 pub mod enrollment;
 pub mod shipper;
+pub mod shipping_driver;
 
 #[cfg(test)]
 #[path = "tests/streaming.rs"]

@@ -16,7 +16,8 @@ pub struct Usage { pub input: u64, pub cache_read: u64, pub cache_write: u64, pu
 impl Usage {
     fn json(&self) -> Value {
         json!({"input_tokens": self.input, "cache_read_tokens": self.cache_read, "cache_write_tokens": self.cache_write,
-            "output_tokens": self.output, "total_tokens": self.input + self.cache_read + self.cache_write + self.output})
+            "output_tokens": self.output,
+            "total_tokens": self.input.saturating_add(self.cache_read).saturating_add(self.cache_write).saturating_add(self.output)})
     }
 }
 
@@ -92,7 +93,7 @@ fn parse_json_response(value: &Value) -> ParsedResponse {
 }
 
 pub fn is_sse(bytes: &[u8]) -> bool {
-    let trimmed = bytes.iter().position(|b| !b.is_ascii_whitespace()).map(|i| &bytes[i..]).unwrap_or(b"");
+    let trimmed = bytes.iter().position(|b| !b.is_ascii_whitespace()).and_then(|i| bytes.get(i..)).unwrap_or(b"");
     trimmed.starts_with(b"event:") || trimmed.starts_with(b"data:") || trimmed.starts_with(b":")
 }
 
@@ -135,19 +136,17 @@ fn parse_response(bytes: &[u8]) -> (ParsedResponse, bool) {
     }
 }
 
-fn truncated_utf8(bytes: &[u8], limit: usize) -> String {
-    let text = String::from_utf8_lossy(bytes);
-    if text.len() <= limit { return text.into_owned(); }
-    let mut end = limit; while !text.is_char_boundary(end) { end -= 1; }
-    text[..end].to_owned()
-}
+fn truncated_utf8(bytes: &[u8], limit: usize) -> String { cap(String::from_utf8_lossy(bytes).into_owned(), limit) }
 fn cap(text: String, limit: usize) -> String {
     if text.len() <= limit { return text; }
-    let mut end = limit; while !text.is_char_boundary(end) { end -= 1; }
-    text[..end].to_owned()
+    let mut end = limit; while !text.is_char_boundary(end) { end = end.saturating_sub(1); }
+    text.get(..end).unwrap_or("").to_owned()
 }
 
 /// Civil date and RFC 3339 timestamp from Unix milliseconds (proleptic Gregorian, UTC).
+// Bounded arithmetic: ms fits u64, so days is below 2^38 and every
+// intermediate fits i64 with room to spare; the algorithm is Howard Hinnant's.
+#[allow(clippy::arithmetic_side_effects)]
 pub fn civil(ms: u64) -> (i64, u32, u32, u32, u32, u32, u32) {
     let seconds = (ms / 1000) as i64; let millis = (ms % 1000) as u32;
     let days = seconds.div_euclid(86_400); let rem = seconds.rem_euclid(86_400);

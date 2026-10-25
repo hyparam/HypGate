@@ -5,22 +5,27 @@ optional `shipping` section of the root policy. Every decision is made by the
 verified shipper machine (`gateway_core::shipper::Machine`): which records
 form which exchange, which exchanges go into the next batch, which request to
 send with which credential, how to read a reply, and how long to wait. The
-runtime thread performs those actions against the one configured server and
-reports replies back. The HTTPS client, JSON and SSE parsing, the projection
-of an exchange into HypAware rows, the state files, and the server's own
-behavior are trusted and tested.
+loop that calls it is verified too (`gateway_core::shipping_driver::drive`):
+it runs against an `Effects` trait whose runtime implementation is a clock, a
+record source, a row projector, one request sender, sleeps, a checkpoint
+writer, and a metrics sink, with no decisions in it. The HTTPS client, JSON
+and SSE parsing, the projection of an exchange into HypAware rows, the state
+files, and the server's own behavior are trusted and tested; the shipping
+adapters are held to a panic-free standard by clippy denies on unwrap,
+expect, panic, indexing, and unchecked arithmetic.
 
 ## What it does
 
 The shipper opens the audit log read-only and tails it with the verified
 scanner, resuming from the last validated offset whenever the machine asks it
 to read. Records are grouped by request into exchanges inside the machine.
-Each emitted exchange comes back to the runtime as a numbered token; the
-runtime projects it into two `ai_gateway_messages` rows (a user part with the
-request text and an assistant part with the response text and token usage),
-serializes them as NDJSON, and hands the token back with the bytes. The
-machine accepts tokens only in emission order and keeps the projections as
-the unresolved suffix of a ghost history. When it chooses to upload, the
+Each emitted exchange comes back as a numbered token; the verified driver has
+the runtime project it into two `ai_gateway_messages` rows (a user part with
+the request text and an assistant part with the response text and token
+usage), serialized as NDJSON, and hands the token straight back with the
+bytes. The machine accepts tokens only in emission order and keeps the
+projections as the unresolved suffix of a ghost history; the driver is proved
+never to hold a token across an iteration. When it chooses to upload, the
 request body is exactly the concatenation of the next queued exchanges, at
 most 5,000 rows and 4 MiB, sent to `POST /v1/ingest/proxy` with the gateway
 credential the server issued at enrollment. A request carries a path and a
@@ -129,6 +134,7 @@ implemented.
 | Retained bytes are an ordered prefix of the received bytes, within the cap | `exchange_assembler::Exchange::valid` proved; `assembler_interleaves_requests_and_truncates_at_the_cap`. |
 | Bounded open exchanges and pending rows | `Assembler::valid` proved; `Machine::valid` bounds queued plus outstanding projections by `max_open_exchanges` and `wants_records` refuses reads beyond it (proved); the drain run tests it. |
 | Nothing is dropped between emission and upload: every emitted exchange is queued in order, an ingest body is exactly the next queued exchanges, an acknowledgment pops exactly those, a poison pops exactly one | `Machine::{admit,enqueue,next,reply}` postconditions over the ghost history (proved); `machine_enrolls_then_ships_queued_exchanges_in_order_and_resolves_on_acknowledgment`. |
+| The loop honors the machine's turn-taking: every token is projected and queued at once, every send gets exactly one reply, records are read only while wanted and only with valid headers, flushes respect the queue bound, and a checkpoint carries the machine's own progress | `shipping_driver::{drive,pump,flush,settle}` verified against the machine's contracts and the `Effects::checkpoint` precondition. |
 | The only request bodies are the escaped bootstrap token, nothing, or queued rows; the token appears only in a bootstrap body; no request names a host | `Machine::next` postconditions and the `Request` type (proved). |
 | Every wait is 1 to 300 seconds; every state has a next action; pending work with a usable credential is sent or poisoned at once | `Machine::next` and `Machine::reply` postconditions (proved). |
 | Each exchange is emitted exactly once, on its completion record or its eviction | `Assembler::admit` and `evict_oldest` postconditions proved. |
@@ -145,9 +151,10 @@ implemented.
   issues credentials only to holders of a valid operator token.
 - TLS/PKI, DNS, Hyper, Tokio, and the filesystem, as for the gateway.
 - The system clock for renewal decisions and row timestamps.
-- The runtime hands every emitted token back to `enqueue` and pairs each
-  reply with the request it sent; the machine checks order and refuses
-  anything else, but cannot see a token the runtime drops.
+- The `Effects` implementation performs what it is asked: `send` reaches the
+  configured server and returns that server's reply, `read` returns the log's
+  records in order, `project` is a faithful projection, and `checkpoint`
+  writes the values it is given. The driver that calls them is verified.
 - The checkpoint's reproducibility: the assembler is deterministic for the
   same record sequence and limits, so a restart replays the file from its
   header and skips the resolved count. A checkpoint from different limits is

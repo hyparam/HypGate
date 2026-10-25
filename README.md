@@ -176,7 +176,12 @@ The workspace pins vstd and commits Cargo.lock.
 cargo test --workspace --locked
 cargo verus verify -p gateway-core --locked -- --triggers-mode silent
 VERUS=/path/to/verus python3 scripts/check_mutations.py
+cargo clippy -p gateway-runtime --locked
 ```
+
+The clippy run enforces the panic-free standard on the cloud-shipping
+adapters (`crates/gateway-runtime/src/shipping`): unwrap, expect, panic,
+indexing, and unchecked arithmetic are denied there.
 
 Opt-in load, memory, benchmark, and failover workloads (the last needs HAProxy and
 OpenSSL on PATH; results are discussed in the [benchmarks](docs/benchmarks.md),
@@ -190,8 +195,9 @@ cargo test -p gateway-runtime --release --locked server::tests::benchmark -- --i
 SOUNDGATE_HAPROXY=/path/to/haproxy cargo test -p gateway-runtime --locked proxy_gateway_process_failover -- --ignored --nocapture
 ```
 
-Validation on 2026-10-25: 431 core verification checks passed, 292 workspace tests including seven compile-fail
-doctests passed, and all 353 deliberate mutations failed their proof obligations. The opt-in TLS proxy/gateway
+Validation on 2026-10-25: 445 core verification checks passed, 292 workspace tests including seven compile-fail
+doctests passed, all 359 deliberate mutations failed their proof obligations, and the shipping adapters passed
+their panic lints. The opt-in TLS proxy/gateway
 process-failover test and six load/fault workloads passed on 2026-10-23.
 Two ten-minute overload runs and the final 100-wave-per-mode isolated memory soak
 also passed; measurements and limits are in the benchmark notes.

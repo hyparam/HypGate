@@ -89,13 +89,19 @@ server's dedup stores each exchange once.
   for that range; an acknowledgment pops exactly those exchanges and a poison
   exactly one; nothing else moves progress.
 
+- The driver loop (`shipping_driver::drive`) is verified against the
+  machine: every emitted token is projected and queued in the same step,
+  every send is followed by exactly one reply, records are admitted only
+  while wanted and with checked headers, and a checkpoint can only carry the
+  machine's own progress.
+
 **Premises.** Hex encoding; the server honors its batch ledger and part-id
 dedup; the projection of an exchange's provider JSON into text and usage is
-faithful (tested against recorded bodies, not proved); the runtime returns
-every token to the machine and pairs each reply with the request it sent.
+faithful (tested against recorded bodies, not proved); the runtime's `Effects`
+implementation performs what it is asked (sends to the configured server,
+returns the log's records in order, writes the checkpoint it is given).
 
-**In progress.** Phase 2 verifies the driver loop so the two runtime premises
-become theorems; phase 4 adds the replay theorem.
+**In progress.** Phase 4 adds the replay theorem.
 
 ## Guarantee 3: there is no crash state
 
@@ -121,13 +127,14 @@ with what the server already holds.
   a revoked credential is the only absorbing state and is reported.
 
 **Premises.** The storage contract (synced bytes survive); Tokio cancellation
-reaches the futures; the runtime adapters are panic-free (lint-enforced in
-phase 2) and the thread boundary contains any panic that does occur; the
-clock is monotone enough for the enrollment windows.
+reaches the futures; the shipping adapters are panic-free, which clippy
+denies on unwrap, expect, panic, indexing, and unchecked arithmetic enforce
+(`cargo clippy -p gateway-runtime`), and the thread boundary contains any
+panic that does occur; the clock is monotone enough for the enrollment
+windows.
 
-**In progress.** A verified driver loop over an effect trait (phase 2) so
-even the glue is checked; panic-injection and kill-at-every-step tests for
-the shipper (phase 5).
+**In progress.** Panic-injection and kill-at-every-step tests for the
+shipper (phase 5).
 
 ## Plan to close the gaps
 
@@ -138,10 +145,11 @@ Each phase is one logical commit on the `hypaware-shipping` branch.
    admit a record, enqueue its projection, choose the next action, absorb a
    reply. Theorems: conservation, batch fidelity, token containment, bounded
    waiting, progress, totality (`crates/gateway-core/src/shipper.rs`).
-2. **Verified driver over an effect trait.** The loop itself is checked
-   against the trait's contracts; the runtime implements read, send, sleep,
-   checkpoint, and now with no decisions in them. Clippy denies on unwrap,
-   expect, indexing, and unchecked arithmetic in the shipping adapters.
+2. **Verified driver over an effect trait.** Done. The loop itself is
+   checked against the machine's contracts; the runtime implements read,
+   send, sleep, checkpoint, and now with no decisions in them
+   (`crates/gateway-core/src/shipping_driver.rs`). Clippy denies on unwrap,
+   expect, panic, indexing, and unchecked arithmetic in the shipping adapters.
 3. **One egress permit.** A single verified type that both the provider
    writer and the cloud client require; with shipping disabled the cloud
    variant is uninhabited. Disallowed-method lints and a CI script pin the
