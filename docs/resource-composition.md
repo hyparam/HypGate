@@ -157,6 +157,7 @@ checks this over 3,000 rounds.
 | Retained configuration content, bounded by both one-MiB input documents | 2,097,152 | [Configuration storage](configuration.md#configuration-storage-and-startup-scratch) |
 | Disk queue slot vector | Q × size of `Option<(RecordFrame, Sender)>` | [Audit ownership](audit-buffer-lifetimes.md#verified-fixed-queue-and-synchronization-obligations) |
 | Root store trust-anchor descriptors | root count × size of `TrustAnchor` | `webpki-roots` static table, cloned descriptors over static DER |
+| Optional shipper thread (only with a `shipping` section): its stack, `O × E` assembler bytes, `O × 2 × (E + 16,384)` queued rows, one scanned record, one 4 MiB batch and its request copy, a 64 KiB reply | 2,097,152 + O × E + O × 2 × (E + 16,384) + 1,048,641 + 8,388,608 + 65,536 | [Cloud shipping](cloud-shipping.md#resources); `budget::shipping`, printed separately at startup |
 
 The composed bound is:
 
@@ -199,7 +200,8 @@ assumption of this milestone, not a proved property.
    counts are bounded by the same R, C, Q, and 32-job limits.
 5. **One instance of each owner.** The executable constructs one
    `GatewayConfig`, `Gateway`, `HttpsTransport`, `DiskLog`, and `serve`
-   invocation on a current-thread runtime. Library callers multiply the
+   invocation on a current-thread runtime, plus at most one shipper thread
+   with its own current-thread runtime, charged on its own row. Library callers multiply the
    per-instance row and must budget their own runtime threads and main stack.
 6. **Protocol scope.** One HTTP/1 exchange per connection without keep-alive,
    pipelining, trailers, Content-Length forwarding, ECH, client authentication,

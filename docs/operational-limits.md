@@ -56,6 +56,21 @@ requested-allocation accounting that follows from them.
 | Storage faults | Full or read-only filesystem, process death | Acknowledged prefix survives; scan reports a complete, incomplete, or corrupt tail without modifying the file. | `filesystem_full_preserves_acknowledged_prefix_and_fails_closed`, `filesystem_read_only_refuses_logger_startup`, crash tests on Linux ext4. |
 | Log file reuse | Never | Startup refuses an existing path and leaves it unchanged. | `check_deployment.sh`. |
 
+## Cloud shipping (optional)
+
+| Limit | Value | Reached | Evidence |
+| --- | --- | --- | --- |
+| Shipping server | One `https://` URL, same validation as destinations | Rejected at startup; the shipper has no other destination. | `shipping_section_is_optional_and_validated`. |
+| Operator token | 1 to 512 visible ASCII bytes from the named environment variable | Startup fails with "missing token"; the token never appears in state files, logs, or rows. | Executable test; `ships_exchanges_once_with_stable_ids_and_resumes_from_checkpoint`. |
+| Open exchanges and pending rows (`max_open_exchanges`) | 1 to 65,536; default 64 | The oldest open exchange is evicted as `incomplete`; a full row queue pauses reading until a batch resolves. | Assembler bound proved; drain-mode test. |
+| Retained bytes per exchange (`max_exchange_bytes`) | 4 KiB to 16 MiB; default 1 MiB | Further body bytes are counted and dropped; the rows say `truncated`. | Prefix bound proved; `assembler_interleaves_requests_and_truncates_at_the_cap`. |
+| Batch | 5,000 rows, 4 MiB, whole exchanges only | The batch is sent and the next one starts; an exchange that fits no batch is poisoned. | `BatchBuilder` proved; drain-mode test. |
+| Request deadline and reply | 30 s, 64 KiB reply | Counted as a transport failure and retried after 2, 4, 6 s, then 30 to 300 s. | `transport_delay` proved; shutdown-under-hang test. |
+| Throttling | `Retry-After` clamped to 1 to 300 s, else 30/60/120/300 s | The same batch is retried under the same id. | `throttle_delay` proved; recovery test. |
+| Poison | 400, 413, 415, 422 | Multi-exchange batches are retried one exchange at a time; the isolated exchange is skipped and counted in `soundgate_shipping_poisoned_batches_total`. | Recovery test. |
+| Enrollment | Credential renewed inside 24 h of expiry or once after a 401; re-enrolled after a rejected refresh; `service_token_revoked` / `service_account_disabled` stop the shipper permanently | `soundgate_shipping_stopped 1`; nothing else changes. | `Enrollment` proved; recovery test. |
+| Shutdown window | 2 s after request workers and the logger | A thread inside a request is left to finish; no replacement. | `shutdown_returns_within_its_window_while_the_server_hangs`. |
+
 ## Shutdown
 
 | Limit | Value | Reached | Evidence |

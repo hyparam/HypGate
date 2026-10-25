@@ -54,6 +54,11 @@ There is no provider-body translation and live-provider compatibility has not ye
 been tested. Upload compression, trailers, arbitrary query parameters, HTTP/2,
 and full duplex are outside the current interface.
 
+To upload exchanges to HypAware Cloud, add a `shipping` section to the root
+policy and provide its token through the named environment variable; see
+[cloud shipping](cloud-shipping.md). `soundgate ship ROOT.json LOG` uploads a
+finished log without starting the gateway.
+
 ## Operational behavior
 
 `target/debug/soundgate scan LOG` reads an existing log without changing it. It
@@ -85,7 +90,9 @@ or credentials. It also exposes `soundgate_requests_active`,
 `soundgate_requests_limit`, and `soundgate_admission_healthy`; occupancy is a
 verified count of live registry slots, sampled under the runtime lock. Poisoned
 admission omits the occupancy gauges and reports health zero. These gauges are
-not process memory or connection counts. `soundgate_worker_admission_healthy`
+not process memory or connection counts. `soundgate_shipping_*` lines appear when the root policy has a `shipping`
+section (see [cloud shipping](cloud-shipping.md)); otherwise
+`soundgate_shipping_enabled 0`. `soundgate_worker_admission_healthy`
 separately reports whether the worker registry is unpoisoned and open; worker registry
 failure also makes readiness fail in both logging modes. Counters live in memory and crashes reset them. Failed exchanges
 count transport errors returned to the worker, not all externally canceled tasks.

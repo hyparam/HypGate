@@ -115,6 +115,16 @@ Runtime dependencies include the adapter, Tokio, Hyper, rustls, OS sockets/files
 DNS/PKI, secret provisioning, and authentication bindings. None is automatically
 verified by adding Verus contracts to the core.
 
+The optional [cloud shipper](cloud-shipping.md) adds one trusted component: a
+thread in the same process that reads the audit log and uploads to one
+configured HypAware server with a credential that server issued. Its token is
+confined by ownership and module structure, not by a process boundary: it is
+read once at startup, moved into the thread, and never placed in the gateway
+configuration, on the request path, or in the log. The shipper has no handle to
+admission, routes, credentials, or the logger, so it cannot enlarge grants or
+change destinations; the HypAware server's ledger and dedup behavior are
+trusted for exactly-once storage, never for any security property above.
+
 Track each external contract separately: what is assumed, why it is reasonable,
 which component fulfills it, and what tests exercise it. Do not replace an unproved
 security obligation with an `assume` and then describe the result as a proof of it.

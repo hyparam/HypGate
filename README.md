@@ -70,6 +70,7 @@ checked by Verus, conditional on the documented adapter contracts.
 | Cancellation and no replay | Cancellation prevents new submissions; uncertain effects, crashes, or failover never trigger automatic replay of a possibly executed generation. | Core cancellation/stale-event checks proved; transport has no replay path. Async cancellation and recovery composition remain unproved. |
 | Resource bounds and safe release | Slots, buffers, queues, and outstanding operations stay within explicit budgets; capacity cannot be reused while work retaining it remains alive. | Logical slot limits, ID isolation, and combined payload bound under an explicit stream-to-slot mapping proved; fixed disk-FIFO order, slot capacity, permanent closure, and actual queued-frame byte bound proved; HTTP mailbox occupancy and endpoint closure proved; ownership and deadlines tested. Conditional allocation composition and shutdown/release arguments are documented; mechanized async refinement remains open. |
 | Logging-mode separation | Availability mode may lose audit coverage but cannot relax authorization, routing, or tenant isolation; logging failure cannot create unbounded replacement work. | Core logging-mode transitions proved; bounded logger and failure handling tested. Submission and lifecycle composition are checked under the documented adapter assumptions. |
+| Cloud shipping | The optional HypAware shipper cannot affect authorization, forwarding, or readiness; it never modifies the log; delivery is at least once with idempotent batch and row identities, so the server stores each exchange once. | Isolation is structural and tested; tailing, exchange assembly bounds, batch limits, upload progress, identity injectivity, and enrollment transitions are core proved; HTTPS, parsing, projection, and the server's ledger/dedup are trusted and tested. See [cloud shipping](docs/cloud-shipping.md). |
 | Honest completion and conditional progress | Failed/truncated streams cannot masquerade as successful completion; under stated scheduler and I/O assumptions, admitted work terminates or times out and releases resources. | Core admission/release and conditional streaming progress proved; EOF/error behavior and deadlines tested. Permanent worker closure and drain rank are proved; the conditional shutdown/resource argument is documented. Mechanized async liveness verification remains open. |
 
 Verus does not verify Tokio, Hyper, rustls, the OS, DNS/PKI, or the filesystem for us.
@@ -113,6 +114,7 @@ Runtime and adapters:
 | [Async transfer](docs/async-transfer.md) | Tokio body driver and the durable-log contract |
 | [HTTPS transport](docs/https-transport.md) | Upstream TLS exchange and handshake isolation |
 | [Disk logging](docs/disk-logging.md) | Bounded disk worker, sync acknowledgments, recovery scanner |
+| [Cloud shipping](docs/cloud-shipping.md) | HypAware shipper thread: protocol, configuration, proved and trusted parts |
 | [HTTP ownership](docs/http-ownership.md) | HTTP owner counts derived from the worker and connection registries |
 | [HTTP buffer lifetimes](docs/http-buffer-lifetimes.md) | HTTP body buffers, mailbox credit, and cancellation |
 | [Audit buffer lifetimes](docs/audit-buffer-lifetimes.md) | Audit queue credit, worker ownership, and receipt delivery |
@@ -176,8 +178,8 @@ cargo test -p gateway-runtime --release --locked server::tests::benchmark -- --i
 SOUNDGATE_HAPROXY=/path/to/haproxy cargo test -p gateway-runtime --locked proxy_gateway_process_failover -- --ignored --nocapture
 ```
 
-Validation on 2026-10-24: 324 core verification checks passed, 261 workspace tests and seven compile-fail doctests
-passed, and all 291 deliberate mutations failed their proof obligations. The opt-in TLS proxy/gateway
+Validation on 2026-10-25: 383 core verification checks passed, 288 workspace tests and seven compile-fail doctests
+passed, and all 332 deliberate mutations failed their proof obligations. The opt-in TLS proxy/gateway
 process-failover test and six load/fault workloads passed on 2026-10-23.
 Two ten-minute overload runs and the final 100-wave-per-mode isolated memory soak
 also passed; measurements and limits are in the benchmark notes.

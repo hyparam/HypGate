@@ -66,14 +66,19 @@ environment operations finds only these sites. Code under `#[cfg(test)]` and in
 | Create audit file, write/sync header, sync parent directory | `DiskLog::create_with_payload_limit` | Startup only; `create_new`, mode 0600, path chosen by the operator |
 | Audit record write and sync | `Storage::write_all`/`Storage::sync` called by `DiskWorker::run` on the worker thread started in `DiskLog::start_limited` | One worker thread; frame came through the verified queue reservation |
 | Read audit file for recovery | `LogReader::new`/`LogReader::next_record` over `disk_log::ReadSource` | Read-only; never truncates, appends, or replays |
-| Dedicated threads | `DiskLog::start_limited` (1), `handshake::Pool::with_limits` (4), `Resolver::with_limit` (4) | Fixed counts at construction; never replaced after a timeout |
+| Dedicated threads | `DiskLog::start_limited` (1), `handshake::Pool::with_limits` (4), `Resolver::with_limit` (4), `shipping::Shipper::spawn` (1, only with a `shipping` section) | Fixed counts at construction; never replaced after a timeout |
+| Read the cloud token | `std::env::var` through `ShippingConfig::from_root_json` in `main.rs::run` and `ship` | Startup only; the value moves into the shipper thread and is never held by `GatewayConfig` |
+| Open the audit log for shipping | `File::open` in `shipping::Engine::read_records` | Read-only handle on the operator's log path; the verified scanner never writes |
+| Write shipper state | `OpenOptions` (create-new, 0600), `write_all`, `sync_all`, `fs::rename` in `shipping::state::write_private` | Only `identity.json` and `checkpoint.json` under the configured state directory; contents are the server credential, a token fingerprint, and counters |
+| Cloud DNS, TCP, TLS, and HTTP | `to_socket_addrs`, `TcpStream::connect`, `TlsConnector::connect`, `handshake`, `send_request` in `shipping::client::Client::run` | Host and port come only from the validated `shipping.server`; called only from the shipper thread with the server-issued credential, never a provider credential |
 
 No other `connect`, `send_request`, `write_all`, `sync_all`, `spawn`, or file-open
-call exists in production runtime source. This enumeration is review evidence
+call exists in production runtime source outside `transport.rs`, `disk_log.rs`,
+and the `shipping` module. This enumeration is review evidence
 for complete mediation. Rust visibility and ownership stop safe code outside
 these modules from reaching the effects without the tokens below; they do not
 stop a future edit inside `transport.rs` or `disk_log.rs` from adding a bypass,
-so this table must be rechecked when those modules change.
+so this table must be rechecked when those modules or `shipping/` change.
 
 ## Mediation tokens and who can construct them
 
@@ -286,7 +291,7 @@ The effect-site table comes from this search, which must list only the sites
 named above outside `#[cfg(test)]` modules and `tests/` directories:
 
 ```sh
-grep -rn --include='*.rs' -E 'TcpStream::connect|send_request|\.handshake\(|connect_with|OpenOptions|File::open|File::create|write_all|\.sync\(|sync_all|TcpListener::bind|tokio::spawn|thread::Builder|std::thread::spawn|process::exit|std::env::var' crates/gateway-runtime/src
+grep -rn --include='*.rs' -E 'TcpStream::connect|send_request|\.handshake\(|connect_with|OpenOptions|File::open|File::create|write_all|\.sync\(|sync_all|TcpListener::bind|tokio::spawn|thread::Builder|std::thread::spawn|process::exit|std::env::var|to_socket_addrs|fs::rename|fs::remove_file' crates/gateway-runtime/src
 grep -rn --include='*.rs' -E 'unsafe|assume\(|external_body' crates/gateway-core/src crates/gateway-runtime/src
 ```
 

@@ -71,6 +71,17 @@ their formal scope.
 | Returned records equal complete checksum-valid source extents; EOF/errors preserve the preceding boundary, with justified rejection | [recovery.rs](../crates/gateway-core/src/recovery.rs): `Source`, `complete_record`, `Scanner::new`, `next_record` | Conditional on stable-source exact-read/error and digest contracts. The production adapter implements those contracts in trusted Rust. Ordered reconstruction is proved separately; initial-open liveness and physical I/O remain outside the theorem. |
 | Recovery binds decoded metadata and exact payload to bounded cursor advancement, and defaults to stopped on a read attempt | Same module: `frame_end`, `Cursor::begin`, `Cursor::accept`, `Cursor::accept_record` | The runtime must truthfully report bytes read, supply a truthful checksum result to `accept_record`, and drop the local ticket on failure. Tickets cannot cross readers. Source correspondence is checked by `recovery::Scanner` under explicit read/digest contracts. |
 
+### Cloud shipper core
+
+| Claim | Checked definitions and operations | Remaining binding or assumption |
+| --- | --- | --- |
+| A scanner resumed at a validated offset continues the same file with the same session and no stop | `recovery::Scanner::resume` | The offset is a record boundary and the source is the same file: carried by the checkpoint and the read-only handle |
+| Open exchanges are bounded and unique per request; retained body bytes are an ordered prefix of the bytes received, within the cap, and truncation is recorded; an exchange is emitted exactly once, on completion or eviction, and orphans carry only their record | `exchange_assembler::Assembler::{new,admit,evict_oldest}`, `Exchange::valid` | Records are supplied in file order by the trusted loop; the projection of an emitted exchange is trusted |
+| A batch holds at most 5,000 rows and 4 MiB, each row followed by exactly one newline; an oversized row is reported, never split | `batch_builder::BatchBuilder::{push,oversized,finish}` | Rows are serialized JSON without raw newlines (serde_json) |
+| The resolved count only advances to the end of the in-flight batch, through an acknowledgment naming its exact id or an explicit poison; abandonment and restore never advance it; the id is a function of session, first index, and body digest | `upload_cursor::UploadCursor::{restore,emit,open_batch,acknowledge,abandon,poison}` | SHA-256 of the body and hex encoding are trusted; the server honors the id ledger |
+| Exchange, message, part, and batch identities are injective in their inputs | `shipping_identity::{exchange_key,message_key,part_key,batch_id}` and the `*_injective` lemmas | Hex encoding preserves distinctness (trusted) |
+| No upload without an unexpired enrollment; refresh only inside the renewal window or once per rejected upload; revocation is absorbing; retry delays are within 1 to 300 seconds and honor `Retry-After` | `enrollment::Enrollment::{can_upload,needs_refresh,enrolled,rejected,refresh_rejected,revoked}`, `throttle_delay`, `transport_delay` | The clock, the server's reply codes, and the loop that consults these transitions are trusted |
+
 ## End-to-end boundaries that remain unproved
 
 There is no single theorem establishing that every byte reaching a provider has

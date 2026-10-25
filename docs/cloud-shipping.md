@@ -1,0 +1,156 @@
+# Cloud shipping to HypAware
+
+Status: implemented on one dedicated thread inside `soundgate`, enabled by an
+optional `shipping` section of the root policy. The verified core covers the
+tailing scanner, exchange assembly and its byte bounds, batch limits, upload
+progress, identity encodings, and the enrollment state machine. The HTTPS
+client, JSON and SSE parsing, the projection into HypAware rows, the state
+files, and the server's own behavior are trusted and tested.
+
+## What it does
+
+The shipper opens the audit log read-only and tails it with the verified
+scanner, resuming from the last validated offset on every poll. Records are
+grouped by request into exchanges with the verified assembler. Each finished
+exchange becomes two `ai_gateway_messages` rows (a user part with the request
+text and an assistant part with the response text and token usage), serialized
+as NDJSON and uploaded in batches of at most 5,000 rows and 4 MiB to
+`POST /v1/ingest/proxy` on the configured server with the gateway credential
+the server issued at enrollment. Progress is checkpointed after every
+acknowledged or poisoned batch.
+
+The shipper never writes to the log, never replays provider traffic, and never
+touches admission, forwarding, or readiness. It shares no executor, resolver,
+handshake pool, or mailbox with request workers.
+
+## Configuration
+
+Add to the root policy (all fields but the first three optional):
+
+```json
+"shipping": {
+  "server": "https://api.hypaware.ai",
+  "token_env": "HYPAWARE_TOKEN",
+  "state_dir": "/var/lib/soundgate/shipping",
+  "max_open_exchanges": 64,
+  "max_exchange_bytes": 1048576,
+  "poll_ms": 1000
+}
+```
+
+- `server` is validated by the same strict `https://` rules as provider
+  destinations. It is the only network destination the shipper ever uses.
+- `token_env` names the environment variable holding the operator token, like
+  a provider credential: 1 to 512 visible ASCII bytes, never in JSON or argv.
+  An org service-account token (`hsa_` prefix) is recommended: re-enrolling
+  with it returns the same server-side gateway, while a plain bootstrap token
+  creates a new gateway row on every enrollment.
+- `state_dir` must exist and be private to the operator. The shipper writes
+  `identity.json` and `checkpoint.json` there, mode 0600, by temporary file
+  and rename. `identity.json` holds the server's gateway credential and a
+  SHA-256 fingerprint of the operator token, not the token.
+- `max_open_exchanges` (1 to 65,536) bounds both the assembler's open
+  exchanges and the queue of projected rows; when the queue is full the
+  shipper stops reading until a batch resolves, so the log file is the buffer.
+- `max_exchange_bytes` (4 KiB to 16 MiB) caps the body bytes retained per
+  exchange; the rest is counted, dropped, and reported as `truncated`.
+- `poll_ms` (100 to 60,000) is the idle poll interval.
+
+`GatewayConfig` ignores the section: the gateway's own configuration never
+holds the server or the token. `main.rs` reads the token once through the same
+environment resolver as provider keys and moves it into the shipper thread.
+This is an ownership and module boundary inside one process, not a process
+boundary.
+
+`soundgate ship ROOT.json LOG` runs the same loop on the current thread over a
+finished log and exits when every exchange is resolved; exchanges still open
+after five idle polls are flushed as `incomplete`.
+
+## Protocol
+
+Enrollment: `POST /v1/identity/bootstrap` with `{"bootstrap_token": ...}`
+returns `{jwt, expires_at, org}`. The gateway id is the credential's `sub`
+claim; the shipper reads `sub` and `exp` without verifying the signature, which
+the server does on every request. `POST /v1/identity/refresh` with the current
+credential renews it; the shipper refreshes when less than 24 hours remain or
+once after a rejected upload, and re-enrolls when a refresh is rejected.
+`service_token_revoked` and `service_account_disabled` stop the shipper
+permanently; `soundgate_shipping_stopped` reports it.
+
+Upload: `POST /v1/ingest/proxy` with `Authorization: Bearer <credential>`,
+`Content-Type: application/x-ndjson`, and `X-Hyp-Batch-Id`. The batch id is
+the hex of the verified encoding of (log session, index of the first exchange,
+SHA-256 of the body), so a retry or a restart that rebuilds the same batch
+sends the same id and the server's ledger acknowledges it without storing it
+again. Row identities are the hex of verified fixed-width encodings of
+(session, request id, message index, part index), so a batch rebuilt
+differently after a restart repeats part ids the server deduplicates.
+
+Replies: 202 resolves the batch. 401 earns one refresh and a retry, then a
+re-enrollment. 403 with a revocation code stops the shipper. 400, 413, 415,
+and 422 are poison: a multi-exchange batch is retried one exchange at a time
+until the bad exchange is isolated, poisoned, counted, and skipped. 429 and
+503 wait for `Retry-After` (1 to 300 seconds) or a 30/60/120/300-second
+ladder; other failures wait 2, 4, 6 seconds and then the ladder. Each request
+has a 30-second deadline and the reply body is capped at 64 KiB.
+
+## Rows
+
+Both rows carry `schema_version` 7, `session_id` (the request's
+`metadata.user_id` or `user` field when present, else the exchange id),
+`provider` (from the destination host), `model`, timestamps and the UTC `date`
+from the request-start record, `is_error`, and `attributes.gateway` with the
+exchange id, destination host and path, status code, outcome, byte counts,
+and the `truncated`, `incomplete`, and `orphan` flags. The assistant row adds
+`attributes.usage` with `input_tokens` net of cache, `cache_read_tokens`,
+`cache_write_tokens`, `output_tokens`, and `total_tokens`, parsed from
+Anthropic Messages (JSON and SSE), OpenAI Responses (JSON and SSE), and
+chat-completions bodies. Unparseable bodies ship as raw text, capped at
+`max_exchange_bytes`. Headers and raw frames are never shipped; the server
+stamps `gateway_id`, `org`, and `received_at` itself. Full parity with the
+HypAware client's projector (tool parts, thinking blocks, compaction) is not
+implemented.
+
+## Properties
+
+| Property | Evidence |
+| --- | --- |
+| Cannot affect authorization, forwarding, or readiness | Structural: the thread receives only the log path, server, token, state directory, and limits; `Gateway` holds a read-only metrics view; readiness never reads it. Tested: `shipping_uploads_forwarded_exchanges_without_touching_readiness` with a hanging server, and the executable test with an unreachable server. |
+| Never modifies the log | The only file handle is read-only (`File::open`); the scanner never truncates or appends (proved). |
+| Retained bytes are an ordered prefix of the received bytes, within the cap | `exchange_assembler::Exchange::valid` proved; `assembler_interleaves_requests_and_truncates_at_the_cap`. |
+| Bounded open exchanges and pending rows | `Assembler::valid` proved; the engine stops reading when the queue is full (tested in the drain run). |
+| Each exchange is emitted exactly once, on its completion record or its eviction | `Assembler::admit` and `evict_oldest` postconditions proved. |
+| Batches hold whole exchanges within 5,000 rows and 4 MiB | `BatchBuilder` proved; `ships_many_exchanges_in_bounded_batches_with_drain_mode`. |
+| Progress advances only through an acknowledgment of the exact in-flight batch id or an explicit poison; abandonment changes nothing | `UploadCursor` proved; `upload_cursor_resolves_only_the_acknowledged_in_flight_batch`. |
+| Batch and row identities are injective in their inputs | `shipping_identity` lemmas proved; stable ids across restarts tested. |
+| No upload without an unexpired credential; one refresh per rejection; revocation is absorbing; delays within 1 to 300 seconds | `Enrollment`, `throttle_delay`, `transport_delay` proved; `recovers_from_rejected_tokens_throttling_and_poison_and_stops_on_revocation`. |
+| At-least-once delivery, exactly-once storage | Trusted server contract: batch-id ledger and `part_id` dedup. Tested against the fake server, including a restart without a checkpoint. |
+| Shutdown within a bounded window, no replacement thread | Tested: `shutdown_returns_within_its_window_while_the_server_hangs`; a thread inside a request is left to finish on its own. |
+
+## Trust assumptions
+
+- The HypAware server honors its documented ledger and dedup semantics and
+  issues credentials only to holders of a valid operator token.
+- TLS/PKI, DNS, Hyper, Tokio, and the filesystem, as for the gateway.
+- The system clock for renewal decisions and row timestamps.
+- The checkpoint's reproducibility: the assembler is deterministic for the
+  same record sequence and limits, so a restart replays the file from its
+  header and skips the resolved count. A checkpoint from different limits is
+  ignored and everything is re-sent; the server drops the repeated rows.
+- Token provisioning and revocation are operator and server obligations.
+
+## Resources
+
+One extra 2 MiB thread stack; at most `max_open_exchanges × max_exchange_bytes`
+in the assembler and `max_open_exchanges × 2 × (max_exchange_bytes + 16 KiB)`
+of queued rows; one scanned record of at most 1 MiB; one batch of at most 4 MiB
+and its copy in the request; a 64 KiB reply. `budget::shipping` composes these
+and the executable prints the figure at startup. See
+[resource composition](resource-composition.md#per-instance).
+
+## What is not covered
+
+No proof connects the thread's loop to the verified transitions; that is the
+same trusted-join situation as the gateway's async shell. The projection is a
+heuristic and lossy. gzip, dataset registration, config pulls, diagnostics,
+and fan-out to several servers are not implemented.
