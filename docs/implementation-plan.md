@@ -422,7 +422,7 @@ resolved-route `BodyBinding`; `Request::routed_bytes` invokes the core gate
 immediately before the borrowed bytes reach the existing single `writer.write`
 call. The same immutable resolved owner supplies the configured destination and
 credential. The final source audit and remaining assumptions are recorded in the
-[end-to-end audit](end-to-end-audit.md#milestone-6-final-upstream-mediation-audit).
+[end-to-end audit](end-to-end-audit.md#upstream-mediation-chain).
 This supersedes the earlier open upstream checkpoints above. The separate HTTP
 ownership and cross-owner resource-composition rows remain unfinished.
 Validation: 250 Cargo/Verus checks, the locked workspace suite with six compile-fail

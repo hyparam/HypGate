@@ -12,7 +12,7 @@ peer receipt, audit-file access controls, or whole-process memory.
 | --- | --- |
 | Shared task wrapper, including completion, cancellation before/after polling, panic, and shutdown | Both lease types use private `server/leased_task.rs::LeasedTask`. Actual future captures enter `TaskCleanup`; only normal destruction reports completion. Worker/connection lifecycle tests cover never-polled destruction, cancellation, capture panic, registry poison, and shutdown. |
 | Checked cleanup-before-reuse lifecycle composition, with explicit production correspondence | `lifecycle_composition::cleanup_before_reuse` combines the actual worker/connection HTTP release predicates, the background `TaskCredit` predicate used independently by DNS and TLS, and the active disk gate. `WorkerRegistry` and `ResponseRegistry` preserve other slot identities and entries on acquire/release, and maintain active-owner mappings across every transition. The runtime uses these exact registries and gates. The ownership table and transition argument below establish their composition with request and background handoff. |
-| Authorization, concrete route/credential binding, exact receipt provenance, and body submission composed in the production path; availability retains authorization | `ResolvedRoute::write_bytes` checks the combined gate. `PreparedRequest` → routed `copy_body` → `Request::routed_bytes` obtains the exact permitted slice immediately before the borrowed writer call. Strict mode requires the designated journal session and exact tenant/request/chunk/direction/payload receipt. Availability omits only audit evidence. See the [upstream mediation audit](end-to-end-audit.md#milestone-6-final-upstream-mediation-audit). |
+| Authorization, concrete route/credential binding, exact receipt provenance, and body submission composed in the production path; availability retains authorization | `ResolvedRoute::write_bytes` checks the combined gate. `PreparedRequest` → routed `copy_body` → `Request::routed_bytes` obtains the exact permitted slice immediately before the borrowed writer call. Strict mode requires the designated journal session and exact tenant/request/chunk/direction/payload receipt. Availability omits only audit evidence. See the [upstream mediation audit](end-to-end-audit.md#upstream-mediation-chain). |
 | Mutation rejection, proof index, and end-to-end audit with remaining trusted joins | All 253 deliberate mutations fail proof, including early release, foreign/stale identities, duplicate HTTP issuance, lost charges, cross-session receipts, unauthorized routes, omitted categories, and mismatched result handoff. The [proof index](proof-index.md), [end-to-end audit](end-to-end-audit.md), and this audit identify the remaining assumptions. |
 
 ## Ownership composition through production transitions
@@ -77,6 +77,10 @@ blocking, cancellation, and panic paths. The cross-owner test is an adapter
 regression, not a substitute for the checked transition invariants.
 
 ## Trusted joins and limits
+
+The general trusted computing base is listed once in the
+[security contract](security-contract.md#trusted-computing-base-and-evidence);
+the joins specific to this milestone are:
 
 - Rust moves, private fields, non-cloneable tokens, Arc lifetime, disjoint mutable
   ownership, mutex serialization, and normal-return destructor reporting bind the
