@@ -210,9 +210,8 @@ Two ten-minute overload runs and the final 100-wave-per-mode isolated memory soa
 also passed; measurements and limits are in the benchmark notes.
 These counts are checks, not a count of independent security guarantees.
 
-[Automated checks](.github/workflows/ci.yml) are configured to reproduce the tests and proofs on Linux.
-Current GitHub Actions runs cannot start because of an account billing/spending-limit
-restriction; the local milestone-6 checks passed, but remote CI is not green.
+[Automated checks](.github/workflows/ci.yml) reproduce the tests and proofs on Linux
+for every pull request and every push to `master`.
 `bash scripts/check_deployment.sh` reproduces the documented deployment from a clean
 checkout, and `deploy/Dockerfile` repeats the build, tests, proofs, and that check in
 a digest-pinned container; see [clean-environment reproduction](docs/deployment.md#clean-environment-reproduction).
