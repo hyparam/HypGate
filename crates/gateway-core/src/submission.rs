@@ -20,10 +20,12 @@ impl AuthorizedWrite {
         -> (out: Option<Self>)
         requires old(stream).valid(), authority.valid(),
         ensures final(stream).valid(), final(stream).key() == old(stream).key(),
+            final(stream).same_owner(old(stream)), final(stream).same_audit(old(stream)),
             final(stream).state().body() == old(stream).state().body(),
             final(stream).state().owner() == old(stream).state().owner(),
             match out {
                 Some(write) => write.direction() == direction && direction <= 1 && write.bound_to(authority)
+                    && OwnedStream::prepared_state(*old(stream), *final(stream), max, write.ticket())
                     && authority.grants(write.route())
                     && write.request() == final(stream).state().owner()
                     && final(stream).state().matches(&write.ticket())
@@ -92,6 +94,8 @@ impl AuthorizedWrite {
     pub fn complete(&self, stream: &mut OwnedStream, count: usize) -> (ok: bool)
         requires old(stream).valid(),
         ensures final(stream).valid(), final(stream).key() == old(stream).key(),
+            final(stream).same_owner(old(stream)), final(stream).same_audit(old(stream)),
+            crate::stream::StreamChunk::completed_write(old(stream).state(), final(stream).state(), &self.ticket(), count, ok),
             ok == (old(stream).state().matches(&self.ticket())
                 && count <= old(stream).state().end() - old(stream).state().position()),
             ok ==> final(stream).state().completed() == old(stream).state().completed()

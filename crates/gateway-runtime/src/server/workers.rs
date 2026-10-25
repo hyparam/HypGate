@@ -19,8 +19,12 @@ impl TaskLease for WorkerLease {
 
 impl WorkerLease {
     pub(super) fn http(&self) -> crate::http_body::WorkerHttp { self.http.clone() }
-    pub(super) fn spawn<F: Future<Output = ()> + Send + 'static>(self, work: F) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(LeasedTask::new(work, self))
+    /// A worker finishes only with proof that its exchange was closed. The
+    /// marker carries no resources, so the leased task still yields unit.
+    pub(super) fn spawn<F: Future<Output = gateway_core::exchange_lifecycle::Closed> + Send + 'static>(self, work: F)
+        -> tokio::task::JoinHandle<()>
+    {
+        tokio::spawn(LeasedTask::new(async move { let _closed = work.await; }, self))
     }
 }
 
@@ -100,6 +104,7 @@ mod tests {
             sent.send(()).unwrap();
             std::future::pending::<()>().await;
             drop(writer);
+            gateway_core::exchange_lifecycle::Closed::without_request()
         });
         let connection = tokio::spawn(connection_lease.task(async move {
             drain.await.unwrap();
@@ -230,6 +235,7 @@ mod tests {
                 let append = append_log.append(LogRecord { tenant: 1, request: 1, chunk: 1,
                     kind: RecordKind::Upload, bytes: b"record" });
                 let _ = tokio::join!(receive, append);
+                gateway_core::exchange_lifecycle::Closed::without_request()
             });
             running.await.unwrap();
             syncing.await.unwrap();
@@ -337,7 +343,7 @@ mod tests {
             let started = started.clone();
             let worker = lease.spawn(async move {
                 started.send(()).await.unwrap();
-                std::future::pending::<()>().await;
+                std::future::pending::<gateway_core::exchange_lifecycle::Closed>().await
             });
             tasks.push(worker);
         }
@@ -379,6 +385,7 @@ mod tests {
                 if exit == 3 { panic!("injected worker panic"); }
                 if exit != 0 { std::future::pending::<()>().await; }
                 drop(cleanup);
+                gateway_core::exchange_lifecycle::Closed::without_request()
             });
             if exit == 2 { running.await.unwrap(); }
             if exit == 1 || exit == 2 { task.abort(); }

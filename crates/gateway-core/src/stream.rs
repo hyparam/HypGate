@@ -87,6 +87,20 @@ impl StreamChunk {
         ensures out == self.closed(),
     { self.closed }
 
+    pub fn is_pending(&self) -> (out: bool)
+        ensures out == self.pending(),
+    { self.pending }
+
+    pub fn is_failed(&self) -> (out: bool)
+        ensures out == self.failed(),
+    { self.failed }
+
+    // Bytes of the current chunk not yet accepted by the writer.
+    pub fn unsent(&self) -> (out: usize)
+        requires self.valid(),
+        ensures out == self.body().len() - self.position(),
+    { self.bytes.len() - self.sent }
+
     pub closed spec fn valid(&self) -> bool {
         self.sent <= self.offered <= self.bytes.len()
         && self.bytes.len() <= self.capacity

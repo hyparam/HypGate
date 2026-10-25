@@ -7,7 +7,6 @@ use gateway_core::owned_stream::OwnedStream;
 use gateway_core::stream::StreamChunk;
 use gateway_core::submission::AuthorizedWrite;
 use std::sync::Mutex;
-use tokio::io::{AsyncRead, AsyncReadExt};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum AdmissionError {
@@ -64,7 +63,6 @@ impl Drop for Lease<'_> {
 pub struct Request<'a> {
     authorized: AuthorizedRequest<'a>,
     capacity: usize,
-    log_failed: bool,
     journal: gateway_core::journal_binding::JournalBinding,
     lease: Lease<'a>,
 }
@@ -117,7 +115,7 @@ impl Admission {
                 }
             }
         }
-        Ok(Request { authorized, capacity, log_failed: false, journal: gateway_core::journal_binding::JournalBinding::new(), lease })
+        Ok(Request { authorized, capacity, journal: gateway_core::journal_binding::JournalBinding::new(), lease })
     }
 }
 
@@ -139,25 +137,21 @@ impl<'a> Request<'a> {
 
     fn stream(&self) -> &StreamChunk { self.lease.stream().stream() }
     fn stream_mut(&mut self) -> &mut OwnedStream { self.lease.stream_mut() }
+    pub(crate) fn owned(&self) -> &OwnedStream { self.lease.stream() }
+    /// The verified owner, its authority, and its journal designation, for the
+    /// body-copy machine. The lease keeps ownership; nothing is extracted.
+    pub(crate) fn parts(&mut self) -> (&mut OwnedStream, &AuthorizedRequest<'a>, &mut gateway_core::journal_binding::JournalBinding) {
+        (self.lease.stream_mut(), &self.authorized, &mut self.journal)
+    }
     /// The stream this ticket was prepared against, if the ticket is ours.
     fn bound_stream(&self, ticket: &WriteTicket<'_>) -> Option<&OwnedStream> {
         std::ptr::eq(ticket.admission, self.lease.admission).then(|| self.lease.stream())
     }
     pub fn request_id(&self) -> u64 { self.authorized.request_id() }
     pub fn tenant_id(&self) -> u64 { self.authorized.tenant_id() }
-    pub(crate) fn capacity(&self) -> usize { self.capacity }
     pub(crate) fn is_closed(&self) -> bool { self.stream().is_closed() }
-    pub(crate) fn log_failed(&self) -> bool { self.log_failed }
+    pub(crate) fn log_failed(&self) -> bool { self.stream().is_failed() }
     pub(crate) fn strict(&self) -> bool { self.lease.admission.strict }
-
-    pub(crate) async fn read_next<R: AsyncRead + Unpin>(&mut self, reader: &mut R)
-        -> Result<usize, TransferError>
-    {
-        if !self.stream_mut().begin_read() { return Err(TransferError::InvalidState); }
-        let length = reader.read(self.stream_mut().read_buffer()).await.map_err(|_| TransferError::Read)?;
-        if !self.stream_mut().finish_read(length) { return Err(TransferError::InvalidState); }
-        Ok(length)
-    }
 
     pub fn advance(&mut self, bytes: Vec<u8>) -> Option<u64> {
         // Verus models payload length, not Vec backing capacity. Reject excess
@@ -218,7 +212,7 @@ impl<'a> Request<'a> {
         let completion = kind == RecordKind::Completion;
         // A request already marked log-failed skips later appends, as the body
         // path does; the gap was counted at the first failure.
-        if self.log_failed && !completion { return Err(TransferError::Log); }
+        if self.log_failed() && !completion { return Err(TransferError::Log); }
         let mut pending = CancelOnDrop { request: self, armed: !completion };
         if pending.request.is_closed() && !completion { return Err(TransferError::InvalidState); }
         if !pending.request.journal.bind(log.session_id()) {
@@ -249,16 +243,12 @@ impl<'a> Request<'a> {
     pub fn pending_bytes(&self, ticket: &WriteTicket<'_>, direction: Direction) -> Option<&[u8]> {
         ticket.core.bytes(self.bound_stream(ticket)?, &self.authorized, &self.journal, direction.id())
     }
-    pub(crate) fn routed_bytes<D, C>(&self, route: &gateway_core::resolved_route::ResolvedRoute<'_, D, C>,
-        ticket: &WriteTicket<'_>, direction: Direction) -> Option<&[u8]> {
-        route.write_bytes(&ticket.core, self.bound_stream(ticket)?, &self.authorized, &self.journal, direction.id())
-    }
     pub fn complete(&mut self, ticket: &WriteTicket<'_>, count: usize) -> bool {
         if self.bound_stream(ticket).is_none() { return false; }
         ticket.core.complete(self.stream_mut(), count)
     }
     pub fn cancel(&mut self) { self.stream_mut().cancel(); }
-    pub fn fail_log(&mut self) { self.log_failed = true; self.stream_mut().fail_log(); }
+    pub fn fail_log(&mut self) { self.stream_mut().fail_log(); }
 }
 
 #[cfg(test)]

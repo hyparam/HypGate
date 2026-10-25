@@ -34,7 +34,7 @@ pub struct PreparedRequest<'a> {
 }
 impl<'a> PreparedRequest<'a> {
     pub(crate) async fn copy_body<R, W, L>(&mut self, reader: &mut R, writer: &mut W, log: &mut L,
-        direction: crate::transfer::Direction) -> Result<crate::transfer::TransferStats, crate::transfer::TransferError>
+        direction: crate::transfer::Direction) -> Result<gateway_core::body_copy::BodyCopy, crate::transfer::TransferError>
     where R: tokio::io::AsyncRead + Unpin, W: tokio::io::AsyncWrite + Unpin, L: crate::transfer::AuditLog {
         self.routed.copy_body(reader, writer, log, direction).await
     }
@@ -63,13 +63,11 @@ impl<'a> PreparedRequest<'a> {
             .ok_or(crate::transfer::TransferError::InvalidState)?;
         self.routed.stream().audit_metadata(log, crate::transfer::RecordKind::ResponseHead, &payload).await
     }
-    /// Kind 4: wall clock, outcome code, and the accepted byte counts.
-    pub(crate) async fn audit_completion<L: crate::transfer::AuditLog>(&mut self, log: &mut L, outcome: u8,
-        upload_bytes: u64, download_bytes: u64) -> Result<(), crate::transfer::TransferError>
+    /// Kind 4: the completion payload the verified lifecycle produced.
+    pub(crate) async fn audit_completion<L: crate::transfer::AuditLog>(&mut self, log: &mut L, payload: &[u8])
+        -> Result<(), crate::transfer::TransferError>
     {
-        let payload = gateway_core::metadata::encode_completion(unix_ms(), outcome, upload_bytes, download_bytes)
-            .ok_or(crate::transfer::TransferError::InvalidState)?;
-        self.routed.stream().audit_metadata(log, crate::transfer::RecordKind::Completion, &payload).await
+        self.routed.stream().audit_metadata(log, crate::transfer::RecordKind::Completion, payload).await
     }
     // Validate the configured binding before any DNS/TCP/TLS effect, then move
     // the only request into the direct HTTP/1 transport in origin form.

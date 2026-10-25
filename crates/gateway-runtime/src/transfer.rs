@@ -1,9 +1,11 @@
-//! Trusted async driver for verified stream transitions. The writer's accepted
-//! count and the logger's durable acknowledgment are external contracts.
+//! Async shell around the verified body-copy machine. The reader's bytes, the
+//! writer's accepted count, and the logger's durable acknowledgment are
+//! external contracts; which of them happens next is the machine's decision.
 use crate::admission::{CancelOnDrop, Request};
 pub use gateway_core::journal::DurableFrame;
+use gateway_core::{body_copy::{Action, BodyCopy, Failure}, resolved_route::ResolvedRoute};
 use std::{future::Future, io};
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Direction { Upload, Download }
@@ -68,75 +70,68 @@ pub trait AuditLog {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum TransferError { Read, Write, WriteZero, Flush, Log, InvalidState, CounterExhausted }
-
-#[derive(Debug, PartialEq, Eq)]
-pub struct TransferStats {
-    pub accepted_bytes: u64,
-    pub audit_gap: bool,
-}
-
-// Production uses the same resolved owner for dispatch and every body range.
-// The direct binding supports embedders with their own trusted writer mapping.
-pub(crate) trait BodyBinding: Sync {
-    fn bytes<'r>(&self, request: &'r Request<'_>, ticket: &crate::admission::WriteTicket<'_>, direction: Direction) -> Option<&'r [u8]>;
-}
-#[cfg(test)]
-impl BodyBinding for () {
-    fn bytes<'r>(&self, request: &'r Request<'_>, ticket: &crate::admission::WriteTicket<'_>, direction: Direction) -> Option<&'r [u8]> {
-        request.pending_bytes(ticket, direction)
-    }
-}
-impl<D: Sync, C: Sync> BodyBinding for gateway_core::resolved_route::ResolvedRoute<'_, D, C> {
-    fn bytes<'r>(&self, request: &'r Request<'_>, ticket: &crate::admission::WriteTicket<'_>, direction: Direction) -> Option<&'r [u8]> {
-        request.routed_bytes(self, ticket, direction)
+impl From<Failure> for TransferError {
+    fn from(failure: Failure) -> Self {
+        match failure {
+            Failure::Read => Self::Read, Failure::Write => Self::Write, Failure::WriteZero => Self::WriteZero,
+            Failure::Flush => Self::Flush, Failure::Log => Self::Log, Failure::InvalidState => Self::InvalidState,
+            Failure::CounterExhausted => Self::CounterExhausted,
+        }
     }
 }
 
 #[cfg(test)]
 pub(crate) async fn copy_body<R, W, L>(request: &mut Request<'_>, reader: &mut R,
-    writer: &mut W, log: &mut L, direction: Direction) -> Result<TransferStats, TransferError>
+    writer: &mut W, log: &mut L, direction: Direction) -> Result<BodyCopy, TransferError>
 where R: AsyncRead + Unpin, W: AsyncWrite + Unpin, L: AuditLog {
-    copy_body_bound(request, reader, writer, log, direction, &()).await
+    copy_body_bound::<_, _, _, (), ()>(request, reader, writer, log, direction, None).await
 }
 
-/// Copy one body sequentially using one outstanding write and one awaited log
-/// append. Successful EOF leaves the request usable for the next direction.
-/// Errors or cancellation close it. EOF/framing correctness belongs to the HTTP
+/// Copy one body under the verified `BodyCopy` machine. The machine names each
+/// effect (read, append, write, flush); this loop performs it and reports the
+/// result back. Nothing here decides what is read, logged, released, or
+/// counted. Successful EOF leaves the request usable for the next direction;
+/// errors or cancellation close it. EOF/framing correctness belongs to the HTTP
 /// body adapter. No detached task, transparent retry, or whole-body buffering.
-pub(crate) async fn copy_body_bound<R, W, L, B>(request: &mut Request<'_>, reader: &mut R,
-    writer: &mut W, log: &mut L, direction: Direction, binding: &B) -> Result<TransferStats, TransferError>
-where R: AsyncRead + Unpin, W: AsyncWrite + Unpin, L: AuditLog, B: BodyBinding {
+pub(crate) async fn copy_body_bound<R, W, L, D: Sync, C: Sync>(request: &mut Request<'_>, reader: &mut R,
+    writer: &mut W, log: &mut L, direction: Direction, route: Option<&ResolvedRoute<'_, D, C>>) -> Result<BodyCopy, TransferError>
+where R: AsyncRead + Unpin, W: AsyncWrite + Unpin, L: AuditLog {
     let mut guard = CancelOnDrop { request, armed: true };
-    let capacity = guard.request.capacity();
-    if capacity == 0 || guard.request.is_closed() { return Err(TransferError::InvalidState); }
-    let mut total = 0u64;
+    let mut copy = BodyCopy::begin(guard.request.owned(), direction.id()).ok_or(TransferError::InvalidState)?;
     loop {
-        // The verified owner drops completed stream storage before allocating
-        // its next read buffer, then moves the filled prefix back into the stream.
-        let length = guard.request.read_next(reader).await?;
-        if length == 0 {
-            guard.armed = false;
-            return Ok(TransferStats { accepted_bytes: total, audit_gap: guard.request.log_failed() });
-        }
-        let next_total = total.checked_add(length as u64).ok_or(TransferError::CounterExhausted)?;
-        if !guard.request.log_failed() {
-            match guard.request.audit_current(log, direction).await {
-                Ok(()) | Err(TransferError::Log) => {},
-                Err(error) => return Err(error),
+        match copy.next() {
+            Action::Read => {
+                let (stream, _, _) = guard.request.parts();
+                if copy.begin_read(stream) {
+                    let length = reader.read(copy.read_buffer(stream)).await.ok();
+                    copy.finish_read(stream, length);
+                }
             }
+            Action::Audit => {
+                let session = log.session_id();
+                let (stream, authority, journal) = guard.request.parts();
+                if let Some((header, bytes)) = copy.audit_record(stream, authority, journal, session) {
+                    let record = LogRecord { tenant: header.tenant, request: header.request, chunk: header.chunk,
+                        kind: direction.into(), bytes };
+                    let receipt = log.append(record).await.ok();
+                    copy.finish_audit(stream, authority, journal, receipt.as_ref());
+                }
+            }
+            Action::Write => {
+                let (stream, authority, journal) = guard.request.parts();
+                if let Some((write, bytes)) = copy.write_bytes(stream, authority, journal, route) {
+                    let count = writer.write(bytes).await.ok();
+                    copy.finish_write(stream, &write, count);
+                }
+            }
+            Action::Flush => {
+                let ok = writer.flush().await.is_ok();
+                let (stream, _, _) = guard.request.parts();
+                copy.finish_flush(stream, ok);
+            }
+            Action::Done => { guard.armed = false; return Ok(copy); }
+            Action::Failed(failure) => return Err(failure.into()),
         }
-        if guard.request.log_failed() && guard.request.strict() { return Err(TransferError::Log); }
-        let mut sent = 0;
-        while sent < length {
-            let ticket = guard.request.prepare(length - sent, direction).ok_or(TransferError::InvalidState)?;
-            let bytes = binding.bytes(guard.request, &ticket, direction).ok_or(TransferError::InvalidState)?;
-            let count = writer.write(bytes).await.map_err(|_| TransferError::Write)?;
-            if !guard.request.complete(&ticket, count) { return Err(TransferError::InvalidState); }
-            if count == 0 { return Err(TransferError::WriteZero); }
-            sent += count;
-        }
-        writer.flush().await.map_err(|_| TransferError::Flush)?;
-        total = next_total;
     }
 }
 

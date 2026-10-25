@@ -115,6 +115,10 @@ impl OwnedStream {
             && self.audit_direction() == prior.audit_direction() && self.receipt() == prior.receipt()
     }
     pub open spec fn unaudited(&self) -> bool { self.audit_session().is_none() && self.receipt().is_none() }
+    // The stream state after a successful reservation of `ticket`.
+    pub open spec fn prepared_state(pre: Self, post: Self, max: usize, ticket: Ticket) -> bool {
+        StreamChunk::prepared(pre.state(), post.state(), max, Some(ticket))
+    }
     // Any change to the retained chunk invalidates its journal receipt.
     fn clear_audit(&mut self)
         ensures final(self).unaudited(), final(self).key() == old(self).key(), final(self).state() == old(self).state(),
@@ -167,6 +171,10 @@ impl OwnedStream {
     pub fn stream(&self) -> (out: &StreamChunk)
         ensures *out == self.state(), self.valid() ==> out.valid(),
     { &self.stream }
+
+    pub fn has_read_buffer(&self) -> (out: bool)
+        ensures out == (self.read_bytes().len() > 0),
+    { self.read_buffer.len() > 0 }
 
     pub fn is_live(&self, registry: &ResourceAdmission) -> (out: bool)
         requires self.valid(), registry.valid(),

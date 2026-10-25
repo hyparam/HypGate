@@ -95,7 +95,7 @@ async fn tls_exchange_preserves_native_payloads_and_scoped_credentials() {
     assert_eq!(output.status, Some(StatusCode::OK));
     assert_eq!(output.bytes, expected); assert_eq!(log.download, expected);
     assert_eq!(log.upload, b"{\"stream\":true}");
-    assert_eq!(stats.download.accepted_bytes, expected.len() as u64);
+    assert_eq!(stats.download.accepted_bytes(), expected.len() as u64);
     assert!(!output.headers.contains_key("set-cookie"));
     assert!(config.admit(b"gateway", 7).is_ok());
 }
@@ -618,7 +618,7 @@ async fn interim_response_does_not_replace_final_status_or_payload() {
     let mut prepared = prepare(&config);
     let (result, ()) = tokio::join!(transport.exchange(&mut prepared, &mut input, &mut output, &mut log, &http), upstream);
     drop(prepared);
-    assert_eq!(result.unwrap().download.accepted_bytes, 2);
+    assert_eq!(result.unwrap().download.accepted_bytes(), 2);
     assert_eq!(output.status, Some(StatusCode::OK)); assert_eq!(output.bytes, b"{}");
     assert!(!output.headers.contains_key("link"));
     assert_eq!(log.upload, b"{}"); assert_eq!(log.download, b"{}");

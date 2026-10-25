@@ -1,5 +1,6 @@
 //! One HTTPS HTTP/1.1 exchange. No redirects, ambient proxies, pooling, or replay.
-use crate::{http_body, http_boundary::{PreparedRequest, prepare_response_parts}, transfer::{AuditLog, Direction, TransferError, TransferStats}};
+use crate::{http_body, http_boundary::{PreparedRequest, prepare_response_parts}, transfer::{AuditLog, Direction, TransferError}};
+use gateway_core::{body_copy::BodyCopy, exchange_lifecycle::Fault};
 use http::{HeaderMap, StatusCode};
 use hyper_util::rt::TokioIo;
 use std::{future::Future, io, sync::Arc, time::Duration};
@@ -18,17 +19,13 @@ pub trait ResponseSink: AsyncWrite + Unpin {
 #[derive(Debug, PartialEq, Eq)]
 pub enum TransportError { Timeout, Connect, Tls, Http, Metadata, Upload, Download, Client, Log }
 impl TransportError {
-    /// Outcome code recorded in the completion record (kind 4).
-    pub fn outcome(&self) -> u8 {
-        use gateway_core::metadata::*;
+    /// The lifecycle fault this error names; the verified lifecycle maps it to
+    /// the completion record's outcome code.
+    pub fn fault(&self) -> Fault {
         match self {
-            Self::Connect | Self::Tls | Self::Http => OUTCOME_UPSTREAM_FAILURE,
-            Self::Timeout => OUTCOME_UPSTREAM_TIMEOUT,
-            Self::Upload => OUTCOME_UPLOAD_FAILURE,
-            Self::Download => OUTCOME_DOWNLOAD_FAILURE,
-            Self::Client => OUTCOME_CLIENT_DISCONNECT,
-            Self::Log => OUTCOME_LOG_REFUSAL,
-            Self::Metadata => OUTCOME_OTHER,
+            Self::Connect => Fault::Connect, Self::Tls => Fault::Tls, Self::Http => Fault::Http,
+            Self::Timeout => Fault::Timeout, Self::Upload => Fault::Upload, Self::Download => Fault::Download,
+            Self::Client => Fault::Client, Self::Log => Fault::Log, Self::Metadata => Fault::Metadata,
         }
     }
 }
@@ -37,7 +34,8 @@ impl TransportError {
 fn body_error(error: TransferError, direction: TransportError) -> TransportError {
     if error == TransferError::Log { TransportError::Log } else { direction }
 }
-pub struct ExchangeStats { pub upload: TransferStats, pub download: TransferStats }
+/// The two finished body-copy machines, with their proved byte counts.
+pub struct ExchangeStats { pub upload: BodyCopy, pub download: BodyCopy }
 
 // Application-data buffering only; handshake/control traffic and record overhead
 // have separate rustls limits. See docs/dependency-resources.md.

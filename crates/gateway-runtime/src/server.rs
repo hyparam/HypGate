@@ -11,6 +11,7 @@ use hyper_util::rt::{TokioIo, TokioTimer};
 use std::{convert::Infallible, future::Future, io, pin::Pin, sync::{Arc, atomic::{AtomicU64, Ordering}},
     task::{Context, Poll}, time::Duration};
 use tokio::{io::{AsyncWrite, AsyncWriteExt}, net::TcpListener, sync::oneshot, task::{JoinHandle, JoinSet}};
+use gateway_core::exchange_lifecycle::{Closed, Fault, Lifecycle};
 use tokio_util::task::TaskTracker;
 
 mod workers;
@@ -99,39 +100,44 @@ impl Gateway {
         worker_response(headers, body, guard).await
     }
 
+    /// Every admitted exchange ends in the verified lifecycle's terminal state
+    /// and returns its `Closed` token, so the worker cannot finish without the
+    /// completion record having been attempted. Only a request refused before
+    /// admission closes without one: it has no records anywhere.
     async fn run_exchange(self: Arc<Self>, http: http_body::WorkerHttp, parts: http::request::Parts,
-        input: Incoming, mut output: Output, disconnect: tokio_util::sync::CancellationToken)
+        input: Incoming, mut output: Output, disconnect: tokio_util::sync::CancellationToken) -> Closed
     {
-        use gateway_core::metadata::{OUTCOME_CLIENT_DISCONNECT, OUTCOME_LOG_REFUSAL, OUTCOME_OTHER, OUTCOME_SUCCESS};
         let mut prepared = match http_boundary::prepare_request_parts(&self.config, parts) {
             Ok(p) => p,
             Err(e) => {
                 let _ = output.start(e.status(), HeaderMap::new()).await;
                 let _ = output.shutdown().await;
-                return;
+                return Closed::without_request();
             }
         };
+        let mut life = Lifecycle::begin();
+        let mut log = ObservedLog { log: self.log.clone(), gaps: &self.audit_gaps,
+            availability: !self.config.requires_audit(), reported: false };
         // If strict logging is already unavailable, do not even open an
         // upstream connection. Later failures still use the stream gate.
         if self.config.requires_audit() && !self.log.healthy() {
             let _ = output.start(StatusCode::SERVICE_UNAVAILABLE, HeaderMap::new()).await;
             let _ = output.shutdown().await;
-            return;
+            life.failed(Fault::Log);
+            return self.audit_completion(&mut prepared, &mut log, life).await;
         }
-        let mut log = ObservedLog { log: self.log.clone(), gaps: &self.audit_gaps,
-            availability: !self.config.requires_audit(), reported: false };
         // Kind 2 before any DNS, TCP, or TLS effect. Strict mode needs the
         // acknowledgment before dispatch; availability mode marks the request
         // log-failed (the gap counter already incremented) and forwards.
         if prepared.audit_request_start(&mut log).await.is_err() && self.config.requires_audit() {
             let _ = output.start(StatusCode::SERVICE_UNAVAILABLE, HeaderMap::new()).await;
             let _ = output.shutdown().await;
-            self.audit_completion(&mut prepared, &mut log, OUTCOME_LOG_REFUSAL, 0, 0).await;
-            return;
+            life.failed(Fault::StartRefused);
+            return self.audit_completion(&mut prepared, &mut log, life).await;
         }
         let Some(mut input) = http.input(input) else {
-            self.audit_completion(&mut prepared, &mut log, OUTCOME_OTHER, 0, 0).await;
-            return;
+            life.failed(Fault::InputUnavailable);
+            return self.audit_completion(&mut prepared, &mut log, life).await;
         };
         // Cancellation drops the exchange future, and with it every upstream
         // socket and body future, before the completion record is written.
@@ -141,16 +147,14 @@ impl Gateway {
             _ = disconnect.cancelled() => None,
             result = self.transport.exchange(&mut prepared, &mut input, &mut output, &mut log, &http) => Some(result),
         };
-        let (outcome, upload, download) = match &result {
-            Some(Ok(stats)) => (OUTCOME_SUCCESS, stats.upload.accepted_bytes, stats.download.accepted_bytes),
-            Some(Err(error)) => (error.outcome(), 0, 0),
-            None => (OUTCOME_CLIENT_DISCONNECT, 0, 0),
-        };
         match result {
-            Some(Ok(_)) => {
+            Some(Ok(stats)) => {
+                life.upload_finished(&stats.upload);
+                life.succeeded(&stats.download);
                 let _ = output.shutdown().await; // only success sends the clean EOF marker
             }
             Some(Err(e)) => {
+                life.failed(e.fault());
                 self.failed_exchanges.fetch_add(1, Ordering::Relaxed);
                 if output.head.is_some() {
                     let status = if e == TransportError::Timeout { StatusCode::GATEWAY_TIMEOUT } else { StatusCode::BAD_GATEWAY };
@@ -160,9 +164,9 @@ impl Gateway {
                 // After headers, dropping the writer makes the body fail;
                 // never turn a truncated generation into successful HTTP EOF.
             }
-            None => {} // canceled: the head sender or body writer drops unfinished
+            None => life.failed(Fault::Cancelled), // the head sender or body writer drops unfinished
         }
-        self.audit_completion(&mut prepared, &mut log, outcome, upload, download).await;
+        self.audit_completion(&mut prepared, &mut log, life).await
     }
 
     // Kind 4 is best effort in both modes: the client-visible result is already
@@ -170,10 +174,12 @@ impl Gateway {
     // before the worker releases its slot, never from a detached task, and
     // skipped when the logger is already unhealthy.
     async fn audit_completion(&self, prepared: &mut http_boundary::PreparedRequest<'_>, log: &mut ObservedLog<'_>,
-        outcome: u8, upload_bytes: u64, download_bytes: u64)
+        life: Lifecycle) -> Closed
     {
-        if !self.log.healthy() { return; }
-        let _ = prepared.audit_completion(log, outcome, upload_bytes, download_bytes).await;
+        if !self.log.healthy() { return life.close(false); }
+        let payload = life.completion(http_boundary::unix_ms());
+        let recorded = prepared.audit_completion(log, &payload).await.is_ok();
+        life.close(recorded)
     }
 }
 

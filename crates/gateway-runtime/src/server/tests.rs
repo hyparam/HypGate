@@ -694,7 +694,7 @@ async fn worker_budget_covers_cleanup_without_consuming_request_slots() {
         assert_eq!(app.config.usage(), Some((0, 1)));
         assert!(tokio::time::timeout(Duration::from_millis(20), upstream.accept()).await.is_err());
         // Cancel before the task's first poll: its captured lease must still drop.
-        let worker = lease.spawn(async move { std::future::pending::<()>().await; });
+        let worker = lease.spawn(async move { std::future::pending::<gateway_core::exchange_lifecycle::Closed>().await });
         worker.abort(); assert!(worker.await.unwrap_err().is_cancelled());
         assert!(app.workers.is_empty());
         assert_eq!(app.worker_slots.usage(), Some((0, 1)));

@@ -183,9 +183,9 @@ impl GatewayConfig {
 
 impl<'a> RoutedRequest<'a> {
     pub(crate) async fn copy_body<R, W, L>(&mut self, reader: &mut R, writer: &mut W, log: &mut L,
-        direction: crate::transfer::Direction) -> Result<crate::transfer::TransferStats, crate::transfer::TransferError>
+        direction: crate::transfer::Direction) -> Result<gateway_core::body_copy::BodyCopy, crate::transfer::TransferError>
     where R: tokio::io::AsyncRead + Unpin, W: tokio::io::AsyncWrite + Unpin, L: crate::transfer::AuditLog {
-        crate::transfer::copy_body_bound(&mut self.request, reader, writer, log, direction, &self.resolved).await
+        crate::transfer::copy_body_bound(&mut self.request, reader, writer, log, direction, Some(&self.resolved)).await
     }
     pub(crate) fn stream(&mut self) -> &mut Request<'a> { &mut self.request }
     pub fn destination(&self) -> &Uri {

@@ -421,6 +421,17 @@ MUTATIONS = [
     ("shipper.rs", "machine_records_wrong_source", "source: Ghost(token.exchange.request_id())", "source: Ghost(0)"),
     ("egress.rs", "egress_permit_forgets_tenant", "origin: Origin::Provider { tenant: authority.tenant_id(), origin: route.origin, credential: route.credential }", "origin: Origin::Provider { tenant: 0, origin: route.origin, credential: route.credential }"),
     ("egress.rs", "egress_permit_swaps_credential_index", "credential: route.credential } })", "credential: route.origin } })"),
+    ("body_copy.rs", "body_copy_drops_accepted_count", "self.accepted = self.accepted + (n as u64);", "self.accepted = self.accepted;"),
+    ("body_copy.rs", "body_copy_skips_audit_while_log_healthy", "if stream.stream().is_failed() { self.phase = Phase::Audited; return None; }", "if true { self.phase = Phase::Audited; return None; }"),
+    ("body_copy.rs", "body_copy_flushes_partial_chunk", "if stream.stream().unsent() == 0 { self.phase = Phase::NeedFlush; } else { self.phase = Phase::Audited; }", "self.phase = Phase::NeedFlush;"),
+    ("body_copy.rs", "body_copy_hides_audit_gap", "if n == 0 { self.gap = stream.stream().is_failed(); self.phase = Phase::Done; }", "if n == 0 { self.gap = false; self.phase = Phase::Done; }"),
+    ("body_copy.rs", "body_copy_finishes_with_data_pending", "if n == 0 { self.gap = stream.stream().is_failed(); self.phase = Phase::Done; }\n                else { self.phase = Phase::Filled; }", "self.gap = stream.stream().is_failed(); self.phase = Phase::Done;"),
+    ("body_copy.rs", "body_copy_writes_unprepared_ticket", "self.ticket = Ghost(write.ticket());", "self.ticket = Ghost(arbitrary());"),
+    ("body_copy.rs", "body_copy_strict_log_failure_continues", "if stream.stream().requires_audit() { self.phase = Phase::Failed; self.failure = Some(Failure::Log); }\n                else { self.phase = Phase::Audited; }", "self.phase = Phase::Audited;"),
+    ("exchange_lifecycle.rs", "lifecycle_misreports_timeout", "out != metadata::OUTCOME_SUCCESS,\n{\n    match fault {\n        Fault::Connect | Fault::Tls | Fault::Http => metadata::OUTCOME_UPSTREAM_FAILURE,\n        Fault::Timeout => metadata::OUTCOME_UPSTREAM_TIMEOUT,", "out != metadata::OUTCOME_SUCCESS,\n{\n    match fault {\n        Fault::Connect | Fault::Tls | Fault::Http => metadata::OUTCOME_UPSTREAM_FAILURE,\n        Fault::Timeout => metadata::OUTCOME_OTHER,"),
+    ("exchange_lifecycle.rs", "lifecycle_records_counts_for_failed_exchange", "let (upload, download) = if self.outcome == metadata::OUTCOME_SUCCESS { (self.upload, self.download) } else { (0, 0) };", "let (upload, download) = (self.upload, self.download);"),
+    ("exchange_lifecycle.rs", "lifecycle_drops_download_count", "self.download = copy.accepted_bytes();", "self.download = 0;"),
+    ("exchange_lifecycle.rs", "lifecycle_fault_leaves_exchange_open", "        self.outcome = outcome_code(fault);\n        self.state = State::Terminal;", "        self.outcome = outcome_code(fault);"),
     ("shipping_driver.rs", "driver_checkpoints_stale_progress", "                let (resolved, poisoned) = machine.progress();\n                effects.checkpoint(machine, resolved, poisoned);\n                effects.observe(Event::PoisonedUnsent, machine);", "                let (resolved, poisoned) = machine.progress();\n                effects.checkpoint(machine, 0, poisoned);\n                effects.observe(Event::PoisonedUnsent, machine);"),
 ]
 

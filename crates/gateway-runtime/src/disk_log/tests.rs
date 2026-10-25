@@ -16,8 +16,8 @@ async fn strict_transfer_and_real_disk_records_have_identical_payloads() {
     let mut output = Vec::new();
     let stats = copy_body(&mut request, &mut &input[..], &mut output, &mut log, Direction::Download).await.unwrap();
     assert_eq!(output, input);
-    assert_eq!(stats.accepted_bytes, input.len() as u64);
-    assert!(!stats.audit_gap);
+    assert_eq!(stats.accepted_bytes(), input.len() as u64);
+    assert!(!stats.audit_gap());
     let mut reader = LogReader::new(File::open(path).unwrap()).unwrap();
     let mut recorded = Vec::new(); let mut expected_chunk = 1;
     while let Some(record) = reader.next_record().unwrap() {

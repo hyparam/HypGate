@@ -42,14 +42,14 @@ async fn multichunk_partial_writes_follow_durable_logs_and_preserve_bytes() {
     let a = admission(1, 3, true); let mut r = a.admit(&[11; 32], 7).unwrap();
     let (events, mut log, mut writer) = io_pair();
     let stats = copy_body(&mut r, &mut &b"abcdefg"[..], &mut writer, &mut log, Direction::Upload).await.unwrap();
-    assert_eq!(stats, TransferStats { accepted_bytes: 7, audit_gap: false });
+    assert_eq!((stats.accepted_bytes(), stats.audit_gap()), (7, false));
     assert_eq!(*events.lock().unwrap(), vec![
         Event::Log(1, Direction::Upload, b"abc".to_vec()), Event::Write(b"ab".to_vec()), Event::Write(b"c".to_vec()),
         Event::Log(2, Direction::Upload, b"def".to_vec()), Event::Write(b"de".to_vec()), Event::Write(b"f".to_vec()),
         Event::Log(3, Direction::Upload, b"g".to_vec()), Event::Write(b"g".to_vec()),
     ]);
     let stats = copy_body(&mut r, &mut &b"data: ok\n\n"[..], &mut writer, &mut log, Direction::Download).await.unwrap();
-    assert_eq!(stats.accepted_bytes, 10);
+    assert_eq!(stats.accepted_bytes(), 10);
     assert!(events.lock().unwrap().iter().any(|e| matches!(e, Event::Log(4, Direction::Download, _))));
 }
 
@@ -60,15 +60,16 @@ async fn logger_failure_is_closed_in_strict_mode_and_reported_in_availability_mo
         let (events, mut log, mut writer) = io_pair(); log.fail = true;
         let result = copy_body(&mut r, &mut &b"abcdef"[..], &mut writer, &mut log, Direction::Upload).await;
         if strict {
-            assert_eq!(result, Err(TransferError::Log));
+            assert_eq!(result.err().unwrap(), TransferError::Log);
             assert!(!events.lock().unwrap().iter().any(|e| matches!(e, Event::Write(_))));
             assert!(r.is_closed());
         } else {
-            assert_eq!(result, Ok(TransferStats { accepted_bytes: 6, audit_gap: true }));
+            let stats = result.unwrap();
+            assert_eq!((stats.accepted_bytes(), stats.audit_gap()), (6, true));
             assert_eq!(events.lock().unwrap().iter().filter(|e| matches!(e, Event::Log(..))).count(), 1);
             // Degradation persists across directions even if a later log call could succeed.
             log.fail = false;
-            assert!(copy_body(&mut r, &mut &b"z"[..], &mut writer, &mut log, Direction::Download).await.unwrap().audit_gap);
+            assert!(copy_body(&mut r, &mut &b"z"[..], &mut writer, &mut log, Direction::Download).await.unwrap().audit_gap());
             assert_eq!(events.lock().unwrap().iter().filter(|e| matches!(e, Event::Log(..))).count(), 1);
         }
     }
@@ -82,11 +83,11 @@ async fn zero_error_and_flush_failures_close_without_replay() {
         writer.max = if expected == TransferError::WriteZero { 0 } else { 2 };
         writer.fail = expected == TransferError::Write;
         writer.flush_fail = expected == TransferError::Flush;
-        assert_eq!(copy_body(&mut r, &mut &b"abc"[..], &mut writer, &mut log, Direction::Upload).await, Err(expected));
+        assert_eq!(copy_body(&mut r, &mut &b"abc"[..], &mut writer, &mut log, Direction::Upload).await.err().unwrap(), expected);
         assert!(r.is_closed());
         assert!(r.prepare(1, Direction::Upload).is_none());
-        assert_eq!(copy_body(&mut r, &mut &b""[..], &mut writer, &mut log, Direction::Download).await,
-            Err(TransferError::InvalidState));
+        assert_eq!(copy_body(&mut r, &mut &b""[..], &mut writer, &mut log, Direction::Download).await.err().unwrap(),
+            TransferError::InvalidState);
     }
 }
 
@@ -125,7 +126,7 @@ async fn real_async_backpressure_preserves_fragmented_sse_bytes() {
         tokio::join!(produce, transfer, consume)
     }).await.unwrap();
     assert_eq!(received, expected);
-    assert_eq!(result.unwrap().accepted_bytes, expected.len() as u64);
+    assert_eq!(result.unwrap().accepted_bytes(), expected.len() as u64);
 }
 
 #[tokio::test]
@@ -138,8 +139,8 @@ async fn read_failure_and_cancellation_close_before_any_write() {
     }
     let a = admission(1, 3, true); let mut r = a.admit(&[11; 32], 7).unwrap();
     let (events, mut log, mut writer) = io_pair();
-    assert_eq!(copy_body(&mut r, &mut FailingRead, &mut writer, &mut log, Direction::Upload).await,
-        Err(TransferError::Read));
+    assert_eq!(copy_body(&mut r, &mut FailingRead, &mut writer, &mut log, Direction::Upload).await.err().unwrap(),
+        TransferError::Read);
     assert!(r.is_closed());
     assert!(events.lock().unwrap().is_empty());
     drop(r);
