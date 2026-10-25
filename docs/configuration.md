@@ -36,10 +36,13 @@ not a total memory guarantee or a recommended deployment setting.
 
 ## Destination and credential binding
 
-Destination validation accepts conventional ASCII DNS names or bracketed IPv6
-addresses, HTTPS, optional nonzero valid ports, and fixed paths. It rejects
-userinfo, fragments, queries, backslashes, control characters, encoded authorities,
-ambiguous hosts, and paths starting with two slashes. No client path is joined onto
+Destination validation is the verified `gateway_core::destination::parse`. It
+accepts conventional ASCII DNS names or bracketed IPv6 addresses, HTTPS, optional
+nonzero ports, and fixed paths, and rejects userinfo, fragments, queries,
+backslashes, control characters, encoded authorities, ambiguous hosts, and paths
+starting with two slashes. The authority, host, port, and path the runtime uses are
+proved to be exactly the substrings of the configured text; Hyper's URI is parsed
+from the same text and must agree with them. No client path is joined onto
 this endpoint. New API paths need explicitly granted endpoints; this initial
 interface does not support dynamic query parameters.
 
@@ -64,8 +67,8 @@ digests, cross-tenant credentials, malformed schemas, and secret/header injectio
 Workspace test totals are maintained in the [README](../README.md). No live provider
 call was made; this does not establish provider compatibility.
 
-JSON parsing, URI validation, hashing, secret resolution, and the runtime mapping
-are trusted and tested, not formally verified. The core theorem still concerns
+JSON parsing, hashing, secret resolution, and the runtime mapping are trusted and
+tested, not formally verified; destination validation is verified. The core theorem still concerns
 normalized route handles. The HTTP adapter consumes `RoutedRequest`; the verified
 header projection strips client credential headers and constructs Host from the
 fixed destination, while disabling redirects/proxies/retries and retaining request

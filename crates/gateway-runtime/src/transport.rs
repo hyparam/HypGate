@@ -92,10 +92,12 @@ impl HttpsTransport {
         http: &http_body::WorkerHttp,
     ) -> Result<ExchangeStats, TransportError> {
         let upstream = prepared.take_upstream().map_err(|_| TransportError::Metadata)?;
+        // The host and port come from the verified destination parts of the
+        // permit's target, never from the request.
         let (host, port) = {
             let permit = prepared.egress();
-            let uri = permit.target().uri();
-            (uri.host().ok_or(TransportError::Metadata)?.trim_start_matches('[').trim_end_matches(']').to_owned(), uri.port_u16().unwrap_or(443))
+            let target = permit.target();
+            (target.host().to_owned(), target.port())
         };
         let server = ServerName::try_from(host.clone()).map_err(|_| TransportError::Metadata)?;
         let tcp = {

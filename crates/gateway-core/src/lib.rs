@@ -14,6 +14,7 @@ pub mod body_copy;
 pub mod exchange_lifecycle;
 pub mod headers;
 pub mod inbound;
+pub mod destination;
 pub mod journal;
 pub mod journal_binding;
 pub mod audit_journal;

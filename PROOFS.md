@@ -45,6 +45,12 @@ destination.
   exactly when it is `/routes/` plus the canonical decimal of a `u64`, and a
   token is accepted exactly when one Authorization field holds `Bearer` and
   one to 512 token characters. Nothing else in a request can pick a route.
+- A configured destination is accepted by a verified parser
+  (`destination::parse`) only as `https://`, a conventional DNS name or a
+  bracketed IPv6 literal, an optional nonzero port, and an origin-form path
+  with no query, and the authority, host, port, and path the runtime
+  connects to, names in TLS, and forwards in Host are proved to be exactly
+  those substrings of the operator's text.
 - The outgoing request head is built by a verified projection
   (`headers::forward_request`): only allowlisted client headers survive, each
   a byte-for-byte copy of an input field with no Connection-nominated name
@@ -286,6 +292,8 @@ rather than mechanized; the table below records where.
   fields the gateway adds to a request.
 - `crates/gateway-core/src/inbound.rs`: the route selector and bearer token
   parsers, with the canonical-decimal spec.
+- `crates/gateway-core/src/destination.rs`: the destination grammar and the
+  extraction of authority, host, port, and path.
 - `crates/gateway-runtime/src/shipping`: the trusted adapters, held to a
   panic-free standard by clippy and run under `catch_unwind`.
 
@@ -300,7 +308,7 @@ checked definitions for each row.
 | --- | --- | --- |
 | Authorization and fail-closed security | Every upstream dispatch requires an authenticated tenant's grant; authentication or policy failures cannot authorize forwarding, in either logging mode. | Core token issuance proved; HTTP binding tested; every production body write passes the checked `ResolvedRoute::write_bytes` gate, and every other socket, lookup, and file-write site is denied by lint. The socket write itself is trusted. |
 | Tenant and credential isolation | Requests, completions, and credentials cannot cross tenant/request boundaries; gateway authentication material never becomes an upstream credential. | Core tenant/credential-handle and ticket checks proved; cross-owner lifecycle composition checked; header projection and credential injection proved (`headers::forward_request`); secret loading tested. Audit-file access control is an operator obligation. |
-| Routing and configuration confinement | Candidate configuration and request fields cannot expand operator grants or change the authorized destination/credential binding. | Normalized configuration and route selection proved; URI, DNS, TLS, and actual dispatch remain trusted/tested. |
+| Routing and configuration confinement | Candidate configuration and request fields cannot expand operator grants or change the authorized destination/credential binding. | Normalized configuration and route selection proved; destination grammar and the extraction of host, port, and path proved (`destination::parse`); DNS, TLS, and actual dispatch remain trusted/tested. |
 | Byte integrity and ordering | Forwarded body bytes form an unchanged, ordered prefix of the input, across chunks and partial writes, without skipped or duplicated advancement. | Core byte-prefix and completion properties proved; async HTTP integration tested. Peer receipt is not proved. |
 | Strict audit-before-forwarding | Every submitted body range in strict mode is covered by a durable log acknowledgment for that request and chunk. | Core gate and exact journal-receipt/stream binding proved; disk sync adapter tested. Filesystem crash guarantees remain open. |
 | Crash-safe recovery | Recovery exposes only complete records, and acknowledged records survive every crash in the specified storage model. | Journal acknowledgment ordering and conditional synced-prefix survival proved; header/payload encoding, header decoding, frame extents, and scanner cursor transitions proved; scanner I/O tested. Process-kill recovery tested and storage assumptions documented; conditional scanner steps proved; acknowledged-prefix reconstruction proved under preserved-byte/read/checksum assumptions. Linux ext4 error/process-death tests passed; physical power-loss validation remains open. |

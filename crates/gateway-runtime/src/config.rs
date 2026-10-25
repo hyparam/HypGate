@@ -60,10 +60,19 @@ enum Logging { Strict, Availability }
 // accidentally format loaded credentials.
 struct Credential { kind: CredentialKind, value: HeaderValue }
 
-// The parsed URI drives dispatch; the exact configured text is what the audit
-// log's request-start record carries, so a reader sees the operator's string.
-pub(crate) struct Destination { uri: Uri, text: String }
-impl Destination { pub(crate) fn uri(&self) -> &Uri { &self.uri } }
+// The verified `gateway_core::destination::parse` decides what is accepted and
+// yields the authority, host, and port the runtime connects to; the parsed URI
+// is Hyper's view of the same text and is checked to agree with it. The exact
+// configured text is what the audit log's request-start record carries.
+pub(crate) struct Destination { uri: Uri, text: String, authority: String, host: String, port: u16 }
+impl Destination {
+    pub(crate) fn uri(&self) -> &Uri { &self.uri }
+    /// The authority exactly as configured, for the Host header.
+    pub(crate) fn authority(&self) -> &str { &self.authority }
+    /// The host for name resolution and TLS, without IPv6 brackets.
+    pub(crate) fn host(&self) -> &str { &self.host }
+    pub(crate) fn port(&self) -> u16 { self.port }
+}
 
 pub struct GatewayConfig {
     chunk_bytes: usize,
@@ -80,39 +89,30 @@ pub struct RoutedRequest<'a> {
 }
 
 fn destination(text: &str) -> Result<Destination, ConfigError> {
-    Ok(Destination { uri: destination_uri(text)?, text: text.to_owned() })
+    let (uri, parts) = destination_uri(text)?;
+    // The parts are visible ASCII by the proof, so these conversions cannot fail.
+    let authority = String::from_utf8(parts.authority).map_err(|_| ConfigError::Destination)?;
+    let host = String::from_utf8(parts.host).map_err(|_| ConfigError::Destination)?;
+    Ok(Destination { uri, text: text.to_owned(), authority, host, port: parts.port })
 }
 
-pub(crate) fn destination_uri(text: &str) -> Result<Uri, ConfigError> {
-    // Keep spelling strict rather than rely on permissive URL normalization.
-    if text.len() > MAX_DESTINATION_BYTES || !text.starts_with("https://") || !text.is_ascii()
-        || text.bytes().any(|b| b <= 32 || b == 127 || b == b'\\' || b == b'#') {
-        return Err(ConfigError::Destination);
-    }
+/// Validate a destination with the verified parser, then parse Hyper's URI
+/// from the same text and require the two views to agree. The verified parts
+/// are what the runtime connects to; the URI is only Hyper's request target.
+pub(crate) fn destination_uri(text: &str) -> Result<(Uri, gateway_core::destination::Parts), ConfigError> {
+    let parts = gateway_core::destination::parse(text.as_bytes()).ok_or(ConfigError::Destination)?;
     let uri: Uri = text.parse().map_err(|_| ConfigError::Destination)?;
-    let authority = uri.authority().ok_or(ConfigError::Destination)?;
-    let host = uri.host().ok_or(ConfigError::Destination)?;
-    if authority.as_str().contains('@') || authority.as_str().contains('%')
-        || host.is_empty() || uri.query().is_some() || uri.path().starts_with("//")
-         {
+    if uri.scheme_str() != Some("https") || uri.query().is_some()
+        || uri.authority().map(|a| a.as_str().as_bytes()) != Some(parts.authority.as_slice())
+        || uri.path().as_bytes() != parts.path.as_slice() {
         return Err(ConfigError::Destination);
     }
-    let suffix = &authority.as_str()[host.len()..];
-    if !suffix.is_empty() && !suffix.strip_prefix(':').is_some_and(|port|
-        !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit())
-            && port.parse::<u16>().is_ok_and(|n| n != 0)) {
+    // A bracketed literal must also be a real IPv6 address, not just IPv6 characters.
+    if parts.authority.first() == Some(&b'[')
+        && std::str::from_utf8(&parts.host).ok().and_then(|h| h.parse::<std::net::Ipv6Addr>().ok()).is_none() {
         return Err(ConfigError::Destination);
     }
-    // Restrict to conventional ASCII DNS names or bracketed IPv6 addresses.
-    if host.starts_with('[') {
-        host.strip_prefix('[').and_then(|s| s.strip_suffix(']'))
-            .and_then(|s| s.parse::<std::net::Ipv6Addr>().ok()).ok_or(ConfigError::Destination)?;
-    } else if host.len() > 253 || host.split('.').any(|label| label.is_empty()
-        || label.len() > 63 || label.starts_with('-') || label.ends_with('-')
-        || !label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')) {
-        return Err(ConfigError::Destination);
-    }
-    Ok(uri)
+    Ok((uri, parts))
 }
 
 fn digest(text: &str) -> Result<Vec<u8>, ConfigError> {
@@ -199,6 +199,10 @@ impl<'a> RoutedRequest<'a> {
     /// The configured destination string exactly as the operator wrote it.
     pub fn destination_text(&self) -> &str {
         &self.resolved.destination(self.request.authority()).expect("private request/route binding").text
+    }
+    /// The verified authority of the resolved destination, for the Host header.
+    pub(crate) fn authority(&self) -> &str {
+        self.resolved.destination(self.request.authority()).expect("private request/route binding").authority()
     }
 
     // Only the trusted HTTP boundary may inject provider credentials.

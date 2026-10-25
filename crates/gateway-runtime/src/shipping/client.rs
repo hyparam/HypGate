@@ -31,9 +31,8 @@ pub struct Client { connector: TlsConnector, server: ShippingServer, host: Strin
 // permit minted from the configured shipping server and nothing else.
 #[allow(clippy::disallowed_methods)]
 async fn open_socket(permit: &Egress<'_, ShippingServer>) -> Result<TcpStream, ClientError> {
-    let uri = permit.target().uri();
-    let host = uri.host().ok_or(ClientError::Resolve)?.trim_start_matches('[').trim_end_matches(']');
-    let addresses: Vec<_> = (host, uri.port_u16().unwrap_or(443)).to_socket_addrs().map_err(|_| ClientError::Resolve)?.take(16).collect();
+    let target = permit.target();
+    let addresses: Vec<_> = (target.host(), target.port()).to_socket_addrs().map_err(|_| ClientError::Resolve)?.take(16).collect();
     if addresses.is_empty() { return Err(ClientError::Resolve); }
     TcpStream::connect(addresses.as_slice()).await.map_err(|_| ClientError::Connect)
 }
@@ -45,7 +44,7 @@ impl Client {
     pub fn with_roots(roots: RootCertStore, server: &ShippingServer, deadline: Duration) -> io::Result<Self> {
         if deadline.is_zero() || deadline > Duration::from_secs(3600) { return Err(io::ErrorKind::InvalidInput.into()); }
         let (server, uri) = (server.clone(), server.uri());
-        let host = uri.host().ok_or(io::ErrorKind::InvalidInput)?.trim_start_matches('[').trim_end_matches(']').to_owned();
+        let host = server.host().to_owned();
         ServerName::try_from(host.clone()).map_err(|_| io::ErrorKind::InvalidInput)?;
         let mut config = ClientConfig::builder().with_root_certificates(roots).with_no_client_auth();
         config.enable_early_data = false;

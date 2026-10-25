@@ -33,8 +33,13 @@ fn default_poll() -> u64 { 1000 }
 /// makes one, so a cloud egress permit exists only when the root policy has a
 /// `shipping` section.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ShippingServer(Uri);
-impl ShippingServer { pub fn uri(&self) -> &Uri { &self.0 } }
+pub struct ShippingServer { uri: Uri, host: String, port: u16 }
+impl ShippingServer {
+    pub fn uri(&self) -> &Uri { &self.uri }
+    /// The host for name resolution and TLS, from the verified destination parts.
+    pub fn host(&self) -> &str { &self.host }
+    pub fn port(&self) -> u16 { self.port }
+}
 
 /// Everything the shipper thread receives. No handle to the gateway's own
 /// configuration, admission, logger, or routes.
@@ -55,7 +60,9 @@ impl ShippingConfig {
         if root.len() > MAX_CONFIG { return Err(ConfigError::Limits); }
         let root: Root = serde_json::from_slice(root).map_err(|_| ConfigError::Syntax)?;
         let Some(section) = root.shipping else { return Ok(None); };
-        let server = ShippingServer(destination(&section.server)?);
+        let (uri, parts) = destination(&section.server)?;
+        let host = String::from_utf8(parts.host).map_err(|_| ConfigError::Destination)?;
+        let server = ShippingServer { uri, host, port: parts.port };
         if section.max_open_exchanges == 0 || section.max_open_exchanges > MAX_OPEN_EXCHANGES
             || section.max_exchange_bytes < MIN_EXCHANGE_BYTES || section.max_exchange_bytes > MAX_EXCHANGE_BYTES
             || section.poll_ms < MIN_POLL_MS || section.poll_ms > MAX_POLL_MS {

@@ -166,9 +166,8 @@ pub fn prepare<'a>(config: &'a GatewayConfig, method: &Method, uri: &Uri, header
     // The verified projection: allowlisted client headers, Host from the
     // resolved destination, the resolved credential exactly once, and
     // `Accept-Encoding: identity` so the provider sends opaque bytes.
-    let authority = routed.destination().authority().ok_or(HttpError::BadRequest)?;
     let (name, value) = routed.credential_header();
-    let head = headers::forward_request(&fields, authority.as_str().as_bytes(), name.as_bytes(), value.as_bytes()).map_err(rejected)?;
+    let head = headers::forward_request(&fields, routed.authority().as_bytes(), name.as_bytes(), value.as_bytes()).map_err(rejected)?;
     let outgoing = header_map(head)?;
     let mut upstream = Request::new(());
     *upstream.method_mut() = Method::POST;
