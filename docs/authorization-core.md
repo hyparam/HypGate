@@ -1,8 +1,6 @@
 # Verified authorization core
 
-Status: implemented in the Cargo library and connected to the tested HTTP
-dispatch path. Formal end-to-end dispatch composition remains open.
-The source is [policy.rs](../crates/gateway-core/src/policy.rs).
+The verified policy, authentication, and authorization core. The source is [policy.rs](../crates/gateway-core/src/policy.rs).
 
 ## Checked boundary
 
@@ -30,17 +28,17 @@ The root grant includes the exact tenant, selector, origin, and credential tuple
 
 ## Assumptions and remaining obligations
 
-The runtime configuration layer now hashes gateway tokens with SHA-256 before
+The runtime configuration layer hashes gateway tokens with SHA-256 before
 authentication. This hashing and its cryptographic security are not verified.
-HTTP authentication header parsing is now tested in the [HTTP boundary](http-boundary.md);
+HTTP authentication header parsing is tested in the [HTTP boundary](http-boundary.md);
 secure token provisioning remains an operator obligation. Digest comparison
 scans every byte but carries no constant-time theorem. Tests use synthetic digests.
 
 Origins and credentials are numeric handles, not URLs or secrets. The transport
 consumes the routed wrapper and uses the same immutable mapping snapshot, without
 accepting independent destination or credential overrides; see the
-[adapter audit](adapter-audit.md) for implementation and test evidence.
-Fixed endpoint URI validation and secret loading are now tested in the
+[end-to-end audit](end-to-end-audit.md) for implementation and test evidence.
+Fixed endpoint URI validation and secret loading are tested in the
 [configuration layer](configuration.md). DNS, TLS, proxy/redirect disabling, header
 filtering, and transport credential confinement remain adapter obligations. Root-policy intent is a trusted input;
 candidate configuration cannot enlarge that policy.
@@ -48,9 +46,11 @@ candidate configuration cannot enlarge that policy.
 Nonzero request IDs are not inherently unique. Composition with the resource
 registry enforces uniqueness within its instance, and the verified initial
 stream constructor binds the token and resource key. The runtime owns the
-request/stream lifetime; its complete release composition remains open. The existing
-registry bounds logical slots and payload allowances, not total process memory.
-No proof yet connects tokens to actual network effects or disk records.
+request/stream lifetime; its release composition is checked in the
+[ownership composition](ownership-composition.md). The registry bounds logical
+slots and payload allowances, not total process memory. The checked chain ends at
+`ResolvedRoute::write_bytes`; the socket write and disk syscall themselves are
+trusted.
 
 ## Evidence
 

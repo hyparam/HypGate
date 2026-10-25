@@ -1,17 +1,14 @@
 # End-to-end audit: authorization through network and disk effects
 
-Milestone 6 status: complete under the [exit audit](milestone-6-exit-audit.md),
-which records the composed ownership and submission proofs and the remaining
-trusted joins. This document traces one request through the production source,
+This document traces one request through the production source,
 from the inbound socket to the exact upstream TCP/TLS/HTTP calls and the exact
 audit-file write/sync calls, then through every failure exit and graceful
 shutdown. Each step names the code by symbol, states whether the step is
 **proved** (a Verus contract in `gateway-core`), **tested** (a runtime test
 exercises it), or **assumed** (trusted code or an external contract), and names
 the evidence. It is a source-level traceability record made by reading the code,
-not an independent review or a mechanized proof of the async runtime. Symbol
-names refer to the source at the milestone 6 closing commit; recheck them when
-the named modules change.
+not an independent review or a mechanized proof of the async runtime. Recheck symbol
+names when the named modules change.
 
 Task ownership: worker and connection tasks share the private
 `server/leased_task.rs::LeasedTask`, held by `WorkerLease` (`server/workers.rs`)
@@ -39,7 +36,7 @@ active credit, and Q+1 bound are checked. See
 [audit-buffer ownership](audit-buffer-lifetimes.md).
 
 Related records: the [proof index](proof-index.md) lists every contract, the
-[adapter audit](adapter-audit.md) records milestone 2 bindings, the
+[ownership composition](ownership-composition.md) records the lifecycle proofs, the
 [storage contract](storage-crash-contract.md) and [shutdown proof](shutdown-proof.md)
 cover disk and termination, and the [resource composition](resource-composition.md)
 covers memory. This document composes them along one request path and lists
@@ -309,14 +306,3 @@ bash scripts/check_effect_sites.sh
 Tests, proofs, and deliberate defects are checked by the commands in the
 [README](../README.md), which also records the current validation totals; CI
 runs them with the pinned toolchain.
-
-## Milestone 6 checkpoint history
-
-Earlier revisions of this document carried eight "milestone 6 follow-up"
-sections written while the HTTP ownership, journal-session, authorized-write,
-receipt composition, concrete-route, output-frame, mailbox-byte, and lifecycle
-composition rows were still open. All of those rows are complete; the
-[milestone 6 exit audit](milestone-6-exit-audit.md) is the authoritative record
-of the composed proofs, production correspondence, and remaining trusted joins,
-and the [historical implementation plan](history/implementation-plan.md) keeps
-the checkpoint-by-checkpoint counts.

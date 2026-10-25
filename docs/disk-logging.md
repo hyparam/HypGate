@@ -125,8 +125,8 @@ tests interleave interruptions with fragmented reads at sizes from one byte to
 128 bytes and check unchanged recovered payloads and offsets. Workspace test totals
 are maintained in the [README](../README.md). These are tests, not a filesystem crash
 theorem. Process-kill tests and the conditional journal-prefix and scanner theorems
-are recorded in the [storage contract](storage-crash-contract.md), which closes
-milestone 3; physical power-loss validation remains open.
+are recorded in the [storage contract](storage-crash-contract.md); physical
+power-loss validation remains open.
 
 Durability assumes the OS/filesystem/storage stack honors successful sync calls
 and that the parent directory was already durable. Permanent disk loss, malicious
@@ -146,4 +146,4 @@ append. Later logger identity changes and receipts from another session are
 rejected; exact record matching is still required. Selecting the intended initial
 logger and its correspondence to the file remain trusted. The authorized-write
 composition through `ResolvedRoute::write_bytes` is checked; see the
-[milestone 6 exit audit](milestone-6-exit-audit.md).
+[ownership composition](ownership-composition.md).

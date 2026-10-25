@@ -62,7 +62,7 @@ this workload does not test power-loss durability.
 The same fixture now has six opt-in runs: healthy, paced peers, and permanent log
 failure, each in strict and availability mode. The healthy fixture now streams
 provider output through 16 KiB frames; the earlier baseline table predates this
-fixture change and is retained as historical evidence, not a direct comparison.
+fixture change and is not a direct comparison.
 
 Paced-peer runs use 4 MiB responses generated in 16 KiB pieces with a 2 ms delay
 before each piece. Clients delay 5 ms between reads of HTTP body frames, whose
@@ -518,5 +518,4 @@ The soak overlapped overload and proof/mutation workloads in other processes.
 Samples measure only the gateway child; macOS does not supply the Linux kernel
 high-water metric. The final availability samples plateaued, while strict samples
 still varied. These finite observations establish neither leak freedom nor a
-universal RSS bound. They provide the repeated load measurement required for
-milestone 4 alongside the separate sustained-overload latency results.
+universal RSS bound. The sustained-overload latency results are reported separately.

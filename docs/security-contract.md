@@ -3,7 +3,7 @@
 The security properties the gateway must have, and where each one stands. Core
 authorization, normalized configuration, streaming, resource, and upstream-mediation
 properties are checked by Verus. Production body writes pass the checked
-`ResolvedRoute::write_bytes` gate ([milestone 6 exit audit](milestone-6-exit-audit.md)),
+`ResolvedRoute::write_bytes` gate ([ownership composition](ownership-composition.md)),
 and the [end-to-end audit](end-to-end-audit.md) traces that mediation through every
 effect site and failure exit. Hyper, TLS, DNS, and the OS remain trusted adapters,
 and there is no single mechanized theorem over the async runtime. The
@@ -139,5 +139,5 @@ security obligation with an `assume` and then describe the result as a proof of 
 Dispatching traffic required checked admission/token-issuance properties and
 negative tests for unknown identities, cross-tenant credentials, host/header
 overrides, unsafe configuration, redirects, and every error path; those are in place
-and mapped in the [adapter audit](adapter-audit.md). Provider compatibility tests and
+and mapped in the [end-to-end audit](end-to-end-audit.md). Provider compatibility tests and
 fault injection supplement these proofs; they do not substitute for them.

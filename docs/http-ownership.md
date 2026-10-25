@@ -1,10 +1,9 @@
 # HTTP ownership and cancellation audit
 
-The production gateway now derives its HTTP owner counts from the same verified
-registries that admit and release workers and connections. The HTTP cleanup-tail
-row of milestone 6 is complete under the adapter assumptions below. The completed
-[lifecycle composition audit](milestone-6-exit-audit.md) connects this row to request,
-disk, DNS, and TLS ownership.
+The production gateway derives its HTTP owner counts from the same verified
+registries that admit and release workers and connections, under the adapter
+assumptions below. The [ownership composition](ownership-composition.md) connects
+these counts to request, disk, DNS, and TLS ownership.
 
 ## Actual owners and charges
 

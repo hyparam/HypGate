@@ -1,14 +1,14 @@
-# Milestone 6 exit audit
+# Ownership composition
 
-Milestone 6 is complete under the adapter assumptions below. This audit maps the
-original four exit criteria and all eight plan rows to the current production
-implementation. It supersedes the historical milestone-6 checkpoint notes.
-It does not claim to verify Tokio, Hyper, Rust destruction, physical durability,
-peer receipt, audit-file access controls, or whole-process memory.
+How the verified ownership and submission proofs compose through the production
+runtime: task wrappers, worker and connection credits, HTTP cleanup tails, DNS,
+TLS, and disk jobs, and the upstream mediation gate. It does not claim to verify
+Tokio, Hyper, Rust destruction, physical durability, peer receipt, audit-file
+access controls, or whole-process memory.
 
-## Original exit criteria
+## Checked claims
 
-| Requirement | Authoritative implementation and evidence |
+| Claim | Implementation and evidence |
 | --- | --- |
 | Shared task wrapper, including completion, cancellation before/after polling, panic, and shutdown | Both lease types use private `server/leased_task.rs::LeasedTask`. Actual future captures enter `TaskCleanup`; only normal destruction reports completion. Worker/connection lifecycle tests cover never-polled destruction, cancellation, capture panic, registry poison, and shutdown. |
 | Checked cleanup-before-reuse lifecycle composition, with explicit production correspondence | `lifecycle_composition::cleanup_before_reuse` combines the actual worker/connection HTTP release predicates. The DNS/TLS credit and active disk slot gates need no separate premise: `TaskCredit::releasable` is the negation of `retaining`, and `DiskWorker::available` excludes `busy`. `WorkerRegistry` and `ResponseRegistry` preserve other slot identities and entries on acquire/release, and maintain active-owner mappings across every transition. The runtime uses these exact registries and gates. The ownership table and transition argument below establish their composition with request and background handoff. |
@@ -17,9 +17,9 @@ peer receipt, audit-file access controls, or whole-process memory.
 
 ## Ownership composition through production transitions
 
-| Owner / plan row | Retained state and release boundary |
+| Owner | Retained state and release boundary |
 | --- | --- |
-| Shared wrapper refactor | `LeasedTask` owns the complete boxed future and its lease; unit output prevents task-owned resources escaping through its result. `TaskCleanup<T>` binds the actual future/captures to the source task. Extraction alone does not complete cleanup. |
+| Shared task wrapper | `LeasedTask` owns the complete boxed future and its lease; unit output prevents task-owned resources escaping through its result. `TaskCleanup<T>` binds the actual future/captures to the source task. Extraction alone does not complete cleanup. |
 | Worker and connection credits | Their lease destructors call `WorkerRegistry::release_task` and `ResponseRegistry::release_task` under the admission mutex. Both require completed task cleanup and no active HTTP descendants. A leaked descendant, failed cleanup, or poisoned registry strands capacity. Worker release failure also closes admission. |
 | HTTP cleanup tails | The four worker roles cover both detached readers, the upload channel, and the response writer. The connection permit covers the response receiver. Normal-return destructor boundaries retain the permits through physical buffer cleanup. Shared upload endpoints preserve a panic flag. `http_owner_bounds` derives 2R readers and C+2R queues/tails from the actual registry arrays. See [HTTP ownership](http-ownership.md). |
 | DNS jobs | Queued/running work and unread replies retain their independently admitted `TaskCredit`. `finish_work_with` creates `TaskResult<T>` containing the actual result and source identity. `TaskResult::adopt` checks that exact source and a live admitted target before returning the same value and permitting source release. Rejected adoption returns the intact result for credited cleanup. |
@@ -80,7 +80,7 @@ regression, not a substitute for the checked transition invariants.
 
 The general trusted computing base is listed once in the
 [security contract](security-contract.md#trusted-computing-base-and-evidence);
-the joins specific to this milestone are:
+the joins specific to this composition are:
 
 - Rust moves, private fields, non-cloneable tokens, Arc lifetime, disjoint mutable
   ownership, mutex serialization, and normal-return destructor reporting bind the
@@ -99,15 +99,3 @@ the joins specific to this milestone are:
   remain explicit trusted boundaries.
 - The public embedding transport API has no gateway worker context. Its caller
   supplies its own lifetime mapping; the gateway always uses `exchange_with_http`.
-
-## Validation and delivery
-
-On 2026-10-24, the pinned verifier reports 288 checks and zero errors; all 253
-mutations are rejected by proof. The locked full workspace suite passes 249 tests
-and seven compile-fail doctests. Both additional concurrent failed-log workloads
-pass over real TLS, in strict and availability modes. The final cross-owner test
-and source/result handoff tests are included in that full suite.
-
-Those figures are the local gates at milestone close. GitHub Actions repeats the
-tests, proofs, and Linux workloads on every push; current totals are in the
-[README](../README.md).

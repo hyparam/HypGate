@@ -196,4 +196,4 @@ these effects with concurrent gateway requests and both logging policies.
 Remaining formal work is a checked transition-level correspondence between all
 runtime ownership events and the complete buffer snapshot, together with allocation
 accounting beyond payload lengths. This audit supports the explicit adapter
-contracts; it does not remove them or close the resource milestone by itself.
+contracts; it does not remove them.

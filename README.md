@@ -61,10 +61,9 @@ a compromised release pipeline from shipping different code.
 ## Status
 
 A runnable prototype. The core's authorization, configuration, streaming,
-shipping, and resource invariants are Verus-checked, and all six
-[implementation milestones](docs/implementation-plan.md) are complete under
-their documented assumptions. The network and disk adapters are tested.
-Live-provider compatibility and production hardening remain incomplete.
+shipping, and resource invariants are Verus-checked. The network and disk
+adapters are tested. Live-provider compatibility and production hardening
+remain incomplete.
 
 ## Run it
 
@@ -89,21 +88,20 @@ for provider configuration, scanning logs, and shutdown behavior.
 
 ## Documentation
 
-The [milestone 6 exit audit](docs/milestone-6-exit-audit.md)
-is the latest record of what is proved, tested, and still trusted.
-
-Guarantees and proofs:
+[PROOFS.md](PROOFS.md) states the guarantees. These pages back them up:
 
 | Document | Purpose |
 | --- | --- |
 | [Proof index](docs/proof-index.md) | Maps each advertised guarantee to its source contracts and composition assumptions |
+| [End-to-end audit](docs/end-to-end-audit.md) | One request traced through every effect site, failure exit, and shutdown |
+| [Ownership composition](docs/ownership-composition.md) | How the ownership and submission proofs compose through the runtime, and the trusted joins |
 | [Security contract](docs/security-contract.md) | Threat boundary, required properties and their status, trusted computing base |
 | [Authorization core](docs/authorization-core.md) | Digest authentication, tenant-scoped tokens, configuration confinement |
 | [Framing proof](docs/framing-proof.md) | Header roundtrips, bounded payloads, frame extents in the serializer and scanner |
 | [Journal proof](docs/journal-proof.md) | Acknowledgment ordering and conditional synced-prefix survival |
 | [Recovery proof](docs/recovery-proof.md) | Scanner cursor transitions and acknowledged-prefix reconstruction |
 | [Shutdown proof](docs/shutdown-proof.md) | Verified drain rank and the conditional shutdown/resource release argument |
-| [Storage crash contract](docs/storage-crash-contract.md) | Storage assumptions, process-death experiments, milestone 3 exit audit |
+| [Storage crash contract](docs/storage-crash-contract.md) | Storage assumptions, process-death experiments, and the evidence behind the recovery claims |
 | [Resource accounting](docs/resource-accounting.md) | Source-level inventory of application buffers and queues |
 | [Resource composition](docs/resource-composition.md) | Budget ownership and the conditional requested-allocation bound |
 | [Dependency resources](docs/dependency-resources.md) | Pinned Hyper/rustls/Tokio retained-allocation audit |
@@ -134,30 +132,6 @@ Operations:
 | [Operational limits](docs/operational-limits.md) | Every fixed and configurable limit and what happens when it is reached |
 | [Benchmarks](docs/benchmarks.md) | Latency, throughput, overload, and memory measurements |
 
-Audits:
-
-| Document | Purpose |
-| --- | --- |
-| [Implementation milestones](docs/implementation-plan.md) | Milestone table with status and a link to each exit audit |
-| [Milestone 1 exit audit](docs/milestone-1-exit-audit.md) | Verified streaming core criteria and evidence |
-| [Adapter audit](docs/adapter-audit.md) | Milestone 2 trust obligations mapped to effect paths and tests |
-| [Availability audit](docs/availability-audit.md) | Milestone 4 criteria, validation results, scheduler/I/O assumptions |
-| [End-to-end audit](docs/end-to-end-audit.md) | One request traced through every effect site, failure exit, and shutdown |
-| [Milestone 6 exit audit](docs/milestone-6-exit-audit.md) | Composed ownership and submission proofs and the remaining trusted joins |
-
-History:
-
-| Document | Purpose |
-| --- | --- |
-| [Historical plan](docs/history/implementation-plan.md) | Checkpoint-by-checkpoint plan with the counts current at each checkpoint |
-| [Streaming core progress](docs/history/streaming-core-progress.md) | First streaming-core and authorization increment |
-| [Verification research](docs/history/verification-research.md) | Language and verifier comparison that chose Rust and Verus |
-| [Experiment results](docs/history/experiment-results.md) | Initial feasibility experiments and reproduction notes |
-| [Viability follow-up](docs/history/viability-followup.md) | Byte-level Verus proofs and the decision to drop Perennial |
-
-The early experiment code was removed from the tree; it is in Git history at
-commit `7869347`.
-
 ## Development
 
 The production core lives in `crates/gateway-core`. Cargo builds and Verus checks
@@ -182,8 +156,8 @@ audited effect sites (`clippy.toml`); the script fails if that set of sites
 changes.
 
 Opt-in load, memory, benchmark, and failover workloads (the last needs HAProxy and
-OpenSSL on PATH; results are discussed in the [benchmarks](docs/benchmarks.md),
-[availability audit](docs/availability-audit.md), and [deployment](docs/deployment.md) notes):
+OpenSSL on PATH; results are discussed in the [benchmarks](docs/benchmarks.md)
+and [deployment](docs/deployment.md) notes):
 
 ```sh
 cargo test -p gateway-runtime --locked --lib sustained_overload -- --ignored --nocapture

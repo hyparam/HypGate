@@ -185,9 +185,7 @@ is occupied. Logger I/O failures are tested at the disk adapter. Test totals are
 the [README](../README.md).
 
 This is a runnable prototype, not a production-ready or wholly verified gateway.
-Stress, failure-mode, and load evidence is in the [availability audit](availability-audit.md)
-and [benchmarks](benchmarks.md). Resource and crash-recovery proofs are conditional
+Stress, failure-mode, and load evidence is in the [benchmarks](benchmarks.md). Resource and crash-recovery proofs are conditional
 on the assumptions in [resource composition](resource-composition.md) and the
 [storage contract](storage-crash-contract.md). Log retention and rotation and
-deployment hardening are operator obligations; the
-[implementation milestones](implementation-plan.md) define the scope.
+deployment hardening are operator obligations.

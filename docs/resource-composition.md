@@ -1,7 +1,7 @@
 # Resource composition
 
-This document closes the resource criterion of milestone 1 by composing the
-separate inventories into one conditional bound. It states which object owns
+This document composes the separate resource inventories into one conditional
+bound. It states which object owns
 each budget, how the production owners correspond to the categories of the
 verified buffer theorem, and how the dependency allocation inventories sum. The
 result is a **requested-allocation ceiling under explicit assumptions**, listed
@@ -175,7 +175,7 @@ show that no owner is unaccounted, not to predict usage.
 ## Assumptions
 
 The composed figure is conditional on the following. Each is a stated
-assumption of this milestone, not a proved property.
+assumption of this composition, not a proved property.
 
 1. **Runtime correspondence.** The production owners in the table above are
    the only holders of the theorem's categories, and Rust field drop order,
@@ -214,8 +214,7 @@ assumption of this milestone, not a proved property.
 Within these assumptions, every queue, buffer, and outstanding operation in the
 production path is charged to exactly one owner with a bounded count and a
 bounded requested size. The remaining obligations are the assumptions
-themselves, which later milestones may narrow but which this document does not
-hide.
+themselves, which this document does not hide.
 
 
 ## Cross-owner regressions and lifecycle composition
@@ -224,5 +223,5 @@ The cross-owner cancellation regressions that exercise the actual HTTP channel
 across separately credited worker and connection tasks are described in the
 [HTTP buffer lifetime audit](http-buffer-lifetimes.md#cross-owner-cancellation-regression);
 the checked lifecycle composition they support is recorded in the
-[milestone 6 exit audit](milestone-6-exit-audit.md). The allocation snapshot
+[ownership composition](ownership-composition.md). The allocation snapshot
 theorem above retains its stated correspondence and allocator assumptions.

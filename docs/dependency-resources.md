@@ -1033,5 +1033,5 @@ as a proven RSS ceiling. Still needed are backing-capacity/lifetime bounds for
 Hyper parser/output storage, TLS handshake state and the cache metadata/active owners excluded above, task/channel nodes,
 configuration and credential storage, allocator/thread overhead, and kernel socket
 buffers. Source-level inspection and isolated process measurements must distinguish
-these from the verified logical payload budget. The current milestone remains open;
-this audit does not replace the async ownership-composition obligation.
+these from the verified logical payload budget. This audit does not replace the
+[ownership composition](ownership-composition.md).
