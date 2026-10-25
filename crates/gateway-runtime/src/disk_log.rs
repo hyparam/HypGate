@@ -1,6 +1,6 @@
 //! Bounded disk logging. Filesystem effects and checksum security are trusted,
 //! not verified. A single worker owns the file; requests never choose its path.
-use crate::transfer::{AuditLog, Direction, LogRecord};
+use crate::transfer::{AuditLog, Direction, LogRecord, RecordKind};
 use gateway_core::{audit_journal::AuditJournal as Journal, journal::DurableFrame};
 use gateway_core::framing::{self, Header, RecordBody, RecordFrame};
 use sha2::{Digest, Sha256};
@@ -234,7 +234,7 @@ impl AuditLog for DiskLog {
 
 fn record_header(record: &LogRecord<'_>) -> Header {
     Header { payload: record.bytes.len() as u32, tenant: record.tenant, request: record.request,
-        chunk: record.chunk, direction: record.direction.id() }
+        chunk: record.chunk, kind: record.kind.id() }
 }
 fn seal_record(body: RecordBody) -> RecordFrame {
     let checksum: [u8; 32] = Sha256::digest(body.bytes()).into();
@@ -254,8 +254,30 @@ pub struct StoredRecord {
     pub tenant: u64,
     pub request: u64,
     pub chunk: u64,
-    pub direction: Direction,
+    pub kind: RecordKind,
     pub bytes: Vec<u8>,
+}
+/// Decoded metadata payload of a kind 2, 3, or 4 record.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Metadata {
+    RequestStart(gateway_core::metadata::RequestStart),
+    ResponseHead(gateway_core::metadata::ResponseHead),
+    Completion(gateway_core::metadata::Completion),
+}
+impl StoredRecord {
+    /// Body direction of a body record; metadata records have none.
+    pub fn direction(&self) -> Option<Direction> { self.kind.direction() }
+    /// Decode a metadata payload with the verified codecs. `None` for body
+    /// records and for a metadata record whose payload does not decode.
+    pub fn metadata(&self) -> Option<Metadata> {
+        use gateway_core::metadata::{decode_completion, decode_request_start, decode_response_head};
+        match self.kind {
+            RecordKind::Upload | RecordKind::Download => None,
+            RecordKind::RequestStart => decode_request_start(&self.bytes).map(Metadata::RequestStart),
+            RecordKind::ResponseHead => decode_response_head(&self.bytes).map(Metadata::ResponseHead),
+            RecordKind::Completion => decode_completion(&self.bytes).map(Metadata::Completion),
+        }
+    }
 }
 
 // Trusted implementation of the verified scanner's sequential byte-stream and
@@ -293,9 +315,10 @@ impl<R: Read> LogReader<R> {
     pub fn next_record(&mut self) -> Result<Option<StoredRecord>, ScanError> {
         let Some(record) = self.scanner.next_record()? else { return Ok(None); };
         let fields = record.header;
+        // The verified decoder admits only kinds 0..=4, so this conversion is total.
+        let kind = RecordKind::from_id(fields.kind).ok_or(ScanError::Corrupt)?;
         Ok(Some(StoredRecord {
-            tenant: fields.tenant, request: fields.request, chunk: fields.chunk,
-            direction: if fields.direction == 0 { Direction::Upload } else { Direction::Download }, bytes: record.bytes,
+            tenant: fields.tenant, request: fields.request, chunk: fields.chunk, kind, bytes: record.bytes,
         }))
     }
 }

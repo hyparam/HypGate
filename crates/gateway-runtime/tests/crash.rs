@@ -1,6 +1,6 @@
 //! Process death leaves the OS running: this validates process-crash recovery,
 //! not power loss, device caches, or the full filesystem durability assumption.
-use gateway_runtime::{disk_log::{DiskLog, LogReader, ScanError}, transfer::{AuditLog, Direction, LogRecord}};
+use gateway_runtime::{disk_log::{DiskLog, LogReader, ScanError}, transfer::{AuditLog, LogRecord, RecordKind}};
 use std::{fs::{self, File}, io::{BufRead, BufReader, Write}, process::{Command, Stdio}, time::Duration};
 mod common;
 use common::{Process, TempDir};
@@ -12,7 +12,7 @@ fn crash_child() {
         let mut log = DiskLog::create(std::path::Path::new(&path), 1, Duration::from_secs(5)).unwrap();
         for chunk in 1..=64u64 {
             let bytes = vec![chunk as u8; 64 * 1024];
-            log.append(LogRecord { tenant: 7, request: 11, chunk, direction: Direction::Upload, bytes: &bytes }).await.unwrap();
+            log.append(LogRecord { tenant: 7, request: 11, chunk, kind: RecordKind::Upload, bytes: &bytes }).await.unwrap();
             println!("SOUNDGATE_ACK {chunk}"); std::io::stdout().flush().unwrap();
             if std::env::var_os("SOUNDGATE_CRASH_PAUSE_AFTER_ACK").is_some() {
                 std::future::pending::<()>().await;

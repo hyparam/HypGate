@@ -127,7 +127,7 @@ mod tests {
     use std::time::Duration;
     fn job(chunk: u64) -> Job {
         (super::super::encode_record(crate::transfer::LogRecord {
-            tenant: 1, request: 1, chunk, direction: crate::transfer::Direction::Upload, bytes: b"record",
+            tenant: 1, request: 1, chunk, kind: crate::transfer::RecordKind::Upload, bytes: b"record",
         }), Completion(tokio::sync::oneshot::channel().0))
     }
     #[tokio::test]
@@ -145,7 +145,7 @@ mod tests {
         }
         let mut storage = super::super::Storage(Unused);
         let record = |chunk| LogRecord { tenant: 1, request: 2, chunk,
-            direction: super::super::Direction::Upload, bytes: b"abc" };
+            kind: super::super::RecordKind::Upload, bytes: b"abc" };
         let first = queue.enqueue(record(1)).await.unwrap();
         let active = queue.recv(&mut owner).unwrap();
         drop(first); // caller cancellation does not return active credit
@@ -163,7 +163,7 @@ mod tests {
     async fn production_enqueue_preserves_pairing_waits_while_full_and_refuses_closed_before_encoding() {
         let queue = Queue::with_payload_limit(1, 3);
         let record = |bytes| LogRecord { tenant: 1, request: 2, chunk: 3,
-            direction: super::super::Direction::Upload, bytes };
+            kind: super::super::RecordKind::Upload, bytes };
         let completion = queue.enqueue(record(b"abc")).await.unwrap();
         // A full queue parks the caller without constructing anything: encoding
         // this excessive payload would panic, so the wait must precede construction.
@@ -190,7 +190,7 @@ mod tests {
     async fn closing_wakes_waiting_callers_without_constructing_their_jobs() {
         let queue = std::sync::Arc::new(Queue::with_payload_limit(1, 3));
         let record = |bytes| LogRecord { tenant: 1, request: 2, chunk: 3,
-            direction: super::super::Direction::Upload, bytes };
+            kind: super::super::RecordKind::Upload, bytes };
         let _queued = queue.enqueue(record(b"abc")).await.unwrap();
         let waiting_queue = queue.clone();
         let waiter = tokio::spawn(async move {
@@ -208,7 +208,7 @@ mod tests {
     async fn dropped_waiter_leaves_no_reservation_and_later_callers_proceed() {
         let queue = Queue::with_payload_limit(1, 3);
         let record = |bytes| LogRecord { tenant: 1, request: 2, chunk: 3,
-            direction: super::super::Direction::Upload, bytes };
+            kind: super::super::RecordKind::Upload, bytes };
         let _queued = queue.enqueue(record(b"abc")).await.unwrap();
         drop(tokio::time::timeout(Duration::from_millis(20), queue.enqueue(record(b"def"))).await);
         assert_eq!(queue.len(), 1);

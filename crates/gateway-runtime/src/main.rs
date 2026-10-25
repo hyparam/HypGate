@@ -1,4 +1,4 @@
-use gateway_runtime::{config::GatewayConfig, disk_log::{DiskLog, LogReader, ScanError}, server::{self, Gateway}, transport::HttpsTransport};
+use gateway_runtime::{config::GatewayConfig, disk_log::{DiskLog, LogReader, Metadata, ScanError, StoredRecord}, server::{self, Gateway}, transport::HttpsTransport};
 use std::{io::{self, Read, Write}, net::SocketAddr, path::Path, time::Duration};
 
 fn bounded_file(path: &str) -> io::Result<Vec<u8>> {
@@ -26,7 +26,10 @@ async fn run() -> Result<(), &'static str> {
             .map_err(|_| "invalid configuration or missing credential")?
     }; // Source JSON buffers are startup scratch, not server-lifetime storage.
     let transport = HttpsTransport::new(Duration::from_secs(300)).map_err(|_| "cannot initialize transport")?;
-    let log = DiskLog::create_with_payload_limit(Path::new(&args[3]), 16, Duration::from_secs(2), config.chunk_bytes()).map_err(|_| "cannot create and sync new audit log")?;
+    // Metadata records need room for an 8192-byte destination even when the
+    // body chunk is smaller; the queue bound in docs/resource-composition.md uses this value.
+    let payload_limit = config.chunk_bytes().max(gateway_core::metadata::MAX_PAYLOAD);
+    let log = DiskLog::create_with_payload_limit(Path::new(&args[3]), 16, Duration::from_secs(2), payload_limit).map_err(|_| "cannot create and sync new audit log")?;
     let listener = tokio::net::TcpListener::bind(address).await.map_err(|_| "cannot bind listener")?;
     eprintln!("soundgate listening on {}", listener.local_addr().map_err(|_| "cannot read listen address")?);
     let budget = gateway_runtime::budget::compose(gateway_runtime::budget::Limits {
@@ -57,13 +60,7 @@ fn scan(path: &str) -> Result<(), &'static str> {
         match reader.next_record() {
             Ok(Some(record)) => {
                 records = records.checked_add(1).ok_or("record count exhausted")?;
-                let row = serde_json::json!({"type":"record", "session":session,
-                    "tenant":record.tenant, "request":record.request, "chunk":record.chunk,
-                    "direction":match record.direction {
-                        gateway_runtime::transfer::Direction::Upload => "upload",
-                        gateway_runtime::transfer::Direction::Download => "download",
-                    }, "payload_bytes":record.bytes.len(), "valid_end":reader.valid_end()});
-                writeln!(output, "{row}").map_err(|_| "cannot write scan output")?;
+                writeln!(output, "{}", scan_row(&session, &record, reader.valid_end())).map_err(|_| "cannot write scan output")?;
             }
             Ok(None) => break None,
             Err(error) => break Some(error),
@@ -74,4 +71,38 @@ fn scan(path: &str) -> Result<(), &'static str> {
     writeln!(output, "{}", serde_json::json!({"type":"summary", "session":session,
         "records":records, "valid_end":reader.valid_end(), "status":status})).map_err(|_| "cannot write scan output")?;
     if error.is_some() { Err("scan stopped at invalid tail; file unchanged") } else { Ok(()) }
+}
+
+// Body payloads are never printed; metadata fields are decoded with the
+// verified codecs, and a metadata payload that does not decode is reported as such.
+fn scan_row(session: &str, record: &StoredRecord, valid_end: u64) -> serde_json::Value {
+    let mut row = serde_json::json!({"type":"record", "session":session,
+        "tenant":record.tenant, "request":record.request, "chunk":record.chunk,
+        "kind":record.kind.name(), "payload_bytes":record.bytes.len(), "valid_end":valid_end});
+    if let Some(direction) = record.direction() {
+        row["direction"] = serde_json::json!(match direction {
+            gateway_runtime::transfer::Direction::Upload => "upload",
+            gateway_runtime::transfer::Direction::Download => "download",
+        });
+        return row;
+    }
+    match record.metadata() {
+        Some(Metadata::RequestStart(start)) => {
+            row["time_ms"] = serde_json::json!(start.time_ms);
+            row["selector"] = serde_json::json!(start.selector);
+            row["destination"] = serde_json::json!(String::from_utf8_lossy(&start.destination));
+        }
+        Some(Metadata::ResponseHead(head)) => {
+            row["time_ms"] = serde_json::json!(head.time_ms);
+            row["status"] = serde_json::json!(head.status);
+        }
+        Some(Metadata::Completion(done)) => {
+            row["time_ms"] = serde_json::json!(done.time_ms);
+            row["outcome"] = serde_json::json!(done.outcome);
+            row["upload_bytes"] = serde_json::json!(done.upload_bytes);
+            row["download_bytes"] = serde_json::json!(done.download_bytes);
+        }
+        None => { row["metadata"] = serde_json::json!("invalid"); }
+    }
+    row
 }

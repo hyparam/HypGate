@@ -184,7 +184,7 @@ mod tests {
     #[tokio::test]
     async fn cancellation_preserves_independent_response_background_and_disk_owners() {
         use crate::{credited_job::CreditedJob, disk_log::DiskLog, server::connections::ConnectionSlots,
-            transfer::{AuditLog, Direction, LogRecord}};
+            transfer::{AuditLog, LogRecord, RecordKind}};
         use gateway_core::resource::ResourceAdmission;
         use http_body_util::BodyExt;
         use tokio::io::AsyncWriteExt;
@@ -228,7 +228,7 @@ mod tests {
             let worker = worker_lease.spawn(async move {
                 writer.write_all(b"data").await.unwrap();
                 let append = append_log.append(LogRecord { tenant: 1, request: 1, chunk: 1,
-                    direction: Direction::Upload, bytes: b"record" });
+                    kind: RecordKind::Upload, bytes: b"record" });
                 let _ = tokio::join!(receive, append);
             });
             running.await.unwrap();

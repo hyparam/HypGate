@@ -3,7 +3,7 @@ use crate::{test_support::{TempDir, admission}, transfer::copy_body};
 use std::{io::Cursor, sync::{Mutex, mpsc as blocking}};
 
 fn record(bytes: &[u8], chunk: u64) -> LogRecord<'_> {
-    LogRecord { tenant: 1, request: 2, chunk, direction: Direction::Download, bytes }
+    LogRecord { tenant: 1, request: 2, chunk, kind: RecordKind::Download, bytes }
 }
 
 #[tokio::test]
@@ -23,7 +23,7 @@ async fn strict_transfer_and_real_disk_records_have_identical_payloads() {
     while let Some(record) = reader.next_record().unwrap() {
         assert_eq!(record.request, request.request_id());
         assert_eq!(record.chunk, expected_chunk);
-        assert_eq!(record.direction, Direction::Download);
+        assert_eq!(record.direction(), Some(Direction::Download));
         recorded.extend(record.bytes); expected_chunk += 1;
     }
     assert_eq!(recorded, input);
@@ -449,13 +449,13 @@ async fn canceling_append_callers_does_not_release_queued_or_active_frame_credit
         release.send(()).unwrap();
         let receipt = excess.await.unwrap().unwrap();
         assert!(receipt.matches_record(Header { payload: 6, tenant: 1, request: 2,
-            chunk: 3, direction: 1 }, b"excess"));
+            chunk: 3, kind: 1 }, b"excess"));
         while log.queued_for_test() != 0 { tokio::task::yield_now().await; }
         // The same worker continues. There is no retry of either canceled job;
         // a later caller receives only its own receipt.
         let receipt = log.append(record(b"later", 4)).await.unwrap();
         assert!(receipt.matches_record(Header { payload: 5, tenant: 1, request: 2,
-            chunk: 4, direction: 1 }, b"later"));
+            chunk: 4, kind: 1 }, b"later"));
         log.shutdown(Duration::from_secs(1)).await.unwrap();
         let mut expected = encode(record(b"active", 1));
         expected.extend(encode(record(b"queued", 2)));

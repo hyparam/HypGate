@@ -34,18 +34,33 @@ pub fn decode_session(bytes: &[u8], checksum_valid: bool) -> (out: Option<[u8; 1
     Some(session)
 }
 
+// Record kinds. Kinds 0 and 1 are body chunks whose payload is forwarded bytes;
+// kinds 2 to 4 are metadata records whose payloads are the verified codecs in
+// `metadata.rs`. Only body kinds can ever serve as body-write evidence.
+pub const KIND_UPLOAD: u8 = 0;
+pub const KIND_DOWNLOAD: u8 = 1;
+pub const KIND_REQUEST_START: u8 = 2;
+pub const KIND_RESPONSE_HEAD: u8 = 3;
+pub const KIND_COMPLETION: u8 = 4;
+pub const MAX_KIND: u8 = 4;
+pub open spec fn body_kind(kind: u8) -> bool { kind <= 1 }
+pub open spec fn metadata_kind(kind: u8) -> bool { 2 <= kind <= 4 }
+pub proof fn kinds_partition(kind: u8)
+    ensures (kind <= 4) == (body_kind(kind) || metadata_kind(kind)), !(body_kind(kind) && metadata_kind(kind)),
+{}
+
 pub struct Header {
     pub payload: u32,
     pub tenant: u64,
     pub request: u64,
     pub chunk: u64,
-    pub direction: u8,
+    pub kind: u8,
 }
-pub open spec fn valid(h: Header) -> bool { h.payload <= 1048576 && h.request != 0 && h.direction <= 1 }
+pub open spec fn valid(h: Header) -> bool { h.payload <= 1048576 && h.request != 0 && h.kind <= 4 }
 pub open spec fn encoding(h: Header) -> Seq<u8> {
     seq![83u8, 71u8, 82u8, 49u8] + spec_u32_to_le_bytes(h.payload)
         + spec_u64_to_le_bytes(h.tenant) + spec_u64_to_le_bytes(h.request)
-        + spec_u64_to_le_bytes(h.chunk) + seq![h.direction]
+        + spec_u64_to_le_bytes(h.chunk) + seq![h.kind]
 }
 pub open spec fn decoded(bytes: Seq<u8>) -> Option<Header> {
     if bytes.len() != 33 || bytes[0] != 83 || bytes[1] != 71 || bytes[2] != 82 || bytes[3] != 49 {
@@ -54,12 +69,12 @@ pub open spec fn decoded(bytes: Seq<u8>) -> Option<Header> {
         let h = Header { payload: spec_u32_from_le_bytes(bytes.subrange(4, 8)),
             tenant: spec_u64_from_le_bytes(bytes.subrange(8, 16)),
             request: spec_u64_from_le_bytes(bytes.subrange(16, 24)),
-            chunk: spec_u64_from_le_bytes(bytes.subrange(24, 32)), direction: bytes[32] };
+            chunk: spec_u64_from_le_bytes(bytes.subrange(24, 32)), kind: bytes[32] };
         if valid(h) { Some(h) } else { None }
     }
 }
 
-fn append(out: &mut Vec<u8>, bytes: &[u8])
+pub(crate) fn append(out: &mut Vec<u8>, bytes: &[u8])
     ensures final(out)@ == old(out)@ + bytes@,
 {
     let mut i: usize = 0;
@@ -79,7 +94,7 @@ pub fn encode(h: Header) -> (out: Option<Vec<u8>>)
         None => !valid(h),
     },
 {
-    if h.payload > 1048576 || h.request == 0 || h.direction > 1 { return None; }
+    if h.payload > 1048576 || h.request == 0 || h.kind > 4 { return None; }
     proof { lemma_auto_spec_u32_to_from_le_bytes(); lemma_auto_spec_u64_to_from_le_bytes(); }
     // The canonical header is exactly 33 bytes; avoid geometric growth.
     let mut bytes = Vec::with_capacity(33);
@@ -88,7 +103,7 @@ pub fn encode(h: Header) -> (out: Option<Vec<u8>>)
     append(&mut bytes, u64_to_le_bytes(h.tenant).as_slice());
     append(&mut bytes, u64_to_le_bytes(h.request).as_slice());
     append(&mut bytes, u64_to_le_bytes(h.chunk).as_slice());
-    bytes.push(h.direction);
+    bytes.push(h.kind);
     proof {
         assert(bytes@.subrange(4, 8) =~= spec_u32_to_le_bytes(h.payload));
         assert(bytes@.subrange(8, 16) =~= spec_u64_to_le_bytes(h.tenant));
@@ -116,9 +131,11 @@ pub fn encode_payload(h: Header, payload: &[u8]) -> (out: Option<Vec<u8>>)
     Some(bytes)
 }
 
-pub proof fn encoded_header_roundtrip(h: Header)
-    requires valid(h),
-    ensures encoding(h).len() == 33, decoded(encoding(h)) == Some(h),
+// The header encoding is injective: decoding it recovers exactly the fields,
+// and succeeds precisely for valid headers.
+pub proof fn encoding_decodes(h: Header)
+    ensures encoding(h).len() == 33,
+        decoded(encoding(h)) == if valid(h) { Some(h) } else { None::<Header> },
 {
     lemma_auto_spec_u32_to_from_le_bytes(); lemma_auto_spec_u64_to_from_le_bytes();
     let bytes = encoding(h);
@@ -127,6 +144,11 @@ pub proof fn encoded_header_roundtrip(h: Header)
     assert(bytes.subrange(16, 24) =~= spec_u64_to_le_bytes(h.request));
     assert(bytes.subrange(24, 32) =~= spec_u64_to_le_bytes(h.chunk));
 }
+
+pub proof fn encoded_header_roundtrip(h: Header)
+    requires valid(h),
+    ensures encoding(h).len() == 33, decoded(encoding(h)) == Some(h),
+{ encoding_decodes(h); }
 
 // No early mismatch exit, so digest comparison does not leak the matching prefix
 // length through control flow. This is a functional equality proof, not a
@@ -261,9 +283,9 @@ pub fn decode(bytes: &[u8]) -> (out: Option<Header>)
     let tenant = u64_from_le_bytes(slice_subrange(bytes, 8, 16));
     let request = u64_from_le_bytes(slice_subrange(bytes, 16, 24));
     let chunk = u64_from_le_bytes(slice_subrange(bytes, 24, 32));
-    let direction = bytes[32];
-    if payload > 1048576 || request == 0 || direction > 1 { return None; }
-    let h = Header { payload, tenant, request, chunk, direction };
+    let kind = bytes[32];
+    if payload > 1048576 || request == 0 || kind > 4 { return None; }
+    let h = Header { payload, tenant, request, chunk, kind };
     proof {
         lemma_auto_spec_u32_to_from_le_bytes(); lemma_auto_spec_u64_to_from_le_bytes();
         assert(encoding(h) =~= bytes@);

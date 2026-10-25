@@ -9,11 +9,49 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 pub enum Direction { Upload, Download }
 impl Direction { pub(crate) fn id(self) -> u8 { match self { Self::Upload => 0, Self::Download => 1 } } }
 
+/// The record kinds of the audit log. Body kinds carry forwarded bytes under
+/// the body chunk ids (1 and up); metadata kinds carry the verified payload
+/// codecs in `gateway_core::metadata` under the reserved chunk id 0.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecordKind { Upload, Download, RequestStart, ResponseHead, Completion }
+impl RecordKind {
+    pub fn id(self) -> u8 {
+        match self {
+            Self::Upload => gateway_core::framing::KIND_UPLOAD, Self::Download => gateway_core::framing::KIND_DOWNLOAD,
+            Self::RequestStart => gateway_core::framing::KIND_REQUEST_START,
+            Self::ResponseHead => gateway_core::framing::KIND_RESPONSE_HEAD,
+            Self::Completion => gateway_core::framing::KIND_COMPLETION,
+        }
+    }
+    /// Every kind the verified framing accepts has a name; nothing else does.
+    pub fn from_id(id: u8) -> Option<Self> {
+        match id {
+            0 => Some(Self::Upload), 1 => Some(Self::Download), 2 => Some(Self::RequestStart),
+            3 => Some(Self::ResponseHead), 4 => Some(Self::Completion), _ => None,
+        }
+    }
+    /// The body direction of a body kind; metadata kinds have none.
+    pub fn direction(self) -> Option<Direction> {
+        match self { Self::Upload => Some(Direction::Upload), Self::Download => Some(Direction::Download), _ => None }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Upload => "upload", Self::Download => "download", Self::RequestStart => "request_start",
+            Self::ResponseHead => "response_head", Self::Completion => "completion",
+        }
+    }
+}
+impl From<Direction> for RecordKind {
+    fn from(direction: Direction) -> Self {
+        match direction { Direction::Upload => Self::Upload, Direction::Download => Self::Download }
+    }
+}
+
 pub struct LogRecord<'a> {
     pub tenant: u64,
     pub request: u64,
     pub chunk: u64,
-    pub direction: Direction,
+    pub kind: RecordKind,
     pub bytes: &'a [u8],
 }
 
@@ -106,7 +144,7 @@ where R: AsyncRead + Unpin, W: AsyncWrite + Unpin, L: AuditLog, B: BodyBinding {
 pub(crate) fn receipt_for_test(record: LogRecord<'_>) -> DurableFrame {
     let frame = gateway_core::framing::RecordBody::new(gateway_core::framing::Header {
         payload: record.bytes.len() as u32, tenant: record.tenant, request: record.request,
-        chunk: record.chunk, direction: record.direction.id(),
+        chunk: record.chunk, kind: record.kind.id(),
     }, record.bytes).unwrap().seal(&[0; 32]);
     let mut journal = gateway_core::journal::Journal::new(0);
     let ticket = journal.begin(frame.bytes().len() as u64).unwrap();

@@ -1,6 +1,6 @@
 //! Opt-in tests for scripts/check_storage.sh's private, size-limited ext4 image.
 //! Never run these against an operator's normal log directory.
-use gateway_runtime::{disk_log::{DiskLog, LogReader, ScanError}, transfer::{AuditLog, Direction, LogRecord}};
+use gateway_runtime::{disk_log::{DiskLog, LogReader, ScanError}, transfer::{AuditLog, LogRecord, RecordKind}};
 use std::{fs::{self, File}, io::Write, path::PathBuf, time::Duration};
 mod common;
 use common::TempDir;
@@ -12,7 +12,7 @@ fn fixture() -> PathBuf {
     root
 }
 fn record(chunk: u64, bytes: &[u8]) -> LogRecord<'_> {
-    LogRecord { tenant: 7, request: 11, chunk, direction: Direction::Upload, bytes }
+    LogRecord { tenant: 7, request: 11, chunk, kind: RecordKind::Upload, bytes }
 }
 
 #[tokio::test]

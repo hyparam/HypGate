@@ -13,7 +13,7 @@ impl AuditLog for Log {
         assert_eq!(record.tenant, 1);
         assert!(record.request != 0);
         if self.pending { std::future::pending::<()>().await; }
-        self.events.lock().unwrap().push(Event::Log(record.chunk, record.direction, record.bytes.to_vec()));
+        self.events.lock().unwrap().push(Event::Log(record.chunk, record.kind.direction().unwrap(), record.bytes.to_vec()));
         if self.fail { Err(io::ErrorKind::Other.into()) } else { Ok(receipt_for_test(record)) }
     }
 }

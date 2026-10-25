@@ -1,5 +1,5 @@
 //! One HTTPS HTTP/1.1 exchange. No redirects, ambient proxies, pooling, or replay.
-use crate::{http_body, http_boundary::{PreparedRequest, prepare_response_parts}, transfer::{AuditLog, Direction, TransferStats}};
+use crate::{http_body, http_boundary::{PreparedRequest, prepare_response_parts}, transfer::{AuditLog, Direction, TransferError, TransferStats}};
 use http::{HeaderMap, StatusCode};
 use hyper_util::rt::TokioIo;
 use std::{future::Future, io, sync::Arc, time::Duration};
@@ -13,8 +13,30 @@ pub trait ResponseSink: AsyncWrite + Unpin {
     /// Complete a successful body and drain any sink-owned application queue.
     fn finish(&mut self) -> impl Future<Output = io::Result<()>> + Send { async { Ok(()) } }
 }
+/// `Log` is a strict-mode refusal: a body or response-head append failed, so
+/// no further bytes were forwarded. Availability mode never returns it.
 #[derive(Debug, PartialEq, Eq)]
-pub enum TransportError { Timeout, Connect, Tls, Http, Metadata, Upload, Download, Client }
+pub enum TransportError { Timeout, Connect, Tls, Http, Metadata, Upload, Download, Client, Log }
+impl TransportError {
+    /// Outcome code recorded in the completion record (kind 4).
+    pub fn outcome(&self) -> u8 {
+        use gateway_core::metadata::*;
+        match self {
+            Self::Connect | Self::Tls | Self::Http => OUTCOME_UPSTREAM_FAILURE,
+            Self::Timeout => OUTCOME_UPSTREAM_TIMEOUT,
+            Self::Upload => OUTCOME_UPLOAD_FAILURE,
+            Self::Download => OUTCOME_DOWNLOAD_FAILURE,
+            Self::Client => OUTCOME_CLIENT_DISCONNECT,
+            Self::Log => OUTCOME_LOG_REFUSAL,
+            Self::Metadata => OUTCOME_OTHER,
+        }
+    }
+}
+// A strict-mode logging refusal during a body copy keeps its own code; other
+// transfer failures are attributed to the direction being copied.
+fn body_error(error: TransferError, direction: TransportError) -> TransportError {
+    if error == TransferError::Log { TransportError::Log } else { direction }
+}
 pub struct ExchangeStats { pub upload: TransferStats, pub download: TransferStats }
 
 // Application-data buffering only; handshake/control traffic and record overhead
@@ -45,16 +67,17 @@ impl HttpsTransport {
         Ok(Self { connector: TlsConnector::from(Arc::new(config)), deadline, resolver: resolver::Resolver::new()?, handshakes: handshake::Pool::new()? })
     }
 
-    /// Consumes authority and retains its lease through all response processing.
+    /// Borrows the authority for the whole exchange; the caller keeps its lease
+    /// afterwards to record the completion and then release the slot.
     /// The HTTP connection future is polled inline, never spawned or transparently retried.
     /// TLS handshakes run on a separately credited, bounded dedicated pool.
     pub(crate) async fn exchange<R: AsyncRead + Unpin, W: ResponseSink, L: AuditLog>(
-        &self, mut prepared: PreparedRequest<'_>, input: &mut R, output: &mut W, log: &mut L,
+        &self, prepared: &mut PreparedRequest<'_>, input: &mut R, output: &mut W, log: &mut L,
         http: &http_body::WorkerHttp,
     ) -> Result<ExchangeStats, TransportError> {
         // The owner lives outside the timed future, which borrows it and owns
         // connection/body futures. Their cleanup precedes returning its credit.
-        tokio::time::timeout(self.deadline, self.run(&mut prepared, input, output, log, http))
+        tokio::time::timeout(self.deadline, self.run(prepared, input, output, log, http))
             .await.map_err(|_| TransportError::Timeout)?
     }
 
@@ -91,7 +114,7 @@ impl HttpsTransport {
         let operation = async {
             let upload = async {
                 let stats = prepared.copy_body(input, &mut body_writer, log, Direction::Upload)
-                    .await.map_err(|_| TransportError::Upload)?;
+                    .await.map_err(|error| body_error(error, TransportError::Upload))?;
                 body_writer.shutdown().await.map_err(|_| TransportError::Upload)?;
                 Ok::<_, TransportError>(stats)
             };
@@ -99,10 +122,18 @@ impl HttpsTransport {
             let (upload, response) = tokio::try_join!(upload, response)?;
             let (parts, body) = response.into_parts();
             let (status, headers) = prepare_response_parts(parts).map_err(|_| TransportError::Metadata)?;
+            // Kind 3 before the head reaches the client. Strict mode stops here
+            // on a failed append; availability mode continues with a gap.
+            match prepared.audit_response_head(log, status).await {
+                Ok(()) => {},
+                Err(TransferError::Log) if !prepared.stream().strict() => {},
+                Err(TransferError::Log) => return Err(TransportError::Log),
+                Err(_) => return Err(TransportError::Metadata),
+            }
             output.start(status, headers).await.map_err(|_| TransportError::Client)?;
             let mut reader = http.output(body).ok_or(TransportError::Http)?;
             let download = prepared.copy_body(&mut reader, output, log, Direction::Download)
-                .await.map_err(|_| TransportError::Download)?;
+                .await.map_err(|error| body_error(error, TransportError::Download))?;
             output.finish().await.map_err(|_| TransportError::Client)?;
             Ok(ExchangeStats { upload, download })
         };

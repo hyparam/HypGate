@@ -13,6 +13,7 @@ pub mod journal;
 pub mod journal_binding;
 pub mod audit_journal;
 pub mod framing;
+pub mod metadata;
 pub mod recovery;
 pub mod fixed_queue;
 pub mod frame_queue;
@@ -36,3 +37,6 @@ mod streaming_tests;
 #[cfg(test)]
 #[path = "tests/composition.rs"]
 mod composition_tests;
+#[cfg(test)]
+#[path = "tests/metadata.rs"]
+mod metadata_tests;

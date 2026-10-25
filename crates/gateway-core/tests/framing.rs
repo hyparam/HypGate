@@ -7,10 +7,10 @@ fn header_roundtrips_boundary_values_without_field_aliasing() {
             for request in [1, u64::MAX] {
                 for chunk in [0, 1, u64::MAX] {
                     for direction in [0, 1] {
-                        let bytes = encode(Header { payload, tenant, request, chunk, direction }).unwrap();
+                        let bytes = encode(Header { payload, tenant, request, chunk, kind: direction }).unwrap();
                         assert_eq!(bytes.len(), 33); assert_eq!(&bytes[..4], b"SGR1");
                         let h = decode(&bytes).unwrap();
-                        assert_eq!((h.payload, h.tenant, h.request, h.chunk, h.direction),
+                        assert_eq!((h.payload, h.tenant, h.request, h.chunk, h.kind),
                             (payload, tenant, request, chunk, direction));
                     }
                 }
@@ -21,7 +21,7 @@ fn header_roundtrips_boundary_values_without_field_aliasing() {
 
 #[test]
 fn malformed_headers_and_incomplete_frame_extents_are_rejected() {
-    let header = encode(Header { payload: 7, tenant: 3, request: 4, chunk: 5, direction: 1 }).unwrap();
+    let header = encode(Header { payload: 7, tenant: 3, request: 4, chunk: 5, kind: 1 }).unwrap();
     for end in 0..header.len() { assert!(decode(&header[..end]).is_none()); }
     let mut extra = header.clone(); extra.push(0); assert!(decode(&extra).is_none());
     for offset in 0..4 {
@@ -32,8 +32,9 @@ fn malformed_headers_and_incomplete_frame_extents_are_rejected() {
         assert!(decode(&bad).is_none());
     }
     let mut bad = header.clone(); bad[16..24].fill(0); assert!(decode(&bad).is_none());
-    for direction in 2..=255 { let mut bad = header.clone(); bad[32] = direction; assert!(decode(&bad).is_none()); }
-    assert!(encode(Header { payload: 0, tenant: 0, request: 0, chunk: 0, direction: 0 }).is_none());
+    for kind in 2..=4 { let mut ok = header.clone(); ok[32] = kind; assert_eq!(decode(&ok).unwrap().kind, kind); }
+    for kind in 5..=255 { let mut bad = header.clone(); bad[32] = kind; assert!(decode(&bad).is_none()); }
+    assert!(encode(Header { payload: 0, tenant: 0, request: 0, chunk: 0, kind: 0 }).is_none());
     for available in 0..72 { assert!(frame_end(56, 7, available).is_none()); }
     assert_eq!(frame_end(56, 7, 72), Some(128));
     assert_eq!(frame_end(u64::MAX - 72, 7, 72), Some(u64::MAX));
@@ -72,27 +73,27 @@ fn framed_payload_is_exact_and_cannot_disagree_with_header_length() {
     use gateway_core::framing::encode_payload;
     for length in [0, 1, 255, 65536, 1048576] {
         let payload: Vec<_> = (0..length).map(|i| (i % 251) as u8).collect();
-        let header = || Header { payload: length as u32, tenant: 19, request: 29, chunk: 37, direction: 1 };
+        let header = || Header { payload: length as u32, tenant: 19, request: 29, chunk: 37, kind: 1 };
         let frame = encode_payload(header(), &payload).unwrap();
         assert_eq!(&frame[..33], encode(header()).unwrap());
         assert_eq!(&frame[33..], payload);
         assert_eq!(frame.len(), 33 + length);
         assert!(frame.capacity() >= frame.len() + 32);
-        let wrong = Header { payload: length as u32 + 1, tenant: 19, request: 29, chunk: 37, direction: 1 };
+        let wrong = Header { payload: length as u32 + 1, tenant: 19, request: 29, chunk: 37, kind: 1 };
         assert!(encode_payload(wrong, &payload).is_none());
     }
-    assert!(encode_payload(Header { payload: 0, tenant: 0, request: 0, chunk: 0, direction: 0 }, &[]).is_none());
+    assert!(encode_payload(Header { payload: 0, tenant: 0, request: 0, chunk: 0, kind: 0 }, &[]).is_none());
 }
 
 #[test]
 fn recovered_record_binds_header_payload_checksum_and_cursor() {
     use gateway_core::framing::Cursor;
     for direction in [0, 1] {
-        let header = encode(Header { payload: 3, tenant: 19, request: 29, chunk: 37, direction }).unwrap();
+        let header = encode(Header { payload: 3, tenant: 19, request: 29, chunk: 37, kind: direction }).unwrap();
         let mut cursor = Cursor::new(56);
         let ticket = cursor.begin().unwrap();
         let record = cursor.accept_record(ticket, &header, vec![7, 8, 9], true).unwrap();
-        assert_eq!((record.header.tenant, record.header.request, record.header.chunk, record.header.direction),
+        assert_eq!((record.header.tenant, record.header.request, record.header.chunk, record.header.kind),
             (19, 29, 37, direction));
         assert_eq!(record.bytes, [7, 8, 9]);
         assert_eq!(cursor.offset(), 124);
@@ -117,7 +118,7 @@ fn sealed_record_preserves_canonical_header_payload_and_checksum() {
     use gateway_core::framing::RecordBody;
     for length in [0, 1, 1048576] {
         let payload = vec![17; length];
-        let header = || Header { payload: length as u32, tenant: 19, request: 29, chunk: 37, direction: 1 };
+        let header = || Header { payload: length as u32, tenant: 19, request: 29, chunk: 37, kind: 1 };
         let body = RecordBody::new(header(), &payload).unwrap();
         assert_eq!(&body.bytes()[..33], encode(header()).unwrap());
         assert_eq!(&body.bytes()[33..], payload);
@@ -158,7 +159,7 @@ fn record_encoding_reserves_exact_capacity_and_sealing_reuses_the_allocation() {
     use gateway_core::framing::RecordBody;
     // Runtime allocator observations, not a Verus capacity or physical-memory theorem.
     for length in [0, 1, 31, 32, 33, 63, 64, 65, 4095, 4096, 4097, 65536, 1048576] {
-        let header = || Header { payload: length as u32, tenant: 1, request: 2, chunk: 3, direction: 0 };
+        let header = || Header { payload: length as u32, tenant: 1, request: 2, chunk: 3, kind: 0 };
         let encoded_header = encode(header()).unwrap();
         assert_eq!(encoded_header.len(), 33);
         assert_eq!(encoded_header.capacity(), 33);

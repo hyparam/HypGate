@@ -120,9 +120,10 @@ async fn exercise(availability: bool, duration: Duration) {
     while let Some(record) = scanner.next_record().unwrap() {
         assert_eq!(record.tenant, 1);
         let entry = records.entry(record.request).or_default();
-        match record.direction {
-            crate::transfer::Direction::Upload => entry.0.extend(record.bytes),
-            crate::transfer::Direction::Download => entry.1.extend(record.bytes),
+        match record.kind {
+            crate::transfer::RecordKind::Upload => entry.0.extend(record.bytes),
+            crate::transfer::RecordKind::Download => entry.1.extend(record.bytes),
+            _ => {},
         }
     }
     assert_eq!(records.len(), SLOTS + 1);

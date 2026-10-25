@@ -1,7 +1,7 @@
 use gateway_core::{frame_queue::FrameQueue, framing::{Header, RecordBody, RecordFrame}};
 
 fn frame(bytes: &[u8], chunk: u64) -> RecordFrame {
-    RecordBody::new(Header { payload: bytes.len() as u32, tenant: 1, request: 7, chunk, direction: 0 }, bytes)
+    RecordBody::new(Header { payload: bytes.len() as u32, tenant: 1, request: 7, chunk, kind: 0 }, bytes)
         .unwrap().seal(&[0; 32]) // Queue tests cover structure; digest correctness is external.
 }
 
@@ -89,7 +89,7 @@ fn dequeue_does_not_release_an_unfinished_encoding_reservation() {
 #[test]
 fn reserved_encoder_checks_admission_limit_and_exact_header_before_building() {
     let mut queue = FrameQueue::<usize>::with_payload_limit(1, 3);
-    let header = || Header { payload: 3, tenant: 7, request: 8, chunk: 9, direction: 1 };
+    let header = || Header { payload: 3, tenant: 7, request: 8, chunk: 9, kind: 1 };
     assert!(queue.encode_reserved(header(), b"abc").is_none());
     assert!(queue.reserve());
     let mut oversized = header(); oversized.payload = 4;

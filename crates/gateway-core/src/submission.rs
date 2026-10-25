@@ -57,7 +57,11 @@ impl AuthorizedWrite {
                 && owner.receipt().unwrap().valid()
                 && journal.session() == Some(owner.receipt().unwrap().session())
                 && owner.receipt().unwrap().record()
-                    == owner.state().audit_frame(authority.tenant(), direction, owner.receipt().unwrap().checksum()))
+                    == owner.state().audit_frame(authority.tenant(), direction, owner.receipt().unwrap().checksum())
+                && crate::framing::decoded(owner.receipt().unwrap().record().subrange(0, 33))
+                    == Some(owner.state().audit_header(authority.tenant(), direction))
+                && owner.state().audit_header(authority.tenant(), direction).kind == direction
+                && crate::framing::body_kind(direction))
     }
     pub open spec fn refused(&self, owner: &OwnedStream, authority: &AuthorizedRequest,
         journal: &crate::journal_binding::JournalBinding, direction: u8) -> bool
@@ -82,7 +86,7 @@ impl AuthorizedWrite {
         if self.request != authority.request_id() || self.request != stream.owner_id()
             || self.route.tenant != authority.tenant_id() || self.route.origin != route.origin
             || self.route.credential != route.credential || self.route.selector != route.selector { return None; }
-        proof { stream.payload_within_capacity(); if stream.strict() { owner.receipt_evidence(); } }
+        proof { stream.payload_within_capacity(); if stream.strict() { owner.receipt_evidence(); owner.receipt_is_body_record(); } }
         stream.pending_bytes(&self.ticket)
     }
     pub fn complete(&self, stream: &mut OwnedStream, count: usize) -> (ok: bool)

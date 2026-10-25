@@ -27,7 +27,7 @@ fn submission_binds_request_route_and_exact_audited_range() {
         assert!(AuthorizedWrite::prepare(&mut stream, &other_request, &binding, 0, 4).is_none());
         if strict {
             assert!(AuthorizedWrite::prepare(&mut stream, &authority, &binding, 0, 4).is_none());
-            let frame = RecordBody::new(Header { payload: 4, tenant: 1, request: authority.request_id(), chunk, direction: 0 }, &[1, 2, 3, 4])
+            let frame = RecordBody::new(Header { payload: 4, tenant: 1, request: authority.request_id(), chunk, kind: 0 }, &[1, 2, 3, 4])
                 .unwrap().seal(&[0; 32]);
             let mut journal = Journal::new(17);
             let ticket = journal.begin(frame.bytes().len() as u64).unwrap();

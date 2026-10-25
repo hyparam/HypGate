@@ -161,11 +161,12 @@ async fn workload(availability: bool, waves: usize) {
     while let Some(record) = reader.next_record().unwrap() {
         assert_eq!(record.tenant, 1);
         let total = totals.entry(record.request).or_default();
-        match record.direction {
-            crate::transfer::Direction::Upload => total.0 += record.bytes.len(),
-            crate::transfer::Direction::Download => {
+        match record.kind {
+            crate::transfer::RecordKind::Upload => total.0 += record.bytes.len(),
+            crate::transfer::RecordKind::Download => {
                 assert!(record.bytes.iter().all(|b| *b == 29)); total.1 += record.bytes.len();
             }
+            _ => {},
         }
     }
     assert_eq!(totals.len(), CLIENTS * waves);

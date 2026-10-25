@@ -45,8 +45,8 @@ async fn exercise(availability: bool, shutdown_blocked: bool) {
                             Err(_) => { failed = true; break; },
                         }
                     }
-                    if availability { assert!(!failed); assert_eq!(bytes, b"{\"stream\":true}"); }
-                    else { assert!(failed); assert!(bytes.is_empty()); }
+                    assert!(availability, "strict mode must not connect without a start record");
+                    assert!(!failed); assert_eq!(bytes, b"{\"stream\":true}");
                     Ok::<_, Infallible>(Response::new(Full::new(Bytes::from_static(b"complete"))))
                 });
                 let result = hyper::server::conn::http1::Builder::new()
@@ -56,16 +56,18 @@ async fn exercise(availability: bool, shutdown_blocked: bool) {
         }
         while let Some(result) = tasks.join_next().await { result.unwrap(); }
     });
+    // Strict mode now refuses at the request-start record, before any upstream
+    // connection: a stalled logger is observed at kind 2, not during the body.
     let mut clients = JoinSet::new();
-    clients.spawn(request(port, availability, false));
+    clients.spawn(request(port, availability));
     started.await.unwrap(); // The real disk worker is blocked inside sync.
     // Fill both queue slots before creating enough traffic to hit saturation.
     for queued in 1..=2 {
-        clients.spawn(request(port, availability, false));
+        clients.spawn(request(port, availability));
         while app.log.queued_for_test() < queued { tokio::task::yield_now().await; }
     }
     assert_eq!(writes.load(Ordering::Relaxed), 1);
-    for _ in 3..SLOTS { clients.spawn(request(port, availability, false)); }
+    for _ in 3..SLOTS { clients.spawn(request(port, availability)); }
     for path in ["/healthz", "/metrics"] {
         let (response, connection) = send(port, path, "", "GET").await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -79,11 +81,11 @@ async fn exercise(availability: bool, shutdown_blocked: bool) {
     let (ready, connection) = send(port, "/readyz", "", "GET").await;
     assert_eq!(ready.status(), if availability { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE });
     ready.collect().await.unwrap(); connection.await.unwrap();
-    for _ in 0..SLOTS { clients.spawn(request(port, availability, true)); }
+    for _ in 0..SLOTS { clients.spawn(request(port, availability)); }
     while let Some(result) = clients.join_next().await { result.unwrap(); }
     while !app.workers.is_empty() { tokio::task::yield_now().await; }
     assert_eq!(app.config.usage(), Some((0, SLOTS)));
-    assert_eq!(connections.load(Ordering::Relaxed), if availability { 2 * SLOTS } else { SLOTS });
+    assert_eq!(connections.load(Ordering::Relaxed), if availability { 2 * SLOTS } else { 0 });
     assert_eq!(app.audit_gaps(), if availability { (2 * SLOTS) as u64 } else { 0 });
     assert_eq!(writes.load(Ordering::Relaxed), 1); // No replacement writer or retry.
     stop_provider.send(()).unwrap(); provider.await.unwrap();
@@ -111,12 +113,10 @@ async fn exercise(availability: bool, shutdown_blocked: bool) {
     assert!(app.workers.is_empty());
 }
 
-async fn request(port: u16, availability: bool, unhealthy: bool) {
+async fn request(port: u16, availability: bool) {
     tokio::time::timeout(Duration::from_secs(3), async {
         let (response, connection) = send(port, "/routes/7", "gateway", "POST").await;
-        let expected = if availability { StatusCode::OK } else if unhealthy {
-            StatusCode::SERVICE_UNAVAILABLE
-        } else { StatusCode::BAD_GATEWAY };
+        let expected = if availability { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
         assert_eq!(response.status(), expected);
         let bytes = response.collect().await.unwrap().to_bytes();
         if availability { assert_eq!(bytes, b"complete"[..]); }

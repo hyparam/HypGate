@@ -1,4 +1,4 @@
-use gateway_runtime::{disk_log::DiskLog, transfer::{AuditLog, Direction, LogRecord}};
+use gateway_runtime::{disk_log::DiskLog, transfer::{AuditLog, LogRecord, RecordKind}};
 use std::{fs, io::{BufRead, BufReader, Read, Write}, net::TcpStream, process::{Command, Stdio}, time::Duration};
 mod common;
 use common::{Process, TempDir};
@@ -28,7 +28,7 @@ fn scan_command_reports_valid_prefix_without_printing_payload_or_editing_log() {
     let dir = TempDir::new("soundgate-scan"); let path = dir.0.join("audit.log");
     tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
         let mut log = DiskLog::create(&path, 1, Duration::from_secs(2)).unwrap();
-        log.append(LogRecord { tenant: 1, request: 2, chunk: 3, direction: Direction::Upload,
+        log.append(LogRecord { tenant: 1, request: 2, chunk: 3, kind: RecordKind::Upload,
             bytes: b"private-payload-marker" }).await.unwrap();
     });
     let complete_length = fs::metadata(&path).unwrap().len();

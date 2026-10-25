@@ -105,9 +105,10 @@ async fn exercise(with_proxy: bool) {
         let mut upload = Vec::new(); let mut download = Vec::new();
         while let Some(record) = scanner.next_record().unwrap() {
             assert_eq!((record.tenant, record.request), (1, 1));
-            match record.direction {
-                crate::transfer::Direction::Upload => upload.extend(record.bytes),
-                crate::transfer::Direction::Download => download.extend(record.bytes),
+            match record.kind {
+                crate::transfer::RecordKind::Upload => upload.extend(record.bytes),
+                crate::transfer::RecordKind::Download => download.extend(record.bytes),
+                _ => {},
             }
         }
         assert_eq!(upload, b"{\"stream\":true}"); assert_eq!(download, visible);
@@ -136,9 +137,10 @@ async fn exercise(with_proxy: bool) {
             let mut upload = Vec::new(); let mut download = Vec::new();
             while let Some(record) = recovered.next_record().unwrap() {
                 assert_eq!((record.tenant, record.request), (1, 1));
-                match record.direction {
-                    crate::transfer::Direction::Upload => upload.extend(record.bytes),
-                    crate::transfer::Direction::Download => download.extend(record.bytes),
+                match record.kind {
+                    crate::transfer::RecordKind::Upload => upload.extend(record.bytes),
+                    crate::transfer::RecordKind::Download => download.extend(record.bytes),
+                    _ => {},
                 }
             }
             assert_eq!(upload, b"second-request"); assert_eq!(download, b"standby-response");

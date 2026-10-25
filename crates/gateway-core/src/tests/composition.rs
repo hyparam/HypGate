@@ -108,7 +108,7 @@ fn audit_record_binds_authority_current_chunk_and_exact_payload() {
     let chunk = stream.advance(vec![3, 1, 4]).unwrap();
     for direction in [0, 1] {
         let (header, bytes) = stream.audit_record(&authority, direction).unwrap();
-        assert_eq!((header.tenant, header.request, header.chunk, header.direction, header.payload),
+        assert_eq!((header.tenant, header.request, header.chunk, header.kind, header.payload),
             (42, 11, chunk, direction, 3));
         assert_eq!(bytes, &[3, 1, 4]);
     }

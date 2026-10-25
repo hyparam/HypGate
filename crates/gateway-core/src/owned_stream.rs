@@ -78,6 +78,26 @@ impl OwnedStream {
             self.receipt().unwrap().record()
                 == self.state().audit_frame(self.audit_tenant(), self.audit_direction(), self.receipt().unwrap().checksum()),
     {}
+    // Strict-mode evidence is always a body record: its canonical header decodes
+    // to the current chunk's header for the recorded body direction, so a
+    // metadata record (kind 2 to 4) can never be the receipt behind a write ticket.
+    pub proof fn receipt_is_body_record(&self)
+        requires self.valid(), self.audit_session().is_some(),
+        ensures self.receipt().is_some(), crate::framing::body_kind(self.audit_direction()),
+            crate::framing::decoded(self.receipt().unwrap().record().subrange(0, 33))
+                == Some(self.state().audit_header(self.audit_tenant(), self.audit_direction())),
+            self.state().audit_header(self.audit_tenant(), self.audit_direction()).kind == self.audit_direction(),
+    {
+        let header = self.state().audit_header(self.audit_tenant(), self.audit_direction());
+        let receipt = self.receipt().unwrap();
+        receipt.canonical();
+        crate::framing::encoding_decodes(header);
+        crate::framing::encoding_decodes(receipt.header());
+        // Both canonical prefixes are the first 33 record bytes, so the header
+        // encodings coincide; injectivity then identifies the headers.
+        assert(receipt.record().subrange(0, 33) =~= crate::framing::encoding(receipt.header()));
+        assert(receipt.record().subrange(0, 33) =~= crate::framing::encoding(header));
+    }
     pub closed spec fn state(&self) -> StreamChunk { self.stream }
     pub closed spec fn read_bytes(&self) -> Seq<u8> { self.read_buffer@ }
     pub closed spec fn key(&self) -> RequestKey { self.key }

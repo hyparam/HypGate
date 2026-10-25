@@ -1,6 +1,6 @@
 use gateway_core::{journal_binding::JournalBinding, journal::{Journal, DurableFrame}, framing::{Header, RecordBody}};
 fn receipt(session: u128) -> DurableFrame {
-    let frame = RecordBody::new(Header { payload: 3, tenant: 1, request: 2, chunk: 3, direction: 0 }, b"abc")
+    let frame = RecordBody::new(Header { payload: 3, tenant: 1, request: 2, chunk: 3, kind: 0 }, b"abc")
         .unwrap().seal(&[0; 32]);
     let mut journal = Journal::new(session);
     let ticket = journal.begin(frame.bytes().len() as u64).unwrap();

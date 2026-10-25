@@ -64,11 +64,11 @@ impl StreamChunk {
             None => !self.auditable(authority, direction),
         },
     {
-        if self.closed || self.failed || self.owner == 0
+        if self.closed || self.failed || self.owner == 0 || self.chunk == 0
             || self.owner != authority.request_id() || self.bytes.len() > 1048576
             || direction > 1 { return None; }
         Some((Header { payload: self.bytes.len() as u32, tenant: authority.tenant_id(),
-            request: self.owner, chunk: self.chunk, direction }, self.bytes.as_slice()))
+            request: self.owner, chunk: self.chunk, kind: direction }, self.bytes.as_slice()))
     }
 
     pub fn capacity_bytes(&self) -> (out: usize)
@@ -127,12 +127,15 @@ impl StreamChunk {
     }
 
     // The current chunk may be audited for this authority in this direction.
+    // Chunk 0 is the unfilled initial state: body records never carry it, so
+    // the runtime reserves chunk 0 for a request's metadata records.
     pub open spec fn auditable(&self, authority: &AuthorizedRequest, direction: u8) -> bool {
-        !self.closed() && !self.failed() && self.owner() != 0 && self.owner() == authority.request()
-            && self.body().len() <= 1048576 && direction <= 1
+        !self.closed() && !self.failed() && self.owner() != 0 && self.chunk() != 0
+            && self.owner() == authority.request()
+            && self.body().len() <= 1048576 && crate::framing::body_kind(direction)
     }
     pub open spec fn audit_header(&self, tenant: u64, direction: u8) -> Header {
-        Header { payload: self.body().len() as u32, tenant, request: self.owner(), chunk: self.chunk(), direction }
+        Header { payload: self.body().len() as u32, tenant, request: self.owner(), chunk: self.chunk(), kind: direction }
     }
     // The canonical record for the current chunk, as a journal receipt must carry it.
     pub open spec fn audit_frame(&self, tenant: u64, direction: u8, checksum: Seq<u8>) -> Seq<u8> {

@@ -166,9 +166,10 @@ async fn benchmark(availability: bool, profile: Profile) {
         let mut totals = std::collections::BTreeMap::<u64, (usize, usize)>::new();
         while let Some(record) = scanner.next_record().unwrap() {
             let entry = totals.entry(record.request).or_default();
-            match record.direction {
-                crate::transfer::Direction::Upload => entry.0 += record.bytes.len(),
-                crate::transfer::Direction::Download => entry.1 += record.bytes.len(),
+            match record.kind {
+                crate::transfer::RecordKind::Upload => entry.0 += record.bytes.len(),
+                crate::transfer::RecordKind::Download => entry.1 += record.bytes.len(),
+                _ => {},
             }
         }
         assert_eq!(totals.len(), if failed_log { concurrency } else { requests });

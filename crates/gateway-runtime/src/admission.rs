@@ -1,6 +1,6 @@
 //! This module is trusted Rust, not Verus-verified. It owns registry keys and
 //! stream storage so callers cannot return a credit while retaining its stream.
-use crate::transfer::{AuditLog, Direction, LogRecord, TransferError};
+use crate::transfer::{AuditLog, Direction, LogRecord, RecordKind, TransferError};
 use gateway_core::policy::{AuthorizedRequest, Policy};
 use gateway_core::resource::{RequestKey, ResourceAdmission};
 use gateway_core::owned_stream::OwnedStream;
@@ -184,7 +184,7 @@ impl<'a> Request<'a> {
             .ok_or(TransferError::InvalidState)?;
         let chunk = header.chunk;
         let record = LogRecord { tenant: header.tenant, request: header.request,
-            chunk, direction, bytes };
+            chunk, kind: direction.into(), bytes };
         let receipt = match log.append(record).await {
             Ok(receipt) => receipt,
             Err(_) => {
@@ -199,6 +199,45 @@ impl<'a> Request<'a> {
         pending.armed = false;
         Ok(())
     }
+    /// Append one metadata record (kinds 2 to 4) for this request. Metadata
+    /// records use chunk id 0, which the verified `audit_record` never issues
+    /// for a body chunk, and they never touch the body stream: no chunk
+    /// advance, no capacity use, no durable offset. The receipt is checked
+    /// against the designated journal session and the exact record, as body
+    /// receipts are, but it authorizes nothing. A failed append marks the
+    /// request log-failed exactly like a failed body append.
+    pub(crate) async fn audit_metadata<L: AuditLog>(&mut self, log: &mut L, kind: RecordKind, payload: &[u8])
+        -> Result<(), TransferError>
+    {
+        if kind.direction().is_some() || payload.len() > gateway_core::metadata::MAX_PAYLOAD {
+            return Err(TransferError::InvalidState);
+        }
+        // A request already marked log-failed skips later appends, as the body
+        // path does; the gap was counted at the first failure.
+        if self.log_failed { return Err(TransferError::Log); }
+        let mut pending = CancelOnDrop { request: self, armed: true };
+        if pending.request.is_closed() { return Err(TransferError::InvalidState); }
+        if !pending.request.journal.bind(log.session_id()) {
+            return Err(TransferError::InvalidState);
+        }
+        let header = gateway_core::framing::Header { payload: payload.len() as u32, tenant: pending.request.tenant_id(),
+            request: pending.request.request_id(), chunk: 0, kind: kind.id() };
+        let record = LogRecord { tenant: header.tenant, request: header.request, chunk: 0, kind, bytes: payload };
+        let receipt = match log.append(record).await {
+            Ok(receipt) => receipt,
+            Err(_) => {
+                pending.request.fail_log();
+                pending.armed = false;
+                return Err(TransferError::Log);
+            }
+        };
+        if !pending.request.journal.accepts(&receipt) || !receipt.matches_record(header, payload) {
+            return Err(TransferError::InvalidState);
+        }
+        pending.armed = false;
+        Ok(())
+    }
+    pub(crate) fn selector(&self) -> u64 { self.authorized.route().selector }
     pub fn prepare(&mut self, max: usize, direction: Direction) -> Option<WriteTicket<'a>> {
         AuthorizedWrite::prepare(self.lease.stream_mut(), &self.authorized, &self.journal, direction.id(), max)
             .map(|core| WriteTicket { admission: self.lease.admission, core })

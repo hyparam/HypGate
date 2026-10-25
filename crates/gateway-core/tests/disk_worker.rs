@@ -22,7 +22,7 @@ impl Completion for Reply {
     fn complete(self, receipt: Option<DurableFrame>) { self.replies.lock().unwrap().push((self.id, receipt)); }
 }
 fn frame(id: u64) -> RecordFrame {
-    RecordBody::new(Header { tenant: 1, request: 1, chunk: id, direction: 0, payload: 3 }, b"abc")
+    RecordBody::new(Header { tenant: 1, request: 1, chunk: id, kind: 0, payload: 3 }, b"abc")
         .unwrap().seal(&[0; 32])
 }
 fn push(queue: &mut FrameQueue<Reply>, id: u64, replies: &Replies) {
@@ -58,7 +58,7 @@ fn active_capacity_survives_io_and_receipt_delivery_until_matching_release() {
     assert_eq!(replies.iter().map(|r| r.0).collect::<Vec<_>>(), vec![1, 2]);
     for (id, receipt) in replies.iter() {
         assert!(receipt.as_ref().unwrap().matches_record(Header {
-            tenant: 1, request: 1, chunk: *id, direction: 0, payload: 3,
+            tenant: 1, request: 1, chunk: *id, kind: 0, payload: 3,
         }, b"abc"));
     }
 }

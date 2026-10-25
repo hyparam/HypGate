@@ -200,8 +200,8 @@ async fn exercise(availability: bool, failed_log: bool, truncated: bool, stop: S
         let mut reader = LogReader::new(File::open(path).unwrap()).unwrap();
         let mut upload = Vec::new(); let mut download = Vec::new();
         while let Some(r) = reader.next_record().unwrap() {
-            match r.direction { crate::transfer::Direction::Upload => &mut upload,
-                crate::transfer::Direction::Download => &mut download }.extend(r.bytes);
+            match r.direction() { Some(crate::transfer::Direction::Upload) => upload.extend(r.bytes),
+                Some(crate::transfer::Direction::Download) => download.extend(r.bytes), None => {} }
         }
         if failed_log { assert!(upload.is_empty()); assert!(download.is_empty()); }
         else {
@@ -212,11 +212,13 @@ async fn exercise(availability: bool, failed_log: bool, truncated: bool, stop: S
 }
 
 #[tokio::test]
-async fn worker_body_drop_aborts_pending_request() {
+async fn worker_body_drop_cancels_pending_request() {
     let tracker = TaskTracker::new();
-    let task = tracker.spawn(std::future::pending::<()>());
+    let token = tokio_util::sync::CancellationToken::new();
+    let cancelled = token.clone();
+    let task = tracker.spawn(async move { cancelled.cancelled().await; });
     let (writer, body) = http_body::channel(16);
-    let response = GatewayBody::Stream { body, _task: AbortOnDrop(Some(task)) };
+    let response = GatewayBody::Stream { body, _task: CancelOnDrop { token, task: Some(task) } };
     drop(response); drop(writer); tracker.close();
     tokio::time::timeout(Duration::from_secs(1), tracker.wait()).await.unwrap();
     assert!(tracker.is_empty());
@@ -302,9 +304,10 @@ async fn concurrent_tenants_keep_credentials_bodies_and_audit_records_isolated()
         let mut reader = LogReader::new(File::open(path).unwrap()).unwrap();
         let mut records = std::collections::BTreeMap::<u64, (u64, u64, Vec<u8>, Vec<u8>)>::new();
         while let Some(record) = reader.next_record().unwrap() {
+            let Some(direction) = record.direction() else { continue; }; // metadata uses chunk 0
             let entry = records.entry(record.request).or_insert((record.tenant, 0, Vec::new(), Vec::new()));
             assert_eq!(entry.0, record.tenant); assert_eq!(record.chunk, entry.1 + 1); entry.1 = record.chunk;
-            match record.direction { crate::transfer::Direction::Upload => &mut entry.2,
+            match direction { crate::transfer::Direction::Upload => &mut entry.2,
                 crate::transfer::Direction::Download => &mut entry.3 }.extend(record.bytes);
         }
         assert_eq!(records.len(), 2);
@@ -474,7 +477,7 @@ async fn bodyless_http_statuses_finish_worker_accounting() {
                             // Emulates final metrics/lease cleanup after draining.
                             done.send(()).unwrap();
                         });
-                        worker_response(headers, body, AbortOnDrop(Some(task))).await
+                        worker_response(headers, body, CancelOnDrop { token: Default::default(), task: Some(task) }).await
                     }
                 });
                 hyper::server::conn::http1::Builder::new().keep_alive(false)
@@ -502,7 +505,7 @@ async fn bodyless_status_rejects_payload_or_missing_completion() {
                     if payload { output.write_all(b"unexpected").await.unwrap(); }
                     // Missing clean completion is an error, even with no bytes.
                 });
-                let response = worker_response(headers, body, AbortOnDrop(Some(task))).await.unwrap();
+                let response = worker_response(headers, body, CancelOnDrop { token: Default::default(), task: Some(task) }).await.unwrap();
                 assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
             }
         }

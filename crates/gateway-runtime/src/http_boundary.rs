@@ -40,6 +40,36 @@ impl<'a> PreparedRequest<'a> {
     }
     pub fn destination(&self) -> &Uri { self.routed.destination() }
     pub(crate) fn stream(&mut self) -> &mut crate::admission::Request<'a> { self.routed.stream() }
+
+    /// Kind 2: wall clock, the authorized route selector, and the configured
+    /// destination text this request was resolved to. Appended before any
+    /// DNS, TCP, or TLS effect.
+    pub(crate) async fn audit_request_start<L: crate::transfer::AuditLog>(&mut self, log: &mut L)
+        -> Result<(), crate::transfer::TransferError>
+    {
+        let destination = self.routed.destination_text().as_bytes().to_vec();
+        let selector = self.routed.stream().selector();
+        let payload = gateway_core::metadata::encode_request_start(unix_ms(), selector, &destination)
+            .ok_or(crate::transfer::TransferError::InvalidState)?;
+        self.routed.stream().audit_metadata(log, crate::transfer::RecordKind::RequestStart, &payload).await
+    }
+    /// Kind 3: wall clock and the upstream HTTP status, appended after the
+    /// response head passed the boundary checks and before it reaches the client.
+    pub(crate) async fn audit_response_head<L: crate::transfer::AuditLog>(&mut self, log: &mut L, status: StatusCode)
+        -> Result<(), crate::transfer::TransferError>
+    {
+        let payload = gateway_core::metadata::encode_response_head(unix_ms(), status.as_u16())
+            .ok_or(crate::transfer::TransferError::InvalidState)?;
+        self.routed.stream().audit_metadata(log, crate::transfer::RecordKind::ResponseHead, &payload).await
+    }
+    /// Kind 4: wall clock, outcome code, and the accepted byte counts.
+    pub(crate) async fn audit_completion<L: crate::transfer::AuditLog>(&mut self, log: &mut L, outcome: u8,
+        upload_bytes: u64, download_bytes: u64) -> Result<(), crate::transfer::TransferError>
+    {
+        let payload = gateway_core::metadata::encode_completion(unix_ms(), outcome, upload_bytes, download_bytes)
+            .ok_or(crate::transfer::TransferError::InvalidState)?;
+        self.routed.stream().audit_metadata(log, crate::transfer::RecordKind::Completion, &payload).await
+    }
     // Validate the configured binding before any DNS/TCP/TLS effect, then move
     // the only request into the direct HTTP/1 transport in origin form.
     pub(crate) fn take_upstream(&mut self) -> Result<Request<()>, HttpError> {
@@ -57,6 +87,13 @@ impl<'a> PreparedRequest<'a> {
         *request.uri_mut() = uri;
         Ok(request)
     }
+}
+
+/// Milliseconds since the Unix epoch, clamped to `u64`; a clock before the
+/// epoch records zero rather than failing the request.
+pub(crate) fn unix_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)).unwrap_or(0)
 }
 
 fn check_size(headers: &HeaderMap) -> Result<(), HttpError> {

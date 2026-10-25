@@ -55,10 +55,14 @@ enum Logging { Strict, Availability }
 // accidentally format loaded credentials.
 struct Credential { kind: CredentialKind, value: HeaderValue }
 
+// The parsed URI drives dispatch; the exact configured text is what the audit
+// log's request-start record carries, so a reader sees the operator's string.
+pub(crate) struct Destination { uri: Uri, text: String }
+
 pub struct GatewayConfig {
     chunk_bytes: usize,
     admission: Admission,
-    destinations: Vec<Uri>,
+    destinations: Vec<Destination>,
     credentials: Vec<Credential>,
 }
 
@@ -66,10 +70,14 @@ pub struct GatewayConfig {
 /// that admitted the owned request. No caller-supplied URI or secret override.
 pub struct RoutedRequest<'a> {
     request: Request<'a>,
-    resolved: gateway_core::resolved_route::ResolvedRoute<'a, Uri, Credential>,
+    resolved: gateway_core::resolved_route::ResolvedRoute<'a, Destination, Credential>,
 }
 
-fn destination(text: &str) -> Result<Uri, ConfigError> {
+fn destination(text: &str) -> Result<Destination, ConfigError> {
+    Ok(Destination { uri: destination_uri(text)?, text: text.to_owned() })
+}
+
+fn destination_uri(text: &str) -> Result<Uri, ConfigError> {
     // Keep spelling strict rather than rely on permissive URL normalization.
     if text.len() > MAX_DESTINATION_BYTES || !text.starts_with("https://") || !text.is_ascii()
         || text.bytes().any(|b| b <= 32 || b == 127 || b == b'\\' || b == b'#') {
@@ -175,7 +183,11 @@ impl<'a> RoutedRequest<'a> {
     }
     pub(crate) fn stream(&mut self) -> &mut Request<'a> { &mut self.request }
     pub fn destination(&self) -> &Uri {
-        self.resolved.destination(self.request.authority()).expect("private request/route binding")
+        &self.resolved.destination(self.request.authority()).expect("private request/route binding").uri
+    }
+    /// The configured destination string exactly as the operator wrote it.
+    pub fn destination_text(&self) -> &str {
+        &self.resolved.destination(self.request.authority()).expect("private request/route binding").text
     }
 
     // Only the trusted HTTP boundary may inject provider credentials.

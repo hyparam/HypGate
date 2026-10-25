@@ -62,7 +62,7 @@ fn durable_frame_commit_binds_one_complete_record_and_rejects_stale_tickets() {
 #[test]
 fn typed_frame_commits_only_the_reserved_complete_record() {
     use gateway_core::framing::{Header, RecordBody};
-    let frame = || RecordBody::new(Header { payload: 3, tenant: 1, request: 2, chunk: 3, direction: 0 },
+    let frame = || RecordBody::new(Header { payload: 3, tenant: 1, request: 2, chunk: 3, kind: 0 },
         &[4, 5, 6]).unwrap().seal(&[7; 32]);
     let length = frame().bytes().len() as u64;
     let mut wrong = Journal::new(0);
@@ -80,7 +80,7 @@ fn typed_frame_commits_only_the_reserved_complete_record() {
 #[test]
 fn durable_receipt_matches_exact_metadata_and_payload() {
     use gateway_core::framing::{Header, RecordBody};
-    let header = || Header { payload: 3, tenant: 1, request: 2, chunk: 3, direction: 0 };
+    let header = || Header { payload: 3, tenant: 1, request: 2, chunk: 3, kind: 0 };
     let frame = RecordBody::new(header(), &[4, 5, 6]).unwrap().seal(&[7; 32]);
     let mut journal = Journal::new(0);
     let ticket = journal.begin(frame.bytes().len() as u64).unwrap();
@@ -90,7 +90,7 @@ fn durable_receipt_matches_exact_metadata_and_payload() {
     assert!(!receipt.matches_record(header(), &[4, 5]));
     let mut other = header(); other.chunk += 1;
     assert!(!receipt.matches_record(other, &[4, 5, 6]));
-    let mut other = header(); other.direction = 2;
+    let mut other = header(); other.kind = 5;
     assert!(!receipt.matches_record(other, &[4, 5, 6]));
 }
 
@@ -98,7 +98,7 @@ fn durable_receipt_matches_exact_metadata_and_payload() {
 fn production_journal_preserves_order_and_rejects_stale_or_failed_commits() {
     use gateway_core::{audit_journal::AuditJournal, framing::{Header, RecordBody}};
     let frame = |chunk, bytes: &[u8]| RecordBody::new(Header {
-        payload: bytes.len() as u32, tenant: 1, request: 2, chunk, direction: 0 }, bytes)
+        payload: bytes.len() as u32, tenant: 1, request: 2, chunk, kind: 0 }, bytes)
         .unwrap().seal(&[7; 32]);
     let mut journal = AuditJournal::new(0);
     let first = frame(1, b"first");
@@ -110,9 +110,9 @@ fn production_journal_preserves_order_and_rejects_stale_or_failed_commits() {
     assert!(journal.commit_frame(&first_ticket, frame(1, b"first")).is_none());
     let second_receipt = journal.commit_frame(&second_ticket, second).unwrap();
     assert!(first_receipt.matches_record(Header {
-        payload: 5, tenant: 1, request: 2, chunk: 1, direction: 0 }, b"first"));
+        payload: 5, tenant: 1, request: 2, chunk: 1, kind: 0 }, b"first"));
     assert!(second_receipt.matches_record(Header {
-        payload: 6, tenant: 1, request: 2, chunk: 2, direction: 0 }, b"second"));
+        payload: 6, tenant: 1, request: 2, chunk: 2, kind: 0 }, b"second"));
     let third = frame(3, b"third");
     let third_ticket = journal.begin(third.bytes().len() as u64).unwrap();
     journal.fail();
@@ -139,7 +139,7 @@ fn tickets_from_another_session_cannot_write_commit_or_acknowledge() {
 #[test]
 fn identical_records_keep_their_distinct_journal_provenance() {
     use gateway_core::{audit_journal::AuditJournal, framing::{Header, RecordBody}};
-    let header = || Header { payload: 3, tenant: 1, request: 2, chunk: 3, direction: 0 };
+    let header = || Header { payload: 3, tenant: 1, request: 2, chunk: 3, kind: 0 };
     for session in [0, 1, u128::MAX] {
         let frame = RecordBody::new(header(), b"abc").unwrap().seal(&[0; 32]);
         let mut journal = AuditJournal::new(session);

@@ -45,9 +45,12 @@ pub fn compose(limits: Limits) -> Option<Budget> {
     if !validate_limits(limits.requests, limits.chunk_bytes) || limits.connections == 0
         || limits.connections > 65_536 || limits.queue == 0 || limits.queue > 65_536 { return None; }
     let (r, k, c, q) = (limits.requests as u64, limits.chunk_bytes as u64, limits.connections as u64, limits.queue as u64);
+    // The audit queue admits metadata payloads up to 8,210 bytes, so its frame
+    // bound is A = max(K, 8210); the verified subtotal is instantiated at A.
+    let a = k.max(gateway_core::metadata::MAX_PAYLOAD as u64);
     let visible_payload = (r * k).checked_add(2 * r * 32_768)?
         .checked_add((c + 2 * r) * 16_384)?
-        .checked_add((q + r + 1).checked_mul(k + 65)?)?
+        .checked_add((q + r + 1).checked_mul(a + 65)?)?
         .checked_add((r + 1) * 33)?;
     let inbound_connections = c.checked_mul(PER_INBOUND_CONNECTION)?;
     let admitted_exchanges = r.checked_mul(PER_ADMITTED_EXCHANGE)?;

@@ -162,7 +162,7 @@ async fn mismatched_durable_receipts_never_authorize_forwarding() {
                 0 => record.tenant += 1,
                 1 => record.request += 1,
                 2 => record.chunk += 1,
-                3 => record.direction = Direction::Download,
+                3 => record.kind = crate::transfer::RecordKind::Download,
                 4 => record.bytes = &[8, 7], // same length, different content
                 5 => record.bytes = &[7],
                 _ => {}, // exact content, but receipt comes from another session

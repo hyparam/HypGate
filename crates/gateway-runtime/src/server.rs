@@ -81,22 +81,21 @@ impl Gateway {
             return Ok(fixed(StatusCode::SERVICE_UNAVAILABLE, "workers unavailable\n"));
         };
         let app = self.clone();
-        let cancel = self.cancel_workers.clone();
-        let task = lease.spawn(async move {
-            tokio::select! {
-                biased;
-                _ = cancel.cancelled() => {},
-                _ = app.run_exchange(http, parts, input, Output { head: Some(head), writer }) => {},
-            }
-        });
-        let guard = AbortOnDrop(Some(task));
+        // The client's response body owns this token: dropping the body before
+        // clean EOF cancels the exchange cooperatively, so the worker can still
+        // record the completion before releasing its slot. Shutdown shares the
+        // same path through the gateway-wide token.
+        let disconnect = tokio_util::sync::CancellationToken::new();
+        let task = lease.spawn(app.run_exchange(http, parts, input, Output { head: Some(head), writer }, disconnect.clone()));
+        let guard = CancelOnDrop { token: disconnect, task: Some(task) };
         worker_response(headers, body, guard).await
     }
 
     async fn run_exchange(self: Arc<Self>, http: http_body::WorkerHttp, parts: http::request::Parts,
-        input: Incoming, mut output: Output)
+        input: Incoming, mut output: Output, disconnect: tokio_util::sync::CancellationToken)
     {
-        let prepared = match http_boundary::prepare_request_parts(&self.config, parts) {
+        use gateway_core::metadata::{OUTCOME_CLIENT_DISCONNECT, OUTCOME_LOG_REFUSAL, OUTCOME_OTHER, OUTCOME_SUCCESS};
+        let mut prepared = match http_boundary::prepare_request_parts(&self.config, parts) {
             Ok(p) => p,
             Err(e) => {
                 let _ = output.start(e.status(), HeaderMap::new()).await;
@@ -113,13 +112,37 @@ impl Gateway {
         }
         let mut log = ObservedLog { log: self.log.clone(), gaps: &self.audit_gaps,
             availability: !self.config.requires_audit(), reported: false };
-        let Some(mut input) = http.input(input) else { return; };
-        let result = self.transport.exchange(prepared, &mut input, &mut output, &mut log, &http).await;
+        // Kind 2 before any DNS, TCP, or TLS effect. Strict mode needs the
+        // acknowledgment before dispatch; availability mode marks the request
+        // log-failed (the gap counter already incremented) and forwards.
+        if prepared.audit_request_start(&mut log).await.is_err() && self.config.requires_audit() {
+            let _ = output.start(StatusCode::SERVICE_UNAVAILABLE, HeaderMap::new()).await;
+            let _ = output.shutdown().await;
+            self.audit_completion(&mut prepared, &mut log, OUTCOME_LOG_REFUSAL, 0, 0).await;
+            return;
+        }
+        let Some(mut input) = http.input(input) else {
+            self.audit_completion(&mut prepared, &mut log, OUTCOME_OTHER, 0, 0).await;
+            return;
+        };
+        // Cancellation drops the exchange future, and with it every upstream
+        // socket and body future, before the completion record is written.
+        let result = tokio::select! {
+            biased;
+            _ = self.cancel_workers.cancelled() => None,
+            _ = disconnect.cancelled() => None,
+            result = self.transport.exchange(&mut prepared, &mut input, &mut output, &mut log, &http) => Some(result),
+        };
+        let (outcome, upload, download) = match &result {
+            Some(Ok(stats)) => (OUTCOME_SUCCESS, stats.upload.accepted_bytes, stats.download.accepted_bytes),
+            Some(Err(error)) => (error.outcome(), 0, 0),
+            None => (OUTCOME_CLIENT_DISCONNECT, 0, 0),
+        };
         match result {
-            Ok(_) => {
+            Some(Ok(_)) => {
                 let _ = output.shutdown().await; // only success sends the clean EOF marker
             }
-            Err(e) => {
+            Some(Err(e)) => {
                 self.failed_exchanges.fetch_add(1, Ordering::Relaxed);
                 if output.head.is_some() {
                     let status = if e == TransportError::Timeout { StatusCode::GATEWAY_TIMEOUT } else { StatusCode::BAD_GATEWAY };
@@ -129,13 +152,26 @@ impl Gateway {
                 // After headers, dropping the writer makes the body fail;
                 // never turn a truncated generation into successful HTTP EOF.
             }
+            None => {} // canceled: the head sender or body writer drops unfinished
         }
+        self.audit_completion(&mut prepared, &mut log, outcome, upload, download).await;
+    }
+
+    // Kind 4 is best effort in both modes: the client-visible result is already
+    // fixed, so its failure changes nothing for the client. It is written inline
+    // before the worker releases its slot, never from a detached task, and
+    // skipped when the logger is already unhealthy.
+    async fn audit_completion(&self, prepared: &mut http_boundary::PreparedRequest<'_>, log: &mut ObservedLog<'_>,
+        outcome: u8, upload_bytes: u64, download_bytes: u64)
+    {
+        if !self.log.healthy() { return; }
+        let _ = prepared.audit_completion(log, outcome, upload_bytes, download_bytes).await;
     }
 }
 
 // Build the response while retaining cancellation ownership of its worker.
 async fn worker_response(headers: oneshot::Receiver<(StatusCode, HeaderMap)>,
-    mut body: http_body::ChannelBody, mut guard: AbortOnDrop) -> Result<Response<GatewayBody>, Infallible>
+    mut body: http_body::ChannelBody, mut guard: CancelOnDrop) -> Result<Response<GatewayBody>, Infallible>
 {
     match headers.await {
         Ok((status, headers)) => {
@@ -146,10 +182,10 @@ async fn worker_response(headers: oneshot::Receiver<(StatusCode, HeaderMap)>,
                 if http_body_util::BodyExt::frame(&mut body).await.is_some() {
                     return Ok(fixed(StatusCode::BAD_GATEWAY, "unexpected upstream body\n"));
                 }
-                if let Some(task) = &mut guard.0 {
+                if let Some(task) = &mut guard.task {
                     if task.await.is_err() { return Ok(fixed(StatusCode::BAD_GATEWAY, "upstream failed\n")); }
                 }
-                guard.0.take();
+                guard.task.take();
                 let mut response = fixed(status, "");
                 *response.headers_mut() = headers;
                 return Ok(response);
@@ -177,9 +213,11 @@ impl AuditLog for ObservedLog<'_> {
     }
 }
 
-struct AbortOnDrop(Option<JoinHandle<()>>);
-impl Drop for AbortOnDrop { fn drop(&mut self) { if let Some(task) = &self.0 { task.abort(); } } }
-enum GatewayBody { Fixed(Full<Bytes>), Stream { body: http_body::ChannelBody, _task: AbortOnDrop } }
+// Dropping the guard before clean EOF cancels the worker's exchange through its
+// token; the worker then records the completion and finishes on its own.
+struct CancelOnDrop { token: tokio_util::sync::CancellationToken, task: Option<JoinHandle<()>> }
+impl Drop for CancelOnDrop { fn drop(&mut self) { if self.task.is_some() { self.token.cancel(); } } }
+enum GatewayBody { Fixed(Full<Bytes>), Stream { body: http_body::ChannelBody, _task: CancelOnDrop } }
 impl Body for GatewayBody {
     type Data = Bytes; type Error = io::Error;
     fn poll_frame(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Result<Frame<Bytes>, io::Error>>> {
@@ -188,8 +226,8 @@ impl Body for GatewayBody {
             Self::Stream { body, _task } => {
                 let result = Pin::new(body).poll_frame(cx);
                 // Clean EOF acknowledged the drained queue. Let the tracked worker
-                // finish accounting rather than aborting it when Hyper drops us.
-                if matches!(result, Poll::Ready(None)) { _task.0.take(); }
+                // finish accounting rather than canceling it when Hyper drops us.
+                if matches!(result, Poll::Ready(None)) { _task.task.take(); }
                 result
             },
         }
