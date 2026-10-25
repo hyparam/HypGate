@@ -117,12 +117,16 @@ verified by adding Verus contracts to the core.
 
 The optional [cloud shipper](cloud-shipping.md) adds one trusted component: a
 thread in the same process that reads the audit log and uploads to one
-configured HypAware server with a credential that server issued. Its token is
-confined by ownership and module structure, not by a process boundary: it is
-read once at startup, moved into the thread, and never placed in the gateway
-configuration, on the request path, or in the log. The shipper has no handle to
-admission, routes, credentials, or the logger, so it cannot enlarge grants or
-change destinations; the HypAware server's ledger and dedup behavior are
+configured HypAware server with a credential that server issued. Every
+decision about what to send is made by the verified shipper machine, whose
+requests carry a path and a body but no host and whose only body containing
+the operator token is a bootstrap; the thread performs those requests against
+the client built from the configured server. The token is confined by
+ownership and module structure, not by a process boundary: it is read once at
+startup, moved into the machine, and never placed in the gateway
+configuration, on the request path, or in the log. The shipper has no handle
+to admission, routes, credentials, or the logger, so it cannot enlarge grants
+or change destinations; the HypAware server's ledger and dedup behavior are
 trusted for exactly-once storage, never for any security property above.
 
 Track each external contract separately: what is assumed, why it is reasonable,

@@ -1,23 +1,32 @@
 # Cloud shipping to HypAware
 
 Status: implemented on one dedicated thread inside `soundgate`, enabled by an
-optional `shipping` section of the root policy. The verified core covers the
-tailing scanner, exchange assembly and its byte bounds, batch limits, upload
-progress, identity encodings, and the enrollment state machine. The HTTPS
-client, JSON and SSE parsing, the projection into HypAware rows, the state
-files, and the server's own behavior are trusted and tested.
+optional `shipping` section of the root policy. Every decision is made by the
+verified shipper machine (`gateway_core::shipper::Machine`): which records
+form which exchange, which exchanges go into the next batch, which request to
+send with which credential, how to read a reply, and how long to wait. The
+runtime thread performs those actions against the one configured server and
+reports replies back. The HTTPS client, JSON and SSE parsing, the projection
+of an exchange into HypAware rows, the state files, and the server's own
+behavior are trusted and tested.
 
 ## What it does
 
 The shipper opens the audit log read-only and tails it with the verified
-scanner, resuming from the last validated offset on every poll. Records are
-grouped by request into exchanges with the verified assembler. Each finished
-exchange becomes two `ai_gateway_messages` rows (a user part with the request
-text and an assistant part with the response text and token usage), serialized
-as NDJSON and uploaded in batches of at most 5,000 rows and 4 MiB to
-`POST /v1/ingest/proxy` on the configured server with the gateway credential
-the server issued at enrollment. Progress is checkpointed after every
-acknowledged or poisoned batch.
+scanner, resuming from the last validated offset whenever the machine asks it
+to read. Records are grouped by request into exchanges inside the machine.
+Each emitted exchange comes back to the runtime as a numbered token; the
+runtime projects it into two `ai_gateway_messages` rows (a user part with the
+request text and an assistant part with the response text and token usage),
+serializes them as NDJSON, and hands the token back with the bytes. The
+machine accepts tokens only in emission order and keeps the projections as
+the unresolved suffix of a ghost history. When it chooses to upload, the
+request body is exactly the concatenation of the next queued exchanges, at
+most 5,000 rows and 4 MiB, sent to `POST /v1/ingest/proxy` with the gateway
+credential the server issued at enrollment. A request carries a path and a
+body but no host: the host lives only in the client built from
+`shipping.server`. Progress is checkpointed after every acknowledged or
+poisoned batch.
 
 The shipper never writes to the log, never replays provider traffic, and never
 touches admission, forwarding, or readiness. It shares no executor, resolver,
@@ -79,10 +88,10 @@ permanently; `soundgate_shipping_stopped` reports it.
 
 Upload: `POST /v1/ingest/proxy` with `Authorization: Bearer <credential>`,
 `Content-Type: application/x-ndjson`, and `X-Hyp-Batch-Id`. The batch id is
-the hex of the verified encoding of (log session, index of the first exchange,
-SHA-256 of the body), so a retry or a restart that rebuilds the same batch
-sends the same id and the server's ledger acknowledges it without storing it
-again. Row identities are the hex of verified fixed-width encodings of
+the hex of the verified encoding of (log session, index range of the
+exchanges, FNV-1a checksum of the body), computed inside the machine, so a
+retry or a restart that rebuilds the same batch sends the same id and the
+server's ledger acknowledges it without storing it again. Row identities are the hex of verified fixed-width encodings of
 (session, request id, message index, part index), so a batch rebuilt
 differently after a restart repeats part ids the server deduplicates.
 
@@ -118,10 +127,13 @@ implemented.
 | Cannot affect authorization, forwarding, or readiness | Structural: the thread receives only the log path, server, token, state directory, and limits; `Gateway` holds a read-only metrics view; readiness never reads it. Tested: `shipping_uploads_forwarded_exchanges_without_touching_readiness` with a hanging server, and the executable test with an unreachable server. |
 | Never modifies the log | The only file handle is read-only (`File::open`); the scanner never truncates or appends (proved). |
 | Retained bytes are an ordered prefix of the received bytes, within the cap | `exchange_assembler::Exchange::valid` proved; `assembler_interleaves_requests_and_truncates_at_the_cap`. |
-| Bounded open exchanges and pending rows | `Assembler::valid` proved; the engine stops reading when the queue is full (tested in the drain run). |
+| Bounded open exchanges and pending rows | `Assembler::valid` proved; `Machine::valid` bounds queued plus outstanding projections by `max_open_exchanges` and `wants_records` refuses reads beyond it (proved); the drain run tests it. |
+| Nothing is dropped between emission and upload: every emitted exchange is queued in order, an ingest body is exactly the next queued exchanges, an acknowledgment pops exactly those, a poison pops exactly one | `Machine::{admit,enqueue,next,reply}` postconditions over the ghost history (proved); `machine_enrolls_then_ships_queued_exchanges_in_order_and_resolves_on_acknowledgment`. |
+| The only request bodies are the escaped bootstrap token, nothing, or queued rows; the token appears only in a bootstrap body; no request names a host | `Machine::next` postconditions and the `Request` type (proved). |
+| Every wait is 1 to 300 seconds; every state has a next action; pending work with a usable credential is sent or poisoned at once | `Machine::next` and `Machine::reply` postconditions (proved). |
 | Each exchange is emitted exactly once, on its completion record or its eviction | `Assembler::admit` and `evict_oldest` postconditions proved. |
 | Batches hold whole exchanges within 5,000 rows and 4 MiB | `BatchBuilder` proved; `ships_many_exchanges_in_bounded_batches_with_drain_mode`. |
-| Progress advances only through an acknowledgment of the exact in-flight batch id or an explicit poison; abandonment changes nothing | `UploadCursor` proved; `upload_cursor_resolves_only_the_acknowledged_in_flight_batch`. |
+| Progress advances only through an acknowledgment of the in-flight batch or an explicit poison; abandonment changes nothing | `UploadCursor` and `Machine::reply` proved; `upload_cursor_resolves_only_the_acknowledged_in_flight_batch`. |
 | Batch and row identities are injective in their inputs | `shipping_identity` lemmas proved; stable ids across restarts tested. |
 | No upload without an unexpired credential; one refresh per rejection; revocation is absorbing; delays within 1 to 300 seconds | `Enrollment`, `throttle_delay`, `transport_delay` proved; `recovers_from_rejected_tokens_throttling_and_poison_and_stops_on_revocation`. |
 | At-least-once delivery, exactly-once storage | Trusted server contract: batch-id ledger and `part_id` dedup. Tested against the fake server, including a restart without a checkpoint. |
@@ -133,6 +145,9 @@ implemented.
   issues credentials only to holders of a valid operator token.
 - TLS/PKI, DNS, Hyper, Tokio, and the filesystem, as for the gateway.
 - The system clock for renewal decisions and row timestamps.
+- The runtime hands every emitted token back to `enqueue` and pairs each
+  reply with the request it sent; the machine checks order and refuses
+  anything else, but cannot see a token the runtime drops.
 - The checkpoint's reproducibility: the assembler is deterministic for the
   same record sequence and limits, so a restart replays the file from its
   header and skips the resolved count. A checkpoint from different limits is

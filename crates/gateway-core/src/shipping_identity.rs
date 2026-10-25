@@ -11,7 +11,7 @@ verus! {
 pub const EXCHANGE_KEY_LEN: usize = 24;
 pub const MESSAGE_KEY_LEN: usize = 28;
 pub const PART_KEY_LEN: usize = 32;
-pub const BATCH_ID_LEN: usize = 56;
+pub const BATCH_ID_LEN: usize = 40;
 
 pub open spec fn exchange_key_encoding(session: Seq<u8>, request: u64) -> Seq<u8> {
     session + spec_u64_to_le_bytes(request)
@@ -22,8 +22,8 @@ pub open spec fn message_key_encoding(session: Seq<u8>, request: u64, message: u
 pub open spec fn part_key_encoding(session: Seq<u8>, request: u64, message: u32, part: u32) -> Seq<u8> {
     message_key_encoding(session, request, message) + spec_u32_to_le_bytes(part)
 }
-pub open spec fn batch_id_encoding(session: Seq<u8>, first: u64, digest: Seq<u8>) -> Seq<u8> {
-    session + spec_u64_to_le_bytes(first) + digest
+pub open spec fn batch_id_encoding(session: Seq<u8>, first: u64, end: u64, checksum: u64) -> Seq<u8> {
+    session + spec_u64_to_le_bytes(first) + spec_u64_to_le_bytes(end) + spec_u64_to_le_bytes(checksum)
 }
 
 pub proof fn exchange_key_injective(s1: Seq<u8>, r1: u64, s2: Seq<u8>, r2: u64)
@@ -61,16 +61,17 @@ pub proof fn part_key_injective(s1: Seq<u8>, r1: u64, m1: u32, p1: u32, s2: Seq<
     assert(e1.subrange(28, 32) =~= spec_u32_to_le_bytes(p1)); assert(e2.subrange(28, 32) =~= spec_u32_to_le_bytes(p2));
 }
 
-pub proof fn batch_id_injective(s1: Seq<u8>, f1: u64, d1: Seq<u8>, s2: Seq<u8>, f2: u64, d2: Seq<u8>)
-    requires s1.len() == 16, s2.len() == 16, d1.len() == 32, d2.len() == 32,
-        batch_id_encoding(s1, f1, d1) == batch_id_encoding(s2, f2, d2),
-    ensures s1 == s2, f1 == f2, d1 == d2,
+pub proof fn batch_id_injective(s1: Seq<u8>, f1: u64, e1: u64, c1: u64, s2: Seq<u8>, f2: u64, e2: u64, c2: u64)
+    requires s1.len() == 16, s2.len() == 16,
+        batch_id_encoding(s1, f1, e1, c1) == batch_id_encoding(s2, f2, e2, c2),
+    ensures s1 == s2, f1 == f2, e1 == e2, c1 == c2,
 {
     lemma_auto_spec_u64_to_from_le_bytes();
-    let e1 = batch_id_encoding(s1, f1, d1); let e2 = batch_id_encoding(s2, f2, d2);
-    assert(e1.subrange(0, 16) =~= s1); assert(e2.subrange(0, 16) =~= s2);
-    assert(e1.subrange(16, 24) =~= spec_u64_to_le_bytes(f1)); assert(e2.subrange(16, 24) =~= spec_u64_to_le_bytes(f2));
-    assert(e1.subrange(24, 56) =~= d1); assert(e2.subrange(24, 56) =~= d2);
+    let b1 = batch_id_encoding(s1, f1, e1, c1); let b2 = batch_id_encoding(s2, f2, e2, c2);
+    assert(b1.subrange(0, 16) =~= s1); assert(b2.subrange(0, 16) =~= s2);
+    assert(b1.subrange(16, 24) =~= spec_u64_to_le_bytes(f1)); assert(b2.subrange(16, 24) =~= spec_u64_to_le_bytes(f2));
+    assert(b1.subrange(24, 32) =~= spec_u64_to_le_bytes(e1)); assert(b2.subrange(24, 32) =~= spec_u64_to_le_bytes(e2));
+    assert(b1.subrange(32, 40) =~= spec_u64_to_le_bytes(c1)); assert(b2.subrange(32, 40) =~= spec_u64_to_le_bytes(c2));
 }
 
 pub fn exchange_key(session: &[u8; 16], request: u64) -> (out: Vec<u8>)
@@ -98,15 +99,16 @@ pub fn part_key(session: &[u8; 16], request: u64, message: u32, part: u32) -> (o
     bytes
 }
 
-/// Session, index of the first exchange in the batch, and the SHA-256 of the
+/// Session, index range of the exchanges in the batch, and a checksum of the
 /// batch body. A retried or re-sent batch computes the identical id.
-pub fn batch_id(session: &[u8; 16], first: u64, digest: &[u8; 32]) -> (out: Vec<u8>)
-    ensures out@ == batch_id_encoding(session@, first, digest@), out@.len() == 56,
+pub fn batch_id(session: &[u8; 16], first: u64, end: u64, checksum: u64) -> (out: Vec<u8>)
+    ensures out@ == batch_id_encoding(session@, first, end, checksum), out@.len() == 40,
 {
-    let mut bytes = Vec::with_capacity(56);
+    let mut bytes = Vec::with_capacity(40);
     append(&mut bytes, session.as_slice());
     append(&mut bytes, u64_to_le_bytes(first).as_slice());
-    append(&mut bytes, digest.as_slice());
+    append(&mut bytes, u64_to_le_bytes(end).as_slice());
+    append(&mut bytes, u64_to_le_bytes(checksum).as_slice());
     bytes
 }
 }

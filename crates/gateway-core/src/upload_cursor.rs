@@ -27,10 +27,19 @@ impl UploadCursor {
     pub closed spec fn in_flight(&self) -> Option<InFlight> { self.in_flight }
     pub closed spec fn valid(&self) -> bool {
         self.resolved <= self.emitted && match self.in_flight {
-            Some(b) => b.first == self.resolved && b.first < b.end && b.end <= self.emitted && b.id@.len() == 56,
+            Some(b) => b.first == self.resolved && b.first < b.end && b.end <= self.emitted && b.id@.len() == 40,
             None => true,
         }
     }
+
+    /// What a valid cursor guarantees, for callers outside this module.
+    pub proof fn bounds(&self)
+        requires self.valid(),
+        ensures self.resolved() <= self.emitted(), match self.in_flight() {
+            Some(b) => b.first() == self.resolved() && b.first() < b.end() && b.end() <= self.emitted() && b.id().len() == 40,
+            None => true,
+        },
+    {}
 
     /// Restore from a checkpoint; a batch that was in flight is forgotten and
     /// will be rebuilt from the same exchanges under the same id.
@@ -73,21 +82,22 @@ impl UploadCursor {
     }
 
     /// Open a batch over the next `count` unresolved exchanges. The id binds the
-    /// session, the first exchange index, and the body digest.
-    pub fn open_batch(&mut self, count: u64, session: &[u8; 16], digest: &[u8; 32]) -> (ok: bool)
+    /// session, the exchange index range, and the body checksum.
+    pub fn open_batch(&mut self, count: u64, session: &[u8; 16], checksum: u64) -> (ok: bool)
         requires old(self).valid(),
         ensures final(self).valid(), final(self).emitted() == old(self).emitted(),
             final(self).resolved() == old(self).resolved(), final(self).poisoned() == old(self).poisoned(),
             ok == (old(self).in_flight().is_none() && 0 < count && count <= old(self).emitted() - old(self).resolved()),
             ok ==> match final(self).in_flight() {
                 Some(b) => b.first() == old(self).resolved() && b.end() == old(self).resolved() + count
-                    && b.id() == crate::shipping_identity::batch_id_encoding(session@, old(self).resolved(), digest@),
+                    && b.id() == crate::shipping_identity::batch_id_encoding(session@, old(self).resolved(),
+                        (old(self).resolved() + count) as u64, checksum),
                 None => false,
             },
             !ok ==> *final(self) == *old(self),
     {
         if self.in_flight.is_some() || count == 0 || count > self.emitted - self.resolved { return false; }
-        let id = batch_id(session, self.resolved, digest);
+        let id = batch_id(session, self.resolved, self.resolved + count, checksum);
         self.in_flight = Some(InFlight { first: self.resolved, end: self.resolved + count, id });
         true
     }

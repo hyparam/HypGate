@@ -42,19 +42,24 @@ destination.
   come from the authorized table indices and nothing else.
 - The shipper's enrollment machine refuses to upload without an unexpired
   server-issued credential; a revoked service account stops it for good.
-- The operator token is read once and moved into the shipper thread; the
-  gateway configuration, request path, and log never hold it.
+- Every outgoing shipper request is chosen by the verified machine
+  (`shipper::Machine::next`): it names a path and a body but no host, so the
+  only destination any body can reach is the client built from the configured
+  server. A bootstrap body is the escaped operator token, a refresh body is
+  empty, an ingest body is queued rows, and no other action, checkpoint, or
+  state carries the token.
+- The operator token is read once and moved into the machine; the gateway
+  configuration, request path, and log never hold it.
 
 **Premises.** HTTP serialization, DNS, TLS, and the system resolver behave as
 specified (no IP-range policy, so not an SSRF theorem); the effect-site table
 in the end-to-end audit is complete; the runtime passes the gate's bytes to
-the socket it opened for that route.
+the socket it opened for that route and the machine's requests to the client
+it built from the configured server.
 
-**In progress.** The shipper's loop still decides in untrusted Rust which
-bytes go into which request. Phase 1 below moves it into a verified machine
-whose outgoing requests carry a path and body but no host; the host exists
-only in the client constructed from the configured server. "No other socket"
-then becomes a lint-enforced structural fact rather than a reviewed table.
+**In progress.** "No other socket" is still a reviewed table; phase 3 makes
+it a lint-enforced structural fact and gives the provider writer and the
+cloud client one shared permit type.
 
 ## Guarantee 2: what was logged is what is shipped, once and in order
 
@@ -77,18 +82,20 @@ server's dedup stores each exchange once.
   only to the end of the in-flight batch, only on an acknowledgment naming
   its exact id or an explicit poison; abandonment and restore never advance it.
 - Exchange, message, part, and batch identities are injective in their inputs.
+- Conservation (`shipper::Machine`): every emitted exchange comes back as a
+  numbered token that is accepted only in emission order; the queue is always
+  the unresolved suffix of the ghost history of projections; an ingest body is
+  exactly the concatenation of the next queued exchanges under the batch id
+  for that range; an acknowledgment pops exactly those exchanges and a poison
+  exactly one; nothing else moves progress.
 
-**Premises.** SHA-256 and hex encoding; the server honors its batch ledger
-and part-id dedup; the projection of an exchange's provider JSON into text and
-usage is faithful (tested against recorded bodies, not proved).
+**Premises.** Hex encoding; the server honors its batch ledger and part-id
+dedup; the projection of an exchange's provider JSON into text and usage is
+faithful (tested against recorded bodies, not proved); the runtime returns
+every token to the machine and pairs each reply with the request it sent.
 
-**In progress.** The joins between those components, that every emitted
-exchange is queued, that a batch covers exactly the front of the queue, that
-the acknowledged id is the one sent, live in the runtime today. The verified
-machine of phase 1 carries a ghost history of emitted exchanges and proves
-conservation: emitted equals resolved plus queued plus in flight, and an
-ingest body is exactly the concatenation of the next queued exchanges. Phase
-4 adds the replay theorem.
+**In progress.** Phase 2 verifies the driver loop so the two runtime premises
+become theorems; phase 4 adds the replay theorem.
 
 ## Guarantee 3: there is no crash state
 
@@ -108,25 +115,29 @@ with what the server already holds.
   crash in the specified storage model; retry delays are bounded.
 - Slots, buffers, and queues stay within explicit budgets, and capacity
   cannot be reused while work retaining it is alive.
+- The shipper machine is total: every operation has no precondition beyond a
+  valid state and the caller's turn-taking; every wait it asks for is 1 to 300
+  seconds; pending work with a usable credential is sent or poisoned at once;
+  a revoked credential is the only absorbing state and is reported.
 
 **Premises.** The storage contract (synced bytes survive); Tokio cancellation
 reaches the futures; the runtime adapters are panic-free (lint-enforced in
 phase 2) and the thread boundary contains any panic that does occur; the
 clock is monotone enough for the enrollment windows.
 
-**In progress.** The progress theorem over the phase 1 machine; a verified
-driver loop over an effect trait (phase 2) so even the glue is checked;
-panic-injection and kill-at-every-step tests for the shipper (phase 5).
+**In progress.** A verified driver loop over an effect trait (phase 2) so
+even the glue is checked; panic-injection and kill-at-every-step tests for
+the shipper (phase 5).
 
 ## Plan to close the gaps
 
 Each phase is one logical commit on the `hypaware-shipping` branch.
 
-1. **Verified shipper machine (core).** One state machine owning the
+1. **Verified shipper machine (core).** Done. One state machine owning the
    assembler, cursor, enrollment, queue, backoff, and batching. Operations:
    admit a record, enqueue its projection, choose the next action, absorb a
    reply. Theorems: conservation, batch fidelity, token containment, bounded
-   waiting, progress, totality.
+   waiting, progress, totality (`crates/gateway-core/src/shipper.rs`).
 2. **Verified driver over an effect trait.** The loop itself is checked
    against the trait's contracts; the runtime implements read, send, sleep,
    checkpoint, and now with no decisions in them. Clippy denies on unwrap,
@@ -163,7 +174,7 @@ checked definitions for each row.
 | Cancellation and no replay | Cancellation prevents new submissions; uncertain effects, crashes, or failover never trigger automatic replay of a possibly executed generation. | Core cancellation/stale-event checks proved; transport has no replay path. Async cancellation and recovery composition remain unproved. |
 | Resource bounds and safe release | Slots, buffers, queues, and outstanding operations stay within explicit budgets; capacity cannot be reused while work retaining it remains alive. | Logical slot limits, ID isolation, and combined payload bound under an explicit stream-to-slot mapping proved; fixed disk-FIFO order, slot capacity, permanent closure, and actual queued-frame byte bound proved; HTTP mailbox occupancy and endpoint closure proved; ownership and deadlines tested. Conditional allocation composition and shutdown/release arguments are documented; mechanized async refinement remains open. |
 | Logging-mode separation | Availability mode may lose audit coverage but cannot relax authorization, routing, or tenant isolation; logging failure cannot create unbounded replacement work. | Core logging-mode transitions proved; bounded logger and failure handling tested. Submission and lifecycle composition are checked under the documented adapter assumptions. |
-| Cloud shipping | The optional HypAware shipper cannot affect authorization, forwarding, or readiness; it never modifies the log; delivery is at least once with idempotent batch and row identities, so the server stores each exchange once. | Isolation is structural and tested; tailing, exchange assembly bounds, batch limits, upload progress, identity injectivity, and enrollment transitions are core proved; HTTPS, parsing, projection, and the server's ledger/dedup are trusted and tested. See [cloud shipping](docs/cloud-shipping.md). |
+| Cloud shipping | The optional HypAware shipper cannot affect authorization, forwarding, or readiness; it never modifies the log; every request it sends is chosen by a verified machine and names no host; no exchange is dropped between the log and the acknowledged batch; delivery is at least once with idempotent batch and row identities, so the server stores each exchange once. | Isolation is structural and tested; tailing, exchange assembly bounds, batch limits, upload progress, identity injectivity, enrollment transitions, and the machine's conservation, request shape, and bounded waiting are core proved; HTTPS, parsing, projection, and the server's ledger/dedup are trusted and tested. See [cloud shipping](docs/cloud-shipping.md). |
 | Honest completion and conditional progress | Failed/truncated streams cannot masquerade as successful completion; under stated scheduler and I/O assumptions, admitted work terminates or times out and releases resources. | Core admission/release and conditional streaming progress proved; EOF/error behavior and deadlines tested. Permanent worker closure and drain rank are proved; the conditional shutdown/resource argument is documented. Mechanized async liveness verification remains open. |
 
 Verus does not verify Tokio, Hyper, rustls, the OS, DNS/PKI, or the filesystem

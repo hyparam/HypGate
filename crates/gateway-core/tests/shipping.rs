@@ -1,11 +1,13 @@
 //! Executable checks of the shipper core: assembler bounds and ordering, batch
-//! limits, upload cursor progress, identity encodings, and enrollment transitions.
+//! limits, upload cursor progress, identity encodings, enrollment transitions,
+//! and the shipper machine that composes them.
 //! The proofs cover every input; these pin concrete scenarios and boundaries.
 use gateway_core::batch_builder::{BatchBuilder, MAX_BYTES, MAX_ROWS};
 use gateway_core::enrollment::{Enrollment, Recovery, State, throttle_delay, transport_delay, MAX_DELAY_SECONDS};
 use gateway_core::exchange_assembler::{Assembler, saturating_add};
 use gateway_core::framing::Header;
 use gateway_core::metadata::{encode_completion, encode_request_start, encode_response_head};
+use gateway_core::shipper::{checksum, Action, Credential, Emitted, Machine, Outcome, Path, Reply};
 use gateway_core::shipping_identity::{batch_id, exchange_key, message_key, part_key};
 use gateway_core::upload_cursor::UploadCursor;
 
@@ -107,28 +109,28 @@ fn batch_builder_holds_the_row_and_byte_limits() {
 
 #[test]
 fn upload_cursor_resolves_only_the_acknowledged_in_flight_batch() {
-    let session = [7u8; 16]; let digest = [3u8; 32];
+    let session = [7u8; 16]; let digest = 3u64;
     assert!(UploadCursor::restore(1, 2, 0).is_none());
     let mut c = UploadCursor::restore(0, 0, 0).unwrap();
     assert!(c.emit(5)); assert_eq!(c.pending(), 5);
-    assert!(!c.open_batch(0, &session, &digest));
-    assert!(!c.open_batch(6, &session, &digest));
-    assert!(c.open_batch(3, &session, &digest));
-    assert!(!c.open_batch(1, &session, &digest)); // one batch at a time
+    assert!(!c.open_batch(0, &session, digest));
+    assert!(!c.open_batch(6, &session, digest));
+    assert!(c.open_batch(3, &session, digest));
+    assert!(!c.open_batch(1, &session, digest)); // one batch at a time
     let id = c.current().unwrap().batch_id().clone();
-    assert_eq!(id, batch_id(&session, 0, &digest));
+    assert_eq!(id, batch_id(&session, 0, 3, digest));
     assert_eq!(c.current().unwrap().range(), (0, 3));
-    assert!(!c.acknowledge(&batch_id(&session, 1, &digest)));
-    assert!(!c.acknowledge(&id[..55]));
+    assert!(!c.acknowledge(&batch_id(&session, 1, 3, digest)));
+    assert!(!c.acknowledge(&id[..39]));
     assert_eq!(c.counts(), (5, 0, 0));
     assert!(c.acknowledge(&id));
     assert_eq!(c.counts(), (5, 3, 0)); assert!(c.current().is_none());
     assert!(!c.acknowledge(&id)); // nothing in flight
-    assert!(c.open_batch(2, &session, &digest));
+    assert!(c.open_batch(2, &session, digest));
     c.abandon(); assert_eq!(c.counts(), (5, 3, 0));
     // The rebuilt batch over the same range has the same id.
-    assert!(c.open_batch(2, &session, &digest));
-    assert_eq!(c.current().unwrap().batch_id(), &batch_id(&session, 3, &digest));
+    assert!(c.open_batch(2, &session, digest));
+    assert_eq!(c.current().unwrap().batch_id(), &batch_id(&session, 3, 5, digest));
     assert!(c.poison()); assert_eq!(c.counts(), (5, 5, 1)); assert!(!c.poison());
     assert!(!c.emit(u64::MAX));
 }
@@ -139,12 +141,13 @@ fn identities_are_fixed_width_and_distinct() {
     assert_eq!(exchange_key(&s, 5).len(), 24);
     assert_eq!(message_key(&s, 5, 1).len(), 28);
     assert_eq!(part_key(&s, 5, 1, 0).len(), 32);
-    assert_eq!(batch_id(&s, 0, &[0; 32]).len(), 56);
+    assert_eq!(batch_id(&s, 0, 1, 0).len(), 40);
     assert_ne!(exchange_key(&s, 5), exchange_key(&t, 5));
     assert_ne!(exchange_key(&s, 5), exchange_key(&s, 6));
     assert_ne!(part_key(&s, 5, 1, 0), part_key(&s, 5, 0, 1));
-    assert_ne!(batch_id(&s, 1, &[0; 32]), batch_id(&s, 0, &[0; 32]));
-    assert_ne!(batch_id(&s, 0, &[1; 32]), batch_id(&s, 0, &[0; 32]));
+    assert_ne!(batch_id(&s, 1, 2, 0), batch_id(&s, 0, 2, 0));
+    assert_ne!(batch_id(&s, 0, 2, 0), batch_id(&s, 0, 1, 0));
+    assert_ne!(batch_id(&s, 0, 1, 1), batch_id(&s, 0, 1, 0));
     assert_eq!(&part_key(&s, 5, 1, 0)[..28], &message_key(&s, 5, 1)[..]);
 }
 
@@ -180,4 +183,152 @@ fn retry_delays_are_bounded() {
     assert_eq!(throttle_delay(0, Some(0)), 30);
     assert_eq!(throttle_delay(0, Some(u64::MAX)), MAX_DELAY_SECONDS);
     assert_eq!([transport_delay(0), transport_delay(1), transport_delay(2), transport_delay(3), transport_delay(6)], [2, 4, 6, 30, 300]);
+}
+
+// ---- shipper machine --------------------------------------------------------
+
+const DAY: u64 = 86_400;
+
+/// Feed one complete exchange through the machine and return its token.
+fn feed(m: &mut Machine, request: u64, upload: &[u8]) -> Emitted {
+    let start = encode_request_start(1_000, 7, b"https://api.example/v1").unwrap();
+    assert!(m.admit(header(2, request, 0, &start), &start).is_none());
+    assert!(m.admit(header(0, request, 1, upload), upload).is_none());
+    let done = encode_completion(2_000, 0, upload.len() as u64, 0).unwrap();
+    m.admit(header(4, request, 0, &done), &done).expect("completion emits")
+}
+
+fn ok_reply(status: u16) -> Reply { Reply { status, retry_after: None, revocation: false, credential: None } }
+fn credential_reply(jwt: &[u8], expires_at: u64) -> Reply {
+    Reply { status: 200, retry_after: None, revocation: false, credential: Some(Credential { jwt: jwt.to_vec(), expires_at }) }
+}
+fn send(m: &mut Machine, now: u64) -> gateway_core::shipper::Request {
+    // Reading comes first whenever the log may have grown; report its end, then act.
+    match m.next(now) { Action::Read => { m.end_of_log(); } other => panic!("expected read, got {}", name(&other)) }
+    match m.next(now) { Action::Send(r) => r, other => panic!("expected send, got {}", name(&other)) }
+}
+fn name(a: &Action) -> &'static str {
+    match a { Action::Read => "read", Action::Send(_) => "send", Action::Sleep(_) => "sleep", Action::Poisoned => "poisoned", Action::Idle => "idle", Action::Stopped => "stopped" }
+}
+
+#[test]
+fn machine_enrolls_then_ships_queued_exchanges_in_order_and_resolves_on_acknowledgment() {
+    let session = [7u8; 16];
+    let mut m = Machine::new(b"tok\"en\\".to_vec(), session, 4, 1024, 0, 0);
+    assert!(!m.is_enrolled(100) && !m.is_stopped());
+    assert!(matches!(m.next(100), Action::Read), "an empty queue reads first");
+    assert!(m.wants_records());
+    let a = feed(&mut m, 1, b"aaa"); let b = feed(&mut m, 2, b"bb");
+    assert_eq!((a.position(), b.position()), (0, 1));
+    assert_eq!(a.exchange().upload, b"aaa");
+    let b = m.enqueue(b, b"{b}\n".to_vec(), 1).expect_err("tokens are accepted in emission order only");
+    assert_eq!(b.position(), 1);
+    assert!(m.enqueue(a, b"{a}\n".to_vec(), 1).is_ok());
+    assert_eq!(m.queue_len(), 1);
+    m.end_of_log();
+    // Unenrolled: the first request is a bootstrap carrying the escaped token and no bearer.
+    let r = match m.next(100) { Action::Send(r) => r, other => panic!("{}", name(&other)) };
+    assert_eq!(r.path, Path::Bootstrap);
+    assert_eq!(r.body, br#"{"bootstrap_token":"tok\"en\\"}"#);
+    assert!(r.bearer.is_none() && r.batch_id.is_none());
+    assert_eq!(m.reply(100, ok_reply(503)), Outcome::Deferred(30));
+    assert!(matches!(m.next(100), Action::Sleep(30)));
+    let r = send(&mut m, 100);
+    assert_eq!(r.path, Path::Bootstrap);
+    assert_eq!(m.reply(100, credential_reply(b"jwt-one", 100 + 21 * DAY)), Outcome::Enrolled);
+    assert!(m.is_enrolled(100));
+    assert!(m.enqueue(b, b"{b}\n".to_vec(), 1).is_ok());
+    let r = send(&mut m, 100);
+    assert_eq!(r.path, Path::Ingest);
+    assert_eq!(r.body, b"{a}\n{b}\n");
+    assert_eq!(r.bearer.as_deref(), Some(&b"jwt-one"[..]));
+    assert_eq!(r.batch_id.as_deref(), Some(&batch_id(&session, 0, 2, checksum(b"{a}\n{b}\n"))[..]));
+    assert_eq!(m.reply(100, ok_reply(202)), Outcome::Acknowledged(2));
+    assert_eq!((m.progress(), m.queue_len()), ((2, 0), 0));
+    assert!(matches!(m.next(100), Action::Read));
+    m.end_of_log();
+    assert!(matches!(m.next(100), Action::Idle));
+}
+
+#[test]
+fn machine_isolates_then_poisons_rejected_exchanges_refreshes_once_and_stops_on_revocation() {
+    let session = [9u8; 16];
+    let mut m = Machine::new(b"t".to_vec(), session, 8, 1024, 0, 0);
+    assert!(m.adopt_identity(b"jwt-old".to_vec(), 50 + 21 * DAY, 50));
+    for (request, body) in [(1u64, &b"{c}\n"[..]), (2, b"{d}\n")] {
+        let t = feed(&mut m, request, b"x");
+        assert!(m.enqueue(t, body.to_vec(), 1).is_ok());
+    }
+    let r = send(&mut m, 50);
+    assert_eq!((r.path, r.body.as_slice()), (Path::Ingest, &b"{c}\n{d}\n"[..]));
+    assert_eq!(m.reply(50, ok_reply(422)), Outcome::Isolating);
+    assert_eq!((m.progress(), m.queue_len()), ((0, 0), 2));
+    let r = send(&mut m, 50);
+    assert_eq!(r.body, b"{c}\n");
+    assert_eq!(m.reply(50, ok_reply(422)), Outcome::Poisoned);
+    assert_eq!((m.progress(), m.queue_len()), ((1, 1), 1));
+    let r = send(&mut m, 50);
+    assert_eq!(r.body, b"{d}\n");
+    assert_eq!(m.reply(50, ok_reply(401)), Outcome::Nothing);
+    let r = send(&mut m, 50);
+    assert_eq!((r.path, r.body.len(), r.bearer.as_deref()), (Path::Refresh, 0, Some(&b"jwt-old"[..])));
+    assert_eq!(m.reply(50, credential_reply(b"jwt-new", 60 + 21 * DAY)), Outcome::Enrolled);
+    let r = send(&mut m, 50);
+    assert_eq!((r.path, r.bearer.as_deref()), (Path::Ingest, Some(&b"jwt-new"[..])));
+    assert_eq!(m.reply(50, ok_reply(401)), Outcome::Nothing, "a fresh credential earns one refresh again");
+    let r = send(&mut m, 50);
+    assert_eq!(r.path, Path::Refresh);
+    assert_eq!(m.reply(50, ok_reply(401)), Outcome::Unenrolled, "a rejected refresh means bootstrap");
+    assert!(!m.is_enrolled(50));
+    let r = send(&mut m, 50);
+    assert_eq!(r.path, Path::Bootstrap);
+    assert_eq!(m.reply(50, Reply { status: 403, retry_after: None, revocation: true, credential: None }), Outcome::Revoked);
+    assert!(m.is_stopped() && matches!(m.next(50), Action::Stopped));
+    assert_eq!((m.progress(), m.queue_len()), ((1, 1), 1), "nothing was lost or invented");
+}
+
+#[test]
+fn machine_skips_checkpointed_exchanges_poisons_oversized_ones_and_bounds_its_queue() {
+    let session = [3u8; 16];
+    let mut m = Machine::new(b"t".to_vec(), session, 2, 1024, 1, 4);
+    assert!(m.adopt_identity(b"jwt".to_vec(), 2 * DAY, 0));
+    let start = encode_request_start(1, 7, b"https://h/p").unwrap();
+    let done = encode_completion(2, 0, 0, 0).unwrap();
+    assert!(m.admit(header(2, 1, 0, &start), &start).is_none());
+    assert!(m.admit(header(4, 1, 0, &done), &done).is_none(), "exchange 0 is already on the server");
+    assert_eq!(m.emitted_count(), 1);
+    assert!(m.wants_records());
+    let t = feed(&mut m, 2, b"y");
+    assert!(m.wants_records(), "one outstanding token leaves room for one more");
+    assert!(m.enqueue(t, vec![b'z'; 4 * 1024 * 1024 + 1], 1).is_ok());
+    let t = feed(&mut m, 3, b"y");
+    assert!(!m.wants_records(), "one queued plus one outstanding reaches the bound of 2");
+    assert!(m.enqueue(t, b"{ok}\n".to_vec(), 1).is_ok());
+    assert!(!m.wants_records(), "queue full");
+    assert!(matches!(m.next(0), Action::Poisoned), "an exchange no batch can hold is poisoned unsent");
+    assert_eq!(m.progress(), (2, 5));
+    let r = match m.next(0) { Action::Read => { m.end_of_log(); match m.next(0) { Action::Send(r) => r, o => panic!("{}", name(&o)) } } Action::Send(r) => r, o => panic!("{}", name(&o)) };
+    assert_eq!(r.body, b"{ok}\n");
+    assert_eq!(r.batch_id.as_deref(), Some(&batch_id(&session, 2, 3, checksum(b"{ok}\n"))[..]));
+    assert_eq!(m.reply(0, Reply { status: 429, retry_after: Some(7), revocation: false, credential: None }), Outcome::Deferred(7));
+    assert!(matches!(m.next(0), Action::Sleep(7)));
+    // Nearing expiry, a refresh goes out before the retry.
+    let r = send(&mut m, DAY);
+    assert_eq!(r.path, Path::Refresh);
+    assert_eq!(m.reply(DAY, ok_reply(401)), Outcome::Unenrolled);
+    let r = send(&mut m, DAY);
+    assert_eq!(r.path, Path::Bootstrap);
+    assert_eq!(m.reply(DAY, credential_reply(b"j2", DAY + 1)), Outcome::Enrolled);
+    let r = send(&mut m, DAY);
+    assert_eq!(r.path, Path::Refresh, "a credential inside the renewal window is refreshed before use");
+    assert_eq!(m.reply(DAY, credential_reply(b"j3", DAY)), Outcome::Deferred(30), "an already expired credential is refused");
+}
+
+#[test]
+fn checksum_is_deterministic_and_sensitive_to_every_byte() {
+    assert_eq!(checksum(b""), 0xcbf29ce484222325);
+    assert_eq!(checksum(b"a"), 0xaf63dc4c8601ec8c);
+    assert_eq!(checksum(b"ab"), checksum(b"ab"));
+    assert_ne!(checksum(b"ab"), checksum(b"ba"));
+    assert_ne!(checksum(b"ab"), checksum(b"ab\0"));
 }

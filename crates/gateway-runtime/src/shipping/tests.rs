@@ -5,6 +5,7 @@ use super::state::{base64url_encode, jwt_claims, load_checkpoint, load_identity,
 use crate::disk_log::DiskLog;
 use crate::test_support::{self_signed, TempDir};
 use crate::transfer::{AuditLog, LogRecord, RecordKind};
+use gateway_core::exchange_assembler::{Assembler, Exchange};
 use gateway_core::metadata::{encode_completion, encode_request_start, encode_response_head};
 use http_body_util::{BodyExt, Full};
 use hyper::{body::Incoming, service::service_fn, Request, Response};
@@ -211,7 +212,7 @@ async fn ships_exchanges_once_with_stable_ids_and_resumes_from_checkpoint() {
     let ids: HashSet<_> = batches.iter().flat_map(|b| b.1.iter().map(|r| r["part_id"].as_str().unwrap().to_owned())).collect();
     assert_eq!(ids.len(), 4);
     let first_id = batches[0].0.clone();
-    assert_eq!(first_id.len(), 112); assert!(first_id.starts_with(&hex(&log.session())));
+    assert_eq!(first_id.len(), 80); assert!(first_id.starts_with(&hex(&log.session())));
 
     // Restart from the checkpoint: nothing already resolved is sent again, and a
     // new exchange goes out. Wiping the checkpoint re-sends everything under the

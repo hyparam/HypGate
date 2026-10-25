@@ -1,16 +1,14 @@
-//! Cloud shipping: one dedicated thread tails the audit log read-only, groups
-//! records into exchanges with the verified assembler, projects them into
-//! HypAware rows, and uploads NDJSON batches to the configured server. It
-//! shares no executor, pool, or handle with request workers; its only inputs
-//! are the log path, the server, the token, and a state directory, and its only
-//! outputs are metrics. Failure here never touches admission or readiness.
-use gateway_core::batch_builder::BatchBuilder;
-use gateway_core::enrollment::{throttle_delay, transport_delay, Enrollment, Recovery};
-use gateway_core::exchange_assembler::{Assembler, Exchange};
+//! Cloud shipping: one dedicated thread tails the audit log read-only and
+//! drives the verified shipper machine, which groups records into exchanges,
+//! batches their projections, and decides every request, retry, and
+//! checkpoint. This module performs those actions against the one configured
+//! server and reports replies back. It shares no executor, pool, or handle with
+//! request workers; its only inputs are the log path, the server, the token,
+//! and a state directory, and its only outputs are metrics. Failure here never
+//! touches admission or readiness.
 use gateway_core::framing::Header;
-use gateway_core::upload_cursor::UploadCursor;
-use sha2::{Digest, Sha256};
-use std::{collections::VecDeque, fs::File, io::{self, Seek, SeekFrom}, path::PathBuf, sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}, mpsc}, time::{Duration, SystemTime}};
+use gateway_core::shipper::{Action, Credential, Emitted, Machine, Outcome, Path as ShipPath, Reply as MachineReply, Request};
+use std::{fs::File, io::{self, Seek, SeekFrom}, path::PathBuf, sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}, mpsc}, time::{Duration, SystemTime}};
 use tokio_rustls::rustls::RootCertStore;
 use crate::disk_log::{LogReader, ScanError};
 
@@ -19,7 +17,7 @@ pub mod client;
 pub mod state;
 pub mod projection;
 pub use config::ShippingConfig;
-use client::{Client, ClientError, Reply};
+use client::{Client, Reply};
 use state::{hex, Checkpoint, Identity};
 
 const INGEST_PATH: &str = "/v1/ingest/proxy";
@@ -105,8 +103,9 @@ pub fn ship_to_end_with_roots(config: ShippingConfig, log_path: PathBuf, roots: 
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum Mode { Follow, Drain }
 
-struct Pending { rows: Vec<Vec<u8>> }
-
+/// The runtime half of the shipper: it performs the actions the verified
+/// machine chooses and reports replies back. It makes no decisions of its own
+/// about what to send, where progress stands, or when to retry.
 struct Engine {
     config: ShippingConfig,
     log_path: PathBuf,
@@ -114,35 +113,31 @@ struct Engine {
     stop: Arc<AtomicBool>,
     metrics: Arc<Metrics>,
     client: Option<Client>,
-    session: Option<[u8; 16]>,
+    /// Created once the log header is readable, since the session names the checkpoint.
+    machine: Option<Machine>,
     valid_end: u64,
-    read_failed: bool,
-    assembler: Assembler,
-    cursor: UploadCursor,
-    emitted_total: u64,
-    skip: u64,
-    queue: VecDeque<Pending>,
-    enrollment: Enrollment,
-    jwt: Option<String>,
-    gateway_id: Option<String>,
-    throttle_attempt: u32,
-    transport_attempt: u32,
-    enroll_attempt: u32,
-    /// Exchanges per batch; drops to one after a rejected batch so the bad
-    /// exchange is isolated and poisoned alone, and recovers after a success.
-    batch_limit: u64,
+    idle_polls: u32,
 }
 
 fn now_seconds() -> u64 { SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) }
 fn now_ms() -> u64 { SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_millis().min(u64::MAX as u128) as u64).unwrap_or(0) }
 
+/// A credential parsed from an enrollment reply, with the gateway id for the identity file.
+struct Issued { credential: Credential, gateway_id: String, expires_at: u64 }
+
+fn parse_credential(body: &[u8]) -> Option<Issued> {
+    let value = serde_json::from_slice::<serde_json::Value>(body).ok()?;
+    let jwt = value.get("jwt")?.as_str()?;
+    let expires_at = value.get("expires_at")?.as_u64()?;
+    if jwt.len() > 16 * 1024 { return None; }
+    let (gateway_id, exp) = state::jwt_claims(jwt)?;
+    let expires_at = expires_at.min(exp);
+    Some(Issued { credential: Credential { jwt: jwt.as_bytes().to_vec(), expires_at }, gateway_id, expires_at })
+}
+
 impl Engine {
     fn new(config: ShippingConfig, log_path: PathBuf, roots: Option<RootCertStore>, stop: Arc<AtomicBool>, metrics: Arc<Metrics>) -> Self {
-        let assembler = Assembler::new(config.max_open_exchanges, config.max_exchange_bytes);
-        Engine { config, log_path, roots, stop, metrics, client: None, session: None, valid_end: 56, read_failed: false,
-            assembler, cursor: UploadCursor::restore(0, 0, 0).expect("empty cursor"), emitted_total: 0, skip: 0,
-            queue: VecDeque::new(), enrollment: Enrollment::new(), jwt: None, gateway_id: None,
-            throttle_attempt: 0, transport_attempt: 0, enroll_attempt: 0, batch_limit: u64::MAX }
+        Engine { config, log_path, roots, stop, metrics, client: None, machine: None, valid_end: 56, idle_polls: 0 }
     }
 
     fn stopping(&self) -> bool { self.stop.load(Ordering::Relaxed) }
@@ -165,268 +160,177 @@ impl Engine {
             None => Client::new(&self.config.server, REQUEST_DEADLINE),
         }.map_err(|_| "cannot initialize shipping client")?;
         self.client = Some(client);
-        self.restore_identity();
-        let mut idle_polls = 0u32;
+        let poll = Duration::from_millis(self.config.poll_ms);
         loop {
             if self.stopping() { return Ok(()); }
-            if self.enrollment.is_stopped() {
-                self.metrics.stopped.store(true, Ordering::Relaxed);
-                if mode == Mode::Drain { return Err("shipping stopped: token revoked or account disabled"); }
-                self.wait(Duration::from_millis(self.config.poll_ms)).await;
-                continue;
-            }
-            // The log file is the buffer: stop reading while the queue is full.
-            let read = if self.read_failed || self.queue.len() >= self.config.max_open_exchanges { 0 } else { self.read_records() };
-            if mode == Mode::Drain {
-                if read == 0 { idle_polls += 1; } else { idle_polls = 0; }
-                if idle_polls >= DRAIN_IDLE_POLLS {
-                    while let Some(exchange) = self.assembler.evict_oldest() { self.emit(exchange); }
-                    if self.queue.is_empty() { return Ok(()); }
+            if self.machine.is_none() {
+                match self.open_session() {
+                    Some(machine) => self.machine = Some(machine),
+                    None => { if !self.wait(poll).await { return Ok(()); } continue; }
                 }
             }
-            if self.queue.is_empty() {
-                if !self.wait(Duration::from_millis(self.config.poll_ms)).await { return Ok(()); }
-                continue;
+            let now = now_seconds();
+            let action = self.machine.as_mut().map(|m| m.next(now)).ok_or("shipping machine missing")?;
+            match action {
+                Action::Stopped => {
+                    self.metrics.stopped.store(true, Ordering::Relaxed);
+                    if mode == Mode::Drain { return Err("shipping stopped: token revoked or account disabled"); }
+                    if !self.wait(poll).await { return Ok(()); }
+                }
+                Action::Sleep(seconds) => { if !self.wait(Duration::from_secs(seconds)).await { return Ok(()); } }
+                Action::Read => {
+                    let read = self.read_records();
+                    if read == 0 { self.idle_polls = self.idle_polls.saturating_add(1); } else { self.idle_polls = 0; }
+                }
+                Action::Idle => {
+                    if mode == Mode::Drain && self.idle_polls >= DRAIN_IDLE_POLLS {
+                        if !self.flush_open() { return Ok(()); }
+                        continue;
+                    }
+                    if !self.wait(poll).await { return Ok(()); }
+                }
+                Action::Poisoned => {
+                    self.metrics.poisoned_batches.fetch_add(1, Ordering::Relaxed);
+                    self.save_checkpoint();
+                }
+                Action::Send(request) => self.perform(request).await,
             }
-            self.ship_next().await;
+            if let Some(machine) = &self.machine { self.metrics.lag.store(machine.queue_len() as u64, Ordering::Relaxed); }
         }
     }
 
-    fn restore_identity(&mut self) {
-        let Some(identity) = state::load_identity(&self.config.state_dir) else { return; };
-        let same = identity.server == self.config.server.to_string()
-            && identity.token_fingerprint == state::fingerprint(self.config.token());
-        if !same { return; }
-        if self.enrollment.enrolled(identity.expires_at, now_seconds()) {
-            self.jwt = Some(identity.jwt); self.gateway_id = Some(identity.gateway_id);
-            self.metrics.enrolled.store(true, Ordering::Relaxed);
+    /// Read the log header, build the machine from the matching checkpoint, and
+    /// adopt a saved identity for this server and token.
+    fn open_session(&mut self) -> Option<Machine> {
+        let file = File::open(&self.log_path).ok()?;
+        let reader = match LogReader::new(file) {
+            Ok(reader) => reader,
+            Err(ScanError::Incomplete) => return None,
+            Err(_) => { self.metrics.read_failed.store(true, Ordering::Relaxed); return None; }
+        };
+        let session = reader.session();
+        self.valid_end = 56;
+        let checkpoint = state::load_checkpoint(&self.config.state_dir).filter(|c| c.session == hex(&session)
+            && c.max_open_exchanges == self.config.max_open_exchanges && c.max_exchange_bytes == self.config.max_exchange_bytes);
+        let (resolved, poisoned) = checkpoint.map(|c| (c.resolved, c.poisoned)).unwrap_or((0, 0));
+        let mut machine = Machine::new(self.config.token().to_vec(), session, self.config.max_open_exchanges,
+            self.config.max_exchange_bytes, resolved, poisoned);
+        if let Some(identity) = state::load_identity(&self.config.state_dir) {
+            let same = identity.server == self.config.server.to_string()
+                && identity.token_fingerprint == state::fingerprint(self.config.token());
+            if same && machine.adopt_identity(identity.jwt.into_bytes(), identity.expires_at, now_seconds()) {
+                self.metrics.enrolled.store(true, Ordering::Relaxed);
+            }
         }
+        Some(machine)
     }
 
-    /// Scan from the last valid end; returns the number of records admitted.
-    /// Corruption or an I/O error stops reading for good but not shipping.
+    /// Scan from the last valid end while the machine wants records; returns
+    /// the number of records admitted. Corruption or an I/O error stops reading
+    /// for good but not shipping.
     fn read_records(&mut self) -> u64 {
-        let Ok(mut file) = File::open(&self.log_path) else { return 0; };
-        let mut reader = if let Some(session) = self.session {
-            if file.seek(SeekFrom::Start(self.valid_end)).is_err() { return 0; }
-            match LogReader::resume(file, session, self.valid_end) { Ok(r) => r, Err(_) => { self.fail_reading(); return 0; } }
-        } else {
-            match LogReader::new(file) {
-                Ok(reader) => { self.start_session(reader.session()); reader }
-                Err(ScanError::Incomplete) => return 0,
-                Err(_) => { self.fail_reading(); return 0; }
-            }
+        let Some(machine) = self.machine.as_mut() else { return 0; };
+        let session = *machine.session_id();
+        let Ok(mut file) = File::open(&self.log_path) else { machine.end_of_log(); return 0; };
+        if file.seek(SeekFrom::Start(self.valid_end)).is_err() { machine.end_of_log(); return 0; }
+        let mut reader = match LogReader::resume(file, session, self.valid_end) {
+            Ok(reader) => reader,
+            Err(_) => { machine.log_failed(); self.metrics.read_failed.store(true, Ordering::Relaxed); return 0; }
         };
         let mut count = 0;
-        loop {
+        while machine.wants_records() {
             match reader.next_record() {
                 Ok(Some(record)) => {
                     count += 1;
                     self.metrics.records_read.fetch_add(1, Ordering::Relaxed);
                     let header = Header { payload: record.bytes.len() as u32, tenant: record.tenant, request: record.request,
                         chunk: record.chunk, kind: record.kind.id() };
-                    if let Some(exchange) = self.assembler.admit(header, &record.bytes) { self.emit(exchange); }
-                    if self.queue.len() >= self.config.max_open_exchanges { break; }
+                    if let Some(token) = machine.admit(header, &record.bytes) { Self::project(machine, &self.metrics, token); }
                 }
-                Ok(None) | Err(ScanError::Incomplete) => break,
-                Err(_) => { self.fail_reading(); break; }
+                Ok(None) | Err(ScanError::Incomplete) => { machine.end_of_log(); break; }
+                Err(_) => { machine.log_failed(); self.metrics.read_failed.store(true, Ordering::Relaxed); break; }
             }
         }
         self.valid_end = reader.valid_end();
         count
     }
 
-    fn fail_reading(&mut self) { self.read_failed = true; self.metrics.read_failed.store(true, Ordering::Relaxed); }
-
-    fn start_session(&mut self, session: [u8; 16]) {
-        self.session = Some(session);
-        self.valid_end = 56;
-        let checkpoint = state::load_checkpoint(&self.config.state_dir).filter(|c| c.session == hex(&session)
-            && c.max_open_exchanges == self.config.max_open_exchanges && c.max_exchange_bytes == self.config.max_exchange_bytes);
-        if let Some(checkpoint) = checkpoint {
-            if let Some(cursor) = UploadCursor::restore(checkpoint.resolved, checkpoint.resolved, checkpoint.poisoned) {
-                self.cursor = cursor; self.skip = checkpoint.resolved;
-            }
-        }
+    /// Project an emitted exchange into rows and queue it.
+    fn project(machine: &mut Machine, metrics: &Metrics, token: Emitted) {
+        metrics.exchanges_emitted.fetch_add(1, Ordering::Relaxed);
+        let session = *machine.session_id();
+        let rows = projection::rows(&session, token.exchange(), machine.exchange_cap());
+        let mut body = Vec::new();
+        for row in &rows { body.extend_from_slice(&serde_json::to_vec(row).unwrap_or_default()); body.push(b'\n'); }
+        if machine.enqueue(token, body, rows.len()).is_err() { machine.log_failed(); metrics.read_failed.store(true, Ordering::Relaxed); }
     }
 
-    /// Project an emitted exchange and queue its rows, unless the checkpoint
-    /// says the server already has it.
-    fn emit(&mut self, exchange: Exchange) {
-        let index = self.emitted_total; self.emitted_total += 1;
-        self.metrics.exchanges_emitted.fetch_add(1, Ordering::Relaxed);
-        if index < self.skip { return; }
-        if !self.cursor.emit(1) { self.fail_reading(); return; }
-        let session = self.session.unwrap_or([0; 16]);
-        let rows = projection::rows(&session, &exchange, self.config.max_exchange_bytes).iter()
-            .map(|row| serde_json::to_vec(row).unwrap_or_default()).collect();
-        self.queue.push_back(Pending { rows });
-        self.metrics.lag.store(self.queue.len() as u64, Ordering::Relaxed);
+    /// Drain mode after an idle stretch: emit every open exchange as incomplete.
+    /// False when nothing was open and nothing is queued, so the run is finished.
+    fn flush_open(&mut self) -> bool {
+        let Some(machine) = self.machine.as_mut() else { return false; };
+        let mut flushed = false;
+        while machine.open_exchanges() > 0 && machine.wants_records() {
+            match machine.flush() { Some(token) => { flushed = true; Self::project(machine, &self.metrics, token); } None => break }
+        }
+        self.idle_polls = 0;
+        flushed || machine.queue_len() > 0 || machine.open_exchanges() > 0
     }
 
     fn save_checkpoint(&self) {
-        let Some(session) = self.session else { return; };
-        let (_, resolved, poisoned) = self.cursor.counts();
-        let _ = state::save_checkpoint(&self.config.state_dir, &Checkpoint { session: hex(&session), resolved, poisoned,
+        let Some(machine) = &self.machine else { return; };
+        let (resolved, poisoned) = machine.progress();
+        let _ = state::save_checkpoint(&self.config.state_dir, &Checkpoint { session: hex(machine.session_id()), resolved, poisoned,
             max_open_exchanges: self.config.max_open_exchanges, max_exchange_bytes: self.config.max_exchange_bytes });
     }
 
-    fn resolve_front(&mut self, count: u64) {
-        for _ in 0..count { self.queue.pop_front(); }
-        self.metrics.lag.store(self.queue.len() as u64, Ordering::Relaxed);
-        self.save_checkpoint();
-    }
-
-    /// Build the next batch from whole exchanges at the queue front and send it.
-    async fn ship_next(&mut self) {
-        if !self.ensure_enrolled().await { return; }
-        let Some(session) = self.session else { return; };
-        let mut builder = BatchBuilder::new();
-        let mut count = 0u64;
-        for pending in &self.queue {
-            if count >= self.batch_limit { break; }
-            let before = builder.len();
-            let fits = pending.rows.iter().all(|row| builder.push(row));
-            if !fits {
-                if count == 0 {
-                    // An exchange no batch can hold: poison it without sending.
-                    let digest = Sha256::digest(builder.bytes());
-                    let _ = self.cursor.open_batch(1, &session, &digest.into());
-                    self.poison();
-                    return;
-                }
-                // Drop the partial rows of this exchange and send what fits.
-                let kept = builder.bytes()[..before].to_vec();
-                builder = BatchBuilder::new();
-                for row in kept.split_inclusive(|b| *b == b'\n') { builder.push(&row[..row.len() - 1]); }
-                break;
+    /// Send the request the machine chose and hand it the reply.
+    async fn perform(&mut self, request: Request) {
+        let path = match request.path { ShipPath::Bootstrap => BOOTSTRAP_PATH, ShipPath::Refresh => REFRESH_PATH, ShipPath::Ingest => INGEST_PATH };
+        let bearer = request.bearer.as_deref().and_then(|b| std::str::from_utf8(b).ok());
+        let mut headers: Vec<(&str, String)> = Vec::new();
+        match request.path {
+            ShipPath::Bootstrap => headers.push(("content-type", "application/json".to_owned())),
+            ShipPath::Ingest => {
+                headers.push(("content-type", "application/x-ndjson".to_owned()));
+                headers.push(("x-hyp-batch-id", hex(request.batch_id.as_deref().unwrap_or(&[]))));
             }
-            count += 1;
+            ShipPath::Refresh => {}
         }
-        if count == 0 || builder.is_empty() { return; }
-        let body = builder.finish();
-        let digest: [u8; 32] = Sha256::digest(&body).into();
-        if !self.cursor.open_batch(count, &session, &digest) { return; }
-        let id = hex(self.cursor.current().map(|b| b.batch_id().as_slice()).unwrap_or(&[]));
-        let Some(jwt) = self.jwt.clone() else { self.cursor.abandon(); return; };
-        let headers = [("content-type", "application/x-ndjson".to_owned()), ("x-hyp-batch-id", id.clone())];
-        let reply = self.client.as_ref().expect("client").request("POST", INGEST_PATH, Some(&jwt), &headers, body).await;
-        match reply {
-            Ok(Reply { status: 200 | 202, .. }) => {
-                let raw = self.cursor.current().map(|b| b.batch_id().clone()).unwrap_or_default();
-                if self.cursor.acknowledge(&raw) {
-                    self.resolve_front(count);
-                    self.enrollment.uploaded();
-                    self.metrics.batches_acknowledged.fetch_add(1, Ordering::Relaxed);
-                    self.metrics.last_acknowledged_ms.store(now_ms(), Ordering::Relaxed);
-                    self.throttle_attempt = 0; self.transport_attempt = 0; self.batch_limit = u64::MAX;
-                }
+        let Some(client) = self.client.as_ref() else { return; };
+        let result = client.request("POST", path, bearer, &headers, request.body).await;
+        let (reply, issued) = match result {
+            Ok(reply) => {
+                let revocation = is_revocation(&reply);
+                let issued = if request.path != ShipPath::Ingest && reply.status == 200 { parse_credential(&reply.body) } else { None };
+                (MachineReply { status: reply.status, retry_after: reply.retry_after, revocation,
+                    credential: issued.as_ref().map(|i| Credential { jwt: i.credential.jwt.clone(), expires_at: i.credential.expires_at }) }, issued)
             }
-            Ok(Reply { status: 401, .. }) => {
-                self.cursor.abandon();
-                match self.enrollment.rejected() {
-                    Recovery::Refresh => self.refresh().await,
-                    Recovery::Bootstrap => { self.jwt = None; self.metrics.enrolled.store(false, Ordering::Relaxed); }
-                    Recovery::Stop => {}
-                }
-            }
-            Ok(reply @ Reply { status: 403, .. }) => {
-                self.cursor.abandon();
-                if is_revocation(&reply) { self.revoke(); } else { self.throttle(None).await; }
-            }
-            Ok(Reply { status: 400 | 413 | 415 | 422, .. }) => {
-                if count > 1 { self.cursor.abandon(); self.batch_limit = 1; } else { self.poison(); }
-            }
-            Ok(Reply { status: 429 | 503, retry_after, .. }) => { self.cursor.abandon(); self.throttle(retry_after).await; }
-            Ok(_) | Err(_) => { self.cursor.abandon(); self.transport_failure().await; }
-        }
-    }
-
-    fn poison(&mut self) {
-        let (_, before, _) = self.cursor.counts();
-        if self.cursor.poison() {
-            let (_, after, _) = self.cursor.counts();
-            self.metrics.poisoned_batches.fetch_add(1, Ordering::Relaxed);
-            self.resolve_front(after - before);
-        }
-    }
-
-    fn revoke(&mut self) {
-        self.enrollment.revoked();
-        self.jwt = None;
-        self.metrics.enrolled.store(false, Ordering::Relaxed);
-        self.metrics.stopped.store(true, Ordering::Relaxed);
-    }
-
-    async fn throttle(&mut self, retry_after: Option<u64>) {
-        let delay = throttle_delay(self.throttle_attempt, retry_after);
-        self.throttle_attempt = self.throttle_attempt.saturating_add(1);
-        self.wait(Duration::from_secs(delay)).await;
-    }
-
-    async fn transport_failure(&mut self) {
-        let delay = transport_delay(self.transport_attempt);
-        self.transport_attempt = self.transport_attempt.saturating_add(1);
-        self.wait(Duration::from_secs(delay)).await;
-    }
-
-    /// True when an unexpired enrollment is available for the next upload.
-    async fn ensure_enrolled(&mut self) -> bool {
-        if self.enrollment.is_stopped() { return false; }
+            Err(_) => (MachineReply { status: 0, retry_after: None, revocation: false, credential: None }, None),
+        };
         let now = now_seconds();
-        if self.enrollment.needs_bootstrap() { self.bootstrap().await; }
-        else if self.enrollment.needs_refresh(now) { self.refresh().await; }
-        let ok = self.enrollment.can_upload(now_seconds()) && self.jwt.is_some();
-        self.metrics.enrolled.store(ok, Ordering::Relaxed);
-        ok
-    }
-
-    fn adopt(&mut self, reply: &Reply) -> bool {
-        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&reply.body) else { return false; };
-        let (Some(jwt), Some(expires_at)) = (value.get("jwt").and_then(|v| v.as_str()), value.get("expires_at").and_then(|v| v.as_u64())) else { return false; };
-        if jwt.len() > 16 * 1024 { return false; }
-        let Some((gateway_id, exp)) = state::jwt_claims(jwt) else { return false; };
-        let expires_at = expires_at.min(exp);
-        if !self.enrollment.enrolled(expires_at, now_seconds()) { return false; }
-        self.jwt = Some(jwt.to_owned());
-        self.gateway_id = Some(gateway_id.clone());
-        self.enroll_attempt = 0;
-        self.metrics.enrolled.store(true, Ordering::Relaxed);
-        let _ = state::save_identity(&self.config.state_dir, &Identity { jwt: jwt.to_owned(), expires_at, gateway_id,
-            server: self.config.server.to_string(), token_fingerprint: state::fingerprint(self.config.token()) });
-        true
-    }
-
-    async fn bootstrap(&mut self) {
-        let body = serde_json::to_vec(&serde_json::json!({"bootstrap_token": String::from_utf8_lossy(self.config.token())})).unwrap_or_default();
-        let headers = [("content-type", "application/json".to_owned())];
-        let reply = self.client.as_ref().expect("client").request("POST", BOOTSTRAP_PATH, None, &headers, body).await;
-        self.handle_enrollment_reply(reply, true).await;
-    }
-
-    async fn refresh(&mut self) {
-        let Some(jwt) = self.jwt.clone() else { return; };
-        let reply = self.client.as_ref().expect("client").request("POST", REFRESH_PATH, Some(&jwt), &[], Vec::new()).await;
-        self.handle_enrollment_reply(reply, false).await;
-    }
-
-    async fn handle_enrollment_reply(&mut self, reply: Result<Reply, ClientError>, bootstrap: bool) {
-        match reply {
-            Ok(reply @ Reply { status: 200, .. }) => { if !self.adopt(&reply) { self.enroll_backoff().await; } }
-            Ok(reply @ Reply { status: 403, .. }) if is_revocation(&reply) => self.revoke(),
-            Ok(Reply { status: 401 | 400 | 403, .. }) => {
-                if bootstrap { self.enroll_backoff().await; }
-                else { self.enrollment.refresh_rejected(); self.jwt = None; self.metrics.enrolled.store(false, Ordering::Relaxed); }
+        let Some(machine) = self.machine.as_mut() else { return; };
+        let outcome = machine.reply(now, reply);
+        // Lag and enrollment first, so a reader who sees the acknowledgment count sees them too.
+        self.metrics.lag.store(machine.queue_len() as u64, Ordering::Relaxed);
+        self.metrics.enrolled.store(machine.is_enrolled(now), Ordering::Relaxed);
+        match outcome {
+            Outcome::Acknowledged(_) => {
+                self.metrics.batches_acknowledged.fetch_add(1, Ordering::Relaxed);
+                self.metrics.last_acknowledged_ms.store(now_ms(), Ordering::Relaxed);
+                self.save_checkpoint();
             }
-            Ok(Reply { status: 429 | 503, retry_after, .. }) => self.throttle(retry_after).await,
-            Ok(_) | Err(_) => self.transport_failure().await,
+            Outcome::Poisoned => { self.metrics.poisoned_batches.fetch_add(1, Ordering::Relaxed); self.save_checkpoint(); }
+            Outcome::Enrolled => {
+                if let Some(issued) = issued {
+                    let jwt = String::from_utf8(issued.credential.jwt).unwrap_or_default();
+                    let _ = state::save_identity(&self.config.state_dir, &Identity { jwt, expires_at: issued.expires_at, gateway_id: issued.gateway_id,
+                        server: self.config.server.to_string(), token_fingerprint: state::fingerprint(self.config.token()) });
+                }
+            }
+            Outcome::Revoked => self.metrics.stopped.store(true, Ordering::Relaxed),
+            Outcome::Unenrolled | Outcome::Isolating | Outcome::Deferred(_) | Outcome::Nothing => {}
         }
-    }
-
-    async fn enroll_backoff(&mut self) {
-        let delay = throttle_delay(self.enroll_attempt, None);
-        self.enroll_attempt = self.enroll_attempt.saturating_add(1);
-        self.wait(Duration::from_secs(delay)).await;
     }
 }
 

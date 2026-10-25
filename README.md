@@ -190,8 +190,8 @@ cargo test -p gateway-runtime --release --locked server::tests::benchmark -- --i
 SOUNDGATE_HAPROXY=/path/to/haproxy cargo test -p gateway-runtime --locked proxy_gateway_process_failover -- --ignored --nocapture
 ```
 
-Validation on 2026-10-25: 383 core verification checks passed, 288 workspace tests and seven compile-fail doctests
-passed, and all 332 deliberate mutations failed their proof obligations. The opt-in TLS proxy/gateway
+Validation on 2026-10-25: 431 core verification checks passed, 292 workspace tests including seven compile-fail
+doctests passed, and all 353 deliberate mutations failed their proof obligations. The opt-in TLS proxy/gateway
 process-failover test and six load/fault workloads passed on 2026-10-23.
 Two ten-minute overload runs and the final 100-wave-per-mode isolated memory soak
 also passed; measurements and limits are in the benchmark notes.
