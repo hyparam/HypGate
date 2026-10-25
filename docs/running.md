@@ -58,7 +58,15 @@ and full duplex are outside the current interface.
 
 `target/debug/soundgate scan LOG` reads an existing log without changing it. It
 prints newline-delimited JSON metadata for each valid record, then a summary with
-session ID, record count, valid-prefix byte offset, and status. Raw payloads are
+session ID, record count, valid-prefix byte offset, and status. Every record row
+carries `tenant`, `request`, `chunk`, `kind`, `payload_bytes`, and `valid_end`.
+Body rows (`kind` `upload` or `download`) add `direction` and never print the
+payload. A `request_start` row adds `time_ms`, `selector`, and `destination`; a
+`response_head` row adds `time_ms` and `status`; a `completion` row adds
+`time_ms`, `outcome`, `upload_bytes`, and `download_bytes`, decoded by the
+verified codecs; a metadata row whose payload does not decode carries
+`"metadata":"invalid"` instead. Outcome codes are listed in the
+[disk logging notes](disk-logging.md#format-and-scanner). Raw payloads are
 not printed. A malformed header or incomplete/corrupt tail gives a nonzero exit;
 valid earlier records remain reported. Scanning never replays or truncates data.
 See the [storage crash contract](storage-crash-contract.md) for its limits.

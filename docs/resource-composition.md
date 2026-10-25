@@ -49,8 +49,8 @@ the mechanism that keeps the count hypothesis true.
 | `chunks`: at most R, each at most K | `OwnedStream` inside `admission::Request` (stream body or pending read buffer, never both nonempty) | `OwnedStream::claim` in `Admission::admit` | `OwnedStream::retire` in `Lease::drop` under the admission mutex | Verified registry occupancy; `registry_owned_payload_bound` supplies the chunk predicate; raw construction is crate-private |
 | `readers`: at most 2R, each at most 32 KiB | `http_body::Reader::buffered` for the inbound body and for the upstream response body | `Reader::new` in `Gateway::handle` and `HttpsTransport::run` | Worker future destruction (`LeasedTask` drops its future before its lease) | Production `WorkerRegistry` issues each reader role once; active permits prevent release. `http_owner_bounds` derives 2R; copies remain charged through partial reads and destruction |
 | `output_queues`: at most C + 2R, each at most 16 KiB | `http_body` mailbox items: client response channel (one per connection), its sender-only cleanup tail (one per worker), upload channel (one per exchange) | `ConnectionResponses::channel` in `Gateway::handle`; `http_body::channel` in `HttpsTransport::run` | Receiver drop extracts the item; sender drop preserves it for draining | Verified `Mailbox` slot bound; production `ResponseRegistry` preserves the active-response/occupied-connection mapping and proves the C bound. Active permits forbid release, including during cleanup. Production worker roles bound upload channels and response-writer tails by R each; `http_owner_bounds` derives C+2R. See [HTTP ownership](http-ownership.md) for the runtime mapping |
-| `queued_log`: at most Q, each at most K | `FrameQueue<Completion>` slots in `disk_log::queue::Queue` | `enqueue` through the verified reservation and `finish_reserved` | Worker `recv` pops under the queue mutex | Verified fixed-queue occupancy; the executable binds the payload limit to K |
-| Encoding snapshot: at most one, within K + 65 | `RecordBody`/`RecordFrame` built by the single-use `EncodingPermit` | `FrameQueue::reserve` under the queue mutex | `finish_reserved` or construction panic (poisoned, still charged) | Verified reservation bit; the permit is non-cloneable and consumed |
+| `queued_log`: at most Q, each at most A = max(K, 8,210) | `FrameQueue<Completion>` slots in `disk_log::queue::Queue` | `enqueue` through the verified reservation and `finish_reserved` | Worker `recv` pops under the queue mutex | Verified fixed-queue occupancy; the executable binds the payload limit to A so metadata records fit; the theorem is instantiated at A, which bounds K |
+| Encoding snapshot: at most one, within A + 65 | `RecordBody`/`RecordFrame` built by the single-use `EncodingPermit` | `FrameQueue::reserve` under the queue mutex | `finish_reserved` or construction panic (poisoned, still charged) | Verified reservation bit; the permit is non-cloneable and consumed |
 | `active_log`: at most one, within K | `ActiveAppend` / `FinishedAppend` matched to the disk worker's retained frame snapshot | Verified `DiskWorker::take` inside `recv` returns credit to Q and charges the active slot | Verified run commits or drops the frame; consuming delivery and a matching session/generation token permit release | Verified busy gate and `queued_and_active_bound`; one worker per `DiskLog`, never replaced |
 | `receipts`: at most R, each within K | `DurableFrame` delivered through the job oneshot to `Request::audit_current` | `commit_frame` and oneshot send | Exact receipt validation drops it; cancellation drops it with the receiver | One outstanding append per request; the worker can run ahead by one job, which is the active-frame term |
 | `headers`: at most R + 1, each 33 bytes | Canonical header scratch in `encode_payload` and in receipt comparison | Encoding entry | Function return | One per encoding logger plus one per validating request |
@@ -82,7 +82,13 @@ assumption listed below.
 
 The visible payload subtotal is the verified theorem's conclusion:
 
-    V(R, K, C, Q) = R × K + 2R × 32,768 + (C + 2R) × 16,384 + (Q + R + 1) × (K + 65) + (R + 1) × 33
+    V(R, K, C, Q) = R × K + 2R × 32,768 + (C + 2R) × 16,384 + (Q + R + 1) × (A + 65) + (R + 1) × 33
+
+where A = max(K, 8,210) is the audit payload limit the executable passes to the
+logger: metadata records (at most 8,210 bytes) share the queue with body chunks.
+For the documented 16 KiB chunk A equals K. Instantiating the verified theorem at
+A is sound because every chunk is at most K and hence at most A; the figure is
+conservative for small chunks, where retained body receipts are in fact at most K.
 
 The dependency inventories in the [dependency audit](dependency-resources.md)
 give per-owner requested-allocation bounds. They are summed below. Every row

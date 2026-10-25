@@ -15,8 +15,23 @@ and compared by trusted SHA-256 code; random-session generation and uniqueness
 are not proved, and a checksum is not source authentication.
 
 A valid header has a payload length at most one MiB, a nonzero request ID, and a
-direction of zero or one. Tenant and chunk IDs may use the full u64 range. These
-are structural checks, not authentication or authorization of recorded identities.
+record kind of at most 4. Kinds 0 and 1 are the body directions (`body_kind`);
+kinds 2 to 4 are the metadata records (`metadata_kind`); `kinds_partition` states
+that these two classes are disjoint and together are exactly the valid kinds.
+Tenant and chunk IDs may use the full u64 range. These are structural checks,
+not authentication or authorization of recorded identities.
+
+The widened kind bound lives only in framing. The body-write path is unchanged:
+`StreamChunk::audit_record` and `AuthorizedWrite::{prepare,bytes}` still refuse any
+direction above 1, so no body receipt can carry a metadata kind, and
+`OwnedStream::receipt_is_body_record` proves the converse for strict-mode
+evidence: the receipt's canonical header decodes to the current chunk's header
+for the recorded body direction (`encoding_decodes` makes the header encoding
+injective), so a metadata record can never stand behind a write ticket.
+`AuthorizedWrite::delivers` now states this decoded-kind fact for every byte
+range it releases. `audit_record` also refuses chunk 0, the unfilled initial
+state, so body records are numbered from 1 and the runtime's metadata records own
+chunk 0 without overlap.
 
 `encode` rejects invalid fields and otherwise produces exactly 33 bytes: record
 magic, little-endian payload length, tenant/request/chunk IDs, and direction.
@@ -46,6 +61,27 @@ view and, after sync, uses `Journal::commit_frame`. On success the checked
 acknowledged prefix is exactly the old history followed by this frame's canonical
 header, payload, and checksum. Thus framing and journal byte identities compose;
 the [journal receipt path](journal-proof.md) now connects this record to stream write authorization.
+
+## Metadata payload codecs
+
+`metadata.rs` holds the payload codecs for kinds 2 to 4, in the same style as the
+header: an open specification encoding, a specification decoder, an executable
+`encode_*` whose postcondition states that specification decoding returns the
+original fields and the exact length, and an executable `decode_*` that agrees
+with the specification on every input and re-encodes to the identical bytes.
+
+| Record | Fields | Length | Rejected |
+| --- | --- | --- | --- |
+| Request start | u64 time, u64 selector, u16 length, destination | 18 + destination, at most 8,210 | destination length 0 or above 8,192; a declared length that does not match the slice |
+| Response head | u64 time, u16 status | 10 | status below 100 or above 999; any other length |
+| Completion | u64 time, u8 outcome, u64 upload bytes, u64 download bytes | 25 | outcome above 7; any other length |
+
+`request_start_roundtrip`, `response_head_roundtrip`, and `completion_roundtrip`
+are the exact-length and specification-roundtrip theorems; `metadata_payloads_bounded`
+shows every metadata payload fits the 8,210-byte limit the executable gives the
+logger. The codecs check structure only: the clock value, HTTP status, outcome
+code, and destination text are supplied by trusted runtime code, and the
+destination's ASCII content is enforced by configuration parsing, not here.
 
 `frame_end` advances by exactly 33 header bytes plus payload plus 32 digest bytes.
 It rejects oversized payloads, insufficient available bytes, and offset overflow.
@@ -95,8 +131,16 @@ states the separate persistence assumptions.
 ## Validation
 
 Boundary-value roundtrips and malformed header/extent tests run through ordinary
-Cargo. Three cursor mutations reopen a stopped scanner, advance before validation, or
-regress its offset. Two payload mutations omit the body or remove its length check. Four framing mutations switch the request field to tenant bytes, remove the
-payload bound, accept incomplete extents, and skip a frame byte; all are rejected.
+Cargo, including every kind byte from 0 to 255, destination lengths 0, 1, 8,192,
+and 8,193, status and outcome boundaries, and every truncation and bit flip of a
+metadata record. Three cursor mutations reopen a stopped scanner, advance before
+validation, or regress its offset. Two payload mutations omit the body or remove
+its length check. Framing mutations switch the request field to tenant bytes,
+remove the payload bound, accept incomplete extents, skip a frame byte, accept an
+unknown kind in the encoder or decoder, or drop the kind byte. Guard mutations
+widen the body-direction checks in `audit_record`, `prepare`, and `bytes` to the
+metadata kinds, or let a body record use chunk 0. Thirty-one codec mutations
+remove each length check and corrupt each field of each metadata payload in the
+encoder and the decoder; all are rejected.
 Current check, test, and mutation totals are maintained in the [README](../README.md);
 counts describe checks, not independent guarantees.

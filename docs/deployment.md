@@ -67,14 +67,16 @@ healthy strict-mode instance with 16 request slots; that requests without
 credentials, with a wrong token, with a token but no grant, with the wrong method,
 or outside `/routes/<n>` receive 401, 401, 401, 405, and 400 and that an authorized
 request whose upstream refuses the connection receives 502, is counted once as a
-failed exchange, releases its slot, and leaves no audit gap. When HAProxy is on
+failed exchange, releases its slot, leaves no audit gap, and leaves exactly a
+request-start and a completion record (outcome 1) in the log. When HAProxy is on
 `PATH` or named by `SOUNDGATE_HAPROXY`, it also starts a standby instance, generates
 fixture TLS material, validates and runs the [example configuration](../deploy/haproxy.cfg)
 with only ports and the certificate path substituted, checks that the public frontend
 exposes only `POST /routes/<n>`, shuts the primary down with SIGTERM, and verifies
 that a new request reaches the standby without any replayed exchange. Finally every
 gateway must exit with status zero after SIGTERM, and `soundgate scan` must report a
-complete, record-free log without changing its bytes.
+complete log holding only paired start/completion records with the configured
+destination and no body records, without changing its bytes.
 
 `deploy/Dockerfile` reproduces the same path inside a container built from the
 official Rust 1.99.1 image pinned by digest. The build installs the checksum-pinned

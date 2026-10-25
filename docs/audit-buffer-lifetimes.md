@@ -18,7 +18,8 @@ supply up to `MAX_RECORD_BYTES` and must account for retained receipts separatel
 | Delivered, awaiting consumption | `Request::audit_current` retains exclusive request ownership across append and checks the exact receipt before dropping it. | At most one receipt per live production request, hence R |
 | Dropped/canceled | The frame is dropped at its current owner; dropping the caller alone cannot drop a queued Job or interrupt its syscall. | Credit follows the surviving frame, not the caller's task |
 
-The resulting frame term is `(Q + 1 + R) * (K + 65)`. The checked production
+The resulting frame term is `(Q + 1 + R) * (A + 65)` with `A = max(K, 8210)`, the
+audit payload limit that also admits metadata records. The checked production
 encoding derives 65 bytes of header/checksum overhead. The journal's byte history
 and canonical-frame sequence are erased ghost state, not retained old payloads.
 Header encoding/comparison scratch is accounted separately and now requests
@@ -38,7 +39,7 @@ queue now use fixed-slot storage.
 generation exhaustion, or an incompatible payload limit, and atomically moves
 the oldest exact frame/completion pair into `ActiveAppend`. The queue and active
 slot have independent credits. `queued_and_active_bound` derives the actual
-queue plus encoding plus active-frame bound of `(Q + 1) * (K + 65)` from the
+queue plus encoding plus active-frame bound of `(Q + 1) * (A + 65)` from the
 queue invariant and the retained active-frame snapshot. The private active and
 finished handles preserve that snapshot's bytes and completion association.
 

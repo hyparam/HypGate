@@ -44,6 +44,22 @@ requires an increase in the source's error count. Thus a valid next record must 
 returned if reads complete without I/O errors. This is conditional functional
 progress, not a bound on scheduling, interrupted reads, or syscall latency.
 
+## Record kinds
+
+The scanner is kind-agnostic: it decodes the 33-byte header with the same
+verified `framing::decode`, so a record of kind 2, 3, or 4 is returned exactly like
+a body chunk, with its payload bytes unchanged for the metadata codecs, and a
+header with kind 5 or above is `Corrupt` at that boundary. `recovered_kind_in_range`
+states that every returned header has a kind of at most 4 and is either a body or
+a metadata kind; `recover_metadata_frame_step` instantiates the frame-recovery
+step for a canonical metadata frame and adds that the recovered kind is the
+encoded metadata kind, not a body kind. `reconstruct_acknowledged` is unchanged
+and covers mixed sequences because it quantifies over arbitrary canonical frames.
+The runtime maps the recovered kind byte to its `RecordKind` name with a total
+conversion and decodes metadata payloads with the verified codecs after
+recovery; a structurally valid record whose metadata payload does not decode is
+returned and reported as such, not treated as corruption of the file.
+
 ## Evidence and remaining logging obligations
 
 The production-path tests still cover truncation/corruption, exact payloads,

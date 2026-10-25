@@ -199,7 +199,18 @@ for log in "$work"/logs/session-*.log; do
     scan=$("$binary" scan "$log")
     summary=$(tail -n1 <<<"$scan")
     grep -q '"status":"complete"' <<<"$summary" || fail "scan of $log: $summary"
-    grep -q '"records":0' <<<"$summary" || fail "unexpected records in $log: $summary"
+    # Refused upstream connections leave a start record and a completion with
+    # outcome 1 per authorized request, and never a body record.
+    records=$(grep -o '"records":[0-9]*' <<<"$summary" | cut -d: -f2)
+    starts=$(grep -c '"kind":"request_start"' <<<"$scan" || true)
+    completions=$(grep -c '"kind":"completion"' <<<"$scan" || true)
+    failures=$(grep -c '"outcome":1' <<<"$scan" || true)
+    if grep -q '"kind":"upload"\|"kind":"download"' <<<"$scan"; then fail "body records in $log: $scan"; fi
+    [[ "$records" == $((starts + completions)) && "$starts" == "$completions" && "$completions" == "$failures" ]] \
+        || fail "unexpected records in $log: $scan"
+    if (( starts > 0 )); then
+        grep -q "\"destination\":\"https://localhost:$closed/v1/messages\"" <<<"$scan" || fail "wrong destination in $log: $scan"
+    fi
     [[ "$(openssl dgst -sha256 "$log" | awk '{print $NF}')" == "$before" ]] || fail 'scan modified the log'
     echo "ok: $(basename "$log") $summary"
 done

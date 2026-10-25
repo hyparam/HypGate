@@ -73,8 +73,9 @@ On a shutdown signal or listener error, `serve` drops its listener and permanent
 closes shared worker admission. Its finite set of at most C inbound tasks has a
 ten-second drain window. Once the window expires, it aborts and joins all remaining
 local tasks. Under the scheduling/destruction assumptions these joins terminate.
-Dropping a response abort guard requests cancellation of its worker; successful
-body EOF may instead leave the worker finishing bookkeeping.
+Dropping a response guard cancels its worker through a token; the worker drops
+its exchange, writes the completion record while the logger is healthy, and
+finishes. Successful body EOF instead leaves the worker finishing bookkeeping.
 
 The same absolute drain deadline covers all R tracked workers, including workers
 started through other listeners sharing the Gateway. If tracking has not drained,
