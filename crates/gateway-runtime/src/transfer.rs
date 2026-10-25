@@ -1,6 +1,6 @@
 //! Trusted async driver for verified stream transitions. The writer's accepted
 //! count and the logger's durable acknowledgment are external contracts.
-use crate::admission::Request;
+use crate::admission::{CancelOnDrop, Request};
 pub use gateway_core::journal::DurableFrame;
 use std::{future::Future, io};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
@@ -35,13 +35,6 @@ pub enum TransferError { Read, Write, WriteZero, Flush, Log, InvalidState, Count
 pub struct TransferStats {
     pub accepted_bytes: u64,
     pub audit_gap: bool,
-}
-
-// Dropping a pending future must also close the stream: the underlying I/O may
-// have had an effect whose completion is now unknown. Never reuse/replay it.
-struct CancelOnDrop<'r, 'a> { request: &'r mut Request<'a>, armed: bool }
-impl Drop for CancelOnDrop<'_, '_> {
-    fn drop(&mut self) { if self.armed { self.request.cancel(); } }
 }
 
 // Production uses the same resolved owner for dispatch and every body range.
@@ -111,7 +104,7 @@ where R: AsyncRead + Unpin, W: AsyncWrite + Unpin, L: AuditLog, B: BodyBinding {
 pub(crate) fn receipt_for_test(record: LogRecord<'_>) -> DurableFrame {
     let frame = gateway_core::framing::RecordBody::new(gateway_core::framing::Header {
         payload: record.bytes.len() as u32, tenant: record.tenant, request: record.request,
-        chunk: record.chunk, direction: match record.direction { Direction::Upload => 0, Direction::Download => 1 },
+        chunk: record.chunk, direction: record.direction.id(),
     }, record.bytes).unwrap().seal(&[0; 32]);
     let mut journal = gateway_core::journal::Journal::new(0);
     let ticket = journal.begin(frame.bytes().len() as u64).unwrap();

@@ -236,7 +236,7 @@ impl AuditLog for DiskLog {
 
 fn record_header(record: &LogRecord<'_>) -> Header {
     Header { payload: record.bytes.len() as u32, tenant: record.tenant, request: record.request,
-        chunk: record.chunk, direction: match record.direction { Direction::Upload => 0, Direction::Download => 1 } }
+        chunk: record.chunk, direction: record.direction.id() }
 }
 fn seal_record(body: RecordBody) -> RecordFrame {
     let checksum: [u8; 32] = Sha256::digest(body.bytes()).into();

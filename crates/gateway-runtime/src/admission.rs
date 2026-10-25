@@ -29,6 +29,21 @@ struct Lease<'a> {
     state: Option<LeaseState>,
 }
 
+impl Lease<'_> {
+    fn stream(&self) -> &OwnedStream {
+        match self.state.as_ref().expect("live lease") {
+            LeaseState::Streaming(stream) => stream,
+            LeaseState::Reserved(_) => unreachable!("admitted stream"),
+        }
+    }
+    fn stream_mut(&mut self) -> &mut OwnedStream {
+        match self.state.as_mut().expect("live lease") {
+            LeaseState::Streaming(stream) => stream,
+            LeaseState::Reserved(_) => unreachable!("admitted stream"),
+        }
+    }
+}
+
 impl Drop for Lease<'_> {
     fn drop(&mut self) {
         // Poison permanently closes admission. Do not recover potentially broken
@@ -52,6 +67,13 @@ pub struct Request<'a> {
     log_failed: bool,
     journal: gateway_core::journal_binding::JournalBinding,
     lease: Lease<'a>,
+}
+
+// Dropping a pending future must also close the stream: the underlying I/O may
+// have had an effect whose completion is now unknown. Never reuse/replay it.
+pub(crate) struct CancelOnDrop<'r, 'a> { pub(crate) request: &'r mut Request<'a>, pub(crate) armed: bool }
+impl Drop for CancelOnDrop<'_, '_> {
+    fn drop(&mut self) { if self.armed { self.request.cancel(); } }
 }
 
 impl Admission {
@@ -112,21 +134,14 @@ impl<'a> Request<'a> {
         value: gateway_core::task_credit::TaskResult<T>) -> Result<T, gateway_core::task_credit::TaskResult<T>>
     {
         let Ok(registry) = self.lease.admission.registry.lock() else { return Err(value); };
-        let Some(LeaseState::Streaming(owner)) = self.lease.state.as_ref() else { return Err(value); };
-        value.adopt(credit, &registry, owner)
+        value.adopt(credit, &registry, self.lease.stream())
     }
 
-    fn stream(&self) -> &StreamChunk {
-        match self.lease.state.as_ref().expect("live lease") {
-            LeaseState::Streaming(stream) => stream.stream(),
-            LeaseState::Reserved(_) => unreachable!("admitted stream"),
-        }
-    }
-    fn stream_mut(&mut self) -> &mut OwnedStream {
-        match self.lease.state.as_mut().expect("live lease") {
-            LeaseState::Streaming(stream) => stream,
-            LeaseState::Reserved(_) => unreachable!("admitted stream"),
-        }
+    fn stream(&self) -> &StreamChunk { self.lease.stream().stream() }
+    fn stream_mut(&mut self) -> &mut OwnedStream { self.lease.stream_mut() }
+    /// The stream this ticket was prepared against, if the ticket is ours.
+    fn bound_stream(&self, ticket: &WriteTicket<'_>) -> Option<&OwnedStream> {
+        std::ptr::eq(ticket.admission, self.lease.admission).then(|| self.lease.stream())
     }
     pub fn request_id(&self) -> u64 { self.authorized.request_id() }
     pub fn tenant_id(&self) -> u64 { self.authorized.tenant_id() }
@@ -156,18 +171,14 @@ impl<'a> Request<'a> {
     pub async fn audit_current<L: AuditLog>(&mut self, log: &mut L, direction: Direction)
         -> Result<(), TransferError>
     {
-        struct Pending<'r, 'a> { request: &'r mut Request<'a>, armed: bool }
-        impl Drop for Pending<'_, '_> {
-            fn drop(&mut self) { if self.armed { self.request.cancel(); } }
-        }
-        let mut pending = Pending { request: self, armed: true };
+        let mut pending = CancelOnDrop { request: self, armed: true };
         if pending.request.is_closed() || pending.request.log_failed() {
             return Err(TransferError::InvalidState);
         }
         if !pending.request.journal.bind(log.session_id()) {
             return Err(TransferError::InvalidState);
         }
-        let direction_id = match direction { Direction::Upload => 0, Direction::Download => 1 };
+        let direction_id = direction.id();
         let (header, bytes) = pending.request.stream()
             .audit_record(&pending.request.authorized, direction_id)
             .ok_or(TransferError::InvalidState)?;
@@ -182,33 +193,25 @@ impl<'a> Request<'a> {
                 return Err(TransferError::Log);
             }
         };
-        let Some(LeaseState::Streaming(stream)) = pending.request.lease.state.as_mut() else {
-            unreachable!("admitted stream")
-        };
-        if !stream.acknowledge_receipt(&pending.request.authorized, &pending.request.journal, direction_id, &receipt) {
+        if !pending.request.lease.stream_mut().acknowledge_receipt(&pending.request.authorized, &pending.request.journal, direction_id, &receipt) {
             return Err(TransferError::InvalidState);
         }
         pending.armed = false;
         Ok(())
     }
     pub fn prepare(&mut self, max: usize, direction: Direction) -> Option<WriteTicket<'a>> {
-        let Some(LeaseState::Streaming(stream)) = self.lease.state.as_mut() else { return None; };
-        AuthorizedWrite::prepare(stream, &self.authorized, &self.journal, direction.id(), max)
+        AuthorizedWrite::prepare(self.lease.stream_mut(), &self.authorized, &self.journal, direction.id(), max)
             .map(|core| WriteTicket { admission: self.lease.admission, core })
     }
     pub fn pending_bytes(&self, ticket: &WriteTicket<'_>, direction: Direction) -> Option<&[u8]> {
-        if !std::ptr::eq(ticket.admission, self.lease.admission) { return None; }
-        let Some(LeaseState::Streaming(stream)) = self.lease.state.as_ref() else { return None; };
-        ticket.core.bytes(stream, &self.authorized, &self.journal, direction.id())
+        ticket.core.bytes(self.bound_stream(ticket)?, &self.authorized, &self.journal, direction.id())
     }
     pub(crate) fn routed_bytes<D, C>(&self, route: &gateway_core::resolved_route::ResolvedRoute<'_, D, C>,
         ticket: &WriteTicket<'_>, direction: Direction) -> Option<&[u8]> {
-        if !std::ptr::eq(ticket.admission, self.lease.admission) { return None; }
-        let Some(LeaseState::Streaming(stream)) = self.lease.state.as_ref() else { return None; };
-        route.write_bytes(&ticket.core, stream, &self.authorized, &self.journal, direction.id())
+        route.write_bytes(&ticket.core, self.bound_stream(ticket)?, &self.authorized, &self.journal, direction.id())
     }
     pub fn complete(&mut self, ticket: &WriteTicket<'_>, count: usize) -> bool {
-        if !std::ptr::eq(ticket.admission, self.lease.admission) { return false; }
+        if self.bound_stream(ticket).is_none() { return false; }
         ticket.core.complete(self.stream_mut(), count)
     }
     pub fn cancel(&mut self) { self.stream_mut().cancel(); }
