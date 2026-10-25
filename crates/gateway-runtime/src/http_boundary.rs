@@ -15,6 +15,16 @@ const FORWARDED_RESPONSE_HEADERS: &[&str] = &[
 #[derive(Debug, PartialEq, Eq)]
 pub enum HttpError { BadRequest, Unauthorized, MethodNotAllowed, HeadersTooLarge, Unavailable }
 impl HttpError {
+    /// Close the worker for a request refused before admission. No exchange
+    /// and no record exist for it anywhere, so there is no lifecycle to
+    /// finish. This is the only call to `Closed::without_request` in the
+    /// runtime; clippy denies it everywhere else and
+    /// `scripts/check_effect_sites.sh` pins this site.
+    // Escape hatch: the one worker exit without a lifecycle.
+    #[allow(clippy::disallowed_methods)]
+    pub(crate) fn close(self) -> gateway_core::exchange_lifecycle::Closed {
+        gateway_core::exchange_lifecycle::Closed::without_request()
+    }
     pub fn status(&self) -> StatusCode {
         match self {
             Self::BadRequest => StatusCode::BAD_REQUEST,

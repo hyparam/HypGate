@@ -10,6 +10,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 expected='crates/gateway-runtime/src/disk_log.rs:create_with_payload_limit
+crates/gateway-runtime/src/http_boundary.rs:close
 crates/gateway-runtime/src/main.rs:bind
 crates/gateway-runtime/src/main.rs:secret
 crates/gateway-runtime/src/shipping/client.rs:open_socket
@@ -29,10 +30,11 @@ if [ "$actual" != "$expected" ]; then
   exit 1
 fi
 
-# Every marked site must say what it is for, within the three lines above it.
+# Every marked site must say what it is for, within the three lines above it:
+# an effect site, or the one escape hatch that closes a worker without a lifecycle.
 if ! grep -rn --include='*.rs' -B3 '#\[allow(clippy::disallowed_methods)\]' crates/gateway-runtime/src \
-  | awk 'BEGIN { ok = 1; seen = 0 } /^--$/ { if (!seen) ok = 0; seen = 0; next } /Effect site/ { seen = 1 } END { if (!seen) ok = 0; exit !ok }'; then
-  echo "every disallowed-methods allowance needs an 'Effect site' comment just above it" >&2
+  | awk 'BEGIN { ok = 1; seen = 0 } /^--$/ { if (!seen) ok = 0; seen = 0; next } /Effect site|Escape hatch/ { seen = 1 } END { if (!seen) ok = 0; exit !ok }'; then
+  echo "every disallowed-methods allowance needs an 'Effect site' or 'Escape hatch' comment just above it" >&2
   exit 1
 fi
 
@@ -41,4 +43,4 @@ if ! output=$(cargo clippy -p gateway-runtime --locked --quiet 2>&1); then
   echo "$output" | grep -E -A8 '^error' >&2
   exit 1
 fi
-echo "effect sites: $(echo "$expected" | wc -l | tr -d ' ') audited, none unaccounted"
+echo "pinned sites: $(echo "$expected" | wc -l | tr -d ' ') audited, none unaccounted"

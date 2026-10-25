@@ -112,7 +112,7 @@ impl Gateway {
             Err(e) => {
                 let _ = output.start(e.status(), HeaderMap::new()).await;
                 let _ = output.shutdown().await;
-                return Closed::without_request();
+                return e.close();
             }
         };
         let mut life = Lifecycle::begin();

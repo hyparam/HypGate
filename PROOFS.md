@@ -109,8 +109,8 @@ mode, so the log holds bodies and metadata, not the full HTTP exchange.
   fault; the outcome code is a checked function of that event; the completion
   payload decodes to that outcome and, on success, to the two body-copy
   counts; and a worker can finish only by returning the `Closed` token a
-  terminal lifecycle produces, or the one escape for a request refused before
-  admission, which has no records anywhere.
+  terminal lifecycle produces, or the one lint-pinned escape for a request
+  refused before admission, which has no records anywhere.
 - Forwarded bytes are an ordered, unchanged prefix of the input across chunks
   and partial writes, with no skipped or duplicated advancement; cancellation
   prevents new submissions and a failed or truncated stream cannot complete as
@@ -174,11 +174,14 @@ an assumption we take on; the proofs that could be written have been.
   cancellation reaches the loop's drop guard, and Hyper's framing.
 - *Every admitted exchange reaches its completion record.* The lifecycle is a
   verified machine that is terminal after exactly one event, and the worker
-  future must return the `Closed` token only a terminal lifecycle produces,
-  with one escape for a request refused before admission. Two cases still
-  end without a record, both by design and both reported by its absence: the
-  logger is already unhealthy, or the task was aborted after the shutdown
-  drain window and never ran its tail.
+  future must return the `Closed` token only a terminal lifecycle produces.
+  The one escape, for a request refused before admission, is a single
+  lint-pinned call site (`HttpError::close`); clippy denies the constructor
+  everywhere else and `scripts/check_effect_sites.sh` fails if the site
+  moves. Shutdown cancels workers cooperatively and awaits them with no
+  deadline, so the only ways an admitted exchange ends without a record are
+  a logger that is already unhealthy and process death, both reported by
+  the record's absence.
 - *Durability stops at the storage contract.* Acknowledged records survive
   every crash in the model; the model assumes the filesystem honors sync.
   Tested on ext4 with process kills and full or read-only disks, never with

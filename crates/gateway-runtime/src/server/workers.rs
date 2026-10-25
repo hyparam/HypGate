@@ -104,7 +104,7 @@ mod tests {
             sent.send(()).unwrap();
             std::future::pending::<()>().await;
             drop(writer);
-            gateway_core::exchange_lifecycle::Closed::without_request()
+            crate::http_boundary::HttpError::Unavailable.close()
         });
         let connection = tokio::spawn(connection_lease.task(async move {
             drain.await.unwrap();
@@ -235,7 +235,7 @@ mod tests {
                 let append = append_log.append(LogRecord { tenant: 1, request: 1, chunk: 1,
                     kind: RecordKind::Upload, bytes: b"record" });
                 let _ = tokio::join!(receive, append);
-                gateway_core::exchange_lifecycle::Closed::without_request()
+                crate::http_boundary::HttpError::Unavailable.close()
             });
             running.await.unwrap();
             syncing.await.unwrap();
@@ -385,7 +385,7 @@ mod tests {
                 if exit == 3 { panic!("injected worker panic"); }
                 if exit != 0 { std::future::pending::<()>().await; }
                 drop(cleanup);
-                gateway_core::exchange_lifecycle::Closed::without_request()
+                crate::http_boundary::HttpError::Unavailable.close()
             });
             if exit == 2 { running.await.unwrap(); }
             if exit == 1 || exit == 2 { task.abort(); }
