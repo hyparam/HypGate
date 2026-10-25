@@ -186,7 +186,7 @@ mode, so the log holds bodies and metadata, not the full HTTP exchange.
 [storage contract](docs/storage-crash-contract.md)); the disk adapter reports
 write and sync outcomes truthfully; the async loop performs the effect the
 body-copy machine names on the reader, writer, and logger it was given, and
-those report truthfully; hex encoding; the server honors its batch
+those report truthfully; the server honors its batch
 ledger and part-id dedup; the projection of an exchange's provider JSON into text and usage is
 faithful (tested against recorded bodies, not proved); the runtime's `Effects`
 implementation performs what it is asked (sends to the configured server,

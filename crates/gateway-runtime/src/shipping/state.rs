@@ -30,7 +30,8 @@ pub struct Checkpoint {
     pub max_exchange_bytes: usize,
 }
 
-pub fn hex(bytes: &[u8]) -> String { bytes.iter().map(|b| format!("{b:02x}")).collect() }
+/// Lowercase hex from the verified encoder; every byte it returns is ASCII.
+pub fn hex(bytes: &[u8]) -> String { gateway_core::shipping_identity::hex(bytes).into_iter().map(char::from).collect() }
 pub fn fingerprint(token: &[u8]) -> String { hex(&Sha256::digest(token)) }
 
 // Effect site: the shipper's two state files, under the configured state directory.

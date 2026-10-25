@@ -93,10 +93,10 @@ permanently; `loggate_shipping_stopped` reports it.
 
 Upload: `POST /v1/ingest/proxy` with `Authorization: Bearer <credential>`,
 `Content-Type: application/x-ndjson`, and `X-Hyp-Batch-Id`. The batch id is
-the hex of the verified encoding of (log session, index range of the
+the verified hex of the verified encoding of (log session, index range of the
 exchanges, FNV-1a checksum of the body), computed inside the machine, so a
 retry or a restart that rebuilds the same batch sends the same id and the
-server's ledger acknowledges it without storing it again. Row identities are the hex of verified fixed-width encodings of
+server's ledger acknowledges it without storing it again. Row identities are the verified hex of verified fixed-width encodings of
 (session, request id, message index, part index), so a batch rebuilt
 differently after a restart repeats part ids the server deduplicates.
 
