@@ -350,17 +350,20 @@ pub fn nominations(fields: &Vec<Field>, request: bool) -> (out: Option<Vec<Vec<u
                     assert(nominated_in(fields@, i as int, s as int, e as int, name@));
                 }
                 let ghost before = hop@;
-                if allowed_name(request, name.as_slice()) && !listed(&hop, name.as_slice()) {
-                    hop.push(name);
-                }
+                let was_allowed = allowed_name(request, name.as_slice());
+                let was_listed = listed(&hop, name.as_slice());
+                let pushed = was_allowed && !was_listed;
+                if pushed { hop.push(name); }
                 proof {
+                    assert(pushed ==> hop@ == before.push(name));
+                    assert(!pushed ==> hop@ == before);
                     // Whatever was covered stays covered, and this element is now covered.
                     assert forall|st: int, s2: int, e2: int, en: int| #[trigger] element_bounds(value@, st, s2, e2, en)
                         && en < end + 1 && allowed(request, lower_seq(value@.subrange(s2, e2)))
                         implies in_list(hop@, lower_seq(value@.subrange(s2, e2))) by {
                         if en < start {
                             assert(in_list(before, lower_seq(value@.subrange(s2, e2))));
-                            if hop@ != before { lemma_in_list_push(before, lower_seq(value@.subrange(s2, e2)), name); }
+                            if pushed { lemma_in_list_push(before, lower_seq(value@.subrange(s2, e2)), name); }
                         } else {
                             // The element lies in this comma-delimited segment, so its bounds are ours.
                             assert(st == start) by {
@@ -378,13 +381,14 @@ pub fn nominations(fields: &Vec<Field>, request: bool) -> (out: Option<Vec<Vec<u
                                 if e2 > e { assert(is_blank(value@[e2 - 1])); }
                             }
                             assert(lower_seq(value@.subrange(s2, e2)) == name@);
-                            if hop@ == before { assert(in_list(before, name@)); } else { assert(hop@[hop@.len() - 1]@ == name@); }
+                            assert(was_allowed);
+                            if pushed { assert(hop@[hop@.len() - 1]@ == name@); } else { assert(was_listed); assert(in_list(before, name@)); }
                         }
                     }
                     assert forall|j: int, s2: int, e2: int, n: Seq<u8>| 0 <= j < i && #[trigger] nominated_in(fields@, j, s2, e2, n)
                         && allowed(request, n) implies in_list(hop@, n) by {
                         assert(in_list(before, n));
-                        if hop@ != before { lemma_in_list_push(before, n, name); }
+                        if pushed { lemma_in_list_push(before, n, name); }
                     }
                 }
                 if end == value.len() { more = false; } else { start = end + 1; }
