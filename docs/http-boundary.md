@@ -42,8 +42,10 @@ echo secrets; header filtering is not arbitrary content secrecy.
 Six boundary tests cover fixed destination/credential binding, caller header
 overrides, duplicate/malformed authentication, forbidden paths and methods,
 Connection nominations, header limits, admission cleanup, and response filtering.
-All 24 workspace tests passed on 2026-10-23. No live provider was contacted.
-Next: network dispatch, exact body forwarding through the stream core, and logging.
+Workspace test totals are maintained in the [README](../README.md). No live provider
+was contacted. Network dispatch, body forwarding, and logging are covered by the
+[HTTPS transport](https-transport.md), [async transfer](async-transfer.md), and
+[running](running.md) notes.
 
 ## Metadata ownership and allocation
 

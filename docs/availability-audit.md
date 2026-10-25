@@ -47,6 +47,9 @@ not a mechanized verification of Tokio.
 
 ## Validation checkpoint
 
+Counts below are those at milestone 4 close; current totals are maintained in the
+[README](../README.md).
+
 - Production core: 191 verification checks passed, including closure and rank.
 - Workspace: 188 tests and five compile-fail doctests passed. Opt-in external
   fixtures are separately exercised as listed here.
@@ -72,15 +75,9 @@ notes; no physical-power-loss or universal memory/latency claim is made.
 
 ## Reproduction
 
-```sh
-cargo test --workspace --locked
-cargo verus verify -p gateway-core --locked -- --triggers-mode silent
-VERUS=/path/to/verus python3 scripts/check_mutations.py
-cargo test -p gateway-runtime --locked --lib sustained_overload -- --ignored --nocapture
-cargo test -p gateway-runtime --locked --lib isolated_gateway_memory_soak -- --ignored --nocapture
-cargo test -p gateway-runtime --release --locked server::tests::benchmark -- --ignored --nocapture --test-threads=1
-SOUNDGATE_HAPROXY=/path/to/haproxy cargo test -p gateway-runtime --locked proxy_gateway_process_failover -- --ignored --nocapture
-```
+The commands for the workspace suite, proofs, mutations, and the opt-in overload,
+memory-soak, benchmark, and proxy-failover workloads are in the
+[README](../README.md#development).
 
 The proxy command requires HAProxy and OpenSSL. macOS RSS sampling needs permission
 to inspect the child PID with `ps`. The sustained test holds eight streams for

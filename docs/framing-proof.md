@@ -98,5 +98,5 @@ Boundary-value roundtrips and malformed header/extent tests run through ordinary
 Cargo. Three cursor mutations reopen a stopped scanner, advance before validation, or
 regress its offset. Two payload mutations omit the body or remove its length check. Four framing mutations switch the request field to tenant bytes, remove the
 payload bound, accept incomplete extents, and skip a frame byte; all are rejected.
-The complete core passes 55 verification checks, 75 workspace tests pass, and all
-39 proof mutations are rejected. Counts describe checks, not independent guarantees.
+Current check, test, and mutation totals are maintained in the [README](../README.md);
+counts describe checks, not independent guarantees.

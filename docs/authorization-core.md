@@ -52,17 +52,14 @@ request/stream lifetime; its complete release composition remains open. The exis
 registry bounds logical slots and payload allowances, not total process memory.
 No proof yet connects tokens to actual network effects or disk records.
 
-## Initial checkpoint evidence
+## Evidence
 
-The figures below describe the initial authorization increment. Current checks
-and source-contract mappings are in the [proof index](proof-index.md) and README.
+Source-contract mappings are in the [proof index](proof-index.md); current check,
+test, and mutation totals are maintained in the [README](../README.md). Policy tests
+include 108 candidate configurations plus invalid identities and authorization
+failures.
 
-On 2026-10-23 the pinned Verus release checked 34 core obligations with no errors;
-the dependency vstd checked 2,060. All six Cargo integration tests passed: five
-policy tests and one streaming/resource lifecycle scenario. Policy tests include
-108 candidate configurations plus invalid identities and authorization failures.
-
-The consolidated mutation runner rejects all 19 injected defects. Seven exercise
+Seven authorization mutations exercise
 unauthenticated identity acceptance, cross-tenant routing, expanded root grants,
 cross-tenant credentials, unknown origins, wrong origin accessors, and ambiguous
 identities. A mutation counts only when a proof obligation fails, not when the

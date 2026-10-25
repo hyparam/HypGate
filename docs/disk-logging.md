@@ -95,10 +95,11 @@ record, including header, payload, checksum, and the next record boundary. They
 check the exact retained prefix offset and that subsequent scanner calls never
 read the underlying source again, even though the source could recover. Separate
 tests interleave interruptions with fragmented reads at sizes from one byte to
-128 bytes and check unchanged recovered payloads and offsets. All 70 workspace
-tests pass. These are tests, not a filesystem crash theorem. Real process-kill experiments and the conditional journal-prefix theorem now exist;
-see the [storage contract](storage-crash-contract.md). Scanner refinement and
-power-loss/storage-stack validation remain milestone-three requirements.
+128 bytes and check unchanged recovered payloads and offsets. Workspace test totals
+are maintained in the [README](../README.md). These are tests, not a filesystem crash
+theorem. Process-kill tests and the conditional journal-prefix and scanner theorems
+are recorded in the [storage contract](storage-crash-contract.md), which closes
+milestone 3; physical power-loss validation remains open.
 
 Durability assumes the OS/filesystem/storage stack honors successful sync calls
 and that the parent directory was already durable. Permanent disk loss, malicious
@@ -115,5 +116,6 @@ from the same random file-header session. Uniqueness of that session and its
 correspondence to the actual file remain trusted. Each request establishes its immutable `JournalBinding` before its first
 append. Later logger identity changes and receipts from another session are
 rejected; exact record matching is still required. Selecting the intended initial
-logger and its correspondence to the file remain trusted. Full authorized-write
-composition is a separate unfinished milestone 6 obligation.
+logger and its correspondence to the file remain trusted. The authorized-write
+composition through `ResolvedRoute::write_bytes` is checked; see the
+[milestone 6 exit audit](milestone-6-exit-audit.md).

@@ -91,7 +91,5 @@ response-writer paths; the queued response still drains under connection credit
 after worker cancellation. The locked gateway suite also covers normal exchanges,
 deadlines, shutdown, blocked logging, and canceled requests through this path.
 
-Validation at this checkpoint: 293 Verus checks, 247 tests including the added
-targeted escaped-owner regression, six compile-fail doctests, and 248 rejected
-mutations. Mutations cover duplicate/stale/foreign issuance, wrong roles, missing
+Current validation totals are maintained in the [README](../README.md). Mutations cover duplicate/stale/foreign issuance, wrong roles, missing
 charges, premature release, and omitted aggregate payload categories.

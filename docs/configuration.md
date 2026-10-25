@@ -61,8 +61,8 @@ categories, never input strings or secret values. Secret memory is not zeroized.
 Six configuration unit tests cover native provider endpoint/credential bindings,
 invalid authentication, forbidden routes, hostile destinations, invalid limits and
 digests, cross-tenant credentials, malformed schemas, and secret/header injection.
-All eighteen workspace tests passed on 2026-10-23. No live provider call was made;
-this does not establish provider compatibility.
+Workspace test totals are maintained in the [README](../README.md). No live provider
+call was made; this does not establish provider compatibility.
 
 JSON parsing, URI validation, hashing, secret resolution, and the runtime mapping
 are trusted and tested, not formally verified. The core theorem still concerns

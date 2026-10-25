@@ -123,12 +123,17 @@ and checks its health endpoint. Additional end-to-end scenarios inject failed lo
 They check strict refusal without a provider connection, availability-mode forwarding
 with unchanged authorization, audit-gap reporting after failure, metrics, and
 rejection of a second request while the sole slot is occupied. Logger I/O failures
-are tested separately at the disk adapter. All 71 workspace tests pass.
+are tested separately at the disk adapter. Workspace test totals are maintained in
+the [README](../README.md).
 
 This is a runnable prototype, not a production-ready or wholly verified gateway.
-Concurrent-request stress tests, all end-to-end failure modes, resource composition
-proofs, crash-recovery proofs, load measurements, retention/rotation, and operator
-deployment hardening remain open. See the milestone checklist for the full scope.
+Concurrent-request stress, failure-mode, and load evidence is recorded in the
+[availability audit](availability-audit.md) and [benchmarks](benchmarks.md);
+resource composition and crash-recovery proofs are conditional on the assumptions
+in [resource composition](resource-composition.md) and the
+[storage contract](storage-crash-contract.md). Log retention/rotation and operator
+deployment hardening remain operator obligations; see the
+[implementation milestones](implementation-plan.md) for scope.
 
 See [proxy deployment and failover](deployment.md) for a tested HAProxy example
 with TLS, readiness checks, a standby instance, and generation retries disabled.

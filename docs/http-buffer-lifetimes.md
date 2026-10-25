@@ -132,8 +132,8 @@ poison refusal, 10,000 ordered handoffs between two threads, and receiver destru
 behind in-progress construction followed by exact payload release. Release workload
 and isolated-memory regressions exercise both logging modes through this path.
 
-Validation on 2026-10-23: 154 regular workspace tests and five compile-fail doctests
-pass, including all six slot-adapter tests and both core mailbox ownership tests. All six
+Current test totals are maintained in the [README](../README.md); the suite includes
+all six slot-adapter tests and both core mailbox ownership tests. All six
 release load/fault workloads pass. A three-wave isolated process run in each mode
 also passes, with sampled peaks of 12,992,512 bytes in strict mode and 12,959,744
 bytes in availability mode on macOS. These observations are regression evidence,

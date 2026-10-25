@@ -1,11 +1,14 @@
-# Security contract before transport implementation
+# Security contract
 
-Status: core authorization, normalized configuration, streaming, and resource
-properties are checked. The [end-to-end audit](end-to-end-audit.md) traces dispatch
-mediation through the enumerated effect sites and failure exits at the source level;
-a mechanized end-to-end theorem remains open. See the
-[authorization implementation notes](authorization-core.md) for the exact boundary.
-This contract gates the HTTP adapter milestone and extends the original research.
+Status: core authorization, normalized configuration, streaming, resource, and
+upstream-mediation properties are checked. Production body writes pass the checked
+`ResolvedRoute::write_bytes` gate ([milestone 6 exit audit](milestone-6-exit-audit.md));
+the [end-to-end audit](end-to-end-audit.md) traces that mediation through the
+enumerated effect sites and failure exits at the source level. Hyper, TLS, DNS, and
+the OS remain trusted adapters, and there is no single mechanized theorem over the
+async runtime. See the [authorization implementation notes](authorization-core.md)
+for the exact boundary. This contract was written before the transport existed; it
+now records the obligations it imposed and their current status.
 
 ## Threat and policy boundary
 
@@ -26,11 +29,11 @@ and credential ownership mechanism must be settled before exposing an endpoint.
 
 | Property | Obligation | Current status |
 | --- | --- | --- |
-| Authorization | Every upstream dispatch is justified by an authenticated principal's grant for that route and policy snapshot. Unknown identities, missing grants, and validation errors produce no dispatch. | Digest identity and tenant-scoped token issuance proved; HTTP authentication is tested; network dispatch binding remains open. |
-| Tenant isolation | A principal cannot select another tenant's credential, route grant, request state, or private audit destination. Async completion cannot attach to another live request. | Local owner/ticket checks and authenticated token tenant binding proved; global composition and audit isolation remain open. |
-| Credential confinement | Only the credential handle authorized for the tenant and exact origin may reach the secret-bearing transport operation. Gateway authentication material is never forwarded upstream; credential headers are excluded from client-visible metadata, audit metadata, and diagnostics. | Authorized handles satisfy tenant ownership and exact root grants; secret loading and header filtering are tested; transport handling remains open. |
-| Routing integrity | Effective scheme, host, port, and route template come from validated policy, not arbitrary request fields, provider response headers, ambient proxy settings, or unvalidated configuration. | Normalized origin handles confined to root grants; Fixed HTTPS endpoint parsing is tested; network dispatch remains open. |
-| Security failure is closed | Authentication, authorization, destination validation, and credential selection failures never permit upstream dispatch. | Invalid core authentication/configuration cannot yield authority; actual dispatch mediation remains open. Distinct from logging policy. |
+| Authorization | Every upstream dispatch is justified by an authenticated principal's grant for that route and policy snapshot. Unknown identities, missing grants, and validation errors produce no dispatch. | Digest identity and tenant-scoped token issuance proved; HTTP authentication is tested; production dispatch is bound through the checked `ResolvedRoute::write_bytes` gate, with Hyper/TLS/DNS delivery trusted. |
+| Tenant isolation | A principal cannot select another tenant's credential, route grant, request state, or private audit destination. Async completion cannot attach to another live request. | Local owner/ticket checks and authenticated token tenant binding proved; cross-owner lifecycle composition is checked (`cleanup_before_reuse`); audit-file access control remains an operator obligation. |
+| Credential confinement | Only the credential handle authorized for the tenant and exact origin may reach the secret-bearing transport operation. Gateway authentication material is never forwarded upstream; credential headers are excluded from client-visible metadata, audit metadata, and diagnostics. | Authorized handles satisfy tenant ownership and exact root grants; secret loading and header filtering are tested; the transport consumes only the resolved route's credential, with header serialization trusted to Hyper. |
+| Routing integrity | Effective scheme, host, port, and route template come from validated policy, not arbitrary request fields, provider response headers, ambient proxy settings, or unvalidated configuration. | Normalized origin handles confined to root grants; fixed HTTPS endpoint parsing is tested; socket/TLS naming derives from the resolved destination, with URI parsing, DNS, and TLS name checks trusted. |
+| Security failure is closed | Authentication, authorization, destination validation, and credential selection failures never permit upstream dispatch. | Invalid core authentication/configuration cannot yield authority; dispatch mediation is audited at the source level in the end-to-end audit. Distinct from logging policy. |
 | Logging policy | Strict mode gates write ranges on durable acknowledgments. Availability-first mode may forward without complete audit coverage but still requires all security checks. | Exact durable receipts gate stream bytes; ordered recovery is proved under explicit storage/read/checksum assumptions. Linux ext4 failure/process-death tests passed; physical persistence remains trusted. |
 | Configuration confinement | For every candidate configuration, validation either rejects it or constructs routes whose tenant, origin, and credential bindings satisfy the root grants. | Proved for normalized tenant, selector, origin, and credential handles; textual configuration parsing is implemented and tested, not proved. |
 
@@ -49,7 +52,7 @@ identity, immutable policy snapshot, exact destination, and credential handle.
 Currently the token binds a nonzero request ID; uniqueness and resource ownership
 require composition with the registry. Destinations and credentials are handles;
 the configuration layer now preserves their immutable mapping to actual endpoints
-and secrets in a routed request. Network dispatch must consume that wrapper.
+and secrets in a routed request, and the transport consumes only that wrapper.
 See [configuration](configuration.md) for tested parser scope and remaining obligations.
 Do not implement public deserialization, arbitrary constructors, or unrestricted
 cloning for the token.
@@ -116,8 +119,8 @@ Track each external contract separately: what is assumed, why it is reasonable,
 which component fulfills it, and what tests exercise it. Do not replace an unproved
 security obligation with an `assume` and then describe the result as a proof of it.
 
-Before milestone 2 can dispatch traffic, require checked admission/token-issuance
-properties and negative tests for unknown identities, cross-tenant credentials,
-host/header overrides, unsafe configuration, redirects, and every error path.
-Provider compatibility tests and fault injection supplement these proofs; they
-do not substitute for them.
+Dispatching traffic required checked admission/token-issuance properties and
+negative tests for unknown identities, cross-tenant credentials, host/header
+overrides, unsafe configuration, redirects, and every error path; those are in place
+and mapped in the [adapter audit](adapter-audit.md). Provider compatibility tests and
+fault injection supplement these proofs; they do not substitute for them.
