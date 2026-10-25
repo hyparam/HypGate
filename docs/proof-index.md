@@ -118,8 +118,15 @@ remove trusted specifications supplied by vstd.
 
 Use the pinned toolchain and commands in the [README](../README.md). The
 [mutation runner](../scripts/check_mutations.py) verifies the unmodified core
-first, then checks isolated deliberately broken variants. A mutant must fail a
-proof obligation; syntax/type failures do not count as successful rejection.
+first, then checks deliberately broken variants. A mutant must fail a proof
+obligation; syntax/type failures do not count as successful rejection. Mutants
+confined to the bodies of distinct exec or proof functions are checked many to
+a verifier run: Verus proves each function against the specifications of what
+it calls, never their bodies, so such a mutant can be refuted only inside its
+own function and cannot change any other function's result. The runner proves
+the confinement for every batch by diffing the verifier's own intermediate
+representation of the batch against the unmodified crate, and verifies any
+mutant that fails that check, or that edits a specification, on its own.
 [CI](../.github/workflows/ci.yml) also runs executable tests and proxy-policy tests.
 Verification-check totals are not counts of independent security guarantees.
 

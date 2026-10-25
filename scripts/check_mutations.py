@@ -2,10 +2,16 @@
 
 VERUS=/path/to/verus python3 scripts/check_mutations.py
 Normal executable scenarios are tested separately with cargo test --workspace.
+
+Mutations confined to the bodies of distinct exec or proof functions are checked
+many to a verifier run (see "Verus's simplified VIR" below for why that is
+sound); every other mutation, and any batch the VIR check cannot vouch for,
+is verified on its own.
 """
 from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -420,11 +426,141 @@ MUTATIONS = [
 
 
 MARKERS = ["postcondition not satisfied", "precondition not satisfied", "error: requires not satisfied", "assertion failed", "invariant not satisfied"]
+LOG = ["--log", "vir-simple", "--log", "vir-option=no_span+no_type"]
 
 
-def command(source, module=None):
+def command(source, modules=(), log_dir=None, lifetime=True):
     args = [VERUS, str(source / "lib.rs"), "--crate-type", "lib", "--triggers-mode", "silent"]
-    return args + (["--verify-module", module] if module else [])
+    for module in modules:
+        args += ["--verify-module", module]
+    if log_dir:
+        args += LOG + ["--log-dir", str(log_dir)]
+    if not lifetime:
+        args.append("--no-lifetime")
+    return args
+
+
+# --- Verus's simplified VIR, the crate as the verifier sees it -----------------
+#
+# A batch of mutations is sound to judge from one verifier run only if no
+# mutation changed anything another function's proof can see. Verus checks each
+# function against the specifications of what it calls, never against their
+# bodies, so a mutation confined to the body of an exec or proof function can be
+# refuted only inside that function, and cannot change any other function's
+# outcome. The VIR log makes that condition checkable: it is diffed against the
+# unmutated crate, and the batch is accepted only when the sole differences are
+# the bodies of exec/proof functions, one per mutation.
+
+# Crate-wide counters and diagnostic source positions carry no meaning for the comparison.
+COUNTERS = re.compile(r"(:id|RustcId)\s+\d+")
+DIAGNOSTIC_SPANS = re.compile(r':spans \("[^"]*"\)')
+SPAN = re.compile(r"^;; (\S+?):(\d+):\d+: (\d+):\d+")
+NAME = re.compile(r":name \((?:Fun :path|Dt Path) (\S+?)\)")
+FIELD = re.compile(r'\\.|[()"]|:(?:body|mode|item_kind) ')
+
+
+def parse_vir(path):
+    """Return {key: (kind, spec, body, mode)} and {file: [(start, end, key)]} for a VIR log."""
+    items, spans = {}, {}
+    span = None
+    for chunk in re.split(r"\n(?=[(;])", Path(path).read_text()):
+        if chunk.startswith(";;"):
+            if match := SPAN.match(chunk):
+                span = (Path(match[1]).name, int(match[2]), int(match[3]))
+            continue
+        if not chunk.startswith("("):
+            continue
+        kind = chunk[1:].split(None, 1)[0]
+        text = " ".join(DIAGNOSTIC_SPANS.sub(":spans (_)", COUNTERS.sub(r"\1 _", chunk)).split())
+        body, mode = "", None
+        if kind == "Function":
+            depth, in_string, fields = 0, False, {}
+            for token in FIELD.finditer(text):
+                t = token[0]
+                if t.startswith("\\"):
+                    continue
+                if in_string:
+                    in_string = t != '"'
+                elif t == '"':
+                    in_string = True
+                elif t == "(":
+                    depth += 1
+                elif t == ")":
+                    depth -= 1
+                elif depth == 1:
+                    fields[t.strip()] = token.end()
+            body_at = fields[":body"]
+            body, text = text[body_at:], text[:body_at]
+            mode = text[fields[":mode"]:].split(None, 1)[0]
+            if "(ItemKind Const)" in text[fields[":item_kind"]:].split(")", 1)[0] + ")":
+                mode = "Const"
+        name = NAME.search(text)
+        key = (kind, name[1]) if name and kind in ("Function", "Datatype") else (kind, text)
+        items[key] = (kind, text, body, mode)
+        if span and name:
+            spans.setdefault(span[0], []).append((span[1], span[2], key))
+    for file_spans in spans.values():
+        file_spans.sort()
+    return items, spans
+
+
+def item_at(spans, file, line):
+    """The item whose source region holds this line: the last one starting at or above it."""
+    found = None
+    for start, _end, key in spans.get(file, ()):
+        if start > line:
+            break
+        found = key
+    return found
+
+
+def local_changes(baseline, mutated):
+    """(exec/proof functions whose bodies alone differ, items that differ in any other way).
+
+    None when the item sets differ, which no body-only change can cause.
+    """
+    if baseline.keys() != mutated.keys():
+        return None
+    changed, beyond = set(), set()
+    for key, (kind, spec, body, mode) in mutated.items():
+        base_kind, base_spec, base_body, _ = baseline[key]
+        if kind != base_kind or spec != base_spec or (body != base_body and (kind != "Function" or mode not in ("Exec", "Proof"))):
+            beyond.add(key)
+        elif body != base_body:
+            changed.add(key)
+    return changed, beyond
+
+
+ERROR = re.compile(r"^(error|warning|note)(?:\[\w+\])?: (.*)$", re.M)
+LOCATION = re.compile(r"^\s*(?:-->|:::) (\S+?):(\d+):\d+", re.M)
+
+
+def error_blocks(output):
+    """(message, [(file, line)]) for each error Verus reported."""
+    headers = list(ERROR.finditer(output))
+    blocks = []
+    for i, header in enumerate(headers):
+        if header[1] != "error":
+            continue
+        text = output[header.end():headers[i + 1].start() if i + 1 < len(headers) else len(output)]
+        locations = [(Path(m[1]).name, int(m[2])) for m in LOCATION.finditer(text)]
+        blocks.append((header[2], locations))
+    return blocks
+
+
+# --- Running the mutations ----------------------------------------------------
+
+def apply(workdir, name, mutations):
+    """Copy the crate and apply each (filename, before, after)."""
+    target = workdir / name / "src"
+    shutil.copytree(SOURCE, target)
+    clean = True
+    for filename, before, after in mutations:
+        path = target / filename
+        text = path.read_text()
+        clean = clean and text.count(before) == 1
+        path.write_text(text.replace(before, after))
+    return target, clean
 
 
 def check(workdir, filename, name, before, after):
@@ -434,19 +570,97 @@ def check(workdir, filename, name, before, after):
     of the whole crate too, so only a module that still verifies on its own falls
     back to verifying every module, which catches defects refuted by a caller.
     """
-    original = (SOURCE / filename).read_text()
-    assert original.count(before) == 1, (name, original.count(before))
-    target = workdir / name / "src"
-    shutil.copytree(SOURCE, target)
-    (target / filename).write_text(original.replace(before, after))
-    for module in (Path(filename).stem, None):
-        result = subprocess.run(command(target, module), capture_output=True, text=True)
+    target, _clean = apply(workdir, name, [(filename, before, after)])
+    for modules in ([Path(filename).stem], []):
+        result = subprocess.run(command(target, modules), capture_output=True, text=True)
         output = result.stdout + result.stderr
         if result.returncode != 0:
             if not any(marker in output for marker in MARKERS):
                 raise RuntimeError(f"{name}: expected a proof failure, got:\n{output}")
-            return f"{name}: rejected by proof" + ("" if module else " outside its module")
+            return f"{name}: rejected by proof" + ("" if modules else " outside its module")
     raise RuntimeError(f"{name}: expected a proof failure, got:\n{output}")
+
+
+def check_batch(workdir, baseline, index, batch, attempt=0):
+    """Verify every mutation of a batch in one run; fall back to single runs for what the batch cannot judge.
+
+    `batch` is [(mutation, expected function key)], one mutation per function.
+    """
+    name = f"batch{index}" + (f"-{attempt}" if attempt else "")
+    target, clean = apply(workdir, name, [(m[0], m[2], m[3]) for m, _ in batch])
+    modules = sorted({Path(m[0]).stem for m, _ in batch})
+    log_dir = workdir / name / "vir"
+    result = subprocess.run(command(target, modules, log_dir, lifetime=False), capture_output=True, text=True)
+    output = result.stdout + result.stderr
+    expected = {key: m for m, key in batch}
+    reason = None
+    if not clean:
+        reason = "mutations overlap"
+    elif not (log_dir / "crate-simple.vir").exists():
+        reason = "no VIR log"
+    elif (local := local_changes(baseline, (parsed := parse_vir(log_dir / "crate-simple.vir"))[0])) is None:
+        reason = "the set of items differs"
+    else:
+        items, spans = parsed
+        changed, beyond = local
+        if beyond and beyond <= set(expected) and attempt == 0:
+            # Mutations that edited their own function's specification: single runs for
+            # those, one more batched run for the rest.
+            print(f"{name}: {len(beyond)} mutations change a specification; rerunning the other {len(batch) - len(beyond)} together", flush=True)
+            rest = [(m, key) for m, key in batch if key not in beyond]
+            return [check(workdir, *expected[key]) for key in sorted(beyond)] + (check_batch(workdir, baseline, index, rest, 1) if rest else [])
+        if beyond:
+            reason = f"changes reach beyond the mutated functions: {sorted(k[1] for k in beyond)}"
+        elif changed != set(expected):
+            reason = f"changed bodies do not match the mutated functions: {sorted(k[1] for k in changed ^ set(expected))}"
+        else:
+            refuted = set()
+            for message, locations in error_blocks(output):
+                if not locations:
+                    continue  # "aborting due to N previous errors"
+                owner = item_at(spans, *locations[0])
+                if owner not in expected:
+                    reason = f"error outside the mutated functions: {message} at {locations[0]}"
+                    break
+                if any(marker in message for marker in MARKERS):
+                    refuted.add(owner)
+            if reason is None and (missing := set(expected) - refuted):
+                reason = f"not refuted in their own functions: {sorted(expected[k][1] for k in missing)}"
+    if reason is None:
+        return [f"{m[1]}: rejected by proof" for m, _ in batch]
+    print(f"{name}: {reason}; checking its {len(batch)} mutations one at a time", flush=True)
+    return [check(workdir, *m) for m, _ in batch]
+
+
+def plan(baseline, baseline_spans):
+    """Split the mutations into batches of distinct exec/proof functions, plus the rest for single runs."""
+    singles, keyed = [], []
+    for mutation in MUTATIONS:
+        filename, name, before, _after = mutation
+        source = (SOURCE / filename).read_text()
+        assert source.count(before) == 1, (name, source.count(before))
+        line = source[:source.index(before)].count("\n") + 1
+        key = item_at(baseline_spans, filename, line)
+        if key is None or key[0] != "Function" or baseline[key][3] not in ("Exec", "Proof"):
+            singles.append(mutation)
+        else:
+            keyed.append((mutation, key))
+    # A mutation joins the first batch whose copy of its function is untouched and
+    # in whose edited text its `before` is still unique, so earlier edits in the
+    # batch cannot hide it or duplicate it.
+    batches, texts = [], []
+    for mutation, key in keyed:
+        filename, _name, before, after = mutation
+        for batch, text in zip(batches, texts):
+            current = text.setdefault(filename, (SOURCE / filename).read_text())
+            if all(k != key for _, k in batch) and current.count(before) == 1:
+                batch.append((mutation, key))
+                text[filename] = current.replace(before, after)
+                break
+        else:
+            batches.append([(mutation, key)])
+            texts.append({filename: (SOURCE / filename).read_text().replace(before, after)})
+    return batches, singles
 
 
 # Optional focused reruns after changing one proof module; default remains all.
@@ -455,10 +669,15 @@ if selected := os.environ.get("MUTATION_FILTER"):
     if not MUTATIONS:
         raise SystemExit(f"no mutations match {selected!r}")
 
-subprocess.run(command(SOURCE), check=True)
 with tempfile.TemporaryDirectory(prefix="gateway-mutations-") as temporary:
-    # Each mutation verifies in its own copy, so the independent runs share the machine.
+    workdir = Path(temporary)
+    subprocess.run(command(SOURCE, log_dir=workdir / "baseline"), check=True)
+    baseline, baseline_spans = parse_vir(workdir / "baseline" / "crate-simple.vir")
+    batches, singles = plan(baseline, baseline_spans)
+    jobs = [lambda i=i, b=b: check_batch(workdir, baseline, i, b) for i, b in enumerate(batches)]
+    jobs += [lambda m=m: [check(workdir, *m)] for m in singles]
+    # Each job verifies its own copy, so the independent runs share the machine.
     with ThreadPoolExecutor(max_workers=os.cpu_count() or 1) as pool:
-        for report in pool.map(lambda m: check(Path(temporary), *m), MUTATIONS):
-            print(report, flush=True)
-print(f"{len(MUTATIONS)} mutations rejected by proof", flush=True)
+        for reports in pool.map(lambda job: job(), jobs):
+            print("\n".join(reports), flush=True)
+print(f"{len(MUTATIONS)} mutations rejected by proof ({len(batches)} batched runs, {len(singles)} single runs)", flush=True)

@@ -361,7 +361,6 @@ impl Assembler {
     /// Admit one scanned record. Returns an exchange when this record completes
     /// one, when it belongs to no open request (an orphan carrying just this
     /// record), or when a request start had to evict another exchange first.
-    #[verifier::rlimit(80)]
     pub fn admit(&mut self, header: Header, payload: &[u8]) -> (out: Option<Exchange>)
         requires old(self).valid(), crate::framing::valid(header), header.payload == payload.len(),
         ensures final(self).valid(), final(self).max_open() == old(self).max_open(),

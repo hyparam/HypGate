@@ -86,7 +86,9 @@ jobs:
       - name: Report verifier version
         run: verus --version
       - name: Verify production core
-        run: cargo verus verify -p gateway-core --locked -- --triggers-mode silent
+        # The release archive ships vstd already verified; cargo-verus would rebuild and
+        # re-verify it from source on every run.
+        run: verus crates/gateway-core/src/lib.rs --crate-type lib --triggers-mode silent
       - name: Reject deliberate defects
         run: python3 scripts/check_mutations.py
 
