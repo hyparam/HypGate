@@ -147,6 +147,43 @@ implementation performs what it is asked (sends to the configured server,
 returns the log's records in order, writes the checkpoint it is given); the
 scanner reads the same file on restart (the checkpoint names the session).
 
+**Gaps.** What stands between the theorems above and the statement, and
+whether each is a proof we can still write or an assumption we take on.
+
+- *The glue between the core and the wire is tested, not proved.* Every theorem
+  is about a synchronous state machine. The Tokio tasks, Hyper framing, socket
+  writes, and the disk thread that feed it are audited by reading the source
+  and by tests. Partly fixable: the request-side body driver can be verified
+  over an effect trait the way `shipping_driver::drive` already is, leaving
+  only "the effect implementation does what it is told" as the premise.
+  Tokio and Hyper themselves stay assumptions.
+- *Every exit writes a completion record.* The core proves a failed stream
+  cannot complete as success, but the claim that every failure path emits a
+  completion with the right outcome code rests on the
+  [end-to-end audit](docs/end-to-end-audit.md) and tests. Fixable: make the
+  exchange lifecycle a verified machine whose only terminal transitions emit
+  the completion or record logger failure, so a slot cannot be released
+  without one. A record missing because the process died stays by design and
+  is reported by its absence.
+- *Durability stops at the storage contract.* Acknowledged records survive
+  every crash in the model; the model assumes the filesystem honors sync.
+  Tested on ext4 with process kills and full or read-only disks, never with
+  power loss. Checksums catch corruption, not deliberate rewriting.
+  Assumption: a filesystem cannot be proved from inside the process, only
+  tested on named hardware.
+- *The record values are trusted.* The codecs are proved, but the time,
+  status, outcome, and byte counts they encode come from runtime code and the
+  system clock; session uniqueness and the one-registry-per-log mapping are
+  also trusted. Partly fixable: byte counts and outcome can be derived from
+  verified stream state instead of runtime counters. The clock and the HTTP
+  status from Hyper stay assumptions.
+- *Shipping trusts its edges.* The machine and driver are proved; the HTTPS
+  client, JSON and SSE parsing, the projection into HypAware rows, and the
+  server's dedup ledger are not, and the projection is lossy by design.
+  Mostly assumption: the server and TLS stack are outside the process. The
+  projection could be removed from the trusted set by shipping raw record
+  bytes and parsing server side, which is a design choice rather than a proof.
+
 ## Guarantee 3: there is no crash state
 
 **Statement.** The verified core cannot panic. Every reachable shipper state
