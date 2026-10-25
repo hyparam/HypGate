@@ -115,8 +115,13 @@ unacknowledged with identical identities, so the server stores each once.
 
 Strict mode is the guarantee. Availability mode is the operator's opt-out: it
 forwards after a logging failure and counts one audit gap per affected
-request, with authorization unchanged. Headers are never logged in either
-mode, so the log holds bodies and metadata, not the full HTTP exchange.
+request, with authorization unchanged. The gap rule and the readiness rule
+are checked (`health::GapObserver`, `health::readiness`): a request is
+counted at most once and never in strict mode; the gateway never reports
+ready while admission is broken or, in strict mode, while the log is
+unhealthy, and logging loss never fails readiness in availability mode.
+Headers are never logged in either mode, so the log holds bodies and
+metadata, not the full HTTP exchange.
 
 **Proved today.**
 

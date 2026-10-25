@@ -13,6 +13,7 @@ pub mod submission;
 pub mod body_copy;
 pub mod exchange_lifecycle;
 pub mod headers;
+pub mod health;
 pub mod inbound;
 pub mod destination;
 pub mod journal;

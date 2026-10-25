@@ -11,7 +11,7 @@ use hyper_util::rt::{TokioIo, TokioTimer};
 use std::{convert::Infallible, future::Future, io, pin::Pin, sync::{Arc, atomic::{AtomicU64, Ordering}},
     task::{Context, Poll}, time::Duration};
 use tokio::{io::{AsyncWrite, AsyncWriteExt}, net::TcpListener, sync::oneshot, task::{JoinHandle, JoinSet}};
-use gateway_core::exchange_lifecycle::{Closed, Fault, Lifecycle};
+use gateway_core::{exchange_lifecycle::{Closed, Fault, Lifecycle}, health::{GapObserver, Readiness}};
 use tokio_util::task::TaskTracker;
 
 mod workers;
@@ -66,12 +66,13 @@ impl Gateway {
                 }
                 "/healthz" => return Ok(fixed(StatusCode::OK, "ok\n")),
                 "/readyz" => {
-                    if !self.config.admission_healthy() || !self.worker_slots.healthy() {
-                        return Ok(fixed(StatusCode::SERVICE_UNAVAILABLE, "admission unavailable\n"));
-                    }
-                    let ready = !self.config.requires_audit() || self.log.healthy();
-                    return Ok(fixed(if ready { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE },
-                        if ready { "ready\n" } else { "audit unavailable\n" }));
+                    // The rule is the verified `health::readiness`; this only samples its inputs.
+                    return Ok(match gateway_core::health::readiness(self.config.admission_healthy(), self.worker_slots.healthy(),
+                        self.config.requires_audit(), self.log.healthy()) {
+                        Readiness::Ready => fixed(StatusCode::OK, "ready\n"),
+                        Readiness::AdmissionUnavailable => fixed(StatusCode::SERVICE_UNAVAILABLE, "admission unavailable\n"),
+                        Readiness::AuditUnavailable => fixed(StatusCode::SERVICE_UNAVAILABLE, "audit unavailable\n"),
+                    });
                 }
                 _ => {}
             }
@@ -117,7 +118,7 @@ impl Gateway {
         };
         let mut life = Lifecycle::begin();
         let mut log = ObservedLog { log: self.log.clone(), gaps: &self.audit_gaps,
-            availability: !self.config.requires_audit(), reported: false };
+            observer: GapObserver::new(!self.config.requires_audit()) };
         // If strict logging is already unavailable, do not even open an
         // upstream connection. Later failures still use the stream gate.
         if self.config.requires_audit() && !self.log.healthy() {
@@ -215,14 +216,13 @@ async fn worker_response(headers: oneshot::Receiver<(StatusCode, HeaderMap)>,
 
 // Report potential audit loss at the first failed append, not only after a
 // successful response: cancellation and provider failures must not hide it.
-struct ObservedLog<'a> { log: DiskLog, gaps: &'a AtomicU64, availability: bool, reported: bool }
+// The verified observer decides when an append counts; this only adds one.
+struct ObservedLog<'a> { log: DiskLog, gaps: &'a AtomicU64, observer: GapObserver }
 impl AuditLog for ObservedLog<'_> {
     fn session_id(&self) -> u128 { self.log.session_id() }
     async fn append(&mut self, record: LogRecord<'_>) -> io::Result<crate::transfer::DurableFrame> {
         let result = self.log.append(record).await;
-        if result.is_err() && self.availability && !self.reported {
-            self.gaps.fetch_add(1, Ordering::Relaxed); self.reported = true;
-        }
+        if self.observer.observe(result.is_err()) { self.gaps.fetch_add(1, Ordering::Relaxed); }
         result
     }
 }

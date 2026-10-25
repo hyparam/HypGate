@@ -80,7 +80,8 @@ describes what the scanner can and cannot tell you.
 `GET /readyz` fails when the admission or worker registry is poisoned, when worker
 admission is closed for shutdown, or, in strict mode only, when the logger is
 unhealthy. Availability mode stays ready through logging loss but never overrides
-an admission failure. Readiness does not probe upstream availability, request
+an admission failure. The rule is the verified `health::readiness`; the server
+only samples its inputs. Readiness does not probe upstream availability, request
 capacity, or disk space. In strict mode, once logger health has failed, authorized
 requests get 503 without opening an upstream connection; failures during a stream
 are handled by the durability gate instead.
@@ -91,8 +92,9 @@ are handled by the durability gate instead.
   not count every externally canceled task.
 - `loggate_audit_gap_requests_total`: availability-mode requests whose first log
   append failed, counted once per request even if the request later fails or is
-  canceled. It flags possible incomplete audit coverage, not a count of unlogged
-  bytes. Strict-mode refusals are not gaps.
+  canceled (the verified `health::GapObserver` decides when an append counts). It
+  flags possible incomplete audit coverage, not a count of unlogged bytes.
+  Strict-mode refusals are not gaps.
 - `loggate_audit_healthy`: logger health.
 - `loggate_requests_active` and `loggate_requests_limit`: live registry slots,
   sampled under the runtime lock. These are not memory or connection counts.
