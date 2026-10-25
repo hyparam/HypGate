@@ -235,7 +235,6 @@ impl<'a> Request<'a> {
         pending.armed = false;
         Ok(())
     }
-    pub(crate) fn selector(&self) -> u64 { self.authorized.route().selector }
     pub fn prepare(&mut self, max: usize, direction: Direction) -> Option<WriteTicket<'a>> {
         AuthorizedWrite::prepare(self.lease.stream_mut(), &self.authorized, &self.journal, direction.id(), max)
             .map(|core| WriteTicket { admission: self.lease.admission, core })

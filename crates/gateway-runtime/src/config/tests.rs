@@ -28,7 +28,7 @@ fn native_provider_endpoints_keep_their_own_credentials() {
     let one = c.admit(b"test-gateway-token", 7).unwrap();
     // The egress permit names exactly the resolved destination and its route.
     let permit = one.egress();
-    assert_eq!(permit.target().uri(), one.destination());
+    assert_eq!(permit.target().text, one.destination_text().as_bytes());
     assert!(matches!(permit.kind(), gateway_core::egress::Origin::Provider { origin: 0, credential: 0, .. }));
     let two = c.admit(b"test-gateway-token", 8).unwrap();
     assert_eq!(one.destination().to_string(), "https://api.openai.com/v1/responses");

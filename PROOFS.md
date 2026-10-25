@@ -129,6 +129,11 @@ mode, so the log holds bodies and metadata, not the full HTTP exchange.
   nothing pending. Every failure closes the stream. Its byte count equals the
   growth of the stream's completed history. The async loop around it performs
   the effect the machine names and reports the result; it decides nothing.
+- The start record is built by the verified core
+  (`exchange_lifecycle::start_record`): its selector is the authorized route's
+  and its destination text is the configured text of the destination that
+  route resolved to, so the log names the route and destination the proofs
+  dispatched to.
 - The exchange lifecycle is a verified machine (`exchange_lifecycle::Lifecycle`).
   It is terminal after exactly one event, a successful download or a named
   fault; the outcome code is a checked function of that event; the completion
@@ -213,11 +218,12 @@ an assumption we take on; the proofs that could be written have been.
   power loss. Checksums catch corruption, not deliberate rewriting.
   Assumption: a filesystem cannot be proved from inside the process, only
   tested on named hardware.
-- *Timestamps and the status code are trusted.* The outcome code and the byte
-  counts in the completion record are derived in the verified lifecycle from
-  the body-copy machines' proved counts. The clock, the HTTP status from
-  Hyper, session uniqueness, and the one-registry-per-log mapping remain
-  trusted.
+- *Timestamps and the status code are trusted.* The start record's selector
+  and destination text come from the verified authority and resolved
+  destination (`exchange_lifecycle::start_record`), and the completion
+  record's outcome and byte counts from the verified lifecycle and body-copy
+  machines. The clock, the HTTP status from Hyper, session uniqueness, and the
+  one-registry-per-log mapping remain trusted.
 - *Shipping trusts its edges.* The machine and driver are proved; the HTTPS
   client, JSON and SSE parsing, the projection into HypAware rows, and the
   server's dedup ledger are not, and the projection is lossy by design.

@@ -47,19 +47,17 @@ impl<'a> PreparedRequest<'a> {
         self.routed.copy_body(reader, writer, log, direction).await
     }
     pub fn destination(&self) -> &Uri { self.routed.destination() }
-    pub(crate) fn egress(&self) -> gateway_core::egress::Egress<'_, crate::config::Destination> { self.routed.egress() }
+    pub(crate) fn egress(&self) -> gateway_core::egress::Egress<'_, gateway_core::destination::Parts> { self.routed.egress() }
     pub(crate) fn stream(&mut self) -> &mut crate::admission::Request<'a> { self.routed.stream() }
 
-    /// Kind 2: wall clock, the authorized route selector, and the configured
-    /// destination text this request was resolved to. Appended before any
-    /// DNS, TCP, or TLS effect.
+    /// Kind 2: the wall clock, the authorized route selector, and the configured
+    /// text of the destination this request resolved to, built by the verified
+    /// `exchange_lifecycle::start_record`. Appended before any DNS, TCP, or TLS
+    /// effect.
     pub(crate) async fn audit_request_start<L: crate::transfer::AuditLog>(&mut self, log: &mut L)
         -> Result<(), crate::transfer::TransferError>
     {
-        let destination = self.routed.destination_text().as_bytes().to_vec();
-        let selector = self.routed.stream().selector();
-        let payload = gateway_core::metadata::encode_request_start(unix_ms(), selector, &destination)
-            .ok_or(crate::transfer::TransferError::InvalidState)?;
+        let payload = self.routed.start_record(unix_ms()).ok_or(crate::transfer::TransferError::InvalidState)?;
         self.routed.stream().audit_metadata(log, crate::transfer::RecordKind::RequestStart, &payload).await
     }
     /// Kind 3: wall clock and the upstream HTTP status, appended after the

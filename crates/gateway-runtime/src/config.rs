@@ -60,19 +60,12 @@ enum Logging { Strict, Availability }
 // accidentally format loaded credentials.
 struct Credential { kind: CredentialKind, value: HeaderValue }
 
-// The verified `gateway_core::destination::parse` decides what is accepted and
-// yields the authority, host, and port the runtime connects to; the parsed URI
-// is Hyper's view of the same text and is checked to agree with it. The exact
-// configured text is what the audit log's request-start record carries.
-pub(crate) struct Destination { uri: Uri, text: String, authority: String, host: String, port: u16 }
-impl Destination {
-    pub(crate) fn uri(&self) -> &Uri { &self.uri }
-    /// The authority exactly as configured, for the Host header.
-    pub(crate) fn authority(&self) -> &str { &self.authority }
-    /// The host for name resolution and TLS, without IPv6 brackets.
-    pub(crate) fn host(&self) -> &str { &self.host }
-    pub(crate) fn port(&self) -> u16 { self.port }
-}
+// A destination is the verified `gateway_core::destination::Parts`: the text the
+// operator wrote and the authority, host, port, and path proved to be its
+// substrings. The resolved route hands the core these parts directly, so the
+// request-start record and the Host header are built from them by proof.
+// Hyper's URI is parsed from the same text when a request is admitted.
+pub(crate) type Destination = gateway_core::destination::Parts;
 
 pub struct GatewayConfig {
     chunk_bytes: usize,
@@ -86,15 +79,16 @@ pub struct GatewayConfig {
 pub struct RoutedRequest<'a> {
     request: Request<'a>,
     resolved: gateway_core::resolved_route::ResolvedRoute<'a, Destination, Credential>,
+    uri: Uri,
 }
 
 fn destination(text: &str) -> Result<Destination, ConfigError> {
-    let (uri, parts) = destination_uri(text)?;
-    // The parts are visible ASCII by the proof, so these conversions cannot fail.
-    let authority = String::from_utf8(parts.authority).map_err(|_| ConfigError::Destination)?;
-    let host = String::from_utf8(parts.host).map_err(|_| ConfigError::Destination)?;
-    Ok(Destination { uri, text: text.to_owned(), authority, host, port: parts.port })
+    Ok(destination_uri(text)?.1)
 }
+
+/// The verified parts are visible ASCII, so this never fails for a destination
+/// `parse` accepted.
+fn ascii(bytes: &[u8]) -> &str { std::str::from_utf8(bytes).expect("verified destination part is ASCII") }
 
 /// Validate a destination with the verified parser, then parse Hyper's URI
 /// from the same text and require the two views to agree. The verified parts
@@ -177,7 +171,11 @@ impl GatewayConfig {
         let request = self.admission.admit(&digest, selector)?;
         let resolved = gateway_core::resolved_route::ResolvedRoute::resolve(
             request.authority(), &self.destinations, &self.credentials).ok_or(AdmissionError::Unavailable)?;
-        Ok(RoutedRequest { request, resolved })
+        // Hyper's request target, parsed from the verified destination's text;
+        // configuration already checked that the two views agree.
+        let uri = ascii(&resolved.destination(request.authority()).ok_or(AdmissionError::Unavailable)?.text)
+            .parse().map_err(|_| AdmissionError::Unavailable)?;
+        Ok(RoutedRequest { request, resolved, uri })
     }
 }
 
@@ -188,21 +186,21 @@ impl<'a> RoutedRequest<'a> {
         crate::transfer::copy_body_bound(&mut self.request, reader, writer, log, direction, Some(&self.resolved)).await
     }
     pub(crate) fn stream(&mut self) -> &mut Request<'a> { &mut self.request }
-    pub fn destination(&self) -> &Uri {
-        &self.resolved.destination(self.request.authority()).expect("private request/route binding").uri
-    }
+    pub fn destination(&self) -> &Uri { &self.uri }
+    fn parts(&self) -> &Destination { self.resolved.destination(self.request.authority()).expect("private request/route binding") }
     /// The permit a socket may be opened under: the verified core binds it to
     /// this request's resolved destination and route.
     pub(crate) fn egress(&self) -> gateway_core::egress::Egress<'_, Destination> {
         gateway_core::egress::Egress::provider(&self.resolved, self.request.authority()).expect("private request/route binding")
     }
     /// The configured destination string exactly as the operator wrote it.
-    pub fn destination_text(&self) -> &str {
-        &self.resolved.destination(self.request.authority()).expect("private request/route binding").text
-    }
+    pub fn destination_text(&self) -> &str { ascii(&self.parts().text) }
     /// The verified authority of the resolved destination, for the Host header.
-    pub(crate) fn authority(&self) -> &str {
-        self.resolved.destination(self.request.authority()).expect("private request/route binding").authority()
+    pub(crate) fn authority(&self) -> &str { ascii(&self.parts().authority) }
+    /// The request-start record payload, built by the verified core from the
+    /// authorized selector and the resolved destination's configured text.
+    pub(crate) fn start_record(&self, time_ms: u64) -> Option<Vec<u8>> {
+        gateway_core::exchange_lifecycle::start_record(self.request.authority(), &self.resolved, time_ms)
     }
 
     // Only the trusted HTTP boundary may inject provider credentials.

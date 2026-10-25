@@ -52,7 +52,7 @@ mod handshake;
 // verified core minted for this request's resolved destination; the
 // addresses come from resolving that permit's host.
 #[allow(clippy::disallowed_methods)]
-async fn open_socket(_permit: &gateway_core::egress::Egress<'_, crate::config::Destination>, addresses: &[std::net::SocketAddr]) -> io::Result<TcpStream> {
+async fn open_socket(_permit: &gateway_core::egress::Egress<'_, gateway_core::destination::Parts>, addresses: &[std::net::SocketAddr]) -> io::Result<TcpStream> {
     TcpStream::connect(addresses).await
 }
 
@@ -97,7 +97,7 @@ impl HttpsTransport {
         let (host, port) = {
             let permit = prepared.egress();
             let target = permit.target();
-            (target.host().to_owned(), target.port())
+            (std::str::from_utf8(&target.host).map_err(|_| TransportError::Metadata)?.to_owned(), target.port)
         };
         let server = ServerName::try_from(host.clone()).map_err(|_| TransportError::Metadata)?;
         let tcp = {

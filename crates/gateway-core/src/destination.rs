@@ -19,6 +19,8 @@ pub const ROOT: [u8; 1] = *b"/";
 
 /// The parts of a validated destination.
 pub struct Parts {
+    /// The configured text, exactly as the operator wrote it.
+    pub text: Vec<u8>,
     /// The authority exactly as configured: host text, and `:port` if given.
     pub authority: Vec<u8>,
     /// The host for name resolution and TLS: the DNS name, or the IPv6
@@ -72,7 +74,7 @@ pub open spec fn raw_path_ok(raw: Seq<u8>) -> bool {
 /// `text` splits into `https://`, the host spelling, the port suffix, and the
 /// raw path, and `parts` are exactly those pieces.
 pub open spec fn destination_split(text: Seq<u8>, parts: Parts, spelled: Seq<u8>, suffix: Seq<u8>, raw: Seq<u8>) -> bool {
-    host_text(parts.host@, spelled) && port_text(parts.port, suffix) && raw_path_ok(raw)
+    parts.text@ == text && host_text(parts.host@, spelled) && port_text(parts.port, suffix) && raw_path_ok(raw)
     && parts.authority@ == spelled + suffix
     && text == HTTPS@ + parts.authority@ + raw
     && parts.path@ == (if raw.len() == 0 { ROOT@ } else { raw })
@@ -259,7 +261,7 @@ pub fn parse(text: &[u8]) -> (out: Option<Parts>)
     let suffix = slice_subrange(authority, spelled_end, authority.len());
     let port = match parse_port(suffix) { Some(port) => port, None => return None };
     let path = if raw.len() == 0 { slice_to_vec(ROOT.as_slice()) } else { slice_to_vec(raw) };
-    let parts = Parts { authority: slice_to_vec(authority), host, port, path };
+    let parts = Parts { text: slice_to_vec(text), authority: slice_to_vec(authority), host, port, path };
     proof {
         let spelled = authority@.subrange(0, spelled_end as int);
         assert(parts.authority@ =~= spelled + suffix@);

@@ -5,7 +5,7 @@
 //! outcome code is a checked function of the event, and the byte counts of a
 //! successful exchange are the counts the body-copy machines proved.
 use vstd::prelude::*;
-use crate::{body_copy::BodyCopy, metadata};
+use crate::{body_copy::BodyCopy, destination::Parts, metadata, policy::AuthorizedRequest, resolved_route::ResolvedRoute};
 
 verus! {
 /// Why an exchange ended without a complete response.
@@ -51,6 +51,24 @@ pub fn outcome_code(fault: Fault) -> (out: u8)
         Fault::Log | Fault::StartRefused => metadata::OUTCOME_LOG_REFUSAL,
         Fault::Metadata | Fault::InputUnavailable => metadata::OUTCOME_OTHER,
     }
+}
+
+/// The request-start record payload (kind 2): the clock, the authorized
+/// route's selector, and the configured text of the destination the route
+/// resolved to. `None` only when the route is not bound to this authority or
+/// the destination text is outside the codec's bounds.
+pub fn start_record<C>(authority: &AuthorizedRequest, resolved: &ResolvedRoute<'_, Parts, C>, time_ms: u64) -> (out: Option<Vec<u8>>)
+    requires authority.valid(),
+    ensures match out {
+        Some(payload) => resolved.bound_to(authority)
+            && metadata::decoded_request_start(payload@)
+                == Some((time_ms, authority.binding().selector, resolved.destination_value().text@)),
+        None => !resolved.bound_to(authority) || !metadata::request_start_valid(resolved.destination_value().text@),
+    },
+{
+    let destination = match resolved.destination(authority) { Some(destination) => destination, None => return None };
+    let route = authority.route();
+    metadata::encode_request_start(time_ms, route.selector, destination.text.as_slice())
 }
 
 #[derive(PartialEq, Eq, Structural, Clone, Copy, Debug)]
