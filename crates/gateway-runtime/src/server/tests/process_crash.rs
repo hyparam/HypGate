@@ -1,7 +1,7 @@
 //! Process-crash experiment: the kernel and filesystem caches remain alive.
 use super::*;
 use std::{io::Write, process::{Child, Command, Stdio}};
-use tokio_rustls::rustls::pki_types::CertificateDer;
+use tokio_rustls::{TlsConnector, rustls::{ClientConfig, pki_types::{CertificateDer, ServerName}}};
 
 struct Process(Child);
 impl Drop for Process { fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); } }
@@ -182,7 +182,6 @@ async fn start_proxy(directory: &TempDir, primary: u16, standby: u16, pem: &str)
 }
 
 async fn send_proxy(port: u16, root: &[u8], payload: &'static [u8]) -> (Response<Incoming>, JoinHandle<()>) {
-    use tokio_rustls::{TlsConnector, rustls::{ClientConfig, pki_types::ServerName}};
     let mut roots = RootCertStore::empty(); roots.add(CertificateDer::from(root.to_vec())).unwrap();
     let connector = TlsConnector::from(Arc::new(ClientConfig::builder().with_root_certificates(roots).with_no_client_auth()));
     let socket = TcpStream::connect(("127.0.0.1", port)).await.unwrap();

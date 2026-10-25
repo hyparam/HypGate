@@ -6,9 +6,12 @@ use http_body_util::{BodyExt, Full};
 use hyper::{service::service_fn, Response};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::{convert::Infallible, pin::Pin, task::{Context, Poll}};
-use tokio::net::TcpListener;
-use tokio_rustls::{TlsAcceptor, rustls::{ServerConfig, pki_types::PrivatePkcs8KeyDer}};
+use std::{convert::Infallible, io::{Read, Write}, pin::Pin, sync::atomic::{AtomicBool, Ordering}, task::{Context, Poll}};
+use tokio::{io::{AsyncReadExt, ReadBuf}, net::TcpListener};
+use tokio_rustls::{TlsAcceptor, rustls::{CipherSuite, CipherSuiteCommon, ClientConnection, ContentType, HandshakeKind,
+    ProtocolVersion, ServerConfig, ServerConnection, SupportedCipherSuite, Tls13CipherSuite, pki_types::PrivatePkcs8KeyDer,
+    version::{TLS12, TLS13}, crypto::{cipher::{AeadKey, Iv, OutboundChunks, OutboundPlainMessage},
+    ring::cipher_suite::{TLS13_AES_256_GCM_SHA384, TLS13_CHACHA20_POLY1305_SHA256}}}};
 
 struct Output { bytes: Vec<u8>, status: Option<StatusCode>, headers: HeaderMap }
 impl Output { fn new() -> Self { Self { bytes: Vec::new(), status: None, headers: HeaderMap::new() } } }
@@ -143,8 +146,6 @@ async fn trusted_certificate_with_large_wrong_purpose_list_is_rejected_before_up
 
 #[tokio::test]
 async fn tls_drain_guard_holds_control_queue_stable_and_resumes_exact_bytes() {
-    use tokio::io::{AsyncReadExt, ReadBuf};
-    use std::sync::atomic::{AtomicBool, Ordering};
     struct Gated { tcp: TcpStream, blocked: Arc<AtomicBool> }
     impl AsyncRead for Gated {
         fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, out: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
@@ -211,8 +212,6 @@ async fn tls_drain_guard_holds_control_queue_stable_and_resumes_exact_bytes() {
 
 #[test]
 fn tls_application_write_fragment_overhead_is_bounded_for_pinned_suites() {
-    use std::io::{Read, Write};
-    use tokio_rustls::rustls::{ClientConnection, ServerConnection, CipherSuite};
     let suites = tokio_rustls::rustls::crypto::ring::default_provider().cipher_suites;
     let mut exercised = 0;
     for suite in suites {
@@ -280,8 +279,6 @@ fn tls_application_write_fragment_overhead_is_bounded_for_pinned_suites() {
 // key scheduling. Production uses ring's unmodified confidentiality limits.
 #[test]
 fn tls_automatic_refresh_bounds_records_at_each_batch_boundary() {
-    use std::io::{Read, Write};
-    use tokio_rustls::rustls::{ClientConnection, ServerConnection, SupportedCipherSuite, Tls13CipherSuite, CipherSuiteCommon};
     static SHORT_KEYS: std::sync::LazyLock<Tls13CipherSuite> = std::sync::LazyLock::new(|| {
         let base = tokio_rustls::rustls::crypto::ring::cipher_suite::TLS13_AES_128_GCM_SHA256.tls13().unwrap();
         Tls13CipherSuite {
@@ -348,9 +345,6 @@ fn tls_automatic_refresh_bounds_records_at_each_batch_boundary() {
 
 #[test]
 fn tls_record_encoding_reuses_exact_sized_encryption_allocation() {
-    use tokio_rustls::rustls::{ContentType, ProtocolVersion};
-    use tokio_rustls::rustls::crypto::cipher::{AeadKey, Iv, OutboundPlainMessage, OutboundChunks};
-    use tokio_rustls::rustls::crypto::ring::cipher_suite::{TLS13_AES_256_GCM_SHA384, TLS13_CHACHA20_POLY1305_SHA256};
     for suite in [TLS13_AES_256_GCM_SHA384, TLS13_CHACHA20_POLY1305_SHA256] {
         // Synthetic keys never leave this unit test. Increasing sequence numbers
         // ensure each record uses a distinct nonce under its test key.
@@ -374,8 +368,6 @@ fn tls_record_encoding_reuses_exact_sized_encryption_allocation() {
 // Dependency-level counterexample, not a production HTTP scheduling test.
 #[test]
 fn tls_control_replies_can_exceed_application_buffer_limit() {
-    use std::io::{Read, Write};
-    use tokio_rustls::rustls::{ClientConnection, ServerConnection};
     let cert = generate_simple_self_signed(vec!["localhost".into()]).unwrap();
     let mut roots = RootCertStore::empty(); roots.add(cert.cert.der().clone()).unwrap();
     let server_config = ServerConfig::builder().with_no_client_auth().with_single_cert(
@@ -415,7 +407,6 @@ fn tls_control_replies_can_exceed_application_buffer_limit() {
 
 #[tokio::test]
 async fn tls_key_update_burst_limit_rejects_without_response_or_replay() {
-    use tokio::io::AsyncReadExt;
     tokio::time::timeout(Duration::from_secs(10), async {
         for updates in [32, 33] {
             let (listener, acceptor, roots) = tls().await;
@@ -459,7 +450,6 @@ async fn tls_key_update_burst_limit_rejects_without_response_or_replay() {
 
 #[tokio::test]
 async fn oversized_handshake_is_rejected_from_its_length_before_upload() {
-    use tokio::io::AsyncReadExt;
     tokio::time::timeout(Duration::from_secs(10), async {
         for declared in [65535usize, 65536] {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -524,7 +514,6 @@ async fn deadline_drops_connection_and_releases_admission() {
     let upstream = async {
         let (socket, _) = listener.accept().await.unwrap();
         if let Ok(mut tls) = acceptor.accept(socket).await {
-            use tokio::io::AsyncReadExt;
             let mut bytes = Vec::new(); let _ = tls.read_to_end(&mut bytes).await;
         }
     };
@@ -541,7 +530,6 @@ async fn truncated_response_is_never_reported_as_success() {
     let (listener, acceptor, roots) = tls().await;
     let config = config(listener.local_addr().unwrap().port());
     let upstream = async {
-        use tokio::io::AsyncReadExt;
         let (socket, _) = listener.accept().await.unwrap(); let mut socket = acceptor.accept(socket).await.unwrap();
         let mut request = Vec::new(); let mut buf = [0; 256];
         while !request.ends_with(b"0\r\n\r\n") {
@@ -564,7 +552,6 @@ async fn unsolicited_protocol_switch_is_rejected_before_client_headers() {
     let (listener, acceptor, roots) = tls().await;
     let config = config(listener.local_addr().unwrap().port());
     let upstream = async {
-        use tokio::io::AsyncReadExt;
         let (socket, _) = listener.accept().await.unwrap();
         let mut socket = acceptor.accept(socket).await.unwrap();
         let mut request = Vec::new(); let mut buf = [0; 256];
@@ -593,7 +580,6 @@ async fn interim_response_does_not_replace_final_status_or_payload() {
     let (listener, acceptor, roots) = tls().await;
     let config = config(listener.local_addr().unwrap().port());
     let upstream = async {
-        use tokio::io::AsyncReadExt;
         let (socket, _) = listener.accept().await.unwrap();
         let mut socket = acceptor.accept(socket).await.unwrap();
         let mut request = Vec::new(); let mut buf = [0; 256];
@@ -617,7 +603,6 @@ async fn interim_response_does_not_replace_final_status_or_payload() {
 
 #[tokio::test]
 async fn canceling_tls_handshake_drops_socket_and_returns_owned_request_credit() {
-    use tokio::io::AsyncReadExt;
     tokio::time::timeout(Duration::from_secs(5), async {
         let (listener, _acceptor, roots) = tls().await;
         let config = config(listener.local_addr().unwrap().port());
@@ -652,8 +637,6 @@ async fn canceling_tls_handshake_drops_socket_and_returns_owned_request_credit()
 
 #[tokio::test]
 async fn tls_session_cache_bounds_servers_and_tickets_without_disabling_resumption() {
-    use tokio::io::AsyncReadExt;
-    use tokio_rustls::rustls::{HandshakeKind, version::{TLS12, TLS13}};
     async fn connect(listener: &TcpListener, acceptor: &TlsAcceptor, transport: &HttpsTransport,
         name: &str, expected: HandshakeKind) {
         let provider = async {
@@ -739,7 +722,6 @@ async fn tls_session_cache_bounds_servers_and_tickets_without_disabling_resumpti
 
 #[tokio::test]
 async fn upstream_wire_head_and_header_count_limits_cover_status_line() {
-    use tokio::io::AsyncReadExt;
     tokio::time::timeout(Duration::from_secs(15), async {
         let mut cases = Vec::new();
         let prefix = "HTTP/1.1 200 "; let suffix = "\r\nContent-Length: 0\r\n\r\n";
@@ -840,7 +822,6 @@ fn handshake_messages(mut wire: &[u8]) -> Vec<u8> {
 
 #[test]
 fn tls_retry_cookie_echo_is_bounded_by_the_client_hello_extension_field() {
-    use tokio_rustls::rustls::ClientConnection;
     let config = Arc::new(ClientConfig::builder().with_root_certificates(RootCertStore::empty()).with_no_client_auth());
     for extra in [0usize, 1] {
         let mut client = ClientConnection::new(config.clone(), ServerName::try_from("localhost").unwrap()).unwrap();
@@ -882,7 +863,6 @@ fn tls_retry_cookie_echo_is_bounded_by_the_client_hello_extension_field() {
 
 #[tokio::test]
 async fn retry_cookie_is_echoed_above_the_buffer_limit_and_closure_fails_before_upload() {
-    use tokio::io::AsyncReadExt;
     async fn read_handshake_message(socket: &mut TcpStream) -> Vec<u8> {
         let mut handshake = Vec::new();
         loop {
@@ -925,7 +905,6 @@ async fn retry_cookie_is_echoed_above_the_buffer_limit_and_closure_fails_before_
 
 #[test]
 fn tls_peer_certificate_chain_is_owned_per_connection_and_restored_on_resumption() {
-    use tokio_rustls::rustls::{ClientConnection, HandshakeKind, ServerConnection};
     fn settle(client: &mut ClientConnection, server: &mut ServerConnection) {
         for _ in 0..16 {
             let mut wire = Vec::new(); client.write_tls(&mut wire).unwrap();

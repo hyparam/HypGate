@@ -5,7 +5,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::{fs::File, sync::Mutex};
 use tokio::{io::AsyncReadExt, net::TcpStream};
-use tokio_rustls::rustls::RootCertStore;
+use tokio_rustls::{TlsAcceptor, rustls::RootCertStore};
 use crate::test_support::{self_signed, tls, TempDir};
 
 mod benchmark;
@@ -42,6 +42,34 @@ async fn spawn_gateway(app: &Arc<Gateway>, connections: usize, deadline: Duratio
     let (shutdown, stopped) = oneshot::channel();
     let gateway = tokio::spawn(serve(listener, app.clone(), connections, deadline, async { let _ = stopped.await; }));
     (port, shutdown, gateway)
+}
+
+// One provider connection that streams a first event, then waits for `waiting`
+// before finishing cleanly or, when truncated, disconnecting without an End marker.
+fn stalling_provider(upstream: TcpListener, acceptor: TlsAcceptor, waiting: oneshot::Receiver<()>, truncated: bool) -> JoinHandle<()> {
+    let waiting = Arc::new(Mutex::new(Some(waiting)));
+    tokio::spawn(async move {
+        let (socket, _) = upstream.accept().await.unwrap(); let socket = acceptor.accept(socket).await.unwrap();
+        let service = service_fn(move |request: Request<Incoming>| {
+            let waiting = waiting.lock().unwrap().take().unwrap();
+            async move {
+                assert_eq!(request.uri(), "/v1/messages");
+                assert_eq!(request.headers()["x-api-key"], "provider-secret");
+                assert!(!request.headers().contains_key("authorization"));
+                assert_eq!(request.collect().await.unwrap().to_bytes(), "{\"stream\":true}");
+                let (mut writer, body) = http_body::channel(16);
+                tokio::spawn(async move {
+                    writer.write_all(b"data: hello\n\n").await.unwrap();
+                    if waiting.await.is_err() { return; }
+                    if truncated { return; } // no End marker: simulate a provider disconnect
+                    if writer.write_all(b"data: [DONE]\n\n").await.is_ok() { let _ = writer.shutdown().await; }
+                });
+                Ok::<_, Infallible>(Response::builder().header("content-type", "text/event-stream")
+                    .header("set-cookie", "provider-secret").body(body).unwrap())
+            }
+        });
+        let _ = hyper::server::conn::http1::Builder::new().serve_connection(TokioIo::new(socket), service).await;
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -81,29 +109,8 @@ async fn exercise(availability: bool, failed_log: bool, truncated: bool, stop: S
             assert!(app.workers.is_empty()); assert_eq!(app.audit_gaps(), 0);
             return;
         }
-        let (release, waiting) = oneshot::channel(); let waiting = Arc::new(Mutex::new(Some(waiting)));
-        let upstream_task = tokio::spawn(async move {
-            let (socket, _) = upstream.accept().await.unwrap(); let socket = acceptor.accept(socket).await.unwrap();
-            let service = service_fn(move |request: Request<Incoming>| {
-                let waiting = waiting.lock().unwrap().take().unwrap();
-                async move {
-                    assert_eq!(request.uri(), "/v1/messages");
-                    assert_eq!(request.headers()["x-api-key"], "provider-secret");
-                    assert!(!request.headers().contains_key("authorization"));
-                    assert_eq!(request.collect().await.unwrap().to_bytes(), "{\"stream\":true}");
-                    let (mut writer, body) = http_body::channel(16);
-                    tokio::spawn(async move {
-                        writer.write_all(b"data: hello\n\n").await.unwrap();
-                        if waiting.await.is_err() { return; }
-                        if truncated { return; } // no End marker: simulate a provider disconnect
-                        if writer.write_all(b"data: [DONE]\n\n").await.is_ok() { let _ = writer.shutdown().await; }
-                    });
-                    Ok::<_, Infallible>(Response::builder().header("content-type", "text/event-stream")
-                        .header("set-cookie", "provider-secret").body(body).unwrap())
-                }
-            });
-            let _ = hyper::server::conn::http1::Builder::new().serve_connection(TokioIo::new(socket), service).await;
-        });
+        let (release, waiting) = oneshot::channel();
+        let upstream_task = stalling_provider(upstream, acceptor, waiting, truncated);
         let (mut response, connection) = send(port, "/routes/7", "gateway", "POST").await;
         assert_eq!(response.status(), StatusCode::OK);
         assert!(!response.headers().contains_key("set-cookie"));

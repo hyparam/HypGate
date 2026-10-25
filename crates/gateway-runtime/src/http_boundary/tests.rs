@@ -1,6 +1,10 @@
 use super::*;
+use crate::config::{MAX_CREDENTIAL_BYTES, MAX_DESTINATION_BYTES};
+use http_body_util::{BodyExt, Empty};
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 fn config() -> GatewayConfig {
     let routes = json!([
@@ -151,7 +155,6 @@ fn shared_header(value: &[u8], dropped: &std::sync::Arc<std::sync::atomic::Atomi
 
 #[test]
 fn prepared_request_drops_source_metadata_and_detaches_header_backing() {
-    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
     let c = config(); let dropped = Arc::new(AtomicUsize::new(0));
     let mut request = Request::new(());
     *request.method_mut() = Method::POST; *request.uri_mut() = "/routes/7".parse().unwrap();
@@ -169,7 +172,6 @@ fn prepared_request_drops_source_metadata_and_detaches_header_backing() {
 
 #[test]
 fn prepared_response_drops_source_metadata_and_detaches_header_backing() {
-    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
     let dropped = Arc::new(AtomicUsize::new(0));
     let mut response = http::Response::new(());
     *response.status_mut() = StatusCode::TOO_MANY_REQUESTS;
@@ -202,9 +204,6 @@ fn many_connection_tokens_keep_only_distinct_relevant_names_but_validate_all() {
 
 #[tokio::test]
 async fn maximum_configured_request_head_serializes_below_64_kib() {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use http_body_util::BodyExt;
-    use crate::config::{MAX_CREDENTIAL_BYTES, MAX_DESTINATION_BYTES};
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         let host = ["h".repeat(63), "h".repeat(63), "h".repeat(63), "h".repeat(61)].join(".");
         assert_eq!(host.len(), 253);
@@ -256,8 +255,6 @@ async fn maximum_configured_request_head_serializes_below_64_kib() {
 
 #[tokio::test]
 async fn maximum_response_head_with_continue_serializes_below_64_kib() {
-    use http_body_util::{BodyExt, Empty};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         let mut input = HeaderMap::new();
         for _ in 0..99 { input.append("request-id", HeaderValue::from_static("x")); }
