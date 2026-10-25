@@ -9,7 +9,7 @@ pub struct Cleanup<T> {
     started: bool,
     finished: bool,
     occupied: bool,
-    original: Ghost<Option<T>>,
+    #[allow(dead_code)] original: Ghost<Option<T>>,
 }
 impl<T> Cleanup<T> {
     pub fn new(value: Option<T>) -> (out: Self)

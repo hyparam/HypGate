@@ -81,24 +81,8 @@ impl RegisteredResponse {
 }
 pub struct ResponseRegistry { admission: ResourceAdmission, responses: Vec<ResponseSlot> }
 
-pub open spec fn active_responses(slots: Seq<ResponseSlot>) -> nat
-    decreases slots.len(),
-{
-    if slots.len() == 0 { 0 } else {
-        active_responses(slots.subrange(0, slots.len() as int - 1))
-            + if slots[slots.len() as int - 1].active() { 1nat } else { 0nat }
-    }
-}
-proof fn active_bound(slots: Seq<ResponseSlot>, entries: Seq<u64>)
-    requires slots.len() == entries.len(),
-        forall|i: int| 0 <= i < slots.len() && #[trigger] slots[i].active() ==> entries[i] != 0,
-    ensures active_responses(slots) <= crate::resource::occupied(entries),
-    decreases slots.len(),
-{
-    if slots.len() > 0 {
-        let n = slots.len() as int - 1;
-        active_bound(slots.subrange(0, n), entries.subrange(0, n));
-    }
+pub open spec fn active_responses(slots: Seq<ResponseSlot>) -> nat {
+    crate::resource::count_where(slots, |s: ResponseSlot| s.active())
 }
 impl ResponseRegistry {
     pub closed spec fn owns_task(&self, task: &TaskCredit) -> bool { self.admission.owns(&task.key()) }
@@ -278,7 +262,7 @@ impl ResponseRegistry {
         ensures active_responses(self.slots()) <= crate::resource::occupied(self.entries()),
             active_responses(self.slots()) <= self.limit(),
     {
-        active_bound(self.slots(), self.entries());
+        crate::resource::count_pointwise_le(self.slots(), |s: ResponseSlot| s.active(), self.entries(), |v: u64| v != 0);
         crate::resource::occupied_bound(self.entries());
     }
 }

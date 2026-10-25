@@ -39,24 +39,8 @@ impl Roles {
     fn is_active(&self) -> (out: bool) ensures out == self.any_active(),
     { self.active[0] || self.active[1] || self.active[2] || self.active[3] }
 }
-pub open spec fn role_count(slots: Seq<Roles>, role: int) -> nat
-    decreases slots.len(),
-{
-    if slots.len() == 0 { 0 } else {
-        role_count(slots.subrange(0, slots.len() as int - 1), role)
-            + if slots[slots.len() as int - 1].active(role) { 1nat } else { 0nat }
-    }
-}
-proof fn count_bound(slots: Seq<Roles>, entries: Seq<u64>, role: int)
-    requires slots.len() == entries.len(), 0 <= role < 4,
-        forall|i: int| 0 <= i < slots.len() && #[trigger] slots[i].active(role) ==> entries[i] != 0,
-    ensures role_count(slots, role) <= crate::resource::occupied(entries),
-    decreases slots.len(),
-{
-    if slots.len() > 0 {
-        let n = slots.len() as int - 1;
-        count_bound(slots.subrange(0, n), entries.subrange(0, n), role);
-    }
+pub open spec fn role_count(slots: Seq<Roles>, role: int) -> nat {
+    crate::resource::count_where(slots, |r: Roles| r.active(role))
 }
 impl WorkerRegistry {
     pub closed spec fn slots(&self) -> Seq<Roles> { self.slots@ }
@@ -225,7 +209,7 @@ impl WorkerRegistry {
             implies self.entries()[i] != 0 by {
             assert(self.slots@[i].any_active());
         }
-        count_bound(self.slots(), self.entries(), role);
+        crate::resource::count_pointwise_le(self.slots(), |r: Roles| r.active(role), self.entries(), |v: u64| v != 0);
         crate::resource::occupied_bound(self.entries());
     }
 }

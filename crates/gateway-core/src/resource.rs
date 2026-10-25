@@ -17,38 +17,57 @@ pub fn validate_limits(requests: usize, chunk_bytes: usize) -> (ok: bool)
     total <= 134217728
 }
 
-pub open spec fn occupied(slots: Seq<u64>) -> nat
-    decreases slots.len(),
+// Number of elements satisfying a predicate. Every registry occupancy count in
+// this crate (request slots, worker roles, response permits) is an instance.
+pub open spec fn count_where<T>(s: Seq<T>, p: spec_fn(T) -> bool) -> nat
+    decreases s.len(),
 {
-    if slots.len() == 0 { 0 } else {
-        occupied(slots.subrange(0, slots.len() as int - 1))
-            + if slots[slots.len() as int - 1] == 0 { 0nat } else { 1nat }
+    if s.len() == 0 { 0 } else {
+        count_where(s.subrange(0, s.len() as int - 1), p)
+            + if p(s[s.len() as int - 1]) { 1nat } else { 0nat }
     }
 }
+
+pub proof fn count_le_len<T>(s: Seq<T>, p: spec_fn(T) -> bool)
+    ensures count_where(s, p) <= s.len(),
+    decreases s.len(),
+{
+    if s.len() > 0 { count_le_len(s.subrange(0, s.len() as int - 1), p); }
+}
+
+// A count is bounded by any pointwise weaker count over a parallel sequence.
+pub proof fn count_pointwise_le<T, U>(s: Seq<T>, p: spec_fn(T) -> bool, t: Seq<U>, q: spec_fn(U) -> bool)
+    requires s.len() == t.len(), forall|i: int| 0 <= i < s.len() && #[trigger] p(s[i]) ==> q(t[i]),
+    ensures count_where(s, p) <= count_where(t, q),
+    decreases s.len(),
+{
+    if s.len() > 0 {
+        let n = s.len() as int - 1;
+        count_pointwise_le(s.subrange(0, n), p, t.subrange(0, n), q);
+    }
+}
+
+// Changing one element changes the count only by that element's status.
+pub proof fn count_update<T>(s: Seq<T>, p: spec_fn(T) -> bool, index: int, value: T)
+    requires 0 <= index < s.len(),
+    ensures count_where(s.update(index, value), p) + (if p(s[index]) { 1nat } else { 0nat })
+        == count_where(s, p) + (if p(value) { 1nat } else { 0nat }),
+    decreases s.len(),
+{
+    let last = s.len() as int - 1;
+    if index == last {
+        assert(s.update(index, value).subrange(0, last) =~= s.subrange(0, last));
+    } else {
+        count_update(s.subrange(0, last), p, index, value);
+        assert(s.update(index, value).subrange(0, last) =~= s.subrange(0, last).update(index, value));
+    }
+}
+
+pub open spec fn occupied(slots: Seq<u64>) -> nat { count_where(slots, |v: u64| v != 0) }
 
 pub proof fn occupied_bound(slots: Seq<u64>)
     ensures occupied(slots) <= slots.len(),
-    decreases slots.len(),
-{
-    if slots.len() > 0 { occupied_bound(slots.subrange(0, slots.len() as int - 1)); }
-}
-
-// Changing one slot changes occupancy only by that slot's zero/nonzero status.
-proof fn occupied_update(slots: Seq<u64>, index: int, value: u64)
-    requires 0 <= index < slots.len(),
-    ensures occupied(slots.update(index, value)) + (if slots[index] == 0 { 0nat } else { 1nat })
-        == occupied(slots) + (if value == 0 { 0nat } else { 1nat }),
-    decreases slots.len(),
-{
-    let last = slots.len() as int - 1;
-    if index == last {
-        assert(slots.update(index, value).subrange(0, last) =~= slots.subrange(0, last));
-    } else {
-        occupied_update(slots.subrange(0, last), index, value);
-        assert(slots.update(index, value).subrange(0, last)
-            =~= slots.subrange(0, last).update(index, value));
-    }
-}
+{ count_le_len(slots, |v: u64| v != 0); }
 
 // Keys are scoped to one ResourceAdmission instance. Production will use one registry.
 pub struct RequestKey { slot: usize, id: u64, stream_claimed: bool }
@@ -173,7 +192,7 @@ impl ResourceAdmission {
             if self.slots[i] == 0 {
                 let id = self.next;
                 proof {
-                    occupied_update(self.slots@, i as int, id);
+                    count_update(self.slots@, |v: u64| v != 0, i as int, id);
                     assert forall|owners: Seq<Option<crate::owned_stream::OwnedStream>>|
                         #[trigger] crate::owned_accounting::owners_match(self.slots@, owners, self.per_request as nat)
                         implies crate::owned_accounting::owners_match(self.slots@.update(i as int, id), owners, self.per_request as nat)
@@ -257,7 +276,7 @@ impl ResourceAdmission {
             return false;
         }
         proof {
-            occupied_update(self.slots@, key.slot as int, 0);
+            count_update(self.slots@, |v: u64| v != 0, key.slot as int, 0);
             assert forall|owners: Seq<Option<crate::owned_stream::OwnedStream>>|
                 #[trigger] crate::owned_accounting::owners_match(self.slots@, owners, self.per_request as nat)
                 implies crate::owned_accounting::owners_match(self.slots@.update(key.slot as int, 0),

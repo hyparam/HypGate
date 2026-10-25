@@ -41,7 +41,7 @@ MUTATIONS = [
     ("http_connection.rs", "response_registry_issues_wrong_owner", "ResponseIssuer { index, owner }", "ResponseIssuer { index, owner: 0 }"),
     ("http_connection.rs", "response_registry_loses_active_charge", "if self.responses[i].active { count = count + 1; }", "if false { count = count + 1; }"),
     ("http_connection.rs", "response_registry_denies_valid_release", "self.responses[index].release_task(task, &mut self.admission)", "self.responses[index].release_task(task, &mut self.admission); false"),
-    ("http_connection.rs", "response_registry_hides_active_permits", "if slots[slots.len() as int - 1].active() { 1nat } else { 0nat }", "if slots[slots.len() as int - 1].active() { 0nat } else { 0nat }"),
+    ("http_connection.rs", "response_registry_hides_active_permits", "|s: ResponseSlot| s.active()", "|s: ResponseSlot| false"),
     ("http_connection.rs", "response_duplicate_issuance", "if self.issued || self.retired", "if self.retired"),
     ("http_connection.rs", "response_late_issuance", "if self.issued || self.retired", "if self.issued"),
     ("http_connection.rs", "response_wrong_permit_owner", "ResponsePermit { owner: self.owner }", "ResponsePermit { owner: 0 }"),
