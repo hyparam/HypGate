@@ -112,7 +112,6 @@ impl WorkerRegistry {
             },
     {
         let key = match self.admission.acquire() { Some(key) => key, None => return None };
-        proof { self.admission.state().ownership_facts(&key); }
         let index = key.slot_index();
         let owner = key.owner();
         self.slots.set(index, Roles { owner, issued: [false; 4], active: [false; 4], retired: false });
@@ -191,10 +190,7 @@ impl WorkerRegistry {
         ensures self.owns_task(task), !self.can_release(task),
             self.entries()[task.key().slot() as int] == task.key().id(), task.key().id() != 0,
     {
-        let i = permit.index() as int;
-        assert(self.slots@[i].any_active());
-        self.admission.state().layout();
-        self.admission.state().entry_owns(&task.key());
+        assert(self.slots@[permit.index() as int].any_active());
     }
 
     pub fn role_usage(&self, role: usize) -> (out: usize)
@@ -225,7 +221,6 @@ impl WorkerRegistry {
         ensures role_count(self.slots(), role) <= crate::resource::occupied(self.entries()),
             role_count(self.slots(), role) <= self.limit(),
     {
-        self.admission.state().layout();
         assert forall|i: int| 0 <= i < self.slots.len() && #[trigger] self.slots@[i].active(role)
             implies self.entries()[i] != 0 by {
             assert(self.slots@[i].any_active());

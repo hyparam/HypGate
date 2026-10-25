@@ -119,14 +119,6 @@ pub proof fn registry_owned_payload_bound(registry: &crate::resource::ResourceAd
         registry.limit() * registry.per_request() <= 134217728
             ==> crate::buffer_accounting::byte_sum(owner_buffers(owners)) <= 134217728,
 {
-    registry.layout();
-    assert forall|i: int| 0 <= i < owners.len() implies match #[trigger] owners[i] {
-        Some(o) => o.valid() && o.key().slot() == i && registry.entries()[i] != 0
-            && o.key().id() == registry.entries()[i] && o.state().capacity() <= registry.per_request(),
-        None => true,
-    } by {
-        match owners[i] { Some(o) => { registry.ownership_facts(&o.key()); }, None => {} }
-    }
     bound_prefix(registry.entries(), owners, registry.per_request());
     assert(crate::resource::occupied(registry.entries()) * registry.per_request() <= registry.limit() * registry.per_request())
         by(nonlinear_arith)

@@ -126,7 +126,6 @@ impl OwnedStream {
                 proof { stream.payload_within_capacity(); }
                 let owned = OwnedStream { key, stream, read_buffer: Vec::new(), audit_session: None, audit_tenant: 0, audit_direction: 0, audit: Ghost(None) };
                 proof {
-                    registry.layout(); registry.ownership_facts(&owned.key());
                     assert forall|owners: Seq<Option<OwnedStream>>|
                         #[trigger] crate::owned_accounting::owners_match(registry.entries(), owners, registry.per_request())
                         implies crate::owned_accounting::owners_match(registry.entries(),
@@ -154,26 +153,11 @@ impl OwnedStream {
         ensures out == self.key().id(), out == self.state().owner(),
     { self.stream.owner_id() }
 
-    pub fn retire(mut self, registry: &mut ResourceAdmission) -> (ok: bool)
+    pub fn retire(self, registry: &mut ResourceAdmission) -> (ok: bool)
         requires self.valid(), old(registry).valid(),
-        ensures final(registry).valid(),
-            final(registry).limit() == old(registry).limit(),
-            final(registry).per_request() == old(registry).per_request(),
-            final(registry).next_id() == old(registry).next_id(),
+        ensures ResourceAdmission::released(*old(registry), *final(registry), &self.key(), ok),
             ok == old(registry).owns(&self.key()),
-            ok ==> (forall|owners: Seq<Option<OwnedStream>>|
-                #[trigger] crate::owned_accounting::owners_match(old(registry).entries(), owners, old(registry).per_request())
-                ==> crate::owned_accounting::owners_match(final(registry).entries(),
-                    owners.update(self.key().slot() as int, None), final(registry).per_request())),
-            ok ==> !final(registry).owns(&self.key())
-                && crate::resource::occupied(final(registry).entries()) + 1
-                    == crate::resource::occupied(old(registry).entries()),
-            !ok ==> *final(registry) == *old(registry),
-    {
-        self.read_buffer = Vec::new();
-        let ok = registry.release_stream(&self.key, self.stream);
-        ok
-    }
+    { registry.release_stream(&self.key, self.stream) }
 
     pub fn begin_read(&mut self) -> (ok: bool)
         requires old(self).valid(),

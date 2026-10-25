@@ -183,7 +183,7 @@ MUTATIONS = [
     ("buffer_accounting.rs", "underbudget_output_cleanup", "+ (connections + 2 * requests) * 16384 + (queue + requests + 1) * (chunk + 65)", "+ (connections + requests) * 16384 + (queue + requests + 1) * (chunk + 65)"),
     ("buffer_accounting.rs", "underbudget_receipts", "+ (connections + 2 * requests) * 16384 + (queue + requests + 1) * (chunk + 65)", "+ (connections + 2 * requests) * 16384 + (queue + 1) * (chunk + 65)"),
     ("journal.rs", "receipt_frame_overhead_too_small", "ensures self.record().len() == self.payload_len() + 65,", "ensures self.record().len() == self.payload_len() + 64,"),
-    ("owned_stream.rs", "owned_retirement_skips_release", "let ok = registry.release_stream(&self.key, self.stream);", "let ok = true;"),
+    ("owned_stream.rs", "owned_retirement_skips_release", "{ registry.release_stream(&self.key, self.stream) }", "{ true }"),
     ("owned_stream.rs", "owned_advance_changes_bytes", "let out = self.stream.advance(bytes);", "let out = self.stream.advance(Vec::new());"),
     ("owned_stream.rs", "owned_cancel_ignored", "{ self.stream.cancel() }", "{ }"),
     ("owned_stream.rs", "owned_prepare_denies_progress", "{ self.stream.prepare(max) }", "{ None }"),

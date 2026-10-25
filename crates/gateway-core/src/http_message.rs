@@ -1,5 +1,6 @@
 //! Actual production HTTP mailbox item and its cleanup payload projection.
 use vstd::prelude::*;
+#[allow(unused_imports)] // Mailbox and Cleanup appear only in proof items erased from the plain build.
 use crate::{output_frame::OutputFrame, mailbox::{Mailbox, Cleanup}};
 verus! {
 pub enum HttpMessage { Data(OutputFrame), End }

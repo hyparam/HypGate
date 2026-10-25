@@ -73,10 +73,10 @@ impl RequestKey {
 impl ResourceAdmission {
     pub closed spec fn entries(&self) -> Seq<u64> { self.slots@ }
     pub closed spec fn next_id(&self) -> u64 { self.next }
-    pub closed spec fn limit(&self) -> nat { self.slots.len() as nat }
+    pub open spec fn limit(&self) -> nat { self.entries().len() }
     pub closed spec fn per_request(&self) -> nat { self.per_request as nat }
-    pub closed spec fn owns(&self, key: &RequestKey) -> bool {
-        key.slot < self.slots.len() && key.id != 0 && self.slots@[key.slot as int] == key.id
+    pub open spec fn owns(&self, key: &RequestKey) -> bool {
+        key.slot() < self.limit() && key.id() != 0 && self.entries()[key.slot() as int] == key.id()
     }
     pub closed spec fn valid(&self) -> bool {
         self.next > 0
@@ -86,21 +86,22 @@ impl ResourceAdmission {
             ==> self.slots@[i] != self.slots@[j])
     }
 
-    pub proof fn layout(&self)
-        ensures self.entries().len() == self.limit(),
-    {}
-
-    pub proof fn ownership_facts(&self, key: &RequestKey)
-        requires self.owns(key),
-        ensures key.slot() < self.limit(), key.id() != 0,
-            self.entries()[key.slot() as int] == key.id(),
-    {}
-
-    pub proof fn entry_owns(&self, key: &RequestKey)
-        requires key.slot() < self.limit(), key.id() != 0,
-            self.entries()[key.slot() as int] == key.id(),
-        ensures self.owns(key),
-    {}
+    // Shared release transition: the slot is cleared, nothing else moves, and any
+    // owner snapshot matching the prior entries matches the new ones minus this slot.
+    pub open spec fn released(pre: Self, post: Self, key: &RequestKey, ok: bool) -> bool {
+        post.valid() && post.limit() == pre.limit() && post.per_request() == pre.per_request()
+            && post.next_id() == pre.next_id()
+            && (ok ==> pre.owns(key) && !post.owns(key)
+                && occupied(post.entries()) + 1 == occupied(pre.entries())
+                && post.entries()[key.slot() as int] == 0
+                && (forall|i: int| 0 <= i < pre.limit() && i != key.slot()
+                    ==> #[trigger] post.entries()[i] == pre.entries()[i])
+                && (forall|owners: Seq<Option<crate::owned_stream::OwnedStream>>|
+                    #[trigger] crate::owned_accounting::owners_match(pre.entries(), owners, pre.per_request())
+                    ==> crate::owned_accounting::owners_match(post.entries(),
+                        owners.update(key.slot() as int, None), post.per_request())))
+            && (!ok ==> post == pre)
+    }
 
     pub fn new(request_limit: usize, per_request: usize) -> (a: Self)
         ensures a.valid(), a.limit() == request_limit, a.per_request() == per_request,
@@ -230,20 +231,8 @@ impl ResourceAdmission {
     // External effects must already be stopped; registry identity remains scoped.
     pub(crate) fn release_stream(&mut self, key: &RequestKey, stream: StreamChunk) -> (ok: bool)
         requires old(self).valid(),
-        ensures final(self).valid(), final(self).limit() == old(self).limit(),
-            final(self).per_request() == old(self).per_request(),
-            final(self).next_id() == old(self).next_id(),
-            ok ==> (forall|owners: Seq<Option<crate::owned_stream::OwnedStream>>|
-                #[trigger] crate::owned_accounting::owners_match(old(self).entries(), owners, old(self).per_request())
-                ==> crate::owned_accounting::owners_match(final(self).entries(),
-                    owners.update(key.slot() as int, None), final(self).per_request())),
+        ensures Self::released(*old(self), *final(self), key, ok),
             ok == (key.stream_claimed() && stream.owner() == key.id() && old(self).owns(key)),
-            ok ==> !final(self).owns(key)
-                && occupied(final(self).entries()) + 1 == occupied(old(self).entries())
-                && final(self).entries()[key.slot() as int] == 0
-                && (forall|i: int| 0 <= i < old(self).limit() && i != key.slot()
-                    ==> #[trigger] final(self).entries()[i] == old(self).entries()[i]),
-            !ok ==> *final(self) == *old(self),
     {
         if !key.stream_claimed || stream.owner_id() != key.id { return false; }
         self.release_slot(key)
@@ -252,20 +241,8 @@ impl ResourceAdmission {
     // Only an unclaimed reservation can return credit without consuming a stream.
     pub fn release(&mut self, key: &RequestKey) -> (ok: bool)
         requires old(self).valid(),
-        ensures final(self).valid(), final(self).limit() == old(self).limit(),
-            final(self).per_request() == old(self).per_request(),
-            final(self).next_id() == old(self).next_id(),
-            ok ==> (forall|owners: Seq<Option<crate::owned_stream::OwnedStream>>|
-                #[trigger] crate::owned_accounting::owners_match(old(self).entries(), owners, old(self).per_request())
-                ==> crate::owned_accounting::owners_match(final(self).entries(),
-                    owners.update(key.slot() as int, None), final(self).per_request())),
+        ensures Self::released(*old(self), *final(self), key, ok),
             ok == (!key.stream_claimed() && old(self).owns(key)),
-            ok ==> !final(self).owns(key)
-                && occupied(final(self).entries()) + 1 == occupied(old(self).entries())
-                && final(self).entries()[key.slot() as int] == 0
-                && (forall|i: int| 0 <= i < old(self).limit() && i != key.slot()
-                    ==> #[trigger] final(self).entries()[i] == old(self).entries()[i]),
-            !ok ==> *final(self) == *old(self),
     {
         if key.stream_claimed { return false; }
         self.release_slot(key)
@@ -274,19 +251,7 @@ impl ResourceAdmission {
     // Private primitive: claimed reservations must pass through release_stream.
     fn release_slot(&mut self, key: &RequestKey) -> (ok: bool)
         requires old(self).valid(),
-        ensures final(self).valid(), final(self).limit() == old(self).limit(),
-            final(self).per_request() == old(self).per_request(),
-            final(self).next_id() == old(self).next_id(),
-            ok ==> (forall|owners: Seq<Option<crate::owned_stream::OwnedStream>>|
-                #[trigger] crate::owned_accounting::owners_match(old(self).entries(), owners, old(self).per_request())
-                ==> crate::owned_accounting::owners_match(final(self).entries(),
-                    owners.update(key.slot() as int, None), final(self).per_request())),
-            ok ==> old(self).owns(key) && !final(self).owns(key)
-                && occupied(final(self).entries()) + 1 == occupied(old(self).entries())
-                && final(self).entries()[key.slot() as int] == 0
-                && (forall|i: int| 0 <= i < old(self).limit() && i != key.slot()
-                    ==> #[trigger] final(self).entries()[i] == old(self).entries()[i]),
-            !ok ==> !old(self).owns(key) && *final(self) == *old(self),
+        ensures Self::released(*old(self), *final(self), key, ok), ok == old(self).owns(key),
     {
         if key.slot >= self.slots.len() || key.id == 0 || self.slots[key.slot] != key.id {
             return false;

@@ -189,18 +189,8 @@ impl TaskCredit {
 
     pub fn release(self, registry: &mut ResourceAdmission) -> (ok: bool)
         requires old(registry).valid(),
-        ensures final(registry).valid(),
-            final(registry).limit() == old(registry).limit(),
-            final(registry).per_request() == old(registry).per_request(),
-            final(registry).next_id() == old(registry).next_id(),
+        ensures ResourceAdmission::released(*old(registry), *final(registry), &self.key(), ok),
             ok == (self.releasable() && !self.key().stream_claimed() && old(registry).owns(&self.key())),
-            ok ==> !self.retaining() && !final(registry).owns(&self.key())
-                && crate::resource::occupied(final(registry).entries()) + 1 == crate::resource::occupied(old(registry).entries())
-                && final(registry).entries()[self.key().slot() as int] == 0
-                && (forall|i: int| 0 <= i < old(registry).limit() && i != self.key().slot()
-                    ==> #[trigger] final(registry).entries()[i] == old(registry).entries()[i]),
-            !ok ==> *final(registry) == *old(registry),
-            self.retaining() ==> *final(registry) == *old(registry),
     {
         if !self.can_release() { return false; }
         registry.release(&self.key)
@@ -208,16 +198,9 @@ impl TaskCredit {
 
     pub fn release_worker(self, registry: &mut DrainRegistry) -> (ok: bool)
         requires old(registry).valid(),
-        ensures final(registry).valid(),
-            final(registry).closed() == old(registry).closed(),
-            final(registry).limit() == old(registry).limit(),
+        ensures final(registry).closed() == old(registry).closed(),
+            ResourceAdmission::released(old(registry).state(), final(registry).state(), &self.key(), ok),
             ok == (self.releasable() && !self.key().stream_claimed() && old(registry).owns(&self.key())),
-            ok ==> !self.retaining() && !final(registry).owns(&self.key())
-                && final(registry).remaining() + 1 == old(registry).remaining()
-                && (forall|i: int| 0 <= i < old(registry).limit() && i != self.key().slot()
-                    ==> #[trigger] final(registry).state().entries()[i] == old(registry).state().entries()[i]),
-            !ok ==> *final(registry) == *old(registry),
-            self.retaining() ==> *final(registry) == *old(registry),
     {
         if !self.can_release() { return false; }
         registry.release(&self.key)
@@ -235,11 +218,5 @@ pub proof fn acquire_preserves_retained_task(before: ResourceAdmission,
             ==> #[trigger] after.entries()[i] == before.entries()[i],
         after.limit() == before.limit(),
     ensures issued.slot() != task.key().slot(), after.owns(&task.key()),
-{
-    before.ownership_facts(&task.key());
-    after.layout();
-    assert(issued.slot() != task.key().slot());
-    // Expose the private ownership predicate through a core helper.
-    after.entry_owns(&task.key());
-}
+{}
 }

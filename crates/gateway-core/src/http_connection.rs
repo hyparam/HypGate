@@ -53,20 +53,11 @@ impl ResponseSlot {
 
     pub fn release_task(&mut self, task: TaskCredit, registry: &mut ResourceAdmission) -> (ok: bool)
         requires old(registry).valid(),
-        ensures final(registry).valid(), final(self).retired(),
-            final(self).owner() == old(self).owner(),
+        ensures final(self).retired(), final(self).owner() == old(self).owner(),
             final(self).issued() == old(self).issued(), final(self).active() == old(self).active(),
-            final(registry).limit() == old(registry).limit(),
-            final(registry).per_request() == old(registry).per_request(),
-            final(registry).next_id() == old(registry).next_id(),
+            ResourceAdmission::released(*old(registry), *final(registry), &task.key(), ok),
             ok == (!old(self).active() && old(self).owner() == task.key().id()
                 && task.releasable() && !task.key().stream_claimed() && old(registry).owns(&task.key())),
-            ok ==> !final(registry).owns(&task.key())
-                && final(registry).entries()[task.key().slot() as int] == 0
-                && (forall|i: int| 0 <= i < old(registry).limit() && i != task.key().slot()
-                    ==> #[trigger] final(registry).entries()[i] == old(registry).entries()[i]),
-            !ok ==> *final(registry) == *old(registry),
-            old(self).active() ==> *final(registry) == *old(registry),
     {
         self.retired = true;
         if self.active || self.owner != task.owner_id() { return false; }
@@ -170,7 +161,6 @@ impl ResponseRegistry {
             },
     {
         let key = match self.admission.acquire() { Some(key) => key, None => return None };
-        proof { self.admission.ownership_facts(&key); }
         let index = key.slot_index();
         let owner = key.owner();
         let (slot, task) = ResponseSlot::reserve(key);
@@ -255,10 +245,7 @@ impl ResponseRegistry {
             response.index() == task.key().slot(), response.owner() == task.key().id(),
         ensures self.owns_task(task), !self.can_release_task(task),
             self.entries()[task.key().slot() as int] == task.key().id(), task.key().id() != 0,
-    {
-        self.admission.layout();
-        self.admission.entry_owns(&task.key());
-    }
+    {}
 
     pub fn response_count(&self) -> (out: usize)
         requires self.valid(),
@@ -291,7 +278,6 @@ impl ResponseRegistry {
         ensures active_responses(self.slots()) <= crate::resource::occupied(self.entries()),
             active_responses(self.slots()) <= self.limit(),
     {
-        self.admission.layout();
         active_bound(self.slots(), self.entries());
         crate::resource::occupied_bound(self.entries());
     }

@@ -54,21 +54,14 @@ impl DrainRegistry {
             },
     {
         let out = if self.closed { None } else { self.registry.acquire() };
-        proof { self.registry.layout(); crate::resource::occupied_bound(self.registry.entries()); }
+        proof { crate::resource::occupied_bound(self.registry.entries()); }
         out
     }
     pub fn release(&mut self, key: &RequestKey) -> (out: bool)
         requires old(self).valid(),
-        ensures final(self).valid(), final(self).closed() == old(self).closed(),
-            final(self).limit() == old(self).limit(),
+        ensures final(self).closed() == old(self).closed(),
+            ResourceAdmission::released(old(self).state(), final(self).state(), key, out),
             out == (!key.stream_claimed() && old(self).owns(key)),
-            final(self).state().next_id() == old(self).state().next_id(),
-            final(self).state().per_request() == old(self).state().per_request(),
-            out ==> final(self).remaining() + 1 == old(self).remaining()
-                && !final(self).owns(key)
-                && (forall|i: int| 0 <= i < old(self).limit() && i != key.slot()
-                    ==> #[trigger] final(self).state().entries()[i] == old(self).state().entries()[i]),
-            !out ==> *final(self) == *old(self),
     { self.registry.release(key) }
 }
 
