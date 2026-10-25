@@ -60,8 +60,7 @@ pub proof fn bounded_frames(frames: Seq<RecordFrame>, count: nat, chunk: nat)
         assert(frames[i].valid());
         assert(frames[i].payload().len() <= chunk);
         assert(frame_bytes(frames)[i] == frames[i].contents());
-        frames[i].canonical();
-        crate::framing::encoded_header_roundtrip(frames[i].header());
+        frames[i].retained_size();
     }
 }
 

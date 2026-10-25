@@ -240,6 +240,14 @@ impl RecordFrame {
         ensures self.contents() == encoding(self.header()) + self.payload() + self.checksum(),
             valid(self.header()), self.header().payload == self.payload().len(), self.checksum().len() == 32,
     {}
+    // A sealed frame is its payload plus 33 header and 32 checksum bytes.
+    pub proof fn retained_size(&self)
+        requires self.valid(),
+        ensures self.contents() == encoding(self.header()) + self.payload() + self.checksum(),
+            valid(self.header()), self.header().payload == self.payload().len(),
+            encoding(self.header()).len() == 33, decoded(encoding(self.header())) == Some(self.header()),
+            self.contents().len() == self.payload().len() + 65,
+    { encoded_header_roundtrip(self.header()); }
     pub fn bytes(&self) -> (out: &Vec<u8>)
         ensures out@ == self.contents(),
     { &self.bytes }

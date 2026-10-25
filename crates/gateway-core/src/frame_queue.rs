@@ -128,7 +128,7 @@ impl<T> FrameQueue<T> {
             },
     {
         if self.reserved { return Err(item); }
-        proof { item.0.canonical(); crate::framing::encoded_header_roundtrip(item.0.header()); }
+        proof { item.0.retained_size(); }
         if item.0.bytes().len() > self.payload_limit + 65 { return Err(item); }
         let out = self.queue.push(item);
         proof { self.queue.occupancy_bound(); }

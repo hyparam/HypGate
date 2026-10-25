@@ -77,10 +77,8 @@ pub proof fn canonical_frame_is_complete<R: Source>(frame: &framing::RecordFrame
         data.subrange(start as int + 33, (start + frame.contents().len()) as int - 32) == frame.payload(),
         frame.contents().len() == 65 + frame.payload().len(),
 {
-    frame.canonical();
-    framing::encoded_header_roundtrip(frame.header());
+    frame.retained_size();
     let end = start + frame.contents().len();
-    assert(frame.contents().len() == 65 + frame.payload().len());
     matching_subrange(data, frame.contents(), start, 33, (frame.contents().len() - 32) as nat);
     matching_subrange(data, frame.contents(), start, (frame.contents().len() - 32) as nat, frame.contents().len());
     assert(data.subrange(start as int, start as int + 33) =~= framing::encoding(frame.header()));

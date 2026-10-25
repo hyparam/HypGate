@@ -1,6 +1,7 @@
 //! Immutable detached HTTP payload. Ownership moves to Hyper on extraction.
 //! Allocator rounding and dependency retention are outside logical byte bounds.
 use vstd::prelude::*;
+use vstd::slice::{slice_subrange, slice_to_vec};
 verus! {
 pub const MAX_OUTPUT_FRAME: usize = 16384;
 pub open spec fn prefix_len(input: nat, requested: nat) -> nat {
@@ -17,18 +18,7 @@ impl OutputFrame {
     {
         let cap = if requested < MAX_OUTPUT_FRAME { requested } else { MAX_OUTPUT_FRAME };
         let count = if bytes.len() < cap { bytes.len() } else { cap };
-        let mut copy = Vec::with_capacity(count);
-        let mut i: usize = 0;
-        while i < count
-            invariant i <= count, count <= bytes.len(), count <= 16384,
-                copy@ == bytes@.subrange(0, i as int),
-            decreases count - i,
-        {
-            copy.push(bytes[i]);
-            i += 1;
-            proof { assert(bytes@.subrange(0, i as int) =~= bytes@.subrange(0, i as int - 1).push(bytes@[i as int - 1])); }
-        }
-        Self { bytes: copy }
+        Self { bytes: slice_to_vec(slice_subrange(bytes, 0, count)) }
     }
     pub proof fn payload_bound(&self)
         requires self.valid(),

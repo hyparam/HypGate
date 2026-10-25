@@ -1,6 +1,6 @@
 //! Reader-owned payload: consumed prefixes stay charged until the whole copy is released.
 use vstd::prelude::*;
-use vstd::slice::slice_subrange;
+use vstd::slice::{slice_subrange, slice_to_vec};
 
 verus! {
 pub struct ReadBuffer { bytes: Vec<u8>, offset: usize, limit: usize }
@@ -39,17 +39,7 @@ impl ReadBuffer {
             !ok ==> *final(self) == *old(self),
     {
         if !self.is_empty() || bytes.len() > self.limit { return false; }
-        let mut copy = Vec::with_capacity(bytes.len());
-        let mut i: usize = 0;
-        while i < bytes.len()
-            invariant i <= bytes.len(), copy@ == bytes@.subrange(0, i as int),
-            decreases bytes.len() - i,
-        {
-            copy.push(bytes[i]);
-            i += 1;
-            proof { assert(bytes@.subrange(0, i as int) =~= bytes@.subrange(0, i as int - 1).push(bytes@[i as int - 1])); }
-        }
-        self.bytes = copy;
+        self.bytes = slice_to_vec(bytes);
         self.offset = 0;
         true
     }

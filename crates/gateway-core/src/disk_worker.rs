@@ -147,10 +147,7 @@ impl DiskWorker {
             <= (queue.capacity() + 1) * (self.payload_limit() + 65),
     {
         queue.encoding_and_queued_bound(encoding_bytes);
-        if let Some(frame) = self.frame() {
-            frame.canonical();
-            crate::framing::encoded_header_roundtrip(frame.header());
-        }
+        if let Some(frame) = self.frame() { frame.retained_size(); }
         assert(queue.capacity() * (queue.payload_limit() + 65) <= queue.capacity() * (self.payload_limit() + 65))
             by(nonlinear_arith) requires queue.payload_limit() <= self.payload_limit();
         assert((queue.capacity() + 1) * (self.payload_limit() + 65)

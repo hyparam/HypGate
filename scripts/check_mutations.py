@@ -61,7 +61,7 @@ MUTATIONS = [
 
     ("output_frame.rs", "output_frame_ignores_hard_limit", "let cap = if requested < MAX_OUTPUT_FRAME { requested } else { MAX_OUTPUT_FRAME };", "let cap = requested;"),
     ("output_frame.rs", "output_frame_ignores_requested_limit", "let cap = if requested < MAX_OUTPUT_FRAME { requested } else { MAX_OUTPUT_FRAME };", "let cap = MAX_OUTPUT_FRAME;"),
-    ("output_frame.rs", "output_frame_corrupts_payload", "copy.push(bytes[i]);", "copy.push(0);"),
+    ("output_frame.rs", "output_frame_corrupts_payload", "slice_to_vec(slice_subrange(bytes, 0, count))", "slice_to_vec(slice_subrange(bytes, 0, 0))"),
     ("output_frame.rs", "output_frame_loses_handoff_payload", "{ self.bytes }", "{ Vec::new() }"),
     ("output_frame.rs", "output_frame_understates_length", "{ self.bytes.len() }", "{ 0 }"),
 

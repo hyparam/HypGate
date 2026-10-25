@@ -27,10 +27,7 @@ impl DurableFrame {
     pub proof fn retained_size(&self)
         requires self.valid(),
         ensures self.record().len() == self.payload_len() + 65,
-    {
-        self.frame.canonical();
-        crate::framing::encoded_header_roundtrip(self.frame.header());
-    }
+    { self.frame.retained_size() }
     pub fn matches_record(&self, h: crate::framing::Header, payload: &[u8]) -> (ok: bool)
         requires self.valid(),
         ensures ok == (crate::framing::valid(h) && h.payload == payload.len()
