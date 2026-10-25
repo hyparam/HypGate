@@ -510,7 +510,7 @@ pub fn forward_response(fields: &Vec<Field>) -> (out: Result<Vec<Field>, Rejecti
 }
 
 // A sequence with no field of the given name has a zero count for it.
-proof fn lemma_filter_none(fields: Seq<Field>, name: Seq<u8>)
+pub proof fn lemma_filter_none(fields: Seq<Field>, name: Seq<u8>)
     requires forall|k: int| 0 <= k < fields.len() ==> #[trigger] fields[k].name@ != name,
     ensures count_named(fields, name) == 0,
     decreases fields.len(),

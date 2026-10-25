@@ -40,6 +40,11 @@ destination.
   receipt all match. Candidate configuration cannot enlarge root grants or
   pick another tenant's credential. The concrete destination and credential
   come from the authorized table indices and nothing else.
+- The route selector and gateway token are parsed by verified code
+  (`inbound::route_selector`, `inbound::bearer`): a path selects a route
+  exactly when it is `/routes/` plus the canonical decimal of a `u64`, and a
+  token is accepted exactly when one Authorization field holds `Bearer` and
+  one to 512 token characters. Nothing else in a request can pick a route.
 - The outgoing request head is built by a verified projection
   (`headers::forward_request`): only allowlisted client headers survive, each
   a byte-for-byte copy of an input field with no Connection-nominated name
@@ -279,6 +284,8 @@ rather than mechanized; the table below records where.
 - `crates/gateway-core/src/headers.rs`: the header projection for both
   directions, with the allowlists, Connection handling, limits, and the three
   fields the gateway adds to a request.
+- `crates/gateway-core/src/inbound.rs`: the route selector and bearer token
+  parsers, with the canonical-decimal spec.
 - `crates/gateway-runtime/src/shipping`: the trusted adapters, held to a
   panic-free standard by clippy and run under `catch_unwind`.
 

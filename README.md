@@ -192,8 +192,8 @@ cargo test -p gateway-runtime --release --locked server::tests::benchmark -- --i
 LOGGATE_HAPROXY=/path/to/haproxy cargo test -p gateway-runtime --locked proxy_gateway_process_failover -- --ignored --nocapture
 ```
 
-Validation on 2026-10-25: 541 core verification checks passed, 295 workspace tests including seven compile-fail
-doctests passed, all 383 deliberate mutations failed their proof obligations, and the runtime passed its
+Validation on 2026-10-25: 567 core verification checks passed, 295 workspace tests including seven compile-fail
+doctests passed, all 389 deliberate mutations failed their proof obligations, and the runtime passed its
 panic and effect-site lints. The opt-in TLS proxy/gateway
 process-failover test and six load/fault workloads passed on 2026-10-23.
 Two ten-minute overload runs and the final 100-wave-per-mode isolated memory soak

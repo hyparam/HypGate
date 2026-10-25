@@ -130,31 +130,19 @@ fn rejected(rejection: Rejection) -> HttpError {
 }
 
 fn selector(uri: &Uri) -> Result<u64, HttpError> {
-    // Accept only origin-form /routes/<decimal>. Never route from a caller URL,
-    // authority, query, percent escape, or path suffix.
+    // Origin form only: never route from a caller URL, authority, or query.
+    // The path itself is parsed by the verified `inbound::route_selector`,
+    // which accepts exactly `/routes/<canonical decimal u64>`.
     if uri.scheme().is_some() || uri.authority().is_some() || uri.query().is_some() {
         return Err(HttpError::BadRequest);
     }
-    let id = uri.path().strip_prefix("/routes/").ok_or(HttpError::BadRequest)?;
-    if id.is_empty() || id.len() > 20 || !id.bytes().all(|b| b.is_ascii_digit())
-        || (id.len() > 1 && id.starts_with('0')) {
-        return Err(HttpError::BadRequest);
-    }
-    id.parse().map_err(|_| HttpError::BadRequest)
+    gateway_core::inbound::route_selector(uri.path().as_bytes()).ok_or(HttpError::BadRequest)
 }
 
-fn bearer(headers: &HeaderMap) -> Result<&[u8], HttpError> {
-    let mut values = headers.get_all("authorization").iter();
-    let value = values.next().ok_or(HttpError::Unauthorized)?.as_bytes();
-    if values.next().is_some() { return Err(HttpError::Unauthorized); }
-    let separator = value.iter().position(|b| *b == b' ').ok_or(HttpError::Unauthorized)?;
-    let (scheme, rest) = value.split_at(separator);
-    let token = &rest[1..];
-    if !scheme.eq_ignore_ascii_case(b"bearer") || token.is_empty() || token.len() > 512
-        || !token.iter().all(|b| b.is_ascii_alphanumeric() || b"-._~+/=".contains(b)) {
-        return Err(HttpError::Unauthorized);
-    }
-    Ok(token)
+/// The gateway token: exactly one Authorization field holding a well-formed
+/// bearer, parsed by the verified `inbound::bearer`.
+fn bearer(fields: &Vec<Field>) -> Result<Vec<u8>, HttpError> {
+    gateway_core::inbound::bearer(fields).ok_or(HttpError::Unauthorized)
 }
 
 /// Prepare a POST request after authenticating gateway Authorization. The caller
@@ -167,11 +155,11 @@ pub fn prepare<'a>(config: &'a GatewayConfig, method: &Method, uri: &Uri, header
     let fields = fields_of(headers);
     if !headers::fits(&fields) { return Err(HttpError::HeadersTooLarge); }
     let route = selector(uri)?;
-    let token = bearer(headers)?;
+    let token = bearer(&fields)?;
     // Every verified header rule runs before a request slot is taken, so a
     // rejected head never consumes capacity.
     headers::check_request(&fields).map_err(rejected)?;
-    let routed = config.admit(token, route).map_err(|error| match error {
+    let routed = config.admit(&token, route).map_err(|error| match error {
         AdmissionError::Unauthorized => HttpError::Unauthorized,
         AdmissionError::AtCapacity | AdmissionError::Unavailable => HttpError::Unavailable,
     })?;

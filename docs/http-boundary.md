@@ -2,14 +2,19 @@
 
 The runtime converts Hyper's header maps to byte fields, hands them to the
 verified projection in `gateway_core::headers`, and converts the result back.
-Selector and bearer parsing and the admission binding are tested Rust; every
-header rule below is proved. No sockets, TLS, request bodies, response bodies,
+The route selector and the bearer token are parsed by the verified
+`gateway_core::inbound`; the admission binding is tested Rust. Every header,
+selector, and token rule below is proved. No sockets, TLS, request bodies, response bodies,
 or disk effects are implemented in this layer.
 
 Clients use `POST /routes/<selector>` with one `Authorization: Bearer <gateway-token>`
-header. Scheme matching is case-insensitive; duplicate credentials, malformed token
-syntax, absolute-form URLs, queries, escaped selectors, extra path components, and
-noncanonical decimal selectors are rejected. Authorization is still decided by
+header. Proved by `inbound::route_selector`: a path is accepted exactly when it is
+`/routes/` followed by the canonical decimal of a `u64`, so escaped selectors,
+extra path components, leading zeros, and out-of-range values are rejected and
+every canonical selector is accepted. Absolute-form URLs and queries are rejected
+before the path is parsed. Proved by `inbound::bearer`: the token is accepted
+exactly when there is one Authorization field, its scheme is `bearer` in any case,
+and the token is one to 512 token characters. Authorization is still decided by
 the verified tenant-scoped policy. Capacity exhaustion returns an unavailable error.
 
 The resulting private-constructor `PreparedRequest` owns the admitted routed request
