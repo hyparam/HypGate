@@ -90,9 +90,9 @@ fn connection_options(headers: &HeaderMap, relevant: &[&str]) -> Result<Vec<Head
     Ok(options)
 }
 
-fn filtered(headers: &HeaderMap, allowed: &[&'static str]) -> Result<HeaderMap, HttpError> {
-    check_size(headers)?;
-    let hop = connection_options(headers, allowed)?;
+// The caller has already checked header size and collected `hop`, the
+// Connection-nominated names, for this same header map.
+fn filtered(headers: &HeaderMap, allowed: &[&'static str], hop: &[HeaderName]) -> Result<HeaderMap, HttpError> {
     let mut out = HeaderMap::new();
     for &name in allowed {
         if hop.iter().any(|h| h == name) { continue; }
@@ -146,7 +146,8 @@ pub fn prepare<'a>(config: &'a GatewayConfig, method: &Method, uri: &Uri, header
     let route = selector(uri)?;
     let token = bearer(headers)?;
     // Validate every header rule before allocating a request slot.
-    let mut outgoing = filtered(headers, FORWARDED_REQUEST_HEADERS)?;
+    let hop = connection_options(headers, FORWARDED_REQUEST_HEADERS)?;
+    let mut outgoing = filtered(headers, FORWARDED_REQUEST_HEADERS, &hop)?;
     // Compression is deliberately unsupported on uploads; dropping its header
     // while forwarding compressed bytes would change the request's meaning.
     if headers.contains_key("content-encoding") || headers.contains_key("upgrade")
@@ -194,10 +195,9 @@ pub fn response_headers(headers: &HeaderMap) -> Result<HeaderMap, HttpError> {
     check_size(headers)?;
     // Removing a nominated encoding while preserving encoded bytes changes
     // their meaning. Reject that upstream response instead.
-    if connection_options(headers, FORWARDED_RESPONSE_HEADERS)?.iter().any(|h| h == "content-encoding") {
-        return Err(HttpError::BadRequest);
-    }
-    filtered(headers, FORWARDED_RESPONSE_HEADERS)
+    let hop = connection_options(headers, FORWARDED_RESPONSE_HEADERS)?;
+    if hop.iter().any(|h| h == "content-encoding") { return Err(HttpError::BadRequest); }
+    filtered(headers, FORWARDED_RESPONSE_HEADERS, &hop)
 }
 
 #[cfg(test)]
