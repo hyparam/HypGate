@@ -75,79 +75,84 @@ checked by Verus, conditional on the documented adapter contracts.
 Verus does not verify Tokio, Hyper, rustls, the OS, DNS/PKI, or the filesystem for us.
 Availability also depends on deployment: an external load balancer must route around
 a failed gateway instance, and interrupted generations are not transparently replayed.
-The [security contract](docs/security-contract.md) and progress notes below specify
-the assumptions and limits; these targets do not promise secrecy of arbitrary
+The [security contract](docs/security-contract.md) and the documents indexed below
+specify the assumptions and limits; these targets do not promise secrecy of arbitrary
 opaque body contents or survival of permanent storage loss.
 
-## Implementation progress
+## Documentation
 
-The [implementation milestones](docs/implementation-plan.md) are the active plan,
-with all six complete under their documented assumptions. The [milestone 6 exit
-audit](docs/milestone-6-exit-audit.md) records the composed ownership and submission
-proofs, production correspondence, and remaining trusted boundaries.
-The [first streaming-core increment](docs/history/streaming-core-progress.md) records the
-current interface, checked behavior, and remaining milestone-one work.
-The [proof index](docs/proof-index.md) maps advertised guarantees to exact source
-contracts and the assumptions still required for composition. The
-[resource inventory](docs/resource-accounting.md) accounts for application buffers
-and queues separately from dependency allocations and total process memory.
-The [resource composition](docs/resource-composition.md) assigns every budget to
-one owner and sums the inventories into a conditional requested-allocation bound.
-The [security contract](docs/security-contract.md) separates proved core properties
-from remaining adapter obligations. The [authorization notes](docs/authorization-core.md)
-describe digest authentication, tenant-scoped tokens, and configuration confinement.
-The [runtime ownership layer](docs/runtime-ownership.md) binds authorized requests
-to capacity leases. Initial stream creation is now verified against the authority
-and live slot, and stream retirement consumes the matching owned stream before
-releasing its slot. Async ownership and external-effect lifetimes remain tested Rust.
-The [configuration boundary](docs/configuration.md) now parses root policy and
-candidate routes, loads credentials, and binds admitted requests to fixed endpoints.
-The [HTTP metadata boundary](docs/http-boundary.md) validates gateway authentication
-and prepares fixed upstream requests with filtered headers.
-The [async transfer driver](docs/async-transfer.md) connects the stream core to Tokio
-reads/writes and an explicit durable-log contract, with cancellation tests.
-The [disk logger](docs/disk-logging.md) now implements that contract with a bounded
-worker, sync acknowledgments, and an incremental recovery scanner. The crash-safe
-logging milestone is complete under the [documented storage/read/checksum assumptions](docs/storage-crash-contract.md#milestone-3-exit-audit);
-physical power-loss validation remains open.
-The [journal proof](docs/journal-proof.md) checks acknowledgment ordering and byte-prefix
-survival conditional on the storage preserving synced bytes.
-The [framing proof](docs/framing-proof.md) checks header roundtrips, bounded payload
-lengths, and exact frame extents in the serializer and recovery scanner.
-The [HTTPS upstream transport](docs/https-transport.md) now forwards opaque bodies
-over real TLS through the stream core. The [runnable gateway](docs/running.md)
-connects the inbound server, authorization, streaming, and disk logging.
-The [deployment example](docs/deployment.md) adds TLS termination and readiness-based
-standby routing with proxy retries disabled.
-Milestone 4 is complete under the [availability exit audit](docs/availability-audit.md)
-and [conditional shutdown proof](docs/shutdown-proof.md), including TLS CPU isolation,
-shared-listener shutdown, sustained overload, and repeated isolated-memory validation.
-The [benchmarks](docs/benchmarks.md) measure both logging modes through TLS and
-real disk logging at concurrency one through 32, with paced half-minute streams,
-1 MiB uploads, overload, and memory soaks, and a Linux CI job repeats the release
-workloads. The [operational limits](docs/operational-limits.md) tabulate every
-fixed and configurable limit, what happens when it is reached, and the evidence.
-The [adapter audit](docs/adapter-audit.md) maps runtime trust obligations to effect
-paths and tests, including concurrent tenants and client disconnects.
-The [end-to-end audit](docs/end-to-end-audit.md) traces one request from
-authorization through every enumerated network and disk effect site, each failure
-exit, and shutdown, marking every step proved, tested, or assumed.
+All six [implementation milestones](docs/implementation-plan.md) are complete under
+their documented assumptions; the [milestone 6 exit audit](docs/milestone-6-exit-audit.md)
+is the latest record of what is proved, tested, and still trusted.
 
-See [language and verification research](docs/history/verification-research.md) for the
-candidate comparison, agreed scope, proposed proof obligations, and next experiment.
+Guarantees and proofs:
 
-See [experiment results and implementation plan](docs/history/experiment-results.md) for
-the initial comparison, Verus proof, limitations, and reproduction instructions.
+| Document | Purpose |
+| --- | --- |
+| [Proof index](docs/proof-index.md) | Maps each advertised guarantee to its source contracts and composition assumptions |
+| [Security contract](docs/security-contract.md) | Threat boundary, required properties and their status, trusted computing base |
+| [Authorization core](docs/authorization-core.md) | Digest authentication, tenant-scoped tokens, configuration confinement |
+| [Framing proof](docs/framing-proof.md) | Header roundtrips, bounded payloads, frame extents in the serializer and scanner |
+| [Journal proof](docs/journal-proof.md) | Acknowledgment ordering and conditional synced-prefix survival |
+| [Recovery proof](docs/recovery-proof.md) | Scanner cursor transitions and acknowledged-prefix reconstruction |
+| [Shutdown proof](docs/shutdown-proof.md) | Verified drain rank and the conditional shutdown/resource release argument |
+| [Storage crash contract](docs/storage-crash-contract.md) | Storage assumptions, process-death experiments, milestone 3 exit audit |
+| [Resource accounting](docs/resource-accounting.md) | Source-level inventory of application buffers and queues |
+| [Resource composition](docs/resource-composition.md) | Budget ownership and the conditional requested-allocation bound |
+| [Dependency resources](docs/dependency-resources.md) | Pinned Hyper/rustls/Tokio retained-allocation audit |
+| [DNS resources](docs/dns-resources.md) | DNS lookup ownership, threads, and shutdown |
 
-The [viability follow-up](docs/history/viability-followup.md) records byte-level Verus proofs
-and the decision to continue with Rust and Verus. Perennial research is retained
-for reference; its experimental code was removed and remains in Git history at
-commit `7869347`.
+Runtime and adapters:
+
+| Document | Purpose |
+| --- | --- |
+| [Runtime ownership](docs/runtime-ownership.md) | Binding authorized requests to capacity leases and owned streams |
+| [Worker lifetimes](docs/worker-lifetimes.md) | Worker credits and task destruction order |
+| [Configuration](docs/configuration.md) | Root policy and candidate route parsing, credential loading, endpoint binding |
+| [HTTP boundary](docs/http-boundary.md) | Inbound authentication and fixed upstream request preparation |
+| [Async transfer](docs/async-transfer.md) | Tokio body driver and the durable-log contract |
+| [HTTPS transport](docs/https-transport.md) | Upstream TLS exchange and handshake isolation |
+| [Disk logging](docs/disk-logging.md) | Bounded disk worker, sync acknowledgments, recovery scanner |
+| [HTTP ownership](docs/http-ownership.md) | HTTP owner counts derived from the worker and connection registries |
+| [HTTP buffer lifetimes](docs/http-buffer-lifetimes.md) | HTTP body buffers, mailbox credit, and cancellation |
+| [Audit buffer lifetimes](docs/audit-buffer-lifetimes.md) | Audit queue credit, worker ownership, and receipt delivery |
+
+Operations:
+
+| Document | Purpose |
+| --- | --- |
+| [Running the gateway](docs/running.md) | Configuration example, provider setup, log scanning, shutdown |
+| [Deployment](docs/deployment.md) | TLS termination, standby routing, clean-environment reproduction |
+| [Operational limits](docs/operational-limits.md) | Every fixed and configurable limit and what happens when it is reached |
+| [Benchmarks](docs/benchmarks.md) | Latency, throughput, overload, and memory measurements |
+
+Audits:
+
+| Document | Purpose |
+| --- | --- |
+| [Implementation milestones](docs/implementation-plan.md) | Milestone table with status and a link to each exit audit |
+| [Milestone 1 exit audit](docs/milestone-1-exit-audit.md) | Verified streaming core criteria and evidence |
+| [Adapter audit](docs/adapter-audit.md) | Milestone 2 trust obligations mapped to effect paths and tests |
+| [Availability audit](docs/availability-audit.md) | Milestone 4 criteria, validation results, scheduler/I/O assumptions |
+| [End-to-end audit](docs/end-to-end-audit.md) | One request traced through every effect site, failure exit, and shutdown |
+| [Milestone 6 exit audit](docs/milestone-6-exit-audit.md) | Composed ownership and submission proofs and the remaining trusted joins |
+
+History:
+
+| Document | Purpose |
+| --- | --- |
+| [Historical plan](docs/history/implementation-plan.md) | Checkpoint-by-checkpoint plan with the counts current at each checkpoint |
+| [Streaming core progress](docs/history/streaming-core-progress.md) | First streaming-core and authorization increment |
+| [Verification research](docs/history/verification-research.md) | Language and verifier comparison that chose Rust and Verus |
+| [Experiment results](docs/history/experiment-results.md) | Initial feasibility experiments and reproduction notes |
+| [Viability follow-up](docs/history/viability-followup.md) | Byte-level Verus proofs and the decision to drop Perennial |
+
+The historical experiment code (`experiments/`) was removed from the tree and
+remains only in Git history at commit `7869347`.
 
 ## Development
 
-The production core lives in `crates/gateway-core`; the superseded experiment
-code is retained only in Git history (see the research notes). Cargo builds and Verus checks
+The production core lives in `crates/gateway-core`. Cargo builds and Verus checks
 use the same source. Install Rust 1.99.1 and Verus release
 `0.2026.10.18.7d82994` (commit `7d829946231d6413a398f6e4160cdfe951261dad`),
 and put the release's `verus` and `cargo-verus` binaries on PATH.
