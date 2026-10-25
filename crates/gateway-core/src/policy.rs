@@ -250,6 +250,10 @@ impl<'a> AuthorizedRequest<'a> {
         && self.binding().tenant == self.tenant
         && self.grants(self.binding())
     }
+    pub proof fn binding_tenant(&self)
+        requires self.valid(),
+        ensures self.binding().tenant == self.tenant(),
+    {}
     pub fn tenant_id(&self) -> (out: u64)
         requires self.valid(),
         ensures out == self.tenant(),

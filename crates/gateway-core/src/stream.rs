@@ -80,10 +80,6 @@ impl StreamChunk {
         ensures out == self.owner(),
     { self.owner }
 
-    pub fn chunk_id(&self) -> (out: u64)
-        ensures out == self.chunk(),
-    { self.chunk }
-
     pub fn requires_audit(&self) -> (out: bool)
         ensures out == self.strict(),
     { self.strict }

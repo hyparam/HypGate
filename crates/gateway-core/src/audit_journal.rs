@@ -104,12 +104,5 @@ impl AuditJournal {
     {
         crate::recovery::reconstruct_prefix::<R>(self.frames(), data, 56, states, results);
     }
-
-    pub proof fn acknowledged_frames_survive(&self, recovered: Seq<u8>)
-        requires self.valid(), recovered.len() >= self.history().len(),
-            recovered.subrange(0, self.history().len() as int) == self.history(),
-        ensures recovered.subrange(0, encoded_frames(self.frames()).len() as int)
-            == encoded_frames(self.frames()),
-    {}
 }
 }

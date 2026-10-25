@@ -89,42 +89,6 @@ pub proof fn canonical_frame_is_complete<R: Source>(frame: &framing::RecordFrame
     assert(data.subrange(end as int - 32, end as int) =~= frame.checksum());
 }
 
-pub proof fn canonical_prefix_is_complete<R: Source>(frames: Seq<framing::RecordFrame>,
-    data: Seq<u8>, start: nat)
-    requires
-        forall|i: int| 0 <= i < frames.len() ==> #[trigger] frames[i].valid(),
-        forall|i: int| 0 <= i < frames.len() ==> R::digest(framing::encoding(frames[i].header())
-            + frames[i].payload()) == #[trigger] frames[i].checksum(),
-        start + crate::audit_journal::encoded_frames(frames).len() <= data.len(),
-        start + crate::audit_journal::encoded_frames(frames).len() <= u64::MAX,
-        data.subrange(start as int, (start + crate::audit_journal::encoded_frames(frames).len()) as int)
-            == crate::audit_journal::encoded_frames(frames),
-    ensures forall|i: int| 0 <= i < frames.len() ==> complete_record::<R>(data,
-        start + crate::audit_journal::encoded_frames(frames.take(i)).len()),
-    decreases frames.len(),
-{
-    if frames.len() > 0 {
-        let prior = frames.drop_last();
-        let prefix = crate::audit_journal::encoded_frames(prior);
-        let last = frames.last();
-        assert(data.subrange(start as int, (start + prefix.len()) as int) =~= prefix);
-        matching_subrange(data, crate::audit_journal::encoded_frames(frames), start,
-            prefix.len(), crate::audit_journal::encoded_frames(frames).len());
-        assert(data.subrange((start + prefix.len()) as int,
-            (start + prefix.len() + last.contents().len()) as int) =~= last.contents());
-        canonical_prefix_is_complete::<R>(prior, data, start);
-        canonical_frame_is_complete::<R>(&last, data, start + prefix.len());
-        assert forall|i: int| 0 <= i < frames.len() implies complete_record::<R>(data,
-            start + crate::audit_journal::encoded_frames(frames.take(i)).len()) by {
-            if i < prior.len() {
-                assert(frames.take(i) =~= prior.take(i));
-            } else {
-                assert(frames.take(i) =~= prior);
-            }
-        }
-    }
-}
-
 pub struct Scanner<R: Source> { source: R, cursor: Cursor, session: [u8; 16] }
 pub open spec fn scanner_step<R: Source>(before: &Scanner<R>, after: &Scanner<R>,
     out: Result<Option<RecoveredRecord>, ScanError>) -> bool {
@@ -168,13 +132,6 @@ pub proof fn recover_frame_step<R: Source>(before: &Scanner<R>, after: &Scanner<
 {
     canonical_frame_is_complete::<R>(frame, before.data(), before.position() as nat);
     frame.canonical();
-    match out {
-        Ok(Some(record)) => {
-            assert(record.header == frame.header());
-            assert(record.bytes@ == frame.payload());
-        },
-        _ => {},
-    }
 }
 
 pub proof fn reconstruct_prefix<R: Source>(frames: Seq<framing::RecordFrame>, data: Seq<u8>,

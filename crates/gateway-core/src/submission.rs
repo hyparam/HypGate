@@ -43,22 +43,36 @@ impl AuthorizedWrite {
         proof { stream.payload_bound(); stream.state().payload_within_capacity(); }
         Some(Self { ticket, route, request: authority.request_id(), direction })
     }
+    // The borrowed slice is exactly the reserved range of the authorized stream;
+    // in strict mode the stream also carries a matching journal receipt.
+    pub open spec fn delivers(&self, owner: &OwnedStream, authority: &AuthorizedRequest,
+        journal: &crate::journal_binding::JournalBinding, direction: u8, bytes: Seq<u8>) -> bool
+    {
+        self.direction() == direction && direction <= 1 && self.bound_to(authority)
+            && authority.grants(self.route()) && self.request() == owner.state().owner()
+            && owner.state().matches(&self.ticket()) && !owner.state().closed()
+            && bytes == owner.state().body().subrange(owner.state().position() as int, owner.state().end() as int)
+            && (owner.state().strict() ==> owner.state().end() <= owner.state().durable()
+                && owner.audited_for(authority, journal) && owner.receipt().is_some()
+                && owner.receipt().unwrap().valid()
+                && journal.session() == Some(owner.receipt().unwrap().session())
+                && owner.receipt().unwrap().record()
+                    == owner.state().audit_frame(authority.tenant(), direction, owner.receipt().unwrap().checksum()))
+    }
+    pub open spec fn refused(&self, owner: &OwnedStream, authority: &AuthorizedRequest,
+        journal: &crate::journal_binding::JournalBinding, direction: u8) -> bool
+    {
+        direction > 1 || self.direction() != direction
+            || (owner.state().strict() && (!owner.audited_for(authority, journal) || owner.audit_direction() != direction))
+            || !self.bound_to(authority) || self.request() != owner.state().owner()
+            || !owner.state().matches(&self.ticket()) || owner.state().closed()
+    }
     pub fn bytes<'a>(&self, owner: &'a OwnedStream, authority: &AuthorizedRequest, journal: &crate::journal_binding::JournalBinding, direction: u8)
         -> (out: Option<&'a [u8]>)
         requires owner.valid(), authority.valid(),
         ensures match out {
-            Some(bytes) => self.direction() == direction && direction <= 1 && self.bound_to(authority)
-                && authority.grants(self.route()) && self.request() == owner.state().owner()
-                && owner.state().matches(&self.ticket()) && !owner.state().closed()
-                && bytes@ == owner.state().body().subrange(owner.state().position() as int, owner.state().end() as int)
-                && (owner.state().strict() ==> owner.state().end() <= owner.state().durable()
-                    && owner.audited_for(authority, journal) && owner.receipt().is_some()
-                    && owner.receipt().unwrap().valid()
-                    && journal.session() == Some(owner.receipt().unwrap().session())
-                    && owner.receipt().unwrap().record()
-                        == owner.state().audit_frame(authority.tenant(), direction, owner.receipt().unwrap().checksum())),
-            None => direction > 1 || self.direction() != direction || (owner.state().strict() && (!owner.audited_for(authority, journal) || owner.audit_direction() != direction)) || !self.bound_to(authority) || self.request() != owner.state().owner()
-                || !owner.state().matches(&self.ticket()) || owner.state().closed(),
+            Some(bytes) => self.delivers(owner, authority, journal, direction, bytes@),
+            None => self.refused(owner, authority, journal, direction),
         },
     {
         if direction > 1 || self.direction != direction { return None; }

@@ -119,33 +119,16 @@ impl Buffers {
     // Discharge queued count and frame validity from the actual production
     // queue. Binding its configured limit to K and other category snapshots
     // remain explicit premises; no queue count is supplied independently.
-    pub proof fn accounted_payload_with_queue<T>(&self, requests: nat, chunk: nat, connections: nat,
-        queue: &crate::frame_queue::FrameQueue<T>)
-        requires self.other_categories_valid(requests, chunk, connections), queue.valid(),
-            self.queued_log == queue.frames(),
-            queue.payload_limit() <= chunk,
-        ensures self.bytes() <= budget(requests, chunk, connections, queue.capacity()),
-    {
-        self.accounted_payload_with_encoding(requests, chunk, connections, queue, Seq::empty());
-    }
-
-    // Encoding is outside the queue's retained-frame projection until insertion.
-    // This snapshot counts it explicitly while the reservation shares Q slots.
-    pub open spec fn bytes_with_encoding(&self, encoding: Seq<u8>) -> nat {
-        self.bytes() + encoding.len()
-    }
-    pub proof fn covers_encoding(&self, encoding: Seq<u8>)
-        ensures self.bytes_with_encoding(encoding) == self.bytes() + encoding.len(),
-            self.bytes_with_encoding(encoding) >= encoding.len(),
-    {}
-
+    // `encoding` is the in-flight RecordBody or sealed RecordFrame contents
+    // (payload plus 33 or 65 bytes of framing), which sits outside the queue's
+    // retained-frame projection until insertion while sharing its Q slots.
     pub proof fn accounted_payload_with_encoding<T>(&self, requests: nat, chunk: nat, connections: nat,
         queue: &crate::frame_queue::FrameQueue<T>, encoding: Seq<u8>)
         requires self.other_categories_valid(requests, chunk, connections), queue.valid(),
             self.queued_log == queue.frames(), queue.payload_limit() <= chunk,
             encoding.len() <= queue.payload_limit() + 65,
             !queue.reserved() ==> encoding.len() == 0,
-        ensures self.bytes_with_encoding(encoding) <= budget(requests, chunk, connections, queue.capacity()),
+        ensures self.bytes() + encoding.len() <= budget(requests, chunk, connections, queue.capacity()),
     {
         queue.encoding_and_queued_bound(encoding.len());
         bounded_sum(self.chunks, requests, chunk);
@@ -161,29 +144,6 @@ impl Buffers {
             requires queue.payload_limit() <= chunk;
         assert(queue.capacity() * (chunk + 65) + (chunk + 65) + requests * (chunk + 65)
             == (queue.capacity() + requests + 1) * (chunk + 65)) by(nonlinear_arith);
-    }
-
-    pub proof fn accounted_payload_with_body<T>(&self, requests: nat, chunk: nat, connections: nat,
-        queue: &crate::frame_queue::FrameQueue<T>, body: &crate::framing::RecordBody)
-        requires self.other_categories_valid(requests, chunk, connections), queue.valid(), queue.reserved(),
-            self.queued_log == queue.frames(), queue.payload_limit() <= chunk,
-            body.valid(), body.payload().len() <= queue.payload_limit(),
-        ensures self.bytes_with_encoding(body.contents()) <= budget(requests, chunk, connections, queue.capacity()),
-    {
-        body.retained_size();
-        self.accounted_payload_with_encoding(requests, chunk, connections, queue, body.contents());
-    }
-
-    pub proof fn accounted_payload_with_sealed_frame<T>(&self, requests: nat, chunk: nat, connections: nat,
-        queue: &crate::frame_queue::FrameQueue<T>, frame: &RecordFrame)
-        requires self.other_categories_valid(requests, chunk, connections), queue.valid(), queue.reserved(),
-            self.queued_log == queue.frames(), queue.payload_limit() <= chunk,
-            frame.valid(), frame.payload().len() <= queue.payload_limit(),
-        ensures self.bytes_with_encoding(frame.contents()) <= budget(requests, chunk, connections, queue.capacity()),
-    {
-        frame.canonical();
-        crate::framing::encoded_header_roundtrip(frame.header());
-        self.accounted_payload_with_encoding(requests, chunk, connections, queue, frame.contents());
     }
 
     // Guard against accidentally dropping a category from the modeled total.

@@ -172,14 +172,5 @@ impl<T> FrameQueue<T> {
             self.frames()[i].canonical();
         }
     }
-    pub proof fn accounted_frame_bytes(&self)
-        requires self.valid(),
-        ensures crate::buffer_accounting::bounded(crate::buffer_accounting::frame_bytes(self.frames()), self.capacity(), self.payload_limit() + 65),
-            crate::buffer_accounting::byte_sum(crate::buffer_accounting::frame_bytes(self.frames())) <= self.capacity() * (self.payload_limit() + 65),
-    {
-        self.frame_layout();
-        crate::buffer_accounting::bounded_frames(self.frames(), self.capacity(), self.payload_limit());
-        crate::buffer_accounting::bounded_sum(crate::buffer_accounting::frame_bytes(self.frames()), self.capacity(), self.payload_limit() + 65);
-    }
 }
 }

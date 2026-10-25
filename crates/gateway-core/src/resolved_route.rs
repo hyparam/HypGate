@@ -39,25 +39,15 @@ impl<'a, D, C> ResolvedRoute<'a, D, C> {
         journal: &crate::journal_binding::JournalBinding, direction: u8) -> (out: Option<&'b [u8]>)
         requires owner.valid(), authority.valid(),
         ensures match out {
-            Some(bytes) => self.bound_to(authority) && write.route() == self.route() && write.direction() == direction && direction <= 1 && write.bound_to(authority)
-                && authority.grants(write.route()) && write.request() == owner.state().owner()
-                && owner.state().matches(&write.ticket()) && !owner.state().closed()
-                && bytes@ == owner.state().body().subrange(owner.state().position() as int, owner.state().end() as int)
-                && (owner.state().strict() ==> owner.state().end() <= owner.state().durable()
-                    && owner.audited_for(authority, journal) && owner.receipt().is_some()
-                    && owner.receipt().unwrap().valid()
-                    && journal.session() == Some(owner.receipt().unwrap().session())
-                    && owner.receipt().unwrap().record() == crate::framing::encoding(crate::framing::Header {
-                        payload: owner.state().body().len() as u32, tenant: authority.tenant(),
-                        request: authority.request(), chunk: owner.state().chunk(), direction })
-                        + owner.state().body() + owner.receipt().unwrap().checksum()),
-            None => !self.bound_to(authority) || direction > 1 || write.direction() != direction || (owner.state().strict() && (!owner.audited_for(authority, journal) || owner.audit_direction() != direction)) || !write.bound_to(authority) || write.request() != owner.state().owner()
-                || !owner.state().matches(&write.ticket()) || owner.state().closed(),
+            Some(bytes) => self.bound_to(authority) && write.route() == self.route()
+                && write.delivers(owner, authority, journal, direction, bytes@),
+            None => !self.bound_to(authority) || write.refused(owner, authority, journal, direction),
         },
     {
         if !self.matches(authority) { return None; }
-        let _route = authority.route();
-        write.bytes(owner, authority, journal, direction)
+        let out = write.bytes(owner, authority, journal, direction);
+        proof { authority.binding_tenant(); }
+        out
     }
     pub fn matches(&self, authority: &AuthorizedRequest) -> (ok: bool)
         requires authority.valid(),

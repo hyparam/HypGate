@@ -6,12 +6,13 @@ use vstd::prelude::*;
 verus! {
 #[allow(unused_imports)]
 use crate::{task_credit::TaskCredit, http_worker::{WorkerRegistry, HttpPermit},
-    http_connection::{ResponseRegistry, RegisteredResponse}, disk_worker::DiskWorker};
+    http_connection::{ResponseRegistry, RegisteredResponse}};
 
+// Background DNS/TLS credits (`TaskCredit::releasable` is the negation of
+// `retaining`) and the disk slot (`available` excludes `busy`) need no lemma.
 pub proof fn cleanup_before_reuse(workers: &WorkerRegistry, worker: &TaskCredit, http: &HttpPermit,
-    connections: &ResponseRegistry, connection: &TaskCredit, response: &RegisteredResponse,
-    background: &TaskCredit, disk: &DiskWorker)
-    requires workers.valid(), connections.valid(), disk.valid(),
+    connections: &ResponseRegistry, connection: &TaskCredit, response: &RegisteredResponse)
+    requires workers.valid(), connections.valid(),
     ensures
         // Even a Cleaned task cannot release a still-live HTTP descendant.
         (workers.owns_permit(http) && http.index() == worker.key().slot() && http.owner() == worker.key().id())
@@ -19,11 +20,6 @@ pub proof fn cleanup_before_reuse(workers: &WorkerRegistry, worker: &TaskCredit,
         (connections.owns_response(response) && response.index() == connection.key().slot()
             && response.owner() == connection.key().id())
             ==> connections.owns_task(connection) && !connections.can_release_task(connection),
-        // Instantiated independently for DNS and TLS, including unread replies
-        // and cleanup. A request's cancellation is not a release condition.
-        background.retaining() ==> !background.releasable(),
-        // Queue transfer cannot reuse the active disk slot before delivery.
-        disk.busy() ==> !disk.available(),
         crate::http_accounting::charged_payload(workers, connections)
             <= 2 * workers.limit() * 32768 + (connections.limit() + 2 * workers.limit()) * 16384,
 {
