@@ -1,7 +1,7 @@
 //! Verified credits follow background work through queued replies. The request
 //! adopts a successful result before its independent background credit returns.
 use gateway_core::{resource::{RequestKey, ResourceAdmission}, task_credit::{TaskCredit, TaskResult}};
-use std::{io, sync::{Arc, Mutex}};
+use std::{io, sync::{Arc, Mutex, mpsc}};
 use tokio::sync::oneshot;
 
 struct Credit { slots: Arc<Mutex<ResourceAdmission>>, state: Option<TaskCredit> }
@@ -71,7 +71,7 @@ impl<T> Drop for Reply<T> {
     }
 }
 
-type Sender<T> = oneshot::Sender<io::Result<Reply<T>>>;
+pub(crate) type Sender<T> = oneshot::Sender<io::Result<Reply<T>>>;
 trait Runnable: Send { fn run(self: Box<Self>); }
 pub(crate) struct CreditedJob(Box<dyn Runnable>);
 struct Job<T, F> { work: Option<F>, send: Option<Sender<T>>, credit: Option<Credit> }
@@ -118,6 +118,45 @@ impl CreditedJob {
             credit: Some(Credit { slots, state: Some(state) }) })), receive)
     }
     pub(crate) fn run(self) { self.0.run(); }
+}
+
+const STACK_BYTES: usize = 2 * 1024 * 1024;
+
+/// Fixed dedicated threads run credited jobs. Request cancellation cannot
+/// return a running job's credit; the threads never hold runtime shutdown open.
+pub(crate) struct JobPool { sender: mpsc::SyncSender<CreditedJob>, pub(crate) slots: Arc<Mutex<ResourceAdmission>> }
+impl JobPool {
+    pub(crate) fn new(name: &str, limit: usize, workers: usize) -> io::Result<Self> {
+        let (sender, receiver) = mpsc::sync_channel::<CreditedJob>(limit.max(1));
+        let receiver = Arc::new(Mutex::new(receiver));
+        for _ in 0..workers {
+            let receiver = receiver.clone();
+            std::thread::Builder::new().name(name.into()).stack_size(STACK_BYTES)
+                .spawn(move || loop {
+                    let job = {
+                        let Ok(receiver) = receiver.lock() else { break; };
+                        receiver.recv()
+                    };
+                    let Ok(job) = job else { break; };
+                    // A job panic drops its job/credit and closes the reply; it
+                    // must not silently remove a worker from the fixed pool.
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job.run()));
+                })?;
+        }
+        Ok(Self { sender, slots: Arc::new(Mutex::new(ResourceAdmission::new(limit, 0))) })
+    }
+    pub(crate) async fn submit<T: Send + 'static>(&self,
+        work: impl FnOnce(&mut Sender<T>) -> Option<io::Result<T>> + Send + 'static) -> io::Result<Reply<T>>
+    {
+        let key = self.slots.lock().map_err(|_| io::Error::from(io::ErrorKind::Other))?
+            .acquire().ok_or(io::ErrorKind::WouldBlock)?;
+        let (job, receive) = CreditedJob::new(self.slots.clone(), key, work);
+        self.sender.try_send(job).map_err(|error| io::Error::from(match error {
+            mpsc::TrySendError::Full(_) => io::ErrorKind::WouldBlock,
+            mpsc::TrySendError::Disconnected(_) => io::ErrorKind::Other,
+        }))?;
+        receive.await.map_err(|_| io::Error::from(io::ErrorKind::Other))?
+    }
 }
 
 #[cfg(test)]

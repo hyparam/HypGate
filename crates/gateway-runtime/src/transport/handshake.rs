@@ -1,41 +1,27 @@
 //! Fixed handshake threads isolate synchronous certificate work from the I/O
 //! executor. Cancellation retains credit until the current poll returns.
+use crate::credited_job::{JobPool, Reply};
+use std::{future::Future, io};
+#[cfg(test)]
 use gateway_core::resource::ResourceAdmission;
-use crate::credited_job::{CreditedJob as Job, Reply};
-use std::{future::Future, io, sync::{Arc, Mutex, mpsc}};
+#[cfg(test)]
+use std::sync::{Arc, Mutex, mpsc};
 #[cfg(test)]
 use tokio::sync::oneshot;
 
 const LIMIT: usize = 32;
 const WORKERS: usize = 4;
-const STACK_BYTES: usize = 2 * 1024 * 1024;
-pub(super) struct Pool { sender: mpsc::SyncSender<Job>, slots: Arc<Mutex<ResourceAdmission>> }
+pub(super) struct Pool { jobs: JobPool }
 impl Pool {
     pub(super) fn new() -> io::Result<Self> { Self::with_limits(LIMIT, WORKERS) }
     fn with_limits(limit: usize, workers: usize) -> io::Result<Self> {
-        let (sender, receiver) = mpsc::sync_channel::<Job>(limit);
-        let receiver = Arc::new(Mutex::new(receiver));
-        for _ in 0..workers {
-            let receiver = receiver.clone();
-            std::thread::Builder::new().name("gateway-tls".into()).stack_size(STACK_BYTES)
-                .spawn(move || loop {
-                    let job = {
-                        let Ok(receiver) = receiver.lock() else { break; };
-                        receiver.recv()
-                    };
-                    let Ok(job) = job else { break; };
-                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job.run()));
-                })?;
-        }
-        Ok(Self { sender, slots: Arc::new(Mutex::new(ResourceAdmission::new(limit, 0))) })
+        Ok(Self { jobs: JobPool::new("gateway-tls", limit, workers)? })
     }
     pub(super) async fn run<T: Send + 'static>(
         &self, future: impl Future<Output = io::Result<T>> + Send + 'static,
     ) -> io::Result<Reply<T>> {
-        let key = self.slots.lock().map_err(|_| io::Error::from(io::ErrorKind::Other))?
-            .acquire().ok_or(io::ErrorKind::WouldBlock)?;
         let runtime = tokio::runtime::Handle::current();
-        let (job, receive) = Job::new(self.slots.clone(), key, move |send| {
+        self.jobs.submit(move |send| {
             // The socket stays registered with the caller's reactor. Only polling
             // the handshake moves threads; successful streams return to that caller.
             runtime.block_on(async move {
@@ -45,12 +31,7 @@ impl Pool {
                     result = future => Some(result),
                 }
             })
-        });
-        self.sender.try_send(job).map_err(|error| io::Error::from(match error {
-            mpsc::TrySendError::Full(_) => io::ErrorKind::WouldBlock,
-            mpsc::TrySendError::Disconnected(_) => io::ErrorKind::Other,
-        }))?;
-        receive.await.map_err(|_| io::Error::from(io::ErrorKind::Other))?
+        }).await
     }
 }
 
@@ -79,10 +60,10 @@ mod tests {
         for _ in 0..32 {
             assert_eq!(pool.run::<()>(async { panic!("replacement work") }).await.unwrap_err().kind(), io::ErrorKind::WouldBlock);
         }
-        assert_eq!(pool.slots.lock().unwrap().usage(), (1, 1));
+        assert_eq!(pool.jobs.slots.lock().unwrap().usage(), (1, 1));
         drop(release);
         tokio::time::timeout(Duration::from_secs(2), async {
-            while pool.slots.lock().unwrap().usage().0 != 0 { tokio::task::yield_now().await; }
+            while pool.jobs.slots.lock().unwrap().usage().0 != 0 { tokio::task::yield_now().await; }
         }).await.unwrap();
         assert_eq!(pool.run(async { Ok(7) }).await.unwrap().into_inner_for_test(), 7);
     }
@@ -92,7 +73,7 @@ mod tests {
         let pool = Pool::with_limits(1, 1).unwrap();
         assert!(pool.run::<()>(async { panic!("injected verification panic") }).await.is_err());
         tokio::time::timeout(Duration::from_secs(2), async {
-            while pool.slots.lock().unwrap().usage().0 != 0 { tokio::task::yield_now().await; }
+            while pool.jobs.slots.lock().unwrap().usage().0 != 0 { tokio::task::yield_now().await; }
             pool.run(async { Ok(()) }).await.unwrap();
         }).await.unwrap();
     }
@@ -111,7 +92,7 @@ mod tests {
         }
         let pool = Arc::new(Pool::with_limits(1, 1).unwrap());
         let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let state = State { slots: pool.slots.clone(), dropped: dropped.clone() };
+        let state = State { slots: pool.jobs.slots.clone(), dropped: dropped.clone() };
         let task_pool = pool.clone();
         let (started, running) = oneshot::channel();
         let task = tokio::spawn(async move {
@@ -123,7 +104,7 @@ mod tests {
         });
         running.await.unwrap(); task.abort(); assert!(task.await.unwrap_err().is_cancelled());
         tokio::time::timeout(Duration::from_secs(2), async {
-            while pool.slots.lock().unwrap().usage().0 != 0 { tokio::task::yield_now().await; }
+            while pool.jobs.slots.lock().unwrap().usage().0 != 0 { tokio::task::yield_now().await; }
         }).await.unwrap();
         assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
     }
@@ -149,12 +130,12 @@ mod tests {
             }).await
         });
         tokio::time::timeout(Duration::from_secs(2), async {
-            while pool.slots.lock().unwrap().usage().0 != 2 { tokio::task::yield_now().await; }
+            while pool.jobs.slots.lock().unwrap().usage().0 != 2 { tokio::task::yield_now().await; }
         }).await.unwrap();
         queued.abort(); assert!(queued.await.unwrap_err().is_cancelled());
         drop(release); first.await.unwrap().unwrap();
         tokio::time::timeout(Duration::from_secs(2), async {
-            while pool.slots.lock().unwrap().usage().0 != 0 { tokio::task::yield_now().await; }
+            while pool.jobs.slots.lock().unwrap().usage().0 != 0 { tokio::task::yield_now().await; }
         }).await.unwrap();
         assert!(!polled.load(std::sync::atomic::Ordering::SeqCst));
     }
