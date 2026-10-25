@@ -141,6 +141,7 @@ implemented.
 | Batches hold whole exchanges within 5,000 rows and 4 MiB | `BatchBuilder` proved; `ships_many_exchanges_in_bounded_batches_with_drain_mode`. |
 | Progress advances only through an acknowledgment of the in-flight batch or an explicit poison; abandonment changes nothing | `UploadCursor` and `Machine::reply` proved; `upload_cursor_resolves_only_the_acknowledged_in_flight_batch`. |
 | Batch and row identities are injective in their inputs | `shipping_identity` lemmas proved; stable ids across restarts tested. |
+| A restart from a checkpoint skips exactly the resolved exchanges and resends the rest with identical identities | Emission numbering is a proved function of record kinds and request ids (`exchange_assembler::{step,emitted_requests}`); the machine ties every projection to its emission number (`Machine::replay_numbering`); `restart_from_a_checkpoint_skips_exactly_the_resolved_exchanges`. |
 | No upload without an unexpired credential; one refresh per rejection; revocation is absorbing; delays within 1 to 300 seconds | `Enrollment`, `throttle_delay`, `transport_delay` proved; `recovers_from_rejected_tokens_throttling_and_poison_and_stops_on_revocation`. |
 | At-least-once delivery, exactly-once storage | Trusted server contract: batch-id ledger and `part_id` dedup. Tested against the fake server, including a restart without a checkpoint. |
 | Shutdown within a bounded window, no replacement thread | Tested: `shutdown_returns_within_its_window_while_the_server_hangs`; a thread inside a request is left to finish on its own. |
@@ -155,10 +156,12 @@ implemented.
   configured server and returns that server's reply, `read` returns the log's
   records in order, `project` is a faithful projection, and `checkpoint`
   writes the values it is given. The driver that calls them is verified.
-- The checkpoint's reproducibility: the assembler is deterministic for the
-  same record sequence and limits, so a restart replays the file from its
-  header and skips the resolved count. A checkpoint from different limits is
-  ignored and everything is re-sent; the server drops the repeated rows.
+- The checkpoint names the log session, and the restarted shipper reads the
+  same file from its header. Given that, emission numbering is proved to be a
+  function of the records (`exchange_assembler::emitted_requests`), so the
+  resolved count skips exactly the exchanges the earlier run resolved. A
+  checkpoint from different limits is ignored and everything is re-sent; the
+  server drops the repeated rows.
 - Token provisioning and revocation are operator and server obligations.
 
 ## Resources

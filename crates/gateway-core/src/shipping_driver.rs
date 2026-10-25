@@ -57,6 +57,7 @@ fn header_ok(header: &Header, len: usize) -> (out: bool)
 // token's index is exactly the next the machine counts, so this never fails.
 fn settle<E: Effects>(machine: &mut Machine, effects: &mut E, token: crate::shipper::Emitted)
     requires old(machine).valid(), token.index() == old(machine).counted(), token.index() < old(machine).emitted(),
+        token.request() == old(machine).emissions()[token.index() as int],
     ensures final(machine).valid(), final(machine).outstanding() == 0 || final(machine).counted() == old(machine).counted() + 1,
         final(machine).counted() == old(machine).counted() + 1, final(machine).emitted() == old(machine).emitted(),
         final(machine).awaiting() == old(machine).awaiting(), final(machine).same_credential(old(machine)),
@@ -111,7 +112,7 @@ fn flush<E: Effects>(machine: &mut Machine, effects: &mut E) -> (remaining: bool
     ensures final(machine).valid(), final(machine).outstanding() == 0, final(machine).awaiting().is_none(),
 {
     let mut emitted = false;
-    while machine.open_exchanges() > 0 && machine.has_room()
+    while machine.open_exchanges() > 0 && machine.has_room() && !machine.has_read_failed()
         invariant machine.valid(), machine.outstanding() == 0, machine.awaiting().is_none(),
     {
         proof { machine.valid_bounds(); }

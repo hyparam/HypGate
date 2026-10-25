@@ -97,14 +97,26 @@ server's dedup stores each exchange once.
   every send is followed by exactly one reply, records are admitted only
   while wanted and with checked headers, and a checkpoint can only carry the
   machine's own progress.
+- Replay (`exchange_assembler::emitted_requests`, `Machine::replay_numbering`):
+  which exchange is emitted when is a function of the record kinds and
+  request ids alone, proved on every assembler step; the machine's ghost
+  emission sequence equals that function of its inputs, and every queued or
+  resolved projection at position j came from the exchange numbered
+  skip + j. A restart that starts the cursor at the checkpointed count
+  therefore skips exactly the exchanges the earlier run resolved, and a
+  resent exchange carries the same request id, so its part ids are identical.
+  A checkpoint can only carry the machine's resolved count, which advances
+  only on an acknowledgment or a poison, so a crash before the checkpoint is
+  written causes a resend, never a skip.
 
 **Premises.** Hex encoding; the server honors its batch ledger and part-id
 dedup; the projection of an exchange's provider JSON into text and usage is
 faithful (tested against recorded bodies, not proved); the runtime's `Effects`
 implementation performs what it is asked (sends to the configured server,
-returns the log's records in order, writes the checkpoint it is given).
+returns the log's records in order, writes the checkpoint it is given); the
+scanner reads the same file on restart (the checkpoint names the session).
 
-**In progress.** Phase 4 adds the replay theorem.
+**In progress.** Nothing; what remains is the trusted projection.
 
 ## Guarantee 3: there is no crash state
 
@@ -158,10 +170,13 @@ Each phase is one logical commit on the `hypaware-shipping` branch.
    disabled no cloud permit can be built. `clippy.toml` disallows every
    other socket, lookup, listener, file-write, and secret-read call and
    `scripts/check_effect_sites.sh` pins the audited sites.
-4. **Replay theorem.** Emission is a deterministic function of the record
-   sequence; restoring a checkpoint and replaying yields the unacknowledged
-   suffix with identical part ids; a checkpoint never claims more than was
-   acknowledged, so a crash can cause a resend but never a skip.
+4. **Replay theorem.** Done. Emission numbering is a proved function of
+   the record kinds and request ids (`exchange_assembler::emitted_requests`);
+   the machine carries it as a ghost sequence tied to every queued and
+   resolved projection (`Machine::replay_numbering`), so restoring a
+   checkpoint skips exactly the resolved exchanges and resends the rest
+   with identical identities. A checkpoint carries only the machine's own
+   resolved count, so a crash causes a resend, never a skip.
 5. **No crash state, tested.** Panic injection and kill-at-every-step runs
    against the scripted server; readiness, admission, and disk acknowledgment
    unchanged while the shipper dies.

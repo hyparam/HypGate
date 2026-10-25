@@ -15,7 +15,7 @@
 use vstd::prelude::*;
 use crate::batch_builder::{MAX_BYTES, MAX_ROWS};
 use crate::enrollment::{throttle_delay, transport_delay, Enrollment, Recovery};
-use crate::exchange_assembler::{Assembler, Exchange};
+use crate::exchange_assembler::{Assembler, Exchange, FLUSH};
 use crate::framing::{append, Header};
 use crate::upload_cursor::UploadCursor;
 
@@ -41,13 +41,12 @@ pub enum Outcome { Acknowledged(u64), Poisoned, Isolating, Enrolled, Unenrolled,
 
 /// One projected exchange: its NDJSON rows, each followed by a newline, and
 /// the row count.
-pub struct Pending { body: Vec<u8>, rows: usize }
+pub struct Pending { body: Vec<u8>, rows: usize, source: Ghost<u64> }
 impl Pending {
     pub closed spec fn body(&self) -> Seq<u8> { self.body@ }
     pub closed spec fn rows(&self) -> nat { self.rows as nat }
-    pub fn new(body: Vec<u8>, rows: usize) -> (out: Self)
-        ensures out.body() == body@, out.rows() == rows,
-    { Pending { body, rows } }
+    /// The request id of the exchange this projection came from.
+    pub closed spec fn source(&self) -> u64 { self.source@ }
 }
 
 pub open spec fn concat_bodies(s: Seq<Pending>) -> Seq<u8>
@@ -64,6 +63,7 @@ pub struct Emitted { exchange: Exchange, index: u64 }
 impl Emitted {
     pub closed spec fn index(&self) -> u64 { self.index }
     pub closed spec fn exchange_value(&self) -> Exchange { self.exchange }
+    pub open spec fn request(&self) -> u64 { self.exchange_value().request_id() }
     pub fn exchange(&self) -> (out: &Exchange) ensures *out == self.exchange_value(), { &self.exchange }
     pub fn position(&self) -> (out: u64) ensures out == self.index(), { self.index }
 }
@@ -171,6 +171,10 @@ pub struct Machine {
     jwt: Option<Vec<u8>>,
     queue: Vec<Pending>,
     history: Ghost<Seq<Pending>>,
+    /// Every (kind, request) the assembler has seen, flushes included.
+    inputs: Ghost<Seq<(u8, u64)>>,
+    /// The request id of every emitted exchange, in emission order.
+    emissions: Ghost<Seq<u64>>,
     /// Exchanges the checkpoint says the server already holds; the cursor starts there.
     skip: u64,
     /// Exchanges the assembler has emitted, including skipped ones.
@@ -195,6 +199,8 @@ impl Machine {
     pub closed spec fn skip(&self) -> u64 { self.skip }
     pub closed spec fn emitted(&self) -> u64 { self.emitted }
     pub closed spec fn history(&self) -> Seq<Pending> { self.history@ }
+    pub closed spec fn inputs(&self) -> Seq<(u8, u64)> { self.inputs@ }
+    pub closed spec fn emissions(&self) -> Seq<u64> { self.emissions@ }
     pub closed spec fn queue(&self) -> Seq<Pending> { self.queue@ }
     pub closed spec fn resolved(&self) -> u64 { self.cursor.resolved() }
     pub closed spec fn poisoned(&self) -> u64 { self.cursor.poisoned() }
@@ -234,7 +240,30 @@ impl Machine {
             && (self.cursor.in_flight().is_some() <==> self.awaiting == Some(Path::Ingest))
             && (self.jwt.is_some() <==> self.enrollment.enrolled_until().is_some())
             && self.delay <= crate::enrollment::MAX_DELAY_SECONDS
+            // Emission numbering is the functional spec applied to the inputs.
+            && self.assembler.open_requests() == crate::exchange_assembler::open_after(self.inputs@, self.max_open as nat)
+            && self.emissions@ == crate::exchange_assembler::emitted_requests(self.inputs@, self.max_open as nat)
+            && self.emissions@.len() >= self.emitted
+            && (!self.read_failed ==> self.emissions@.len() == self.emitted)
+            && (forall|j: int| 0 <= j < self.history@.len()
+                ==> (#[trigger] self.history@[j]).source() == self.emissions@[self.skip + j])
     }
+
+    /// The replay theorem's machine half: emission numbering is a function of
+    /// the inputs alone, and every queued or resolved projection at history
+    /// position j came from the exchange numbered skip + j. Two runs over the
+    /// same records therefore number the same exchanges identically, so a
+    /// restart that skips the checkpointed count skips exactly the exchanges
+    /// the earlier run resolved.
+    pub proof fn replay_numbering(&self)
+        requires self.valid(),
+        ensures self.emissions() == crate::exchange_assembler::emitted_requests(self.inputs(), self.max_open()),
+            self.emissions().len() >= self.emitted(),
+            !self.read_failed() ==> self.emissions().len() == self.emitted(),
+            forall|j: int| 0 <= j < self.history().len()
+                ==> (#[trigger] self.history()[j]).source() == self.emissions()[self.skip() + j],
+            self.skip() + self.history().len() == self.counted(),
+    {}
 
     /// What a valid machine guarantees about its counters, for callers outside this module.
     pub proof fn valid_bounds(&self)
@@ -256,6 +285,10 @@ impl Machine {
             && self.token() == other.token() && self.session() == other.session()
             && self.max_open() == other.max_open() && self.max_bytes() == other.max_bytes()
     }
+    /// Progress-neutral and input-neutral.
+    pub open spec fn same_inputs(&self, other: &Self) -> bool {
+        self.inputs() == other.inputs() && self.emissions() == other.emissions()
+    }
     pub open spec fn same_credential(&self, other: &Self) -> bool {
         self.enrollment() == other.enrollment() && self.jwt() == other.jwt() && self.delay() == other.delay()
     }
@@ -267,13 +300,15 @@ impl Machine {
         ensures out.valid(), out.token() == token@, out.session() == session@, out.max_open() == max_open,
             out.max_bytes() == max_bytes, out.skip() == resolved, out.resolved() == resolved, out.counted() == resolved,
             out.poisoned() == poisoned, out.emitted() == 0, out.history().len() == 0, out.queue().len() == 0,
+            out.inputs().len() == 0, out.emissions().len() == 0,
             out.awaiting().is_none(), !out.stopped(), !out.enrolled(), out.jwt().is_none(), out.delay() == 0,
             !out.read_failed(), !out.at_end(), out.open_count() == 0,
     {
         let cursor = match UploadCursor::restore(resolved, resolved, poisoned) { Some(c) => c, None => { proof { assert(false); } UploadCursor::restore(0, 0, 0).unwrap() } };
         proof { assert(Seq::<Pending>::empty().subrange(0, 0) =~= Seq::<Pending>::empty()); }
         Machine { token, session, max_open, max_bytes, assembler: Assembler::new(max_open, max_bytes), cursor,
-            enrollment: Enrollment::new(), jwt: None, queue: Vec::new(), history: Ghost(Seq::empty()), skip: resolved,
+            enrollment: Enrollment::new(), jwt: None, queue: Vec::new(), history: Ghost(Seq::empty()),
+            inputs: Ghost(Seq::empty()), emissions: Ghost(Seq::empty()), skip: resolved,
             emitted: 0, awaiting: None, force_refresh: false, read_failed: false, at_end: false, delay: 0,
             throttle_attempt: 0, transport_attempt: 0, enroll_attempt: 0, isolate: false }
     }
@@ -282,6 +317,7 @@ impl Machine {
     pub fn adopt_identity(&mut self, jwt: Vec<u8>, expires_at: u64, now: u64) -> (ok: bool)
         requires old(self).valid(),
         ensures final(self).valid(), final(self).same_progress(old(self)), final(self).emitted() == old(self).emitted(),
+            final(self).same_inputs(old(self)),
             final(self).wants() == old(self).wants(), final(self).delay() == old(self).delay(),
             ok == (!old(self).stopped() && now < expires_at),
             ok ==> final(self).enrollment().state() == (crate::enrollment::State::Enrolled { expires_at }) && final(self).jwt() == Some(jwt@),
@@ -303,23 +339,29 @@ impl Machine {
     pub fn end_of_log(&mut self)
         requires old(self).valid(),
         ensures final(self).valid(), final(self).same_progress(old(self)), final(self).same_credential(old(self)),
+            final(self).same_inputs(old(self)),
             final(self).emitted() == old(self).emitted(), final(self).at_end(), final(self).read_failed() == old(self).read_failed(),
     { self.at_end = true; }
     pub fn log_failed(&mut self)
         requires old(self).valid(),
         ensures final(self).valid(), final(self).same_progress(old(self)), final(self).same_credential(old(self)),
+            final(self).same_inputs(old(self)),
             final(self).emitted() == old(self).emitted(), final(self).read_failed(),
     { self.read_failed = true; }
 
     // Number an emitted exchange; exchanges below the checkpoint are dropped.
+    // The caller has already pushed the input and the matching emission.
     fn number(&mut self, exchange: Exchange) -> (out: Option<Emitted>)
-        requires old(self).valid(), old(self).room(),
+        requires old(self).valid_except_count(), old(self).room(), !old(self).read_failed,
+            old(self).emissions@.len() == old(self).emitted + 1,
+            old(self).emissions@ == old(self).emissions@.drop_last().push(exchange.request_id()),
         ensures final(self).valid(), final(self).same_progress(old(self)), final(self).same_credential(old(self)),
-            final(self).at_end() == old(self).at_end(),
+            final(self).same_inputs(old(self)), final(self).at_end() == old(self).at_end(),
             match out {
                 Some(t) => t.index() == old(self).emitted() && old(self).emitted() >= old(self).skip()
                     && final(self).emitted() == old(self).emitted() + 1 && t.exchange_value() == exchange
-                    && final(self).read_failed() == old(self).read_failed(),
+                    && final(self).read_failed() == old(self).read_failed()
+                    && t.request() == final(self).emissions()[t.index() as int],
                 None => (final(self).emitted() == old(self).emitted() + 1 && old(self).emitted() < old(self).skip()
                         && final(self).read_failed() == old(self).read_failed())
                     || (final(self).emitted() == old(self).emitted() && final(self).read_failed()),
@@ -332,42 +374,97 @@ impl Machine {
         Some(Emitted { exchange, index })
     }
 
+    // `valid` with the emission count one ahead of `emitted`: the state between
+    // recording an emission and numbering it.
+    spec fn valid_except_count(&self) -> bool {
+        self.assembler.valid() && self.cursor.valid() && 0 < self.max_open
+            && self.assembler.max_open() == self.max_open as nat
+            && self.assembler.max_bytes() == self.max_bytes as nat
+            && self.cursor.emitted() == self.skip + self.history@.len()
+            && self.skip <= self.cursor.resolved()
+            && self.queue@ == self.history@.subrange((self.cursor.resolved() - self.skip) as int, self.history@.len() as int)
+            && (self.emitted < self.skip ==> self.history@.len() == 0)
+            && (self.emitted >= self.skip ==> self.cursor.emitted() <= self.emitted)
+            && self.queue@.len() + self.outstanding() <= self.max_open
+            && (self.cursor.in_flight().is_some() <==> self.awaiting == Some(Path::Ingest))
+            && (self.jwt.is_some() <==> self.enrollment.enrolled_until().is_some())
+            && self.delay <= crate::enrollment::MAX_DELAY_SECONDS
+            && self.assembler.open_requests() == crate::exchange_assembler::open_after(self.inputs@, self.max_open as nat)
+            && self.emissions@ == crate::exchange_assembler::emitted_requests(self.inputs@, self.max_open as nat)
+            && (forall|j: int| 0 <= j < self.history@.len()
+                ==> (#[trigger] self.history@[j]).source() == self.emissions@[self.skip + j])
+    }
+
     /// Admit one scanned record. An exchange that completes, is orphaned, or is
     /// evicted comes back as a token to project and enqueue.
     pub fn admit(&mut self, header: Header, payload: &[u8]) -> (out: Option<Emitted>)
         requires old(self).valid(), old(self).wants(), crate::framing::valid(header), header.payload == payload.len(),
         ensures final(self).valid(), final(self).same_progress(old(self)), final(self).same_credential(old(self)),
             !final(self).at_end(),
+            final(self).inputs() == old(self).inputs().push((header.kind, header.request)),
+            final(self).emissions() == crate::exchange_assembler::emitted_requests(final(self).inputs(), old(self).max_open()),
             match out {
                 Some(t) => t.index() == old(self).emitted() && old(self).emitted() >= old(self).skip()
                     && final(self).emitted() == old(self).emitted() + 1 && t.exchange_value().valid(old(self).max_bytes())
-                    && !final(self).read_failed(),
+                    && !final(self).read_failed() && t.request() == final(self).emissions()[t.index() as int],
                 None => (final(self).emitted() == old(self).emitted() + 1 && old(self).emitted() < old(self).skip()
                         && !final(self).read_failed())
                     || final(self).emitted() == old(self).emitted(),
             },
     {
-        match self.assembler.admit(header, payload) {
-            None => None,
-            Some(exchange) => self.number(exchange),
+        let ghost before = self.inputs@;
+        let ghost open = self.assembler.open_requests();
+        let out = self.assembler.admit(header, payload);
+        self.inputs = Ghost(before.push((header.kind, header.request)));
+        proof {
+            assert(self.inputs@.drop_last() =~= before);
+            assert(self.inputs@.last() == (header.kind, header.request));
+        }
+        match out {
+            None => {
+                proof { assert(self.emissions@ == crate::exchange_assembler::emitted_requests(self.inputs@, self.max_open as nat)); }
+                None
+            }
+            Some(exchange) => {
+                self.emissions = Ghost(self.emissions@.push(exchange.request_id()));
+                proof { assert(self.emissions@.drop_last() =~= old(self).emissions@); }
+                self.number(exchange)
+            }
         }
     }
 
     /// Emit the oldest open exchange as incomplete (end of a finished log).
     pub fn flush(&mut self) -> (out: Option<Emitted>)
-        requires old(self).valid(), old(self).room(),
+        requires old(self).valid(), old(self).room(), !old(self).read_failed(),
         ensures final(self).valid(), final(self).same_progress(old(self)), final(self).same_credential(old(self)),
             final(self).at_end() == old(self).at_end(),
+            final(self).inputs() == old(self).inputs().push((FLUSH, 0)),
+            final(self).emissions() == crate::exchange_assembler::emitted_requests(final(self).inputs(), old(self).max_open()),
             match out {
                 Some(t) => t.index() == old(self).emitted() && old(self).emitted() >= old(self).skip()
-                    && final(self).emitted() == old(self).emitted() + 1 && t.exchange_value().is_incomplete(),
+                    && final(self).emitted() == old(self).emitted() + 1 && t.exchange_value().is_incomplete()
+                    && t.request() == final(self).emissions()[t.index() as int],
                 None => (final(self).emitted() == old(self).emitted() + 1 && old(self).emitted() < old(self).skip())
                     || (final(self).emitted() == old(self).emitted() && (old(self).open_count() == 0 || final(self).read_failed())),
             },
     {
-        match self.assembler.evict_oldest() {
-            None => None,
-            Some(exchange) => self.number(exchange),
+        let ghost before = self.inputs@;
+        let out = self.assembler.evict_oldest();
+        self.inputs = Ghost(before.push((FLUSH, 0)));
+        proof {
+            assert(self.inputs@.drop_last() =~= before);
+            assert(self.inputs@.last() == (FLUSH, 0u64));
+        }
+        match out {
+            None => {
+                proof { assert(self.emissions@ == crate::exchange_assembler::emitted_requests(self.inputs@, self.max_open as nat)); }
+                None
+            }
+            Some(exchange) => {
+                self.emissions = Ghost(self.emissions@.push(exchange.request_id()));
+                proof { assert(self.emissions@.drop_last() =~= old(self).emissions@); }
+                self.number(exchange)
+            }
         }
     }
 
@@ -375,7 +472,9 @@ impl Machine {
     /// emission order and accepted only in that order.
     pub fn enqueue(&mut self, token: Emitted, body: Vec<u8>, rows: usize) -> (out: Result<(), Emitted>)
         requires old(self).valid(), token.index() < old(self).emitted(),
+            token.request() == old(self).emissions()[token.index() as int],
         ensures final(self).valid(), final(self).same_credential(old(self)), final(self).emitted() == old(self).emitted(),
+            final(self).same_inputs(old(self)),
             final(self).resolved() == old(self).resolved(), final(self).poisoned() == old(self).poisoned(),
             final(self).in_flight() == old(self).in_flight(), final(self).awaiting() == old(self).awaiting(),
             final(self).skip() == old(self).skip(), final(self).token() == old(self).token(),
@@ -387,6 +486,7 @@ impl Machine {
                 && final(self).history().len() == old(self).history().len() + 1
                 && final(self).history() == old(self).history().push(final(self).history().last())
                 && final(self).history().last().body() == body@ && final(self).history().last().rows() == rows
+                && final(self).history().last().source() == token.request()
                 && final(self).queue() == old(self).queue().push(final(self).history().last()),
             // A refused token comes back untouched, so nothing is lost.
             match out {
@@ -401,7 +501,7 @@ impl Machine {
         if token.index != counted { return Err(token); }
         let _ok = self.cursor.emit(1);
         proof { assert(_ok); self.cursor.bounds(); }
-        let pending = Pending { body, rows };
+        let pending = Pending { body, rows, source: Ghost(token.exchange.request_id()) };
         let ghost before = self.history@;
         let ghost start = (_resolved - self.skip) as int;
         self.queue.push(pending);
@@ -422,6 +522,7 @@ impl Machine {
             final(self).assembler == old(self).assembler, final(self).cursor == old(self).cursor,
             final(self).enrollment == old(self).enrollment, final(self).jwt == old(self).jwt,
             final(self).history == old(self).history, final(self).skip == old(self).skip,
+            final(self).inputs == old(self).inputs, final(self).emissions == old(self).emissions,
             final(self).emitted == old(self).emitted, final(self).awaiting == old(self).awaiting,
             final(self).force_refresh == old(self).force_refresh, final(self).read_failed == old(self).read_failed,
             final(self).at_end == old(self).at_end, final(self).delay == old(self).delay,
@@ -438,6 +539,7 @@ impl Machine {
                 self.assembler == old(self).assembler, self.cursor == old(self).cursor,
                 self.enrollment == old(self).enrollment, self.jwt == old(self).jwt,
                 self.history == old(self).history, self.skip == old(self).skip,
+                self.inputs == old(self).inputs, self.emissions == old(self).emissions,
                 self.emitted == old(self).emitted, self.awaiting == old(self).awaiting,
                 self.force_refresh == old(self).force_refresh, self.read_failed == old(self).read_failed,
                 self.at_end == old(self).at_end, self.delay == old(self).delay,
@@ -459,7 +561,7 @@ impl Machine {
     /// Choose the next action. Called only when no request is outstanding.
     pub fn next(&mut self, now: u64) -> (out: Action)
         requires old(self).valid(), old(self).awaiting().is_none(),
-        ensures final(self).valid(), final(self).history() == old(self).history(),
+        ensures final(self).valid(), final(self).history() == old(self).history(), final(self).same_inputs(old(self)),
             final(self).emitted() == old(self).emitted(), final(self).skip() == old(self).skip(),
             final(self).counted() == old(self).counted(),
             final(self).token() == old(self).token(), final(self).session() == old(self).session(),
@@ -603,6 +705,7 @@ impl Machine {
             final(self).assembler == old(self).assembler, final(self).cursor == old(self).cursor,
             final(self).enrollment == old(self).enrollment, final(self).jwt == old(self).jwt,
             final(self).queue == old(self).queue, final(self).history == old(self).history,
+            final(self).inputs == old(self).inputs, final(self).emissions == old(self).emissions,
             final(self).skip == old(self).skip, final(self).emitted == old(self).emitted,
             final(self).awaiting == old(self).awaiting, final(self).force_refresh == old(self).force_refresh,
             final(self).read_failed == old(self).read_failed, final(self).at_end == old(self).at_end,
@@ -620,6 +723,7 @@ impl Machine {
             final(self).assembler == old(self).assembler, final(self).cursor == old(self).cursor,
             final(self).enrollment == old(self).enrollment, final(self).jwt == old(self).jwt,
             final(self).queue == old(self).queue, final(self).history == old(self).history,
+            final(self).inputs == old(self).inputs, final(self).emissions == old(self).emissions,
             final(self).skip == old(self).skip, final(self).emitted == old(self).emitted,
             final(self).awaiting == old(self).awaiting, final(self).force_refresh == old(self).force_refresh,
             final(self).read_failed == old(self).read_failed, final(self).at_end == old(self).at_end,
@@ -637,6 +741,7 @@ impl Machine {
             final(self).assembler == old(self).assembler, final(self).cursor == old(self).cursor,
             final(self).enrollment == old(self).enrollment, final(self).jwt == old(self).jwt,
             final(self).queue == old(self).queue, final(self).history == old(self).history,
+            final(self).inputs == old(self).inputs, final(self).emissions == old(self).emissions,
             final(self).skip == old(self).skip, final(self).emitted == old(self).emitted,
             final(self).awaiting == old(self).awaiting, final(self).force_refresh == old(self).force_refresh,
             final(self).read_failed == old(self).read_failed, final(self).at_end == old(self).at_end,
@@ -653,6 +758,7 @@ impl Machine {
             final(self).max_open == old(self).max_open, final(self).max_bytes == old(self).max_bytes,
             final(self).assembler == old(self).assembler, final(self).cursor == old(self).cursor,
             final(self).queue == old(self).queue, final(self).history == old(self).history,
+            final(self).inputs == old(self).inputs, final(self).emissions == old(self).emissions,
             final(self).skip == old(self).skip, final(self).emitted == old(self).emitted,
             final(self).awaiting == old(self).awaiting, final(self).force_refresh == old(self).force_refresh,
             final(self).read_failed == old(self).read_failed, final(self).at_end == old(self).at_end,
@@ -668,6 +774,7 @@ impl Machine {
         ensures final(self).valid(), final(self).awaiting().is_none(), final(self).in_flight().is_none(),
             final(self).history() == old(self).history(), final(self).emitted() == old(self).emitted(),
             final(self).counted() == old(self).counted(),
+            final(self).same_inputs(old(self)),
             final(self).skip() == old(self).skip(), final(self).token() == old(self).token(),
             final(self).session() == old(self).session(), final(self).read_failed() == old(self).read_failed(),
             !final(self).at_end(),
@@ -716,6 +823,7 @@ impl Machine {
         ensures final(self).valid(), final(self).awaiting().is_none(), final(self).in_flight().is_none(),
             final(self).history() == old(self).history(), final(self).emitted() == old(self).emitted(),
             final(self).counted() == old(self).counted(),
+            final(self).same_inputs(old(self)),
             final(self).skip() == old(self).skip(), final(self).token() == old(self).token(),
             final(self).session() == old(self).session(), final(self).read_failed() == old(self).read_failed(),
             !final(self).at_end(),
@@ -801,6 +909,7 @@ impl Machine {
         ensures final(self).valid(), final(self).awaiting().is_none(), final(self).in_flight().is_none(),
             final(self).history() == old(self).history(), final(self).emitted() == old(self).emitted(),
             final(self).counted() == old(self).counted(),
+            final(self).same_inputs(old(self)),
             final(self).skip() == old(self).skip(), final(self).token() == old(self).token(),
             final(self).session() == old(self).session(), final(self).read_failed() == old(self).read_failed(),
             !final(self).at_end(), final(self).queue() == old(self).queue(),

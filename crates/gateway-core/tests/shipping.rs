@@ -198,6 +198,15 @@ fn feed(m: &mut Machine, request: u64, upload: &[u8]) -> Emitted {
     m.admit(header(4, request, 0, &done), &done).expect("completion emits")
 }
 
+/// Feed one complete exchange; `None` when the machine's checkpoint skips it.
+fn feed_opt(m: &mut Machine, request: u64, upload: &[u8]) -> Option<Emitted> {
+    let start = encode_request_start(1_000, 7, b"https://api.example/v1").unwrap();
+    assert!(m.admit(header(2, request, 0, &start), &start).is_none());
+    assert!(m.admit(header(0, request, 1, upload), upload).is_none());
+    let done = encode_completion(2_000, 0, upload.len() as u64, 0).unwrap();
+    m.admit(header(4, request, 0, &done), &done)
+}
+
 fn ok_reply(status: u16) -> Reply { Reply { status, retry_after: None, revocation: false, credential: None } }
 fn credential_reply(jwt: &[u8], expires_at: u64) -> Reply {
     Reply { status: 200, retry_after: None, revocation: false, credential: Some(Credential { jwt: jwt.to_vec(), expires_at }) }
@@ -331,4 +340,45 @@ fn checksum_is_deterministic_and_sensitive_to_every_byte() {
     assert_eq!(checksum(b"ab"), checksum(b"ab"));
     assert_ne!(checksum(b"ab"), checksum(b"ba"));
     assert_ne!(checksum(b"ab"), checksum(b"ab\0"));
+}
+
+#[test]
+fn restart_from_a_checkpoint_skips_exactly_the_resolved_exchanges() {
+    let session = [4u8; 16];
+    let mut first = Machine::new(b"t".to_vec(), session, 8, 1024, 0, 0);
+    assert!(first.adopt_identity(b"jwt".to_vec(), 30 * DAY, 0));
+    for (request, body) in [(11u64, &b"{a}\n"[..]), (12, b"{b}\n")] {
+        let t = feed(&mut first, request, b"x");
+        assert_eq!(t.exchange().request, request);
+        assert!(first.enqueue(t, body.to_vec(), 1).is_ok());
+    }
+    let r = send(&mut first, 0);
+    assert_eq!(r.body, b"{a}\n{b}\n");
+    assert_eq!(first.reply(0, ok_reply(202)), Outcome::Acknowledged(2));
+    let checkpoint = first.progress();
+    assert_eq!(checkpoint, (2, 0));
+    // A third exchange is read and sent, and the process dies before any reply.
+    let t = feed(&mut first, 13, b"x");
+    assert!(first.enqueue(t, b"{c}\n".to_vec(), 1).is_ok());
+    let r = send(&mut first, 0);
+    assert_eq!(r.body, b"{c}\n");
+    drop(first);
+
+    // The restarted machine replays the same records from the checkpoint:
+    // the two resolved exchanges are numbered and skipped, the third is sent
+    // again under the same batch id.
+    let mut second = Machine::new(b"t".to_vec(), session, 8, 1024, checkpoint.0, checkpoint.1);
+    assert!(second.adopt_identity(b"jwt".to_vec(), 30 * DAY, 0));
+    assert!(feed_opt(&mut second, 11, b"x").is_none());
+    assert!(feed_opt(&mut second, 12, b"x").is_none());
+    assert_eq!(second.emitted_count(), 2);
+    let t = feed_opt(&mut second, 13, b"x").expect("the unresolved exchange is emitted again");
+    assert_eq!((t.position(), t.exchange().request), (2, 13));
+    assert!(second.enqueue(t, b"{c}\n".to_vec(), 1).is_ok());
+    let again = send(&mut second, 0);
+    assert_eq!(again.body, r.body);
+    assert_eq!(again.batch_id, r.batch_id);
+    assert_eq!(again.batch_id.as_deref(), Some(&batch_id(&session, 2, 3, checksum(b"{c}\n"))[..]));
+    assert_eq!(second.reply(0, ok_reply(202)), Outcome::Acknowledged(1));
+    assert_eq!(second.progress(), (3, 0));
 }

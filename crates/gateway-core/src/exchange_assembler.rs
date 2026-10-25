@@ -140,6 +140,61 @@ pub fn saturating_add(a: u64, b: u64) -> (out: u64)
     if a > u64::MAX - b { u64::MAX } else { a + b }
 }
 
+/// Index of a request in a duplicate-free open list.
+pub open spec fn index_of(open: Seq<u64>, request: u64) -> int {
+    choose|i: int| 0 <= i < open.len() && open[i] == request
+}
+
+/// The flush pseudo-record kind: evict the oldest open exchange.
+pub const FLUSH: u8 = 5;
+
+/// One step of the emission order: how the list of open request ids changes
+/// and which request's exchange is emitted, as a function of the record kind
+/// and request alone. Body bytes never influence it.
+pub open spec fn step(open: Seq<u64>, max_open: nat, kind: u8, request: u64) -> (Seq<u64>, Option<u64>) {
+    if kind == 2 {
+        if open.contains(request) { (open.remove(index_of(open, request)).push(request), Some(request)) }
+        else if open.len() == max_open { (open.drop_first().push(request), Some(open[0])) }
+        else { (open.push(request), None) }
+    } else if kind == 4 {
+        if open.contains(request) { (open.remove(index_of(open, request)), Some(request)) } else { (open, Some(request)) }
+    } else if kind == FLUSH {
+        if open.len() > 0 { (open.drop_first(), Some(open[0])) } else { (open, None) }
+    } else if open.contains(request) { (open, None) } else { (open, Some(request)) }
+}
+
+/// The open request ids after a sequence of (kind, request) inputs.
+pub open spec fn open_after(inputs: Seq<(u8, u64)>, max_open: nat) -> Seq<u64>
+    decreases inputs.len(),
+{
+    if inputs.len() == 0 { Seq::empty() }
+    else { step(open_after(inputs.drop_last(), max_open), max_open, inputs.last().0, inputs.last().1).0 }
+}
+
+/// The request ids of the exchanges emitted by a sequence of inputs, in
+/// emission order. This is the replay theorem's object: it depends on the
+/// record kinds and request ids alone, so the same log replays to the same
+/// numbering.
+pub open spec fn emitted_requests(inputs: Seq<(u8, u64)>, max_open: nat) -> Seq<u64>
+    decreases inputs.len(),
+{
+    if inputs.len() == 0 { Seq::empty() }
+    else {
+        let before = emitted_requests(inputs.drop_last(), max_open);
+        match step(open_after(inputs.drop_last(), max_open), max_open, inputs.last().0, inputs.last().1).1 {
+            Some(request) => before.push(request),
+            None => before,
+        }
+    }
+}
+
+/// Replay: the same inputs number the same exchanges. Stated for the record;
+/// it holds because `emitted_requests` is a function of its arguments.
+pub proof fn replay_is_deterministic(a: Seq<(u8, u64)>, b: Seq<(u8, u64)>, max_open: nat)
+    requires a == b,
+    ensures emitted_requests(a, max_open) == emitted_requests(b, max_open), open_after(a, max_open) == open_after(b, max_open),
+{}
+
 pub struct Assembler { open: Vec<Exchange>, max_open: usize, max_bytes: usize }
 
 impl Assembler {
@@ -148,6 +203,42 @@ impl Assembler {
     pub closed spec fn max_bytes(&self) -> nat { self.max_bytes as nat }
     pub closed spec fn has_open(&self, request: u64) -> bool {
         exists|i: int| 0 <= i < self.open@.len() && (#[trigger] self.open@[i]).request == request
+    }
+    /// The open request ids, oldest first.
+    pub closed spec fn open_requests(&self) -> Seq<u64> { Seq::new(self.open@.len(), |i: int| self.open@[i].request) }
+    pub open spec fn no_duplicates(open: Seq<u64>) -> bool {
+        forall|i: int, j: int| 0 <= i < j < open.len() ==> open[i] != open[j]
+    }
+    /// What a valid assembler guarantees about its open list, for callers outside this module.
+    pub proof fn open_requests_valid(&self)
+        requires self.valid(),
+        ensures Self::no_duplicates(self.open_requests()), self.open_requests().len() <= self.max_open(),
+            forall|r: u64| self.has_open(r) == self.open_requests().contains(r),
+    {
+        assert forall|r: u64| self.has_open(r) == self.open_requests().contains(r) by {
+            if self.has_open(r) {
+                let i = choose|i: int| 0 <= i < self.open@.len() && (#[trigger] self.open@[i]).request == r;
+                assert(self.open_requests()[i] == r);
+            }
+            if self.open_requests().contains(r) {
+                let i = choose|i: int| 0 <= i < self.open_requests().len() && self.open_requests()[i] == r;
+                assert(self.open@[i].request == r);
+            }
+        }
+    }
+    // In a duplicate-free list the chosen index of a present request is the only one.
+    proof fn index_unique(&self, index: int, request: u64)
+        requires self.valid(), 0 <= index < self.open@.len(), self.open@[index].request == request,
+        ensures index_of(self.open_requests(), request) == index, self.open_requests().contains(request),
+    {
+        let reqs = self.open_requests();
+        assert(reqs[index] == request);
+        let c = index_of(reqs, request);
+        assert(0 <= c < reqs.len() && reqs[c] == request);
+        if c != index {
+            if c < index { assert(reqs[c] != reqs[index]); } else { assert(reqs[index] != reqs[c]); }
+            assert(false);
+        }
     }
     pub closed spec fn valid(&self) -> bool {
         0 < self.max_open && self.open@.len() <= self.max_open
@@ -160,7 +251,12 @@ impl Assembler {
     pub fn new(max_open: usize, max_bytes: usize) -> (out: Self)
         requires 0 < max_open,
         ensures out.valid(), out.open_count() == 0, out.max_open() == max_open, out.max_bytes() == max_bytes,
-    { Assembler { open: Vec::new(), max_open, max_bytes } }
+            out.open_requests() == Seq::<u64>::empty(),
+    {
+        let out = Assembler { open: Vec::new(), max_open, max_bytes };
+        proof { assert(out.open_requests() =~= Seq::<u64>::empty()); }
+        out
+    }
 
     pub fn open_exchanges(&self) -> (out: usize) ensures out == self.open_count(), { self.open.len() }
 
@@ -190,14 +286,19 @@ impl Assembler {
             final(self).max_bytes() == old(self).max_bytes(),
             final(self).open_count() == old(self).open_count() - 1,
             final(self).open@ == old(self).open@.remove(index as int),
+            final(self).open_requests() == old(self).open_requests().remove(index as int),
             out == old(self).open@[index as int], out.valid(old(self).max_bytes()),
+            out.request_id() == old(self).open_requests()[index as int],
             !final(self).has_open(out.request_id()),
             forall|r: u64| r != out.request_id() ==> (final(self).has_open(r) == old(self).has_open(r)),
     {
         let ghost before = self.open@;
+        let ghost before_requests = self.open_requests();
         let out = self.open.remove(index);
         proof {
             before.remove_ensures(index as int);
+            before_requests.remove_ensures(index as int);
+            assert(self.open_requests() =~= before_requests.remove(index as int));
             assert forall|i: int, j: int| 0 <= i < j < self.open@.len()
                 implies (#[trigger] self.open@[i]).request != (#[trigger] self.open@[j]).request by {
                 let a = if i < index { i } else { i + 1 };
@@ -240,20 +341,27 @@ impl Assembler {
                 Some(e) => e.valid(old(self).max_bytes()) && e.is_incomplete() && old(self).has_open(e.request_id())
                     && !final(self).has_open(e.request_id())
                     && (forall|r: u64| r != e.request_id() ==> (final(self).has_open(r) == old(self).has_open(r)))
-                    && final(self).open_count() == old(self).open_count() - 1,
+                    && final(self).open_count() == old(self).open_count() - 1
+                    && final(self).open_requests() == old(self).open_requests().drop_first()
+                    && e.request_id() == old(self).open_requests()[0],
                 None => old(self).open_count() == 0 && *final(self) == *old(self),
             },
+            (final(self).open_requests(), match out { Some(e) => Some(e.request_id()), None => None })
+                == step(old(self).open_requests(), old(self).max_open(), FLUSH, 0),
     {
         if self.open.len() == 0 { return None; }
         proof { assert(self.has_open(self.open@[0].request)); }
+        let ghost before = self.open_requests();
         let mut out = self.take(0);
         out.incomplete = true;
+        proof { assert(before.remove(0) =~= before.drop_first()); }
         Some(out)
     }
 
     /// Admit one scanned record. Returns an exchange when this record completes
     /// one, when it belongs to no open request (an orphan carrying just this
     /// record), or when a request start had to evict another exchange first.
+    #[verifier::rlimit(80)]
     pub fn admit(&mut self, header: Header, payload: &[u8]) -> (out: Option<Exchange>)
         requires old(self).valid(), crate::framing::valid(header), header.payload == payload.len(),
         ensures final(self).valid(), final(self).max_open() == old(self).max_open(),
@@ -277,13 +385,17 @@ impl Assembler {
             header.kind == 2 ==> final(self).has_open(header.request)
                 && (out.is_some() == (old(self).has_open(header.request) || old(self).open_count() == old(self).max_open()))
                 && match out { Some(e) => e.is_incomplete(), None => true },
+            // The open list and the emitted request follow the functional spec.
+            (final(self).open_requests(), match out { Some(e) => Some(e.request_id()), None => None })
+                == step(old(self).open_requests(), old(self).max_open(), header.kind, header.request),
     {
         let cap = self.max_bytes;
+        proof { old(self).open_requests_valid(); }
         if header.kind == 2 {
             let start = metadata::decode_request_start(payload);
             let evicted = match self.find(header.request) {
                 Some(index) => {
-                    proof { assert(self.has_open(header.request)); }
+                    proof { assert(self.has_open(header.request)); self.index_unique(index as int, header.request); }
                     let mut e = self.take(index); e.incomplete = true; Some(e)
                 }
                 None => if self.open.len() == self.max_open { self.evict_oldest() } else { None },
@@ -300,12 +412,13 @@ impl Assembler {
                     assert(self.open@[i] == mid.open@[i]);
                     if j < last { assert(self.open@[j] == mid.open@[j]); }
                 }
+                assert(self.open_requests() =~= mid.open_requests().push(header.request));
             }
             return evicted;
         }
         match self.find(header.request) {
             Some(index) => {
-                proof { assert(self.has_open(header.request)); }
+                proof { assert(self.has_open(header.request)); self.index_unique(index as int, header.request); }
                 if header.kind == 4 {
                     let mut e = self.take(index);
                     e.completion = metadata::decode_completion(payload);
@@ -329,6 +442,7 @@ impl Assembler {
                     assert(self.has_open(header.request));
                     assert forall|i: int, j: int| 0 <= i < j < self.open@.len()
                         implies (#[trigger] self.open@[i]).request != (#[trigger] self.open@[j]).request by {}
+                    assert(self.open_requests() =~= old(self).open_requests());
                 }
                 None
             }
