@@ -64,23 +64,32 @@ the gate's bytes to the socket it opened under the permit and the machine's
 requests to the client it built from the configured server; `send_request`
 and `write_all` sites are still enumerated by review rather than lint.
 
-## Guarantee 2: correctness, starting with no data loss
+## Guarantee 2: correctness
 
-**Statement.** Nothing is silently lost, altered, or duplicated between the
-provider, the audit log, and HypAware. In strict mode a body byte is released
-to the socket only after its audit record has a durable receipt, so the log is
-complete for everything the provider or client saw; a logging failure fails the
-request rather than skipping the record, and availability mode counts every
-gap it allows. Forwarded bytes are an unchanged, ordered prefix of the input.
-Every acknowledged record survives a crash in the storage model, and recovery
-exposes only complete records. Every exchange recorded in the audit log is
-grouped from its records in file order, bounded in retained size with
-truncation recorded, projected into rows whose identities are a function of
-the log alone, and uploaded in emission order. An exchange is counted as
-delivered only when the server acknowledges the exact batch it was sent in. A
-restart replays the log and resends at most what was unacknowledged, with
-identical identities, so the server's dedup stores each exchange once. A
-truncated stream is never reported as a clean completion.
+**Statement.** The gateway is a faithful pass-through with a faithful record.
+Request and response bodies are forwarded as an unchanged, ordered prefix of
+the input; only headers change. Every exchange produces a start record (time,
+route selector, destination), its upload chunks, a response head (time,
+status), its download chunks, and a completion record (time, outcome code,
+accepted byte counts), in that order, each carrying the authenticated tenant,
+the request id, and a chunk number that cannot cross requests. In strict mode
+a body byte is released to the socket only after its audit record has a
+durable receipt for that exact request, chunk, direction, and payload, so the
+log is complete for everything the provider or client saw, and a logging
+failure fails the request rather than skipping the record. Every acknowledged
+record survives a crash in the storage model, and recovery exposes only
+complete records without rewriting the file. A failed or truncated stream
+cannot complete as success. Every exchange in the log is grouped from its
+records in file order, bounded in retained size with truncation recorded,
+projected into rows whose identities are a function of the log alone, and
+uploaded in emission order; an exchange counts as delivered only when the
+server acknowledges the exact batch, and a restart resends at most what was
+unacknowledged with identical identities, so the server stores each once.
+
+Strict mode is the guarantee. Availability mode is the operator's opt-out: it
+forwards after a logging failure and counts one audit gap per affected
+request, with authorization unchanged. Headers are never logged in either
+mode, so the log holds bodies and metadata, not the full HTTP exchange.
 
 **Proved today.**
 

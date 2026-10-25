@@ -19,27 +19,37 @@ Requests go to the provider you set up, using the key you set up. Logs go to
 the log file on disk. If you turn on shipping, logs go to your HypAware server
 and nowhere else. There is no other network connection in the binary.
 
-### 2. Correctness: no data loss
+### 2. Correctness
 
-Nothing is silently lost, altered, or duplicated between the provider, the log,
-and HypAware.
+The gateway is a faithful pass-through with a faithful record.
 
-- **The log is complete.** In strict mode no byte reaches the provider or the
-  client before its log record is on disk and synced. If a record cannot be
-  written, the request fails instead of going unlogged. Availability mode may
-  forward without a record, but every such gap is counted and reported.
-- **The log is exact.** Logged bytes are the bytes that were forwarded, in
-  order, with no gaps or repeats within a request.
-- **Records survive a crash.** Every record the gateway acknowledged is still
-  there after the process is killed. Recovery reports only complete records and
-  never rewrites, truncates, or replays the file.
-- **What was logged is what is shipped.** Every exchange in the log is uploaded
-  in the order it happened. An upload only counts when the server confirms it
-  received that exact batch. After a restart the gateway resends only what was
-  not confirmed, with the same identities, so the server stores each exchange
-  once.
-- **Failures are honest.** A truncated stream is reported as an error, never as
-  a clean completion. An exchange cut short by the size cap is marked truncated.
+- **Bodies pass through unchanged.** The provider gets the client's request body
+  byte for byte, and the client gets the provider's response byte for byte, in
+  order. Only the headers change: the gateway swaps in the provider credential
+  and sets Host.
+- **Every exchange is recorded completely.** Each request gets a start record
+  with the time, route, and destination; every request body chunk; the response
+  status; every response body chunk; and a completion record with the outcome
+  and byte counts. The logged bytes are the forwarded bytes.
+- **Records are ordered and attributed.** Within a request, records appear in
+  the order the bytes flowed, with chunks numbered from one. Every record names
+  the authenticated tenant and the request, and chunks cannot cross requests.
+- **Nothing is forwarded before it is on disk.** In strict mode a byte reaches
+  the provider or the client only after its record is written and synced. If
+  the log cannot be written, the request fails instead of going unrecorded.
+- **A crash loses nothing that was acknowledged.** Kill the process at any
+  point and every synced record is still there. Recovery reports only complete
+  records and never rewrites or truncates the file.
+- **Failures are reported honestly.** A provider error, timeout, or client
+  disconnect ends the request with a completion record naming the cause. A
+  truncated stream is an error, never a clean completion.
+- **The whole log reaches HypAware once, in order.** An upload counts only when
+  the server confirms the exact batch. After a restart the gateway resends only
+  what was unconfirmed, with the same identities, so the server stores each
+  exchange once.
+
+Strict mode is the guarantee. Availability mode is an opt-out that keeps
+forwarding after the log fails and counts each unrecorded request as a gap.
 
 ### 3. It cannot crash
 
