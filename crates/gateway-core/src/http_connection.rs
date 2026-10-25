@@ -64,9 +64,7 @@ impl ResponseSlot {
         task.release(registry)
     }
 }
-}
 
-verus! {
 // The registry stores the actual response states, not a caller-supplied count.
 // Issuers may be shared; only the registry can mint a non-cloneable permit.
 pub struct ResponseIssuer { index: usize, owner: u64 }

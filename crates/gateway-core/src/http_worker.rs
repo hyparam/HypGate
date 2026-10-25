@@ -165,7 +165,6 @@ impl WorkerRegistry {
             final(self).entries() == old(self).entries(), final(self).limit() == old(self).limit(),
     { self.admission.close(); }
     pub fn usage(&self) -> (out: (usize, usize))
-        requires self.valid(),
         ensures out.0 == crate::resource::occupied(self.entries()), out.1 == self.limit(), out.0 <= out.1,
     { self.admission.usage() }
     pub proof fn retained_permit_blocks_release(&self, task: &TaskCredit, permit: &HttpPermit)

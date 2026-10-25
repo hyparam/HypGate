@@ -81,7 +81,7 @@ MUTATIONS = [
 
     ("submission.rs", "provenance_prepare_without_evidence", "if stream.stream().requires_audit() && (!stream.is_audited_for(authority, journal) || stream.recorded_direction() != direction) { return None; }", ""),
     ("submission.rs", "provenance_bytes_without_evidence", "if owner.stream().requires_audit() && (!owner.is_audited_for(authority, journal) || owner.recorded_direction() != direction) { return None; }", ""),
-    ("owned_stream.rs", "provenance_reuses_prior_chunk", "if out.is_some() { self.audit_session = None; self.audit = Ghost(None); }", ""),
+    ("owned_stream.rs", "provenance_reuses_prior_chunk", "if out.is_some() { self.clear_audit(); }", ""),
     ("owned_stream.rs", "provenance_forges_receipt_session", "self.audit_session = Some(receipt.session_id());", "self.audit_session = Some(0);"),
     ("owned_stream.rs", "provenance_omits_receipt_evidence", "self.audit = Ghost(Some(*receipt));", "self.audit = Ghost(None);"),
     ("owned_stream.rs", "provenance_ignores_designated_journal", " && journal.matches_session(self.audit_session)", ""),

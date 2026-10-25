@@ -21,7 +21,6 @@ pub struct StreamChunk {
     strict: bool,
     failed: bool,
     closed: bool,
-    history: Ghost<Seq<u8>>,
 }
 
 // Abstract stream state. Transition postconditions equate whole views, so the
@@ -95,7 +94,6 @@ impl StreamChunk {
         && (self.strict ==> self.offered <= self.durable)
         && (!self.pending ==> self.offered == self.sent)
         && (self.strict && self.failed ==> self.closed)
-        && self.history@ == self.prefix@ + self.bytes@.subrange(0, self.sent as int)
     }
 
     pub proof fn payload_within_capacity(&self)
@@ -106,7 +104,7 @@ impl StreamChunk {
 
     pub closed spec fn model(&self) -> Model {
         Model { owner: self.owner, capacity: self.capacity as nat, strict: self.strict, chunk: self.chunk,
-            body: self.bytes@, input: self.prefix@ + self.bytes@, completed: self.history@,
+            body: self.bytes@, input: self.prefix@ + self.bytes@, completed: self.prefix@ + self.bytes@.subrange(0, self.sent as int),
             position: self.sent as nat, end: self.offered as nat, durable: self.durable as nat,
             generation: self.generation, pending: self.pending, closed: self.closed, failed: self.failed }
     }
@@ -207,8 +205,7 @@ impl StreamChunk {
         if bytes.len() > capacity { return None; }
         proof { assert(bytes@.subrange(0, 0) =~= Seq::<u8>::empty()); }
         Some(StreamChunk { owner, bytes, capacity, chunk: 0, prefix: Ghost(Seq::empty()), sent: 0, durable: 0, offered: 0,
-            generation: 0, pending: false, strict, failed: false, closed: false,
-            history: Ghost(Seq::empty()) })
+            generation: 0, pending: false, strict, failed: false, closed: false })
     }
 
     // Adapters acknowledge only through journal receipts; the raw transition stays crate-private.
@@ -283,9 +280,10 @@ impl StreamChunk {
             || count > self.offered - self.sent { return false; }
         let ghost start = self.sent;
         self.sent = self.sent + count;
-        let ghost suffix = self.bytes@.subrange(start as int, self.sent as int);
-        proof { assert(self.history@ + suffix =~= self.prefix@ + self.bytes@.subrange(0, self.sent as int)); }
-        self.history = Ghost(self.history@ + suffix);
+        proof {
+            assert(self.prefix@ + self.bytes@.subrange(0, self.sent as int)
+                =~= self.prefix@ + self.bytes@.subrange(0, start as int) + self.bytes@.subrange(start as int, self.sent as int));
+        }
         self.offered = self.sent;
         self.pending = false;
         true
@@ -302,7 +300,7 @@ impl StreamChunk {
             assert(self.bytes@.subrange(0, self.sent as int) =~= self.bytes@);
             assert(bytes@.subrange(0, 0) =~= Seq::<u8>::empty());
         }
-        self.prefix = Ghost(self.history@);
+        self.prefix = Ghost(self.prefix@ + self.bytes@);
         self.bytes = bytes;
         self.sent = 0;
         self.offered = 0;
@@ -318,7 +316,7 @@ impl StreamChunk {
     {
         if self.closed || self.pending || self.bytes.len() != self.sent { return false; }
         proof { assert(self.bytes@.subrange(0, self.sent as int) =~= self.bytes@); }
-        self.prefix = Ghost(self.history@);
+        self.prefix = Ghost(self.prefix@ + self.bytes@);
         self.bytes = Vec::new();
         self.sent = 0;
         self.offered = 0;

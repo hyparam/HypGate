@@ -3,6 +3,29 @@ use vstd::prelude::*;
 use crate::{fixed_queue::FixedQueue, framing::RecordFrame};
 
 verus! {
+// Every queued frame is canonical and within the configured payload limit.
+pub open spec fn items_bounded<T>(items: Seq<(RecordFrame, T)>, limit: nat) -> bool {
+    forall|i: int| 0 <= i < items.len() ==> (#[trigger] items[i]).0.valid() && items[i].0.payload().len() <= limit
+}
+proof fn items_bounded_push<T>(items: Seq<(RecordFrame, T)>, limit: nat, item: (RecordFrame, T))
+    requires items_bounded(items, limit), item.0.valid(), item.0.payload().len() <= limit,
+    ensures items_bounded(items.push(item), limit),
+{
+    assert forall|i: int| 0 <= i < items.push(item).len() implies
+        (#[trigger] items.push(item)[i]).0.valid() && items.push(item)[i].0.payload().len() <= limit by {
+        if i < items.len() { assert(items.push(item)[i] == items[i]); } else { assert(items.push(item)[i] == item); }
+    }
+}
+proof fn items_bounded_drop_first<T>(items: Seq<(RecordFrame, T)>, limit: nat)
+    requires items_bounded(items, limit), items.len() > 0,
+    ensures items_bounded(items.drop_first(), limit),
+{
+    assert forall|i: int| 0 <= i < items.drop_first().len() implies
+        (#[trigger] items.drop_first()[i]).0.valid() && items.drop_first()[i].0.payload().len() <= limit by {
+        assert(items.drop_first()[i] == items[i + 1]);
+    }
+}
+
 pub struct FrameQueue<T> { queue: FixedQueue<(RecordFrame, T)>, payload_limit: usize, reserved: bool }
 impl<T> FrameQueue<T> {
     pub fn payload_capacity(&self) -> (out: usize)
@@ -19,9 +42,8 @@ impl<T> FrameQueue<T> {
     }
     pub closed spec fn valid(&self) -> bool {
         self.payload_limit <= 1048576 && self.queue.valid()
-            && (!self.reserved || self.items().len() < self.capacity()) && (forall|i: int| 0 <= i < self.items().len()
-            ==> { let item = #[trigger] self.items()[i];
-                item.0.valid() && item.0.payload().len() <= self.payload_limit() })
+            && (!self.reserved || self.items().len() < self.capacity())
+            && items_bounded(self.items(), self.payload_limit())
     }
     pub fn new(capacity: usize) -> (out: Self)
         requires capacity > 0,
@@ -109,12 +131,7 @@ impl<T> FrameQueue<T> {
         requires old(self).valid(),
         ensures final(self).valid(), final(self).reserved() == old(self).reserved(), final(self).payload_limit() == old(self).payload_limit(), final(self).closed(), final(self).capacity() == old(self).capacity(),
             final(self).items() == old(self).items(),
-    {
-        self.queue.close();
-        assert forall|i: int| 0 <= i < self.items().len() implies (#[trigger] self.items()[i].0.valid() && self.items()[i].0.payload().len() <= self.payload_limit()) by {
-            assert(self.items()[i] == old(self).items()[i]);
-        }
-    }
+    { self.queue.close(); }
     pub fn push(&mut self, item: (RecordFrame, T)) -> (out: Result<(), (RecordFrame, T)>)
         requires old(self).valid(), item.0.valid(),
         ensures final(self).valid(), final(self).reserved() == old(self).reserved(), final(self).payload_limit() == old(self).payload_limit(), final(self).capacity() == old(self).capacity(),
@@ -131,12 +148,9 @@ impl<T> FrameQueue<T> {
         proof { item.0.retained_size(); }
         if item.0.bytes().len() > self.payload_limit + 65 { return Err(item); }
         let out = self.queue.push(item);
-        proof { self.queue.occupancy_bound(); }
-        assert forall|i: int| 0 <= i < self.items().len() implies (#[trigger] self.items()[i].0.valid() && self.items()[i].0.payload().len() <= self.payload_limit()) by {
-            if i < old(self).items().len() {
-                assert(old(self).items()[i].0.valid());
-                assert(self.items()[i] == old(self).items()[i]);
-            } else { assert(self.items()[i] == item); }
+        proof {
+            self.queue.occupancy_bound();
+            if out.is_ok() { items_bounded_push(old(self).items(), self.payload_limit(), item); }
         }
         out
     }
@@ -151,9 +165,7 @@ impl<T> FrameQueue<T> {
             },
     {
         let out = self.queue.pop();
-        assert forall|i: int| 0 <= i < self.items().len() implies (#[trigger] self.items()[i].0.valid() && self.items()[i].0.payload().len() <= self.payload_limit()) by {
-            assert(self.items()[i] == old(self).items()[i + 1]);
-        }
+        proof { if out.is_some() { items_bounded_drop_first(old(self).items(), self.payload_limit()); } }
         out
     }
     // Projects the actual retained frames, without another runtime collection or

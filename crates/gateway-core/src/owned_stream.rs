@@ -95,6 +95,11 @@ impl OwnedStream {
             && self.audit_direction() == prior.audit_direction() && self.receipt() == prior.receipt()
     }
     pub open spec fn unaudited(&self) -> bool { self.audit_session().is_none() && self.receipt().is_none() }
+    // Any change to the retained chunk invalidates its journal receipt.
+    fn clear_audit(&mut self)
+        ensures final(self).unaudited(), final(self).key() == old(self).key(), final(self).state() == old(self).state(),
+            final(self).read_bytes() == old(self).read_bytes(),
+    { self.audit_session = None; self.audit = Ghost(None); }
 
     pub proof fn payload_bound(&self)
         requires self.valid(),
@@ -171,7 +176,7 @@ impl OwnedStream {
     {
         if !self.read_buffer.is_empty() || self.stream.capacity_bytes() == 0 { return false; }
         if !self.stream.discard_completed() { return false; }
-        self.audit_session = None; self.audit = Ghost(None);
+        self.clear_audit();
         let capacity = self.stream.capacity_bytes();
         self.read_buffer = Vec::with_capacity(capacity);
         self.read_buffer.resize(capacity, 0);
@@ -208,7 +213,7 @@ impl OwnedStream {
         core::mem::swap(&mut bytes, &mut self.read_buffer);
         bytes.truncate(length);
         if length == 0 { return true; }
-        self.audit_session = None; self.audit = Ghost(None);
+        self.clear_audit();
         self.stream.advance(bytes).is_some()
     }
 
@@ -222,7 +227,7 @@ impl OwnedStream {
     {
         if !self.read_buffer.is_empty() { return None; }
         let out = self.stream.advance(bytes);
-        if out.is_some() { self.audit_session = None; self.audit = Ghost(None); }
+        if out.is_some() { self.clear_audit(); }
         proof { self.stream.payload_within_capacity(); }
         out
     }
@@ -234,7 +239,7 @@ impl OwnedStream {
             ok ==> final(self).unaudited(), !ok ==> final(self).same_audit(old(self)),
     {
         let ok = self.stream.discard_completed();
-        if ok { self.audit_session = None; self.audit = Ghost(None); }
+        if ok { self.clear_audit(); }
         ok
     }
 

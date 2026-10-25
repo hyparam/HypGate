@@ -22,7 +22,6 @@ impl DrainRegistry {
         ensures out == self.closed(),
     { self.closed }
     pub fn usage(&self) -> (out: (usize, usize))
-        requires self.valid(),
         ensures out.0 == self.remaining(), out.1 == self.limit(), out.0 <= out.1,
     { self.registry.usage() }
     pub fn close(&mut self)
