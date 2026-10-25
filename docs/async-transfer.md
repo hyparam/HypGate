@@ -15,7 +15,7 @@ must mean that record is durable under its documented crash model.
 derives the identity, chunk, and length internally, and acknowledges only after
 success. The runtime request API no longer accepts caller-supplied numeric durable
 acknowledgments. Its own drop guard closes a canceled audit even when called outside
-the transfer driver. The Verus-checked `log_bytes`, `chunk_id`, and `is_closed`
+the transfer driver. The Verus-checked `log_bytes` and `is_closed`
 accessors expose exact core state. The async binding and logger implementation
 remain trusted/tested Rust, not a journal-to-stream composition theorem.
 

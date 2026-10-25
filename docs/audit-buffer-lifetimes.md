@@ -103,9 +103,8 @@ that snapshot to be empty without a reservation and to fit the configured limit
 plus overhead. The production callback now uses `encode_reserved`, which refuses
 missing/closed reservations and excessive payloads before constructing a body.
 `RecordBody::retained_size` derives its exact 33-byte overhead; consuming `seal`
-preserves payload identity and adds the checksum. The typed combined theorems
-`accounted_payload_with_body` and `accounted_payload_with_sealed_frame` use those
-actual containers instead of an independently supplied encoding length.
+preserves payload identity and adds the checksum. `Buffers::accounted_payload_with_encoding`
+takes its encoding snapshot from those containers' derived lengths.
 
 The production queue now exposes `enqueue(record)`, not a callback or core queue
 reference. Its private callback receives a non-cloneable `EncodingPermit` whose
