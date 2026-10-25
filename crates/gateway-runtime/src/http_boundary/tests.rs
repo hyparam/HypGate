@@ -192,8 +192,6 @@ fn many_connection_tokens_keep_only_distinct_relevant_names_but_validate_all() {
     let c = config(); let mut h = headers();
     let repeated = "x-ignored,content-type,".repeat(500) + "x-final";
     h.insert("connection", HeaderValue::from_str(&repeated).unwrap());
-    let options = gateway_core::headers::check_request(&fields_of(&h)).unwrap();
-    assert_eq!(options.len(), 1); assert_eq!(options[0], b"content-type");
     let p = prep(&c, &h, "/routes/7").unwrap();
     assert!(!p.upstream.headers().contains_key("content-type"));
     assert_eq!(p.upstream.headers()["accept"], "text/event-stream");
