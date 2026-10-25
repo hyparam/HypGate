@@ -140,6 +140,13 @@ with what the server already holds.
   valid state and the caller's turn-taking; every wait it asks for is 1 to 300
   seconds; pending work with a usable credential is sent or poisoned at once;
   a revoked credential is the only absorbing state and is reported.
+- Tested: a shipper thread that panics is contained by `catch_unwind` and
+  the thread boundary; the gateway keeps forwarding, stays ready, and shuts
+  down, and only the shipping metrics and the shipper handle report it
+  (`shipping_thread_panic_changes_only_metrics`). A crash after every single
+  machine step of a seven-exchange run, followed by a restart from the
+  checkpoint, leaves the server with exactly the uninterrupted run's rows
+  (`a_crash_at_any_step_resends_only_the_unacknowledged_exchanges_and_the_server_stores_each_once`).
 
 **Premises.** The storage contract (synced bytes survive); Tokio cancellation
 reaches the futures; the shipping adapters are panic-free, which clippy
@@ -148,8 +155,9 @@ denies on unwrap, expect, panic, indexing, and unchecked arithmetic enforce
 panic that does occur; the clock is monotone enough for the enrollment
 windows.
 
-**In progress.** Panic-injection and kill-at-every-step tests for the
-shipper (phase 5).
+**In progress.** Nothing for the shipper. The gateway's own async
+cancellation and whole-process memory remain documented rather than
+mechanized, as the supporting table below records.
 
 ## Plan to close the gaps
 
@@ -177,9 +185,11 @@ Each phase is one logical commit on the `hypaware-shipping` branch.
    checkpoint skips exactly the resolved exchanges and resends the rest
    with identical identities. A checkpoint carries only the machine's own
    resolved count, so a crash causes a resend, never a skip.
-5. **No crash state, tested.** Panic injection and kill-at-every-step runs
-   against the scripted server; readiness, admission, and disk acknowledgment
-   unchanged while the shipper dies.
+5. **No crash state, tested.** Done. The shipper thread body runs under
+   `catch_unwind`; a panic-injection test shows forwarding, readiness, and
+   shutdown unchanged while only the metrics report it, and a core test
+   crashes the machine after every step of a run and checks the restarted
+   run leaves the ledger identical.
 6. **Documentation.** This file, the proof index, the end-to-end audit, and
    the security contract updated to point at the theorems.
 

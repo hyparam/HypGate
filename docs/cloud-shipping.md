@@ -145,6 +145,8 @@ implemented.
 | No upload without an unexpired credential; one refresh per rejection; revocation is absorbing; delays within 1 to 300 seconds | `Enrollment`, `throttle_delay`, `transport_delay` proved; `recovers_from_rejected_tokens_throttling_and_poison_and_stops_on_revocation`. |
 | At-least-once delivery, exactly-once storage | Trusted server contract: batch-id ledger and `part_id` dedup. Tested against the fake server, including a restart without a checkpoint. |
 | Shutdown within a bounded window, no replacement thread | Tested: `shutdown_returns_within_its_window_while_the_server_hangs`; a thread inside a request is left to finish on its own. |
+| A panic in the shipper thread changes only its metrics | The thread body runs under `catch_unwind`; the handle's `shutdown` reports it. Tested: `shipping_thread_panic_changes_only_metrics` keeps forwarding, readiness, and gateway shutdown intact. |
+| A crash at any step resends only the unacknowledged exchanges | Replay numbering proved (above); tested exhaustively over every step of a run against a ledger-and-dedup fake: `a_crash_at_any_step_resends_only_the_unacknowledged_exchanges_and_the_server_stores_each_once`. |
 
 ## Trust assumptions
 

@@ -32,12 +32,14 @@ const STACK_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Default)]
 pub struct Metrics {
-    enrolled: AtomicBool, stopped: AtomicBool, read_failed: AtomicBool,
+    enrolled: AtomicBool, stopped: AtomicBool, read_failed: AtomicBool, panicked: AtomicBool,
     records_read: AtomicU64, exchanges_emitted: AtomicU64, lag: AtomicU64,
     batches_acknowledged: AtomicU64, last_acknowledged_ms: AtomicU64, poisoned_batches: AtomicU64,
 }
 impl Metrics {
     pub fn stopped(&self) -> bool { self.stopped.load(Ordering::Relaxed) }
+    /// The thread body panicked; the panic was contained and the shipper is stopped.
+    pub fn panicked(&self) -> bool { self.panicked.load(Ordering::Relaxed) }
     pub fn enrolled(&self) -> bool { self.enrolled.load(Ordering::Relaxed) }
     pub fn batches_acknowledged(&self) -> u64 { self.batches_acknowledged.load(Ordering::Relaxed) }
     pub fn poisoned_batches(&self) -> u64 { self.poisoned_batches.load(Ordering::Relaxed) }
@@ -61,20 +63,34 @@ impl Shipper {
     /// Start the thread. The log must already exist with a valid header.
     pub fn spawn(config: ShippingConfig, log_path: PathBuf) -> io::Result<Self> { Self::spawn_with_roots(config, log_path, None) }
     pub fn spawn_with_roots(config: ShippingConfig, log_path: PathBuf, roots: Option<RootCertStore>) -> io::Result<Self> {
+        Self::spawn_thread(move |stop, metrics| {
+            let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                Ok(runtime) => runtime, Err(_) => { metrics.stopped.store(true, Ordering::Relaxed); return; }
+            };
+            let result = Engine::new(config, log_path, roots, stop, metrics.clone(), runtime).run(Mode::Follow);
+            if result.is_err() { metrics.stopped.store(true, Ordering::Relaxed); }
+        })
+    }
+    /// The thread body runs under `catch_unwind`: a panic marks the shipper
+    /// stopped and panicked and ends the thread. Nothing else in the process
+    /// observes it; the gateway holds only this metrics view.
+    fn spawn_thread(body: impl FnOnce(Arc<AtomicBool>, Arc<Metrics>) + Send + 'static) -> io::Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let metrics = Arc::new(Metrics::default());
         let (done, finished) = mpsc::channel();
         let (flag, shared) = (stop.clone(), metrics.clone());
         let thread = std::thread::Builder::new().name("soundgate-shipping".into()).stack_size(STACK_BYTES).spawn(move || {
             let _done = done; // dropped when the thread ends, however it ends
-            let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-                Ok(runtime) => runtime, Err(_) => { shared.stopped.store(true, Ordering::Relaxed); return; }
-            };
-            let result = Engine::new(config, log_path, roots, flag, shared.clone(), runtime).run(Mode::Follow);
-            if result.is_err() { shared.stopped.store(true, Ordering::Relaxed); }
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(flag, shared.clone())));
+            if outcome.is_err() {
+                shared.panicked.store(true, Ordering::Relaxed);
+                shared.stopped.store(true, Ordering::Relaxed);
+            }
         })?;
         Ok(Self { stop, finished, thread: Some(thread), metrics })
     }
+    #[cfg(test)]
+    pub(crate) fn spawn_for_test(body: impl FnOnce() + Send + 'static) -> io::Result<Self> { Self::spawn_thread(move |_, _| body()) }
     pub fn metrics(&self) -> Arc<Metrics> { self.metrics.clone() }
     /// Ask the thread to stop after its current step and join it within the
     /// deadline. A thread still inside a request is left to finish on its own;
@@ -83,7 +99,9 @@ impl Shipper {
         self.stop.store(true, Ordering::Relaxed);
         match self.finished.recv_timeout(deadline) {
             Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                self.thread.take().map(|t| t.join()).transpose().map(|_| ()).map_err(|_| io::Error::other("shipper panicked"))
+                self.thread.take().map(|t| t.join()).transpose().map(|_| ()).map_err(|_| io::Error::other("shipper panicked"))?;
+                if self.metrics.panicked() { return Err(io::Error::other("shipper panicked")); }
+                Ok(())
             }
             Err(mpsc::RecvTimeoutError::Timeout) => { self.thread.take(); Err(io::ErrorKind::TimedOut.into()) }
         }

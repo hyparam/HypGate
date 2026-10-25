@@ -903,6 +903,45 @@ async fn shutdown_closes_shared_worker_admission_before_waiting_for_existing_wor
     }).await.unwrap();
 }
 
+/// A shipper thread that panics changes the shipping metrics and nothing
+/// else: the gateway keeps forwarding, stays ready, and shuts down; the
+/// panic is reported by the shipper handle alone.
+#[tokio::test]
+async fn shipping_thread_panic_changes_only_metrics() {
+    use crate::shipping::Shipper;
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let (upstream, acceptor, roots) = tls().await;
+        let config = config(upstream.local_addr().unwrap().port(), false);
+        let dir = TempDir::new(); let path = dir.0.join("audit.log");
+        let log = DiskLog::create(&path, 4, Duration::from_secs(2)).unwrap();
+        let shipper = Shipper::spawn_for_test(|| panic!("injected shipper failure")).unwrap();
+        let metrics = shipper.metrics();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !metrics.panicked() { tokio::time::sleep(Duration::from_millis(10)).await; }
+        }).await.unwrap();
+        let app = Gateway::with_shipping_metrics(config, HttpsTransport::with_roots(roots, Duration::from_secs(5)).unwrap(), log, Some(metrics.clone()));
+        let (port, shutdown, gateway) = spawn_gateway(&app, 4, Duration::from_secs(8)).await;
+        let (release, waiting) = oneshot::channel();
+        let upstream_task = stalling_provider(upstream, acceptor, waiting, false);
+        let (response, connection) = send(port, "/routes/7", "gateway", "POST").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        release.send(()).unwrap();
+        assert_eq!(response.collect().await.unwrap().to_bytes(), "data: hello\n\ndata: [DONE]\n\n");
+        connection.await.unwrap(); upstream_task.await.unwrap();
+        for (path, status) in [("/healthz", 200), ("/readyz", 200)] {
+            let (r, c) = send(port, path, "", "GET").await;
+            assert_eq!(r.status().as_u16(), status, "{path}"); r.collect().await.unwrap(); c.await.unwrap();
+        }
+        let (text, c) = send(port, "/metrics", "", "GET").await;
+        let text = String::from_utf8(text.collect().await.unwrap().to_bytes().to_vec()).unwrap(); c.await.unwrap();
+        assert!(text.contains("soundgate_shipping_enabled 1\n") && text.contains("soundgate_shipping_stopped 1\n"), "{text}");
+        assert!(text.contains("soundgate_shipping_batches_acknowledged_total 0\n"));
+        shutdown.send(()).unwrap(); gateway.await.unwrap().unwrap();
+        let result = tokio::task::spawn_blocking(move || shipper.shutdown(Duration::from_secs(2))).await.unwrap();
+        assert_eq!(result.unwrap_err().to_string(), "shipper panicked");
+    }).await.unwrap();
+}
+
 /// A gateway with the shipper configured forwards through the provider fixture
 /// while the shipper uploads the same exchange; a hanging HypAware server never
 /// touches readiness or forwarding, and shutdown still completes.

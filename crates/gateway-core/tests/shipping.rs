@@ -382,3 +382,74 @@ fn restart_from_a_checkpoint_skips_exactly_the_resolved_exchanges() {
     assert_eq!(second.reply(0, ok_reply(202)), Outcome::Acknowledged(1));
     assert_eq!(second.progress(), (3, 0));
 }
+
+/// A fake server with the HypAware ledger and dedup semantics: a repeated
+/// batch id is acknowledged without storing, and a repeated row is dropped.
+#[derive(Default)]
+struct Ledger { ids: std::collections::HashSet<Vec<u8>>, stored: Vec<Vec<u8>> }
+impl Ledger {
+    fn ingest(&mut self, request: &gateway_core::shipper::Request) -> Reply {
+        assert_eq!(request.path, Path::Ingest);
+        let id = request.batch_id.clone().unwrap();
+        if self.ids.insert(id) {
+            for row in request.body.split_inclusive(|b| *b == b'\n') {
+                if !self.stored.iter().any(|r| r == row) { self.stored.push(row.to_vec()); }
+            }
+        }
+        ok_reply(202)
+    }
+}
+
+/// Run the shipper over `requests` exchanges against a ledger, dying after
+/// `kill_at` machine steps (never, when `kill_at` is `None`) and restarting
+/// from the checkpoint. Returns the stored rows and the number of steps.
+fn run_with_crash(requests: u64, kill_at: Option<usize>, ledger: &mut Ledger) -> usize {
+    let session = [8u8; 16];
+    let records: Vec<(u8, u64, u64, Vec<u8>)> = (1..=requests).flat_map(|request| {
+        let start = encode_request_start(1_000, 7, b"https://api.example/v1").unwrap();
+        let body = format!("req-{request}").into_bytes();
+        let done = encode_completion(2_000, 0, body.len() as u64, 0).unwrap();
+        vec![(2, request, 0, start), (0, request, 1, body), (4, request, 0, done)]
+    }).collect();
+    let (mut checkpoint, mut steps, mut crashed) = ((0u64, 0u64), 0usize, false);
+    loop {
+        let mut m = Machine::new(b"t".to_vec(), session, 3, 1024, checkpoint.0, checkpoint.1);
+        assert!(m.adopt_identity(b"jwt".to_vec(), 30 * DAY, 0));
+        let mut next_record = 0usize;
+        let mut finished = false;
+        while !finished {
+            if !crashed && kill_at == Some(steps) { crashed = true; break; }
+            steps += 1;
+            match m.next(0) {
+                Action::Read => {
+                    if next_record < records.len() {
+                        let (kind, request, chunk, payload) = &records[next_record]; next_record += 1;
+                        if let Some(t) = m.admit(header(*kind, *request, *chunk, payload), payload) {
+                            let body = format!("{{\"r\":{}}}\n", t.exchange().request).into_bytes();
+                            assert!(m.enqueue(t, body, 1).is_ok());
+                        }
+                    } else { m.end_of_log(); }
+                }
+                Action::Send(request) => {
+                    let reply = ledger.ingest(&request);
+                    if let Outcome::Acknowledged(_) = m.reply(0, reply) { checkpoint = m.progress(); }
+                }
+                Action::Idle => { finished = next_record == records.len() && m.queue_len() == 0; }
+                other => panic!("unexpected {}", name(&other)),
+            }
+        }
+        if finished { return steps; }
+    }
+}
+
+#[test]
+fn a_crash_at_any_step_resends_only_the_unacknowledged_exchanges_and_the_server_stores_each_once() {
+    let mut reference = Ledger::default();
+    let steps = run_with_crash(7, None, &mut reference);
+    assert_eq!(reference.stored.len(), 7);
+    for kill_at in 0..steps {
+        let mut ledger = Ledger::default();
+        run_with_crash(7, Some(kill_at), &mut ledger);
+        assert_eq!(ledger.stored, reference.stored, "crash after step {kill_at}");
+    }
+}
