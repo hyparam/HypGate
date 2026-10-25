@@ -1,36 +1,75 @@
-# Verified Gateway
+# LogGate - Formally Verified AI Gateway
 
-Research toward a minimal LLM gateway: forward request bodies unchanged, stream
-responses back, and record traffic to disk. No provider API translation.
+LogGate is a small LLM gateway with a machine-checked core. It forwards request
+bodies to your provider unchanged, streams responses back, writes every
+exchange to an audit log on disk, and optionally ships that log to
+[HypAware](https://hypaware.ai) for analysis. No provider API translation, no
+plugins, no other network destinations.
 
-Status: a runnable prototype with Verus-checked authorization, configuration,
-streaming, and resource invariants. The network and disk adapters are tested;
-end-to-end formal guarantees and production hardening remain incomplete.
+What makes it different: every decision the gateway makes, including who may
+send what where, which bytes are forwarded, what is logged, and what is shipped
+and when, lives in a Rust crate that [Verus](https://github.com/verus-lang/verus)
+proves correct against written contracts. Other gateways are tested on
+examples. LogGate's core is proved on all inputs, and the unverified code
+that touches sockets, TLS, and files is kept thin, audited, and lint-pinned.
+
+## Three guarantees
+
+### 1. Your traffic goes only where you said
+
+Request bodies reach only the provider a grant names, with that grant's
+credential. Audit records go only to the local log file. Log contents leave
+the machine only to the one HypAware server you configured. No other socket
+exists in the binary.
+
+### 2. What was logged is what is shipped, once and in order
+
+Every exchange in the log is uploaded in emission order. An upload counts only
+when HypAware acknowledges the exact batch it was sent. A restart replays from
+the log with identical identities, so nothing is lost or duplicated.
+
+### 3. There is no crash state
+
+The verified core cannot panic, overflow, or index out of bounds. A process
+kill at any point resumes to a state consistent with the log. The shipper runs
+on its own thread, and its failure changes metrics and nothing else.
+
+Each guarantee is a theorem over the verified core, joined to the outside world
+by a small, enumerated set of trusted adapters. [PROOFS.md](PROOFS.md) states
+each one precisely, names its premises, and lists every finer-grained property
+proved beneath it. What is not verified: Tokio, Hyper, rustls, the OS, DNS and
+PKI, the filesystem under power loss, the HypAware server honoring its ledger,
+and provider-specific JSON parsing. Each is a named premise of a theorem, not
+an unstated gap.
 
 ## Why verify an AI gateway?
 
-For companies that depend on AI, the gateway is among their most critical pieces
-of infrastructure. It sits in the hot path of every AI request routed through it:
-if the gateway goes down, that AI work stops until failover or recovery. It also
-handles highly sensitive data, including proprietary code, customer information,
-internal prompts, and provider credentials. A compromise can expose that data or
-turn a shared gateway into a path across tenant boundaries.
+The gateway sits in the hot path of every AI request and sees your most
+sensitive data: proprietary code, customer information, internal prompts, and
+provider credentials. If it goes down, AI work stops. If it is compromised,
+that data leaks and a shared gateway becomes a path across tenant boundaries.
 
 These risks are concrete. LiteLLM documented a
 [March 2026 supply-chain compromise](https://docs.litellm.ai/blog/security-townhall-updates)
-affecting its published Python packages, and a
+of its published Python packages, and a
 [second compromise on October 21, 2026](https://docs.litellm.ai/blog/security-incident-oct-21-2026)
-that distributed credential-stealing malware in version 1.107.0 through PyPI and
-official container registries. These incidents highlight the trust placed in gateway
-software and the importance of securing how it is built and delivered.
+that shipped credential-stealing malware through PyPI and official container
+registries.
 
-Formal verification can help make this critical infrastructure more trustworthy:
-prove authorization, isolation, byte integrity, and resource invariants across all
-states covered by explicit models, rather than relying only on tested examples.
-This project keeps the gateway small enough to make those proofs practical.
-Proofs complement fault testing, operational redundancy, and secure builds; they
-do not by themselves prevent a compromised release pipeline from shipping different
-code. The proof targets and remaining trust assumptions are listed below.
+Formal verification lets LogGate prove authorization, isolation, byte
+integrity, and resource bounds across every state its models cover, rather
+than only the examples a test suite happens to exercise. Keeping the gateway
+small is what makes those proofs practical. Proofs complement fault testing,
+redundancy, and secure builds; they do not by themselves stop a compromised
+release pipeline from shipping different code.
+
+## Status
+
+A runnable prototype. The core's authorization, configuration, streaming,
+shipping, and resource invariants are Verus-checked, and all six
+[implementation milestones](docs/implementation-plan.md) are complete under
+their documented assumptions. The network and disk adapters are tested.
+Live-provider compatibility and production hardening remain incomplete.
 
 ## Run it
 
@@ -53,52 +92,9 @@ contain request and response bodies. Remote access needs a
 [TLS reverse proxy](docs/deployment.md). See [running the gateway](docs/running.md)
 for provider configuration, scanning logs, and shutdown behavior.
 
-## What the gateway guarantees
-
-Three statements an operator can hold the gateway to. Each is a theorem over a
-verified state machine joined to the outside world by a small, enumerated,
-lint-pinned set of trusted adapters. [PROOFS.md](PROOFS.md) states each one
-precisely, names its premises, and lists every finer-grained property proved
-beneath it.
-
-**Your traffic goes only where you said.** Request bodies reach only the
-provider a root grant names, with that grant's credential; audit records go only
-to the local log file; and, only if a `shipping` section is configured, log
-contents go to the one HypAware server it names, with a credential that server
-issued. No other socket exists in the binary. Every provider body byte passes
-one verified write gate (`ResolvedRoute::write_bytes`); every shipper request
-is chosen by a verified machine and carries a path but no host; both socket
-sites take one verified egress permit, and clippy denies every other socket,
-lookup, listener, file write, and secret read in the runtime.
-
-**What was logged is what is shipped, once and in order.** Every exchange in the
-log is grouped, bounded, and uploaded in emission order; an upload is counted
-only when the server acknowledges the exact batch it was sent; a restart
-replays from the file and reproduces identical identities, so the server's
-dedup stores each exchange once. Proved end to end over the verified machine
-and its driver loop: conservation (the queue is always the unresolved suffix
-of what was emitted), batch fidelity, acknowledgment of exactly the batch
-sent, and replay numbering as a function of the log alone. The projection of
-provider JSON into rows is the one trusted, tested step.
-
-**There is no crash state.** The verified core cannot panic, overflow, or index
-out of bounds, and every reachable shipper state has a next action with a
-bounded wait; the shipper runs on its own thread with no handle to admission,
-routing, or the logger, so its failure changes metrics and nothing else; and a
-process kill at any point resumes to a state consistent with the log. The
-shipper's totality, bounded waiting, and replay are proved; panic containment
-and a crash after every step of a run are tested; the gateway's own crash-safe
-recovery is proved under the storage contract.
-
-What Verus does not verify for us: Tokio, Hyper, rustls, the OS, DNS and PKI,
-the filesystem under power loss, the HypAware server honoring its ledger, and
-provider-specific JSON parsing. Each is a named premise of a theorem, not an
-unstated gap.
-
 ## Documentation
 
-All six [implementation milestones](docs/implementation-plan.md) are complete under
-their documented assumptions; the [milestone 6 exit audit](docs/milestone-6-exit-audit.md)
+The [milestone 6 exit audit](docs/milestone-6-exit-audit.md)
 is the latest record of what is proved, tested, and still trusted.
 
 Guarantees and proofs:
