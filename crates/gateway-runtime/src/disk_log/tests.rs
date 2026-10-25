@@ -487,3 +487,152 @@ async fn configured_record_limit_is_shared_by_clones_and_rejects_before_queueing
     assert_eq!(recovered.chunk, 2); assert_eq!(recovered.bytes, b"abc");
     assert!(reader.next_record().unwrap().is_none());
 }
+
+fn metadata_record(kind: RecordKind, request: u64, bytes: &[u8]) -> LogRecord<'_> {
+    LogRecord { tenant: 1, request, chunk: 0, kind, bytes }
+}
+fn start_payload() -> Vec<u8> {
+    gateway_core::metadata::encode_request_start(1_700_000_000_000, 7, b"https://localhost:8443/v1/messages").unwrap()
+}
+fn head_payload() -> Vec<u8> { gateway_core::metadata::encode_response_head(1_700_000_000_001, 200).unwrap() }
+fn done_payload() -> Vec<u8> { gateway_core::metadata::encode_completion(1_700_000_000_002, 0, 15, 27).unwrap() }
+// Rewrite a sealed frame's header byte and recompute the digest, so only the
+// structural check can reject it.
+fn resealed(mut frame: Vec<u8>, offset: usize, value: u8) -> Vec<u8> {
+    frame[offset] = value;
+    let body_len = frame.len() - 32;
+    let digest: [u8; 32] = Sha256::digest(&frame[..body_len]).into();
+    frame[body_len..].copy_from_slice(&digest); frame
+}
+
+#[tokio::test]
+async fn metadata_records_roundtrip_through_disk_and_scanner() {
+    use super::Metadata;
+    let dir = TempDir::new(); let path = dir.0.join("metadata.log");
+    let mut log = DiskLog::create_with_payload_limit(&path, 2, Duration::from_secs(5), 8210).unwrap();
+    let (start, head, done) = (start_payload(), head_payload(), done_payload());
+    for (kind, payload) in [(RecordKind::RequestStart, &start), (RecordKind::ResponseHead, &head), (RecordKind::Completion, &done)] {
+        let receipt = log.append(metadata_record(kind, 2, payload)).await.unwrap();
+        assert!(receipt.matches_record(Header { payload: payload.len() as u32, tenant: 1, request: 2, chunk: 0, kind: kind.id() }, payload));
+    }
+    log.shutdown(Duration::from_secs(5)).await.unwrap();
+    let mut reader = LogReader::new(File::open(&path).unwrap()).unwrap();
+    let records: Vec<_> = std::iter::from_fn(|| reader.next_record().unwrap()).collect();
+    assert_eq!(records.iter().map(|r| (r.kind, r.chunk, r.direction())).collect::<Vec<_>>(),
+        vec![(RecordKind::RequestStart, 0, None), (RecordKind::ResponseHead, 0, None), (RecordKind::Completion, 0, None)]);
+    match records[0].metadata().unwrap() {
+        Metadata::RequestStart(m) => {
+            assert_eq!((m.time_ms, m.selector), (1_700_000_000_000, 7));
+            assert_eq!(m.destination, b"https://localhost:8443/v1/messages");
+        }
+        other => panic!("{other:?}"),
+    }
+    match records[1].metadata().unwrap() {
+        Metadata::ResponseHead(m) => assert_eq!((m.time_ms, m.status), (1_700_000_000_001, 200)),
+        other => panic!("{other:?}"),
+    }
+    match records[2].metadata().unwrap() {
+        Metadata::Completion(m) => assert_eq!((m.time_ms, m.outcome, m.upload_bytes, m.download_bytes), (1_700_000_000_002, 0, 15, 27)),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(reader.valid_end(), std::fs::metadata(&path).unwrap().len());
+}
+
+#[test]
+fn metadata_record_truncation_and_bit_flips_stop_the_scanner() {
+    let (start, head, done) = (start_payload(), head_payload(), done_payload());
+    for (kind, payload) in [(RecordKind::RequestStart, &start), (RecordKind::ResponseHead, &head), (RecordKind::Completion, &done)] {
+        let mut prefix = header(); prefix.extend(encode(record(b"body", 1)));
+        let tail = encode(metadata_record(kind, 2, payload));
+        for cut in 1..tail.len() {
+            let mut file = prefix.clone(); file.extend_from_slice(&tail[..cut]);
+            let mut reader = LogReader::new(Cursor::new(file)).unwrap();
+            assert_eq!(reader.next_record().unwrap().unwrap().bytes, b"body");
+            assert_eq!(reader.next_record(), Err(ScanError::Incomplete), "{kind:?} cut {cut}");
+            assert_eq!(reader.valid_end(), prefix.len() as u64);
+            assert!(reader.next_record().unwrap().is_none());
+        }
+        for offset in 0..tail.len() {
+            for bit in 0..8 {
+                let mut corrupted = tail.clone(); corrupted[offset] ^= 1 << bit;
+                let mut file = header(); file.extend(corrupted); file.extend(encode(record(b"later", 2)));
+                let mut reader = LogReader::new(Cursor::new(file)).unwrap();
+                assert!(reader.next_record().is_err(), "{kind:?} offset {offset} bit {bit}");
+                assert_eq!(reader.valid_end(), FILE_HEADER as u64);
+                assert!(reader.next_record().unwrap().is_none());
+            }
+        }
+    }
+}
+
+#[test]
+fn interleaved_kinds_from_two_requests_scan_in_order_and_unknown_kind_is_corrupt() {
+    let (start, head, done) = (start_payload(), head_payload(), done_payload());
+    let body = |request, chunk, kind, bytes| LogRecord { tenant: 1, request, chunk, kind, bytes };
+    let sequence = [
+        metadata_record(RecordKind::RequestStart, 2, &start), metadata_record(RecordKind::RequestStart, 3, &start),
+        body(2, 1, RecordKind::Upload, b"ab"), body(3, 1, RecordKind::Upload, b"cd"),
+        metadata_record(RecordKind::ResponseHead, 3, &head), metadata_record(RecordKind::ResponseHead, 2, &head),
+        body(3, 2, RecordKind::Download, b"ef"), body(2, 2, RecordKind::Download, b"gh"),
+        metadata_record(RecordKind::Completion, 3, &done), metadata_record(RecordKind::Completion, 2, &done),
+    ];
+    let mut file = header();
+    let expected: Vec<_> = sequence.iter().map(|r| (r.request, r.chunk, r.kind, r.bytes.to_vec())).collect();
+    for record in sequence { file.extend(encode(record)); }
+    let mut reader = LogReader::new(Cursor::new(file.clone())).unwrap();
+    let scanned: Vec<_> = std::iter::from_fn(|| reader.next_record().unwrap())
+        .map(|r| (r.request, r.chunk, r.kind, r.bytes)).collect();
+    assert_eq!(scanned, expected);
+    assert_eq!(reader.valid_end(), file.len() as u64);
+    // Kind 5 with a correct checksum is still structurally invalid: the scanner
+    // stops before it and never resynchronizes on the valid record that follows.
+    let unknown = resealed(encode(metadata_record(RecordKind::Completion, 2, &done)), 32, 5);
+    assert_eq!(unknown[32], 5);
+    let mut file = header(); file.extend(encode(record(b"first", 1)));
+    let prefix = file.len() as u64;
+    file.extend(unknown); file.extend(encode(record(b"after", 2)));
+    let mut reader = LogReader::new(Cursor::new(file)).unwrap();
+    assert_eq!(reader.next_record().unwrap().unwrap().bytes, b"first");
+    assert_eq!(reader.next_record(), Err(ScanError::Corrupt));
+    assert_eq!(reader.valid_end(), prefix);
+    assert!(reader.next_record().unwrap().is_none());
+    // Every recorded kind byte is accepted; the first unknown one is not.
+    for kind in 0..=4u8 {
+        let mut file = header(); file.extend(resealed(encode(record(b"abc", 1)), 32, kind));
+        assert_eq!(LogReader::new(Cursor::new(file)).unwrap().next_record().unwrap().unwrap().kind.id(), kind);
+    }
+}
+
+#[test]
+fn malformed_metadata_payloads_scan_as_frames_but_do_not_decode() {
+    // Framing and checksum are valid, so the record is returned; the verified
+    // codec rejects the payload, and the scanner neither stops nor guesses.
+    let mut oversized = start_payload(); oversized[16..18].copy_from_slice(&8193u16.to_le_bytes());
+    let mut too_short = start_payload(); too_short.pop();
+    let mut zero_length = start_payload(); zero_length[16..18].copy_from_slice(&0u16.to_le_bytes());
+    let mut bad_status = head_payload(); bad_status[8..10].copy_from_slice(&99u16.to_le_bytes());
+    let mut high_status = head_payload(); high_status[8..10].copy_from_slice(&1000u16.to_le_bytes());
+    let mut bad_outcome = done_payload(); bad_outcome[8] = 8;
+    let cases: [(RecordKind, &[u8]); 8] = [
+        (RecordKind::RequestStart, &oversized), (RecordKind::RequestStart, &too_short), (RecordKind::RequestStart, &zero_length),
+        (RecordKind::RequestStart, b""), (RecordKind::ResponseHead, &bad_status), (RecordKind::ResponseHead, &high_status),
+        (RecordKind::ResponseHead, b"short"), (RecordKind::Completion, &bad_outcome),
+    ];
+    for (kind, payload) in cases {
+        let mut file = header(); file.extend(encode(metadata_record(kind, 2, payload))); file.extend(encode(record(b"after", 1)));
+        let mut reader = LogReader::new(Cursor::new(file.clone())).unwrap();
+        let malformed = reader.next_record().unwrap().unwrap();
+        assert_eq!((malformed.kind, malformed.bytes.as_slice()), (kind, payload));
+        assert!(malformed.metadata().is_none(), "{kind:?} {payload:?}");
+        assert_eq!(reader.next_record().unwrap().unwrap().bytes, b"after");
+        assert_eq!(reader.valid_end(), file.len() as u64);
+    }
+    // Boundary values that the codecs accept decode through the scanner too.
+    let longest = gateway_core::metadata::encode_request_start(0, 0, &vec![b'a'; 8192]).unwrap();
+    assert_eq!(longest.len(), gateway_core::metadata::MAX_PAYLOAD);
+    for (kind, payload) in [(RecordKind::RequestStart, longest), (RecordKind::ResponseHead, gateway_core::metadata::encode_response_head(0, 999).unwrap()),
+        (RecordKind::Completion, gateway_core::metadata::encode_completion(0, 7, u64::MAX, u64::MAX).unwrap())] {
+        let mut file = header(); file.extend(encode(metadata_record(kind, 2, &payload)));
+        assert!(LogReader::new(Cursor::new(file)).unwrap().next_record().unwrap().unwrap().metadata().is_some());
+    }
+}

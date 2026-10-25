@@ -205,18 +205,22 @@ impl<'a> Request<'a> {
     /// advance, no capacity use, no durable offset. The receipt is checked
     /// against the designated journal session and the exact record, as body
     /// receipts are, but it authorizes nothing. A failed append marks the
-    /// request log-failed exactly like a failed body append.
+    /// request log-failed exactly like a failed body append. The completion
+    /// record describes an exchange that is already over, so it is attempted
+    /// even for a closed or log-failed request; the caller skips it only when
+    /// the logger itself is unhealthy.
     pub(crate) async fn audit_metadata<L: AuditLog>(&mut self, log: &mut L, kind: RecordKind, payload: &[u8])
         -> Result<(), TransferError>
     {
         if kind.direction().is_some() || payload.len() > gateway_core::metadata::MAX_PAYLOAD {
             return Err(TransferError::InvalidState);
         }
+        let completion = kind == RecordKind::Completion;
         // A request already marked log-failed skips later appends, as the body
         // path does; the gap was counted at the first failure.
-        if self.log_failed { return Err(TransferError::Log); }
-        let mut pending = CancelOnDrop { request: self, armed: true };
-        if pending.request.is_closed() { return Err(TransferError::InvalidState); }
+        if self.log_failed && !completion { return Err(TransferError::Log); }
+        let mut pending = CancelOnDrop { request: self, armed: !completion };
+        if pending.request.is_closed() && !completion { return Err(TransferError::InvalidState); }
         if !pending.request.journal.bind(log.session_id()) {
             return Err(TransferError::InvalidState);
         }
@@ -226,7 +230,7 @@ impl<'a> Request<'a> {
         let receipt = match log.append(record).await {
             Ok(receipt) => receipt,
             Err(_) => {
-                pending.request.fail_log();
+                if !completion { pending.request.fail_log(); }
                 pending.armed = false;
                 return Err(TransferError::Log);
             }

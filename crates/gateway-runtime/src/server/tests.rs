@@ -44,6 +44,55 @@ async fn spawn_gateway(app: &Arc<Gateway>, connections: usize, deadline: Duratio
     (port, shutdown, gateway)
 }
 
+/// Every record of a finished log, in order.
+fn audit_records(path: &std::path::Path) -> Vec<crate::disk_log::StoredRecord> {
+    let mut reader = LogReader::new(File::open(path).unwrap()).unwrap();
+    let records: Vec<_> = std::iter::from_fn(|| reader.next_record().unwrap()).collect();
+    assert_eq!(reader.valid_end(), std::fs::metadata(path).unwrap().len());
+    records
+}
+/// Checks one request's trace: kind 2, upload chunks, kind 3 when `status` is
+/// given, download chunks, then kind 4 with `outcome`; monotone timestamps,
+/// the configured destination, selector 7, and the body chunk ids 1 and up.
+/// Returns the concatenated upload and download bytes.
+fn assert_trace(records: &[crate::disk_log::StoredRecord], destination: &str, status: Option<u16>, outcome: u8) -> (Vec<u8>, Vec<u8>) {
+    use crate::{disk_log::Metadata, transfer::RecordKind};
+    let request = records.first().expect("a logged request").request;
+    assert!(records.iter().all(|r| r.request == request && r.tenant == 1), "{records:?}");
+    let kinds: Vec<_> = records.iter().map(|r| r.kind).collect();
+    let (mut upload, mut download) = (Vec::new(), Vec::new());
+    let mut phase = 0; let mut chunk = 0; let mut last_time = 0;
+    for record in records {
+        if record.direction().is_some() {
+            assert_eq!(record.chunk, chunk + 1, "body chunks are numbered from 1: {kinds:?}"); chunk = record.chunk;
+        } else { assert_eq!(record.chunk, 0, "metadata uses chunk 0: {kinds:?}"); }
+        match (record.kind, record.metadata()) {
+            (RecordKind::RequestStart, Some(Metadata::RequestStart(start))) => {
+                assert_eq!(phase, 0, "{kinds:?}"); phase = 1;
+                assert_eq!(std::str::from_utf8(&start.destination).unwrap(), destination);
+                assert_eq!(start.selector, 7); last_time = start.time_ms;
+            }
+            (RecordKind::Upload, None) => { assert_eq!(phase, 1, "{kinds:?}"); upload.extend(&record.bytes); }
+            (RecordKind::ResponseHead, Some(Metadata::ResponseHead(head))) => {
+                assert_eq!(phase, 1, "{kinds:?}"); phase = 2;
+                assert_eq!(Some(head.status), status); assert!(head.time_ms >= last_time); last_time = head.time_ms;
+            }
+            (RecordKind::Download, None) => { assert_eq!(phase, 2, "{kinds:?}"); download.extend(&record.bytes); }
+            (RecordKind::Completion, Some(Metadata::Completion(done))) => {
+                assert!(phase == 1 || phase == 2, "{kinds:?}"); phase = 3;
+                assert_eq!(done.outcome, outcome, "{kinds:?}"); assert!(done.time_ms >= last_time);
+                if outcome == 0 {
+                    assert_eq!((done.upload_bytes, done.download_bytes), (upload.len() as u64, download.len() as u64));
+                } else { assert_eq!((done.upload_bytes, done.download_bytes), (0, 0)); }
+            }
+            other => panic!("unexpected record {other:?} in {kinds:?}"),
+        }
+    }
+    assert_eq!(phase, 3, "trace must end with a completion: {kinds:?}");
+    if status.is_none() { assert!(!kinds.contains(&RecordKind::ResponseHead)); }
+    (upload, download)
+}
+
 // One provider connection that streams a first event, then waits for `waiting`
 // before finishing cleanly or, when truncated, disconnecting without an End marker.
 fn stalling_provider(upstream: TcpListener, acceptor: TlsAcceptor, waiting: oneshot::Receiver<()>, truncated: bool) -> JoinHandle<()> {
@@ -79,6 +128,7 @@ async fn exercise(availability: bool, failed_log: bool, truncated: bool, stop: S
     tokio::time::timeout(Duration::from_secs(25), async {
         let (upstream, acceptor, roots) = tls().await;
         let config = config(upstream.local_addr().unwrap().port(), availability);
+        let destination = format!("https://localhost:{}/v1/messages", upstream.local_addr().unwrap().port());
         let dir = TempDir::new(); let path = dir.0.join("audit.log");
         let log = DiskLog::create(&path, 4, Duration::from_secs(2)).unwrap();
         if failed_log { log.inject_failure(); }
@@ -161,6 +211,13 @@ async fn exercise(availability: bool, failed_log: bool, truncated: bool, stop: S
             }
             assert!(app.workers.is_empty());
             assert!(app.config.admit(b"gateway", 7).is_ok());
+            // Drain completes the exchange (outcome 0); the cancellation after the
+            // drain window records a client-disconnect outcome before the slot returns.
+            let outcome = if matches!(stop, Stop::Drain) { 0 } else { gateway_core::metadata::OUTCOME_CLIENT_DISCONNECT };
+            let (upload, download) = assert_trace(&audit_records(&path), &destination, Some(200), outcome);
+            assert_eq!(upload, b"{\"stream\":true}");
+            if matches!(stop, Stop::Drain) { assert_eq!(download, b"data: hello\n\ndata: [DONE]\n\n"); }
+            else { assert!(download.starts_with(&first) && b"data: hello\n\ndata: [DONE]\n\n".starts_with(&download), "{download:?}"); }
             return;
         }
         if matches!(stop, Stop::Disconnect) {
@@ -172,7 +229,14 @@ async fn exercise(availability: bool, failed_log: bool, truncated: bool, stop: S
             assert!(app.config.admit(b"gateway", 7).is_ok());
             drop(release); upstream_task.await.unwrap();
             shutdown.send(()).unwrap(); gateway.await.unwrap().unwrap();
-            assert!(app.workers.is_empty()); return;
+            assert!(app.workers.is_empty());
+            // The canceled exchange still closed its trace: outcome 5 after the head
+            // and the one download chunk the client had already received.
+            let (upload, download) = assert_trace(&audit_records(&path), &destination, Some(200),
+                gateway_core::metadata::OUTCOME_CLIENT_DISCONNECT);
+            assert_eq!(upload, b"{\"stream\":true}");
+            assert!(download.starts_with(&first) && b"data: hello\n\ndata: [DONE]\n\n".starts_with(&download), "{download:?}");
+            return;
         }
         release.send(()).unwrap();
         let rest = response.collect().await;
@@ -197,17 +261,14 @@ async fn exercise(availability: bool, failed_log: bool, truncated: bool, stop: S
         assert!(app.workers.is_empty()); assert_eq!(app.failed_exchanges(), u64::from(truncated));
         assert_eq!(app.audit_gaps(), u64::from(failed_log && availability));
         assert!(app.config.admit(b"gateway", 7).is_ok());
-        let mut reader = LogReader::new(File::open(path).unwrap()).unwrap();
-        let mut upload = Vec::new(); let mut download = Vec::new();
-        while let Some(r) = reader.next_record().unwrap() {
-            match r.direction() { Some(crate::transfer::Direction::Upload) => upload.extend(r.bytes),
-                Some(crate::transfer::Direction::Download) => download.extend(r.bytes), None => {} }
-        }
-        if failed_log { assert!(upload.is_empty()); assert!(download.is_empty()); }
-        else {
-            assert_eq!(upload, b"{\"stream\":true}");
-            if !truncated { assert_eq!(download, bytes); }
-        }
+        let records = audit_records(&path);
+        // An unhealthy logger records nothing at all, not even a completion.
+        if failed_log { assert!(records.is_empty(), "{records:?}"); return; }
+        let outcome = if truncated { gateway_core::metadata::OUTCOME_DOWNLOAD_FAILURE } else { 0 };
+        let (upload, download) = assert_trace(&records, &destination, Some(200), outcome);
+        assert_eq!(upload, b"{\"stream\":true}");
+        if truncated { assert!(download.starts_with(&first) && b"data: hello\n\ndata: [DONE]\n\n".starts_with(&download), "{download:?}"); }
+        else { assert_eq!(download, bytes); }
     }).await.unwrap();
 }
 
@@ -232,6 +293,96 @@ async fn strict_log_failure_prevents_even_upstream_connection() { exercise(false
 async fn availability_log_failure_preserves_stream_and_reports_gap() { exercise(true, true, false, Stop::None).await; }
 #[tokio::test]
 async fn truncated_generation_is_an_error_and_still_reports_audit_gap() { exercise(true, true, true, Stop::None).await; }
+#[tokio::test]
+async fn truncated_provider_records_a_download_failure_completion() { exercise(false, false, true, Stop::None).await; }
+
+#[tokio::test]
+async fn failed_start_record_refuses_in_strict_mode_and_forwards_with_one_gap_in_availability_mode() {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        for availability in [false, true] {
+            let (upstream, acceptor, roots) = tls().await;
+            let destination = format!("https://localhost:{}/v1/messages", upstream.local_addr().unwrap().port());
+            let config = config(upstream.local_addr().unwrap().port(), availability);
+            let dir = TempDir::new(); let path = dir.0.join("audit.log");
+            // A payload limit below the start record's size fails exactly that
+            // append (invalid input, logger stays healthy); the 25-byte completion
+            // and the 3-byte body chunks still fit.
+            let log = DiskLog::create_with_payload_limit(&path, 4, Duration::from_secs(2), 32).unwrap();
+            let app = Gateway::new(config, HttpsTransport::with_roots(roots, Duration::from_secs(5)).unwrap(), log);
+            let (port, shutdown, gateway) = spawn_gateway(&app, 4, Duration::from_secs(8)).await;
+            let (release, waiting) = oneshot::channel();
+            let upstream_task = stalling_provider(upstream, acceptor, waiting, false);
+            let (response, connection) = send(port, "/routes/7", "gateway", "POST").await;
+            if availability {
+                assert_eq!(response.status(), StatusCode::OK);
+                release.send(()).unwrap();
+                assert_eq!(response.collect().await.unwrap().to_bytes(), b"data: hello\n\ndata: [DONE]\n\n"[..]);
+                connection.await.unwrap(); upstream_task.await.unwrap();
+            } else {
+                assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+                response.collect().await.unwrap(); connection.await.unwrap();
+                // No provider connection was opened without the start record.
+                assert!(tokio::time::timeout(Duration::from_millis(50), upstream_task).await.is_err());
+                drop(release);
+            }
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while !app.workers.is_empty() { tokio::task::yield_now().await; }
+            }).await.unwrap();
+            let (metrics, metrics_connection) = send(port, "/metrics", "", "GET").await;
+            let metrics = metrics.collect().await.unwrap().to_bytes(); metrics_connection.await.unwrap();
+            let metrics = std::str::from_utf8(&metrics).unwrap();
+            assert!(metrics.contains(&format!("soundgate_audit_gap_requests_total {}\n", u8::from(availability))));
+            assert!(metrics.contains("soundgate_audit_healthy 1\n"));
+            assert!(app.log.healthy());
+            shutdown.send(()).unwrap(); gateway.await.unwrap().unwrap();
+            assert_eq!(app.audit_gaps(), u64::from(availability));
+            assert_eq!(app.failed_exchanges(), 0);
+            // The request is log-failed after the start record, so body and head
+            // records are skipped; the completion is still written while the
+            // logger is healthy: a logging refusal in strict mode, success in availability.
+            let records = audit_records(&path);
+            assert_eq!(records.iter().map(|r| (r.kind, r.chunk)).collect::<Vec<_>>(), vec![(crate::transfer::RecordKind::Completion, 0)]);
+            let Some(crate::disk_log::Metadata::Completion(done)) = records[0].metadata() else { panic!("{records:?}") };
+            assert_eq!(done.outcome, if availability { 0 } else { gateway_core::metadata::OUTCOME_LOG_REFUSAL });
+            assert_eq!((done.upload_bytes, done.download_bytes), if availability { (15, 27) } else { (0, 0) });
+            let _ = destination;
+        }
+    }).await.unwrap();
+}
+
+#[tokio::test]
+async fn upstream_timeout_records_a_timeout_completion_after_the_start_record() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let destination = format!("https://localhost:{}/v1/messages", upstream.local_addr().unwrap().port());
+        let dir = TempDir::new(); let path = dir.0.join("audit.log");
+        let app = Gateway::new(config(upstream.local_addr().unwrap().port(), false),
+            HttpsTransport::with_roots(RootCertStore::empty(), Duration::from_millis(300)).unwrap(),
+            DiskLog::create(&path, 4, Duration::from_secs(2)).unwrap());
+        let (port, shutdown, gateway) = spawn_gateway(&app, 4, Duration::from_secs(5)).await;
+        // Accept the TCP connection and withhold the TLS handshake until the
+        // exchange deadline expires.
+        let provider = tokio::spawn(async move {
+            let (socket, _) = upstream.accept().await.unwrap();
+            let mut first = [0; 5]; let _ = (&socket).readable().await;
+            let _ = socket.try_read(&mut first);
+            std::future::pending::<()>().await;
+        });
+        let (response, connection) = send(port, "/routes/7", "gateway", "POST").await;
+        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+        response.collect().await.unwrap(); connection.await.unwrap();
+        provider.abort();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !app.workers.is_empty() { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        shutdown.send(()).unwrap(); gateway.await.unwrap().unwrap();
+        assert_eq!(app.failed_exchanges(), 1); assert_eq!(app.audit_gaps(), 0);
+        let records = audit_records(&path);
+        assert_eq!(records.iter().map(|r| r.kind).collect::<Vec<_>>(),
+            vec![crate::transfer::RecordKind::RequestStart, crate::transfer::RecordKind::Completion]);
+        assert_trace(&records, &destination, None, gateway_core::metadata::OUTCOME_UPSTREAM_TIMEOUT);
+    }).await.unwrap();
+}
 
 #[tokio::test]
 async fn concurrent_tenants_keep_credentials_bodies_and_audit_records_isolated() {

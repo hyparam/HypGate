@@ -235,3 +235,57 @@ async fn strict_submission_requires_receipt_for_the_transfer_direction() {
         assert_eq!(request.pending_bytes(&next, Direction::Download), Some(&[2][..]));
     }
 }
+
+#[tokio::test]
+async fn metadata_records_use_chunk_zero_and_never_authorize_body_writes() {
+    use crate::transfer::RecordKind;
+    use std::sync::{Arc, Mutex};
+    #[derive(Default)]
+    struct Log { seen: Arc<Mutex<Vec<(u64, RecordKind, Vec<u8>)>>>, fail: bool }
+    impl AuditLog for Log {
+        fn session_id(&self) -> u128 { 0 }
+        async fn append(&mut self, record: LogRecord<'_>) -> std::io::Result<DurableFrame> {
+            self.seen.lock().unwrap().push((record.chunk, record.kind, record.bytes.to_vec()));
+            if self.fail { Err(std::io::ErrorKind::Other.into()) } else { Ok(receipt(record)) }
+        }
+    }
+    for strict in [true, false] {
+        let a = admission(1, 4, strict);
+        let mut r = a.admit(&[11; 32], 7).unwrap();
+        let mut log = Log::default();
+        // Body kinds are refused on the metadata path; oversized payloads too.
+        assert_eq!(r.audit_metadata(&mut log, RecordKind::Upload, b"x").await, Err(TransferError::InvalidState));
+        assert_eq!(r.audit_metadata(&mut log, RecordKind::RequestStart, &vec![0; 8211]).await, Err(TransferError::InvalidState));
+        assert!(log.seen.lock().unwrap().is_empty());
+        let start = gateway_core::metadata::encode_request_start(5, 7, b"https://example.test/v1").unwrap();
+        r.audit_metadata(&mut log, RecordKind::RequestStart, &start).await.unwrap();
+        assert_eq!(*log.seen.lock().unwrap(), vec![(0, RecordKind::RequestStart, start.clone())]);
+        // The metadata receipt is not body evidence and did not advance the stream:
+        // the next body chunk is still chunk 1, and strict mode still needs its own receipt.
+        assert!(r.prepare(1, Direction::Upload).is_none());
+        assert_eq!(r.advance(vec![1, 2]), Some(1));
+        if strict { assert!(r.prepare(1, Direction::Upload).is_none()); }
+        r.audit_current(&mut log, Direction::Upload).await.unwrap();
+        assert_eq!(log.seen.lock().unwrap().last().unwrap().0, 1);
+        let ticket = r.prepare(2, Direction::Upload).unwrap();
+        assert_eq!(r.pending_bytes(&ticket, Direction::Upload), Some(&[1, 2][..]));
+        assert!(r.complete(&ticket, 2));
+        let head = gateway_core::metadata::encode_response_head(6, 200).unwrap();
+        r.audit_metadata(&mut log, RecordKind::ResponseHead, &head).await.unwrap();
+        // A failed metadata append degrades the request exactly like a failed body append.
+        log.fail = true;
+        let head = gateway_core::metadata::encode_response_head(7, 200).unwrap();
+        assert_eq!(r.audit_metadata(&mut log, RecordKind::ResponseHead, &head).await, Err(TransferError::Log));
+        assert!(r.log_failed());
+        assert_eq!(r.is_closed(), strict);
+        // Later start/head records are skipped; the completion is still attempted
+        // because it describes an exchange that is already over.
+        assert_eq!(r.audit_metadata(&mut log, RecordKind::ResponseHead, &head).await, Err(TransferError::Log));
+        let calls = log.seen.lock().unwrap().len();
+        log.fail = false;
+        let done = gateway_core::metadata::encode_completion(8, 6, 2, 0).unwrap();
+        r.audit_metadata(&mut log, RecordKind::Completion, &done).await.unwrap();
+        assert_eq!(log.seen.lock().unwrap().len(), calls + 1);
+        assert_eq!(log.seen.lock().unwrap().last().unwrap(), &(0, RecordKind::Completion, done));
+    }
+}
