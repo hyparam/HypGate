@@ -410,6 +410,8 @@ MUTATIONS = [
     ("shipping_driver.rs", "driver_reads_when_unwanted", "    while machine.wants_records()\n", "    while true\n"),
     ("shipping_driver.rs", "driver_flushes_without_room", "while machine.open_exchanges() > 0 && machine.has_room()", "while machine.open_exchanges() > 0"),
     ("shipping_driver.rs", "driver_ignores_reply", "let outcome = machine.reply(replied_at, reply);", "let outcome = Outcome::Nothing;"),
+    ("egress.rs", "egress_permit_forgets_tenant", "origin: Origin::Provider { tenant: authority.tenant_id(), origin: route.origin, credential: route.credential }", "origin: Origin::Provider { tenant: 0, origin: route.origin, credential: route.credential }"),
+    ("egress.rs", "egress_permit_swaps_credential_index", "credential: route.credential } })", "credential: route.origin } })"),
     ("shipping_driver.rs", "driver_checkpoints_stale_progress", "                let (resolved, poisoned) = machine.progress();\n                effects.checkpoint(machine, resolved, poisoned);\n                effects.observe(Event::PoisonedUnsent, machine);", "                let (resolved, poisoned) = machine.progress();\n                effects.checkpoint(machine, 0, poisoned);\n                effects.observe(Event::PoisonedUnsent, machine);"),
 ]
 

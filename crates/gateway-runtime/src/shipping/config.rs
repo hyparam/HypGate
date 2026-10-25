@@ -29,10 +29,17 @@ fn default_open() -> usize { 64 }
 fn default_bytes() -> usize { 1024 * 1024 }
 fn default_poll() -> u64 { 1000 }
 
+/// The configured HypAware server. Only `ShippingConfig::from_root_json`
+/// makes one, so a cloud egress permit exists only when the root policy has a
+/// `shipping` section.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShippingServer(Uri);
+impl ShippingServer { pub fn uri(&self) -> &Uri { &self.0 } }
+
 /// Everything the shipper thread receives. No handle to the gateway's own
 /// configuration, admission, logger, or routes.
 pub struct ShippingConfig {
-    pub server: Uri,
+    pub server: ShippingServer,
     pub state_dir: PathBuf,
     pub max_open_exchanges: usize,
     pub max_exchange_bytes: usize,
@@ -48,7 +55,7 @@ impl ShippingConfig {
         if root.len() > MAX_CONFIG { return Err(ConfigError::Limits); }
         let root: Root = serde_json::from_slice(root).map_err(|_| ConfigError::Syntax)?;
         let Some(section) = root.shipping else { return Ok(None); };
-        let server = destination(&section.server)?;
+        let server = ShippingServer(destination(&section.server)?);
         if section.max_open_exchanges == 0 || section.max_open_exchanges > MAX_OPEN_EXCHANGES
             || section.max_exchange_bytes < MIN_EXCHANGE_BYTES || section.max_exchange_bytes > MAX_EXCHANGE_BYTES
             || section.poll_ms < MIN_POLL_MS || section.poll_ms > MAX_POLL_MS {

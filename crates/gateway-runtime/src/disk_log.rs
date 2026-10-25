@@ -74,6 +74,8 @@ impl DiskLog {
     }
 
     /// Enforce the gateway's chunk budget before encoding any audit payload.
+    // Effect site: the audit log file, created new at the operator's path.
+    #[allow(clippy::disallowed_methods)]
     pub fn create_with_payload_limit(path: &Path, queue_capacity: usize, deadline: Duration, payload_limit: usize) -> io::Result<Self> {
         if payload_limit == 0 || payload_limit > MAX_RECORD_BYTES
             || queue_capacity == 0 || queue_capacity > 1024 || deadline.is_zero()

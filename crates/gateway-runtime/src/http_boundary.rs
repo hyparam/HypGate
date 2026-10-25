@@ -39,6 +39,7 @@ impl<'a> PreparedRequest<'a> {
         self.routed.copy_body(reader, writer, log, direction).await
     }
     pub fn destination(&self) -> &Uri { self.routed.destination() }
+    pub(crate) fn egress(&self) -> gateway_core::egress::Egress<'_, crate::config::Destination> { self.routed.egress() }
     pub(crate) fn stream(&mut self) -> &mut crate::admission::Request<'a> { self.routed.stream() }
 
     /// Kind 2: wall clock, the authorized route selector, and the configured

@@ -1,6 +1,16 @@
+#![deny(clippy::disallowed_methods)]
 use gateway_runtime::{config::GatewayConfig, disk_log::{DiskLog, LogReader, Metadata, ScanError, StoredRecord}, server::{self, Gateway},
     shipping::{self, Shipper, ShippingConfig}, transport::HttpsTransport};
 use std::{io::{self, Read, Write}, net::SocketAddr, path::Path, time::Duration};
+
+// Effect site: secrets come only from the environment variables the root
+// policy names, read once at startup.
+#[allow(clippy::disallowed_methods)]
+fn secret(name: &str) -> Option<String> { std::env::var(name).ok() }
+
+// Effect site: the one listening socket.
+#[allow(clippy::disallowed_methods)]
+async fn bind(address: SocketAddr) -> io::Result<tokio::net::TcpListener> { tokio::net::TcpListener::bind(address).await }
 
 fn bounded_file(path: &str) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
@@ -27,11 +37,11 @@ async fn run() -> Result<(), &'static str> {
     let (config, shipping) = {
         let root = bounded_file(&args[1]).map_err(|_| "cannot read root policy")?;
         let routes = bounded_file(&args[2]).map_err(|_| "cannot read candidate routes")?;
-        let config = GatewayConfig::from_json(&root, &routes, |name| std::env::var(name).ok())
+        let config = GatewayConfig::from_json(&root, &routes, secret)
             .map_err(|_| "invalid configuration or missing credential")?;
         // The cloud token is read here once and moves into the shipper thread;
         // the gateway configuration above never holds it.
-        let shipping = ShippingConfig::from_root_json(&root, |name| std::env::var(name).ok())
+        let shipping = ShippingConfig::from_root_json(&root, secret)
             .map_err(|_| "invalid shipping configuration or missing token")?;
         (config, shipping)
     }; // Source JSON buffers are startup scratch, not server-lifetime storage.
@@ -46,7 +56,7 @@ async fn run() -> Result<(), &'static str> {
         Some(shipping) => Some(Shipper::spawn(shipping, Path::new(&args[3]).to_path_buf()).map_err(|_| "cannot start shipping thread")?),
         None => None,
     };
-    let listener = tokio::net::TcpListener::bind(address).await.map_err(|_| "cannot bind listener")?;
+    let listener = bind(address).await.map_err(|_| "cannot bind listener")?;
     eprintln!("soundgate listening on {}", listener.local_addr().map_err(|_| "cannot read listen address")?);
     let budget = gateway_runtime::budget::compose(gateway_runtime::budget::Limits {
         requests: config.request_limit(), chunk_bytes: config.chunk_bytes(), connections: 128, queue: 16,
@@ -79,7 +89,7 @@ async fn run() -> Result<(), &'static str> {
 /// Ship a finished log with the root policy's `shipping` section, then exit.
 fn ship(root_path: &str, log_path: &str) -> Result<(), &'static str> {
     let root = bounded_file(root_path).map_err(|_| "cannot read root policy")?;
-    let config = ShippingConfig::from_root_json(&root, |name| std::env::var(name).ok())
+    let config = ShippingConfig::from_root_json(&root, secret)
         .map_err(|_| "invalid shipping configuration or missing token")?.ok_or("root policy has no shipping section")?;
     let metrics = shipping::ship_to_end(config, Path::new(log_path).to_path_buf())?;
     let mut text = String::new(); metrics.render(&mut text);

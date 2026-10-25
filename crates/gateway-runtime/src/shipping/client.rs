@@ -1,7 +1,9 @@
 //! One HTTPS request at a time to the configured HypAware server. Blocking DNS
 //! and an inline handshake on the shipper's own thread; no redirects, proxies,
 //! pooling, or retries here. Response bodies are capped.
-use http::{Request, Uri};
+use super::config::ShippingServer;
+use gateway_core::egress::Egress;
+use http::Request;
 use http_body_util::{BodyExt, Full, Limited};
 use hyper_util::rt::TokioIo;
 use std::{io, net::ToSocketAddrs, sync::Arc, time::Duration};
@@ -23,21 +25,33 @@ impl Reply {
     }
 }
 
-pub struct Client { connector: TlsConnector, host: String, port: u16, authority: String, deadline: Duration }
+pub struct Client { connector: TlsConnector, server: ShippingServer, host: String, authority: String, deadline: Duration }
+
+// Effect site: the only cloud socket. Resolution and connection happen under a
+// permit minted from the configured shipping server and nothing else.
+#[allow(clippy::disallowed_methods)]
+async fn open_socket(permit: &Egress<'_, ShippingServer>) -> Result<TcpStream, ClientError> {
+    let uri = permit.target().uri();
+    let host = uri.host().ok_or(ClientError::Resolve)?.trim_start_matches('[').trim_end_matches(']');
+    let addresses: Vec<_> = (host, uri.port_u16().unwrap_or(443)).to_socket_addrs().map_err(|_| ClientError::Resolve)?.take(16).collect();
+    if addresses.is_empty() { return Err(ClientError::Resolve); }
+    TcpStream::connect(addresses.as_slice()).await.map_err(|_| ClientError::Connect)
+}
 
 impl Client {
-    pub fn new(server: &Uri, deadline: Duration) -> io::Result<Self> {
+    pub fn new(server: &ShippingServer, deadline: Duration) -> io::Result<Self> {
         Self::with_roots(RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned()), server, deadline)
     }
-    pub fn with_roots(roots: RootCertStore, server: &Uri, deadline: Duration) -> io::Result<Self> {
+    pub fn with_roots(roots: RootCertStore, server: &ShippingServer, deadline: Duration) -> io::Result<Self> {
         if deadline.is_zero() || deadline > Duration::from_secs(3600) { return Err(io::ErrorKind::InvalidInput.into()); }
-        let host = server.host().ok_or(io::ErrorKind::InvalidInput)?.trim_start_matches('[').trim_end_matches(']').to_owned();
+        let (server, uri) = (server.clone(), server.uri());
+        let host = uri.host().ok_or(io::ErrorKind::InvalidInput)?.trim_start_matches('[').trim_end_matches(']').to_owned();
         ServerName::try_from(host.clone()).map_err(|_| io::ErrorKind::InvalidInput)?;
         let mut config = ClientConfig::builder().with_root_certificates(roots).with_no_client_auth();
         config.enable_early_data = false;
         config.cert_decompressors.clear();
-        let authority = server.authority().ok_or(io::ErrorKind::InvalidInput)?.as_str().to_owned();
-        Ok(Self { connector: TlsConnector::from(Arc::new(config)), host, port: server.port_u16().unwrap_or(443), authority, deadline })
+        let authority = uri.authority().ok_or(io::ErrorKind::InvalidInput)?.as_str().to_owned();
+        Ok(Self { connector: TlsConnector::from(Arc::new(config)), server, host, authority, deadline })
     }
 
     /// `bearer` becomes an `Authorization` header; `headers` are added verbatim.
@@ -50,9 +64,8 @@ impl Client {
     async fn run(&self, method: &str, path: &str, bearer: Option<&str>, headers: &[(&str, String)], body: Vec<u8>)
         -> Result<Reply, ClientError>
     {
-        let addresses: Vec<_> = (self.host.as_str(), self.port).to_socket_addrs().map_err(|_| ClientError::Resolve)?.take(16).collect();
-        if addresses.is_empty() { return Err(ClientError::Resolve); }
-        let tcp = TcpStream::connect(addresses.as_slice()).await.map_err(|_| ClientError::Connect)?;
+        let permit = Egress::cloud(&self.server);
+        let tcp = open_socket(&permit).await?;
         let server = ServerName::try_from(self.host.clone()).map_err(|_| ClientError::Tls)?;
         let tls = self.connector.connect(server, tcp).await.map_err(|_| ClientError::Tls)?;
         let (mut sender, connection) = hyper::client::conn::http1::Builder::new()

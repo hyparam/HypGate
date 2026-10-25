@@ -192,7 +192,7 @@ impl Engine {
         let mut machine = Machine::new(self.config.token().to_vec(), session, self.config.max_open_exchanges,
             self.config.max_exchange_bytes, resolved, poisoned);
         if let Some(identity) = state::load_identity(&self.config.state_dir) {
-            let same = identity.server == self.config.server.to_string()
+            let same = identity.server == self.config.server.uri().to_string()
                 && identity.token_fingerprint == state::fingerprint(self.config.token());
             if same && machine.adopt_identity(identity.jwt.into_bytes(), identity.expires_at, now_seconds()) {
                 self.metrics.enrolled.store(true, Ordering::Relaxed);
@@ -203,7 +203,7 @@ impl Engine {
 
     fn save_identity(&self, issued: &Issued) {
         let _ = state::save_identity(&self.config.state_dir, &Identity { jwt: issued.jwt.clone(), expires_at: issued.expires_at,
-            gateway_id: issued.gateway_id.clone(), server: self.config.server.to_string(),
+            gateway_id: issued.gateway_id.clone(), server: self.config.server.uri().to_string(),
             token_fingerprint: state::fingerprint(self.config.token()) });
     }
 }

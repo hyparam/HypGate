@@ -360,7 +360,7 @@ fn shipping_section_is_optional_and_validated() {
     assert!(crate::config::GatewayConfig::from_json(&shipping_json(443, &dir.0, json!({})), br#"{"routes":[]}"#, |_| None).is_ok(),
         "the gateway configuration ignores the section");
     let config = ShippingConfig::from_root_json(&shipping_json(443, &dir.0, json!({})), resolver).unwrap().unwrap();
-    assert_eq!(config.server.to_string(), "https://localhost:443/");
+    assert_eq!(config.server.uri().to_string(), "https://localhost:443/");
     assert_eq!((config.max_open_exchanges, config.max_exchange_bytes, config.poll_ms), (64, 1_048_576, 100));
     for (extra, error) in [
         (json!({"server": "http://localhost/"}), crate::config::ConfigError::Destination),

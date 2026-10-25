@@ -50,16 +50,19 @@ destination.
   state carries the token.
 - The operator token is read once and moved into the machine; the gateway
   configuration, request path, and log never hold it.
+- Both outbound socket sites take one permit type, `egress::Egress`. A
+  provider permit is minted by the verified core only for the destination the
+  request's route resolved to (`Egress::provider`); a cloud permit only from
+  the parsed `shipping` section's server, which does not exist when shipping
+  is off. Every other call to connect, resolve, listen, write a file, or read
+  a secret is denied by `clippy.toml`, and `scripts/check_effect_sites.sh`
+  fails if the set of allowed sites changes.
 
 **Premises.** HTTP serialization, DNS, TLS, and the system resolver behave as
-specified (no IP-range policy, so not an SSRF theorem); the effect-site table
-in the end-to-end audit is complete; the runtime passes the gate's bytes to
-the socket it opened for that route and the machine's requests to the client
-it built from the configured server.
-
-**In progress.** "No other socket" is still a reviewed table; phase 3 makes
-it a lint-enforced structural fact and gives the provider writer and the
-cloud client one shared permit type.
+specified (no IP-range policy, so not an SSRF theorem); the runtime passes
+the gate's bytes to the socket it opened under the permit and the machine's
+requests to the client it built from the configured server; `send_request`
+and `write_all` sites are still enumerated by review rather than lint.
 
 ## Guarantee 2: what was logged is what is shipped, once and in order
 
@@ -150,10 +153,11 @@ Each phase is one logical commit on the `hypaware-shipping` branch.
    send, sleep, checkpoint, and now with no decisions in them
    (`crates/gateway-core/src/shipping_driver.rs`). Clippy denies on unwrap,
    expect, panic, indexing, and unchecked arithmetic in the shipping adapters.
-3. **One egress permit.** A single verified type that both the provider
-   writer and the cloud client require; with shipping disabled the cloud
-   variant is uninhabited. Disallowed-method lints and a CI script pin the
-   only socket and file-write sites.
+3. **One egress permit.** Done. A single verified type that both socket
+   sites require (`crates/gateway-core/src/egress.rs`); with shipping
+   disabled no cloud permit can be built. `clippy.toml` disallows every
+   other socket, lookup, listener, file-write, and secret-read call and
+   `scripts/check_effect_sites.sh` pins the audited sites.
 4. **Replay theorem.** Emission is a deterministic function of the record
    sequence; restoring a checkpoint and replaying yields the unacknowledged
    suffix with identical part ids; a checkpoint never claims more than was

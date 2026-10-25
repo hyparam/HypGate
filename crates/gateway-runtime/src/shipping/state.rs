@@ -33,6 +33,8 @@ pub struct Checkpoint {
 pub fn hex(bytes: &[u8]) -> String { bytes.iter().map(|b| format!("{b:02x}")).collect() }
 pub fn fingerprint(token: &[u8]) -> String { hex(&Sha256::digest(token)) }
 
+// Effect site: the shipper's two state files, under the configured state directory.
+#[allow(clippy::disallowed_methods)]
 fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut temporary = path.as_os_str().to_owned(); temporary.push(".tmp");
     let temporary = Path::new(&temporary);

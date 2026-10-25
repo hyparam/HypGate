@@ -17,6 +17,8 @@ impl Resolver {
     fn with_limit(limit: usize) -> io::Result<Self> {
         Ok(Self { jobs: JobPool::new("gateway-dns", limit, WORKERS.min(limit))? })
     }
+    // Effect site: the system resolver, for the host of a provider permit.
+    #[allow(clippy::disallowed_methods)]
     pub(super) async fn resolve(&self, host: String, port: u16) -> io::Result<Reply<Vec<SocketAddr>>> {
         if let Ok(ip) = host.parse::<IpAddr>() { return Ok(Reply::direct(vec![SocketAddr::new(ip, port)])); }
         self.resolve_with(host, port, |host, port| {

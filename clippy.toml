@@ -1,0 +1,24 @@
+# Every outbound socket, name lookup, listening socket, file write, and
+# secret read in the runtime must be one of the audited effect sites, each
+# marked `#[allow(clippy::disallowed_methods)]` with an "Effect site" comment.
+# `scripts/check_effect_sites.sh` pins that set; `cargo clippy -p
+# gateway-runtime` fails on any call outside it.
+disallowed-methods = [
+    { path = "tokio::net::TcpStream::connect", reason = "sockets open only under an egress permit (transport::open_socket, shipping::client::open_socket)" },
+    { path = "std::net::TcpStream::connect", reason = "sockets open only under an egress permit" },
+    { path = "std::net::ToSocketAddrs::to_socket_addrs", reason = "name lookups only for a permit's host (transport::resolver, shipping::client::open_socket)" },
+    { path = "tokio::net::lookup_host", reason = "name lookups only for a permit's host" },
+    { path = "tokio::net::TcpListener::bind", reason = "one listening socket, in main::bind" },
+    { path = "std::net::TcpListener::bind", reason = "one listening socket, in main::bind" },
+    { path = "tokio::net::UdpSocket::bind", reason = "no UDP" },
+    { path = "std::net::UdpSocket::bind", reason = "no UDP" },
+    { path = "std::fs::OpenOptions::open", reason = "file writes only for the audit log and the shipper state files" },
+    { path = "std::fs::File::create", reason = "file writes only for the audit log and the shipper state files" },
+    { path = "std::fs::write", reason = "file writes only for the audit log and the shipper state files" },
+    { path = "std::fs::rename", reason = "file writes only for the shipper state files" },
+    { path = "std::fs::remove_file", reason = "file writes only for the shipper state files" },
+    { path = "std::fs::remove_dir_all", reason = "the runtime deletes nothing" },
+    { path = "std::env::var", reason = "secrets are read once at startup, in main::secret" },
+    { path = "std::env::var_os", reason = "secrets are read once at startup, in main::secret" },
+    { path = "std::process::Command::new", reason = "the runtime starts no processes" },
+]

@@ -50,6 +50,14 @@ mod resolver;
 mod tls_io;
 mod handshake;
 
+// Effect site: the only provider socket. It is opened under a permit the
+// verified core minted for this request's resolved destination; the
+// addresses come from resolving that permit's host.
+#[allow(clippy::disallowed_methods)]
+async fn open_socket(_permit: &gateway_core::egress::Egress<'_, crate::config::Destination>, addresses: &[std::net::SocketAddr]) -> io::Result<TcpStream> {
+    TcpStream::connect(addresses).await
+}
+
 pub struct HttpsTransport { connector: TlsConnector, deadline: Duration, resolver: resolver::Resolver, handshakes: handshake::Pool }
 impl HttpsTransport {
     pub fn new(deadline: Duration) -> io::Result<Self> {
@@ -86,14 +94,16 @@ impl HttpsTransport {
         http: &http_body::WorkerHttp,
     ) -> Result<ExchangeStats, TransportError> {
         let upstream = prepared.take_upstream().map_err(|_| TransportError::Metadata)?;
-        let host = prepared.destination().host().ok_or(TransportError::Metadata)?
-            .trim_start_matches('[').trim_end_matches(']').to_owned();
-        let port = prepared.destination().port_u16().unwrap_or(443);
+        let (host, port) = {
+            let permit = prepared.egress();
+            let uri = permit.target().uri();
+            (uri.host().ok_or(TransportError::Metadata)?.trim_start_matches('[').trim_end_matches(']').to_owned(), uri.port_u16().unwrap_or(443))
+        };
         let server = ServerName::try_from(host.clone()).map_err(|_| TransportError::Metadata)?;
         let tcp = {
             let addresses = self.resolver.resolve(host, port).await.map_err(|_| TransportError::Connect)?
                 .adopt(prepared.stream()).map_err(|_| TransportError::Connect)?;
-            TcpStream::connect(addresses.as_slice()).await.map_err(|_| TransportError::Connect)?
+            open_socket(&prepared.egress(), addresses.as_slice()).await.map_err(|_| TransportError::Connect)?
         };
         let connector = self.connector.clone();
         let tls = self.handshakes.run(async move {

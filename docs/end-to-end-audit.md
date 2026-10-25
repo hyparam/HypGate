@@ -52,10 +52,20 @@ environment operations finds only these sites. Code under `#[cfg(test)]` and in
 `tests/` directories is excluded. `gateway-core` performs no I/O and forbids
 `unsafe`; neither crate contains `assume`, `external_body`, or `unsafe`.
 
+The socket, name-lookup, listener, file-write, and secret-read sites are also
+enforced mechanically: `clippy.toml` disallows those methods throughout
+`gateway-runtime` (`#![deny(clippy::disallowed_methods)]` in both crate
+roots), each audited site is marked `#[allow(clippy::disallowed_methods)]`
+with an "Effect site" comment, and `scripts/check_effect_sites.sh` fails when
+the set of marked sites differs from its pinned list. The two outbound socket
+sites take an `egress::Egress` permit: the provider one is minted by the
+verified core from the request's resolved route, the cloud one only from the
+parsed `shipping` section's `ShippingServer`.
+
 | Effect | Production site | What must already hold when it runs |
 | --- | --- | --- |
-| Listen on loopback | `TcpListener::bind` in `main.rs::run` | `run` rejects a non-loopback address before loading configuration; configuration and audit log already created |
-| Read root policy, routes, and secrets | `main.rs::bounded_file` and `std::env::var` in `run` | Startup only; bounded file reads, secrets from environment through `GatewayConfig::from_json` |
+| Listen on loopback | `TcpListener::bind` in `main.rs::bind` | `run` rejects a non-loopback address before loading configuration; configuration and audit log already created |
+| Read root policy, routes, and secrets | `main.rs::bounded_file` and `std::env::var` in `main.rs::secret` | Startup only; bounded file reads, secrets from environment through `GatewayConfig::from_json` and `ShippingConfig::from_root_json` |
 | Accept inbound connection | `listener.accept()` in `server::serve` | Connection credit from `ConnectionSlots::acquire` over the verified `ResponseRegistry` |
 | Spawn request worker | `WorkerLease::spawn` called from `Gateway::handle` | Worker credit from `WorkerSlots::acquire` over the verified `WorkerRegistry`/`DrainRegistry` |
 | DNS lookup | `Resolver::resolve` (`transport/resolver.rs`) | Called only from `HttpsTransport::run` with a `PreparedRequest` borrowed; host and port read from its destination |
@@ -74,11 +84,11 @@ environment operations finds only these sites. Code under `#[cfg(test)]` and in
 
 No other `connect`, `send_request`, `write_all`, `sync_all`, `spawn`, or file-open
 call exists in production runtime source outside `transport.rs`, `disk_log.rs`,
-and the `shipping` module. This enumeration is review evidence
-for complete mediation. Rust visibility and ownership stop safe code outside
-these modules from reaching the effects without the tokens below; they do not
-stop a future edit inside `transport.rs` or `disk_log.rs` from adding a bypass,
-so this table must be rechecked when those modules or `shipping/` change.
+and the `shipping` module. For sockets, lookups, listeners, file writes, and
+secret reads this is lint-enforced (see above); for `send_request`,
+`write_all`, `sync_all`, and thread spawns it remains review evidence that
+must be rechecked when those modules change. The effect-site script and
+clippy run are part of the documented checks.
 
 ## Mediation tokens and who can construct them
 
@@ -293,6 +303,7 @@ named above outside `#[cfg(test)]` modules and `tests/` directories:
 ```sh
 grep -rn --include='*.rs' -E 'TcpStream::connect|send_request|\.handshake\(|connect_with|OpenOptions|File::open|File::create|write_all|\.sync\(|sync_all|TcpListener::bind|tokio::spawn|thread::Builder|std::thread::spawn|process::exit|std::env::var|to_socket_addrs|fs::rename|fs::remove_file' crates/gateway-runtime/src
 grep -rn --include='*.rs' -E 'unsafe|assume\(|external_body' crates/gateway-core/src crates/gateway-runtime/src
+bash scripts/check_effect_sites.sh
 ```
 
 Tests, proofs, and deliberate defects are checked by the commands in the

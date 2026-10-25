@@ -25,8 +25,8 @@ jobs:
         run: rustup show active-toolchain
       - name: Test executable workspace
         run: cargo test --workspace --locked
-      - name: Panic lints on the shipping adapters
-        run: rustup component add clippy && cargo clippy -p gateway-runtime --locked
+      - name: Panic lints and pinned effect sites
+        run: rustup component add clippy && bash scripts/check_effect_sites.sh
       - name: Concurrent logging failure workloads
         run: cargo test -p gateway-runtime --locked failed_log -- --ignored --nocapture --test-threads=1
       - name: Isolated gateway memory workload

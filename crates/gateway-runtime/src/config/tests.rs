@@ -26,6 +26,10 @@ fn native_provider_endpoints_keep_their_own_credentials() {
     assert!(matches!(c.admit(b"incorrect", 7), Err(AdmissionError::Unauthorized)));
     assert!(matches!(c.admit(b"test-gateway-token", 9), Err(AdmissionError::Unauthorized)));
     let one = c.admit(b"test-gateway-token", 7).unwrap();
+    // The egress permit names exactly the resolved destination and its route.
+    let permit = one.egress();
+    assert_eq!(permit.target().uri(), one.destination());
+    assert!(matches!(permit.kind(), gateway_core::egress::Origin::Provider { origin: 0, credential: 0, .. }));
     let two = c.admit(b"test-gateway-token", 8).unwrap();
     assert_eq!(one.destination().to_string(), "https://api.openai.com/v1/responses");
     assert_eq!(two.destination().to_string(), "https://api.anthropic.com/v1/messages");
