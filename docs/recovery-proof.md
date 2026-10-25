@@ -44,6 +44,27 @@ requires an increase in the source's error count. Thus a valid next record must 
 returned if reads complete without I/O errors. This is conditional functional
 progress, not a bound on scheduling, interrupted reads, or syscall latency.
 
+## Whole-file emission
+
+`records_from(data, start)` is the maximal run of complete records from a
+position: each record that is whole and checksum-valid, up to the first byte that
+is not. The scanner carries a ghost sequence of the records it has returned.
+While live, that sequence plus the records remaining from the cursor equals the
+records from the start; once stopped, it is a prefix of them. `next_record`
+proves `emission_step`: a returned record extends the sequence by exactly that
+header and payload, and a clean stop (end of file, or a tail that is not a
+complete record) leaves the sequence equal to the whole run. So the loop that
+calls `next_record` until it returns nothing has, at that point, seen every
+recoverable record once and in order, and nothing else. After an I/O error the
+sequence is still a prefix of the run.
+
+`lemma_records_resume` covers the shipper's reopen: if a file is read to its
+clean stop and later extended by appends, the records of the extension from the
+start equal the records already read plus the records of the extension from that
+stop. A reader reopened at its last valid end therefore continues the same run
+without repeating or skipping a record. That the file grows only by appends is a
+premise about the writer, not a theorem here.
+
 ## Record kinds
 
 The scanner is kind-agnostic: it decodes the 33-byte header with the same

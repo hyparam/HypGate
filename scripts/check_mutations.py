@@ -342,7 +342,11 @@ MUTATIONS = [
 
     # Shipper core: tailing scanner, exchange assembly, batch limits, upload
     # progress, identities, and enrollment.
-    ("recovery.rs", "scanner_resume_ignores_offset", "{ Scanner { source, cursor: Cursor::new(offset), session } }", "{ Scanner { source, cursor: Cursor::new(56), session } }"),
+    ("recovery.rs", "scanner_resume_ignores_offset", "Scanner { source, cursor: Cursor::new(offset), session, start: Ghost(offset)", "Scanner { source, cursor: Cursor::new(56), session, start: Ghost(offset)"),
+    ("recovery.rs", "records_from_drops_record", "        seq![record_at(data, start)] + records_from::<R>(data, record_end(data, start))", "        records_from::<R>(data, record_end(data, start))"),
+    ("recovery.rs", "record_at_wrong_payload_start", "        data.subrange(start as int + 33, record_end(data, start) as int - 32))", "        data.subrange(start as int + 32, record_end(data, start) as int - 32))"),
+    ("recovery.rs", "emission_step_forgets_record", "            Ok(Some(record)) => after.emitted() == before.emitted().push((record.header, record.bytes@)),", "            Ok(Some(record)) => after.emitted() == before.emitted(),"),
+    ("recovery.rs", "scan_end_stays_put", "    if complete_record::<R>(data, start) { scan_end::<R>(data, record_end(data, start)) } else { start }", "    start"),
     ("exchange_assembler.rs", "assembler_forgets_truncation", "let take = if payload.len() <= room { payload.len() } else { self.truncated = true; room };", "let take = if payload.len() <= room { payload.len() } else { room };"),
     ("exchange_assembler.rs", "assembler_keeps_bytes_beyond_cap", "let kept = slice_subrange(payload, 0, take);", "let kept = payload;"),
     ("exchange_assembler.rs", "assembler_appends_out_of_order", "let ghost before = self.upload@;\n            let ghost all = self.upload_all@;\n            append(&mut self.upload, kept);", "let ghost before = self.upload@;\n            let ghost all = self.upload_all@;\n            let mut swapped = vstd::slice::slice_to_vec(kept); append(&mut swapped, self.upload.as_slice()); self.upload = swapped;"),

@@ -51,6 +51,78 @@ pub open spec fn complete_record<R: Source>(data: Seq<u8>, start: nat) -> bool {
     }
 }
 
+/// Where the record that starts at `start` ends, when its header decodes.
+pub open spec fn record_end(data: Seq<u8>, start: nat) -> nat {
+    match framing::decoded(data.subrange(start as int, start as int + 33)) {
+        Some(h) => (start + 65 + h.payload) as nat, None => start,
+    }
+}
+
+/// The header and payload of the complete record at `start`.
+pub open spec fn record_at(data: Seq<u8>, start: nat) -> (framing::Header, Seq<u8>) {
+    (framing::decoded(data.subrange(start as int, start as int + 33))->Some_0,
+        data.subrange(start as int + 33, record_end(data, start) as int - 32))
+}
+
+/// The maximal run of complete records from `start`, in file order. This is
+/// what recovery must return: every record that is whole and checksummed up
+/// to the first byte that is not, and nothing else.
+pub open spec fn records_from<R: Source>(data: Seq<u8>, start: nat) -> Seq<(framing::Header, Seq<u8>)>
+    decreases (if start <= data.len() { data.len() - start } else { 0 }),
+{
+    if complete_record::<R>(data, start) {
+        seq![record_at(data, start)] + records_from::<R>(data, record_end(data, start))
+    } else { Seq::empty() }
+}
+
+/// The position where that run stops.
+pub open spec fn scan_end<R: Source>(data: Seq<u8>, start: nat) -> nat
+    decreases (if start <= data.len() { data.len() - start } else { 0 }),
+{
+    if complete_record::<R>(data, start) { scan_end::<R>(data, record_end(data, start)) } else { start }
+}
+
+proof fn lemma_prefix_of_sum<T>(a: Seq<T>, b: Seq<T>, c: Seq<T>)
+    requires a + b == c,
+    ensures a == c.take(a.len() as int),
+{
+    assert(a =~= c.take(a.len() as int));
+}
+
+/// A record complete in a file stays complete, with the same contents, in any
+/// extension of that file.
+proof fn lemma_complete_extends<R: Source>(data: Seq<u8>, longer: Seq<u8>, start: nat)
+    requires data.is_prefix_of(longer), complete_record::<R>(data, start),
+    ensures complete_record::<R>(longer, start), record_end(longer, start) == record_end(data, start),
+        record_at(longer, start) == record_at(data, start),
+{
+    assert(longer.subrange(start as int, start as int + 33) =~= data.subrange(start as int, start as int + 33));
+    let end = record_end(data, start);
+    assert(longer.subrange(start as int, end as int - 32) =~= data.subrange(start as int, end as int - 32));
+    assert(longer.subrange(end as int - 32, end as int) =~= data.subrange(end as int - 32, end as int));
+    assert(longer.subrange(start as int + 33, end as int - 32) =~= data.subrange(start as int + 33, end as int - 32));
+}
+
+/// Reading a file to its clean end and later reading its extension from that
+/// end yields exactly the records of the extension, in order. This is why a
+/// scanner reopened at its last valid end reads each record once.
+pub proof fn lemma_records_resume<R: Source>(data: Seq<u8>, longer: Seq<u8>, start: nat)
+    requires data.is_prefix_of(longer),
+    ensures records_from::<R>(longer, start)
+        == records_from::<R>(data, start) + records_from::<R>(longer, scan_end::<R>(data, start)),
+    decreases (if start <= data.len() { data.len() - start } else { 0 }),
+{
+    if complete_record::<R>(data, start) {
+        lemma_complete_extends::<R>(data, longer, start);
+        lemma_records_resume::<R>(data, longer, record_end(data, start));
+        assert(records_from::<R>(longer, start) =~= records_from::<R>(data, start)
+            + records_from::<R>(longer, scan_end::<R>(data, start)));
+    } else {
+        assert(records_from::<R>(longer, start) =~= records_from::<R>(data, start)
+            + records_from::<R>(longer, scan_end::<R>(data, start)));
+    }
+}
+
 proof fn matching_subrange(data: Seq<u8>, whole: Seq<u8>, start: nat, lo: nat, hi: nat)
     requires start + whole.len() <= data.len(), lo <= hi <= whole.len(),
         data.subrange(start as int, (start + whole.len()) as int) == whole,
@@ -87,10 +159,29 @@ pub proof fn canonical_frame_is_complete<R: Source>(frame: &framing::RecordFrame
     assert(data.subrange(end as int - 32, end as int) =~= frame.checksum());
 }
 
-pub struct Scanner<R: Source> { source: R, cursor: Cursor, session: [u8; 16] }
+pub struct Scanner<R: Source> {
+    source: R, cursor: Cursor, session: [u8; 16],
+    start: Ghost<u64>, emitted: Ghost<Seq<(framing::Header, Seq<u8>)>>,
+}
+
+/// What one scan call adds to the emitted sequence. A record extends it; a
+/// clean stop (end of file, or a tail that is not a complete record) means
+/// everything recoverable from the start has been emitted, in order.
+pub open spec fn emission_step<R: Source>(before: &Scanner<R>, after: &Scanner<R>,
+    out: Result<Option<RecoveredRecord>, ScanError>) -> bool {
+    after.start() == before.start()
+        && match out {
+            Ok(Some(record)) => after.emitted() == before.emitted().push((record.header, record.bytes@)),
+            Ok(None) => after.emitted() == before.emitted()
+                && (before.stopped() || after.emitted() == records_from::<R>(after.data(), after.start() as nat)),
+            Err(ScanError::Io) => after.emitted() == before.emitted(),
+            Err(_) => after.emitted() == before.emitted()
+                && (before.stopped() || after.emitted() == records_from::<R>(after.data(), after.start() as nat)),
+        }
+}
 pub open spec fn scanner_step<R: Source>(before: &Scanner<R>, after: &Scanner<R>,
     out: Result<Option<RecoveredRecord>, ScanError>) -> bool {
-    after.valid() && after.data() == before.data() && after.session_id() == before.session_id()
+    after.structural() && after.data() == before.data() && after.session_id() == before.session_id()
         && match out {
                 Ok(Some(record)) => !before.stopped() && !after.stopped()
                     && after.position() == before.position() + 65 + record.bytes.len()
@@ -181,9 +272,34 @@ pub proof fn reconstruct_prefix<R: Source>(frames: Seq<framing::RecordFrame>, da
 }
 
 impl<R: Source> Scanner<R> {
-    pub closed spec fn valid(&self) -> bool {
+    pub closed spec fn structural(&self) -> bool {
         self.source.valid() && self.cursor.position() <= self.source.position()
             && (!self.cursor.stopped() ==> self.cursor.position() == self.source.position())
+    }
+    /// The emitted records plus what remains from the cursor are exactly the
+    /// records from the start; once stopped, the emitted records are a prefix.
+    pub closed spec fn emission_invariant(&self) -> bool {
+        self.start@ <= self.cursor.position()
+            && if !self.cursor.stopped() {
+                self.emitted@ + records_from::<R>(self.source.data(), self.cursor.position() as nat)
+                    == records_from::<R>(self.source.data(), self.start@ as nat)
+            } else {
+                self.emitted@ == records_from::<R>(self.source.data(), self.start@ as nat).take(self.emitted@.len() as int)
+            }
+    }
+    pub closed spec fn valid(&self) -> bool { self.structural() && self.emission_invariant() }
+    pub closed spec fn start(&self) -> u64 { self.start@ }
+    pub closed spec fn emitted(&self) -> Seq<(framing::Header, Seq<u8>)> { self.emitted@ }
+
+    /// Whatever has been emitted is a prefix of the records from the start.
+    pub proof fn emitted_prefix(&self)
+        requires self.valid(),
+        ensures self.emitted() == records_from::<R>(self.data(), self.start() as nat).take(self.emitted().len() as int),
+    {
+        if !self.cursor.stopped() {
+            lemma_prefix_of_sum(self.emitted@, records_from::<R>(self.source.data(), self.cursor.position() as nat),
+                records_from::<R>(self.source.data(), self.start@ as nat));
+        }
     }
     pub closed spec fn data(&self) -> Seq<u8> { self.source.data() }
     pub closed spec fn position(&self) -> u64 { self.cursor.position() }
@@ -195,6 +311,7 @@ impl<R: Source> Scanner<R> {
         requires source.valid(), source.position() == 0,
         ensures match out {
             Ok(scanner) => scanner.valid() && scanner.position() == 56 && !scanner.stopped()
+                && scanner.start() == 56 && scanner.emitted() == Seq::<(framing::Header, Seq<u8>)>::empty()
                 && scanner.data() == source.data()
                 && scanner.data().subrange(0, 24) == framing::session_encoding(scanner.session_id()@)
                 && R::digest(scanner.data().subrange(0, 24)) == scanner.data().subrange(24, 56),
@@ -218,7 +335,9 @@ impl<R: Source> Scanner<R> {
             assert(prefix@ =~= source.data().subrange(0, 24));
             assert(checksum@ =~= source.data().subrange(24, 56));
         }
-        Ok(Scanner { source, cursor: Cursor::new(56), session })
+        let scanner = Scanner { source, cursor: Cursor::new(56), session, start: Ghost(56), emitted: Ghost(Seq::empty()) };
+        proof { assert(scanner.emitted@ + records_from::<R>(scanner.source.data(), 56) =~= records_from::<R>(scanner.source.data(), 56)); }
+        Ok(scanner)
     }
 
     /// Continue scanning a file whose header was already validated by `new`,
@@ -229,9 +348,14 @@ impl<R: Source> Scanner<R> {
     pub fn resume(source: R, session: [u8; 16], offset: u64) -> (out: Self)
         requires source.valid(), source.position() == offset, offset >= 56,
         ensures out.valid(), out.position() == offset, !out.stopped(),
+            out.start() == offset, out.emitted() == Seq::<(framing::Header, Seq<u8>)>::empty(),
             out.data() == source.data(), out.session_id() == session,
             out.io_errors() == source.io_errors(),
-    { Scanner { source, cursor: Cursor::new(offset), session } }
+    {
+        let scanner = Scanner { source, cursor: Cursor::new(offset), session, start: Ghost(offset), emitted: Ghost(Seq::empty()) };
+        proof { assert(scanner.emitted@ + records_from::<R>(scanner.source.data(), offset as nat) =~= records_from::<R>(scanner.source.data(), offset as nat)); }
+        scanner
+    }
 
     pub fn session(&self) -> (out: [u8; 16])
         ensures out == self.session_id(),
@@ -242,7 +366,45 @@ impl<R: Source> Scanner<R> {
 
     pub fn next_record(&mut self) -> (out: Result<Option<RecoveredRecord>, ScanError>)
         requires old(self).valid(),
+        ensures final(self).valid(), scanner_step(old(self), final(self), out), emission_step(old(self), final(self), out),
+    {
+        let out = self.step();
+        proof {
+            let data = self.source.data();
+            let start = self.start@ as nat;
+            let before = old(self).cursor.position() as nat;
+            let total = records_from::<R>(data, start);
+            match out {
+                Ok(Some(ref record)) => {
+                    let after = self.cursor.position() as nat;
+                    assert(complete_record::<R>(data, before));
+                    assert(record_end(data, before) == after);
+                    assert(record_at(data, before) == (record.header, record.bytes@));
+                    self.emitted@ = self.emitted@.push((record.header, record.bytes@));
+                    assert(self.emitted@ + records_from::<R>(data, after) =~= total);
+                }
+                Ok(None) => if !old(self).stopped() {
+                    assert(!complete_record::<R>(data, before));
+                    assert(self.emitted@ =~= total);
+                    assert(total.take(total.len() as int) =~= total);
+                },
+                Err(ScanError::Io) => if !old(self).stopped() {
+                    lemma_prefix_of_sum(self.emitted@, records_from::<R>(data, before), total);
+                },
+                Err(_) => if !old(self).stopped() {
+                    assert(!complete_record::<R>(data, before));
+                    assert(self.emitted@ =~= total);
+                    assert(total.take(total.len() as int) =~= total);
+                },
+            }
+        }
+        out
+    }
+
+    fn step(&mut self) -> (out: Result<Option<RecoveredRecord>, ScanError>)
+        requires old(self).structural(),
         ensures scanner_step(old(self), final(self), out),
+            final(self).start@ == old(self).start@, final(self).emitted@ == old(self).emitted@,
     {
         let ticket = match self.cursor.begin() { Some(ticket) => ticket, None => return Ok(None) };
         let header = match self.source.read_exact(33) {

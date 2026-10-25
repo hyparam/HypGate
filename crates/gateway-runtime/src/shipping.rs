@@ -232,7 +232,8 @@ impl Effects for Engine {
 
     /// The next record after the last valid end. The reader is kept across
     /// calls while records keep coming and reopened at the same offset after
-    /// the end of the file, so the file is read exactly once in order.
+    /// the end of the file, so the file is read exactly once in order
+    /// (`recovery::emission_step` and `lemma_records_resume`).
     fn read(&mut self) -> Read {
         let Some(session) = self.session else { return Read::Failed; };
         if self.reader.is_none() {
