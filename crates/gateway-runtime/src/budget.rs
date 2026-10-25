@@ -62,6 +62,23 @@ pub fn compose(limits: Limits) -> Option<Budget> {
     Some(Budget { visible_payload, inbound_connections, admitted_exchanges, instance, total })
 }
 
+/// Requested allocation of the optional shipper thread, in addition to the
+/// gateway budget: its stack, the assembler's open exchanges, the queue of
+/// projected rows it stops filling when full, one scanned record, one batch
+/// under construction plus its copy in the request, and the capped reply.
+pub fn shipping(open_exchanges: usize, exchange_bytes: usize) -> Option<u64> {
+    if open_exchanges == 0 || open_exchanges > 65_536 || exchange_bytes < 4_096 || exchange_bytes > 16 * 1024 * 1024 { return None; }
+    let (open, bytes) = (open_exchanges as u64, exchange_bytes as u64);
+    let assembler = open.checked_mul(bytes)?;
+    let queue = open.checked_mul(2 * (bytes + ROW_OVERHEAD))?;
+    Some(SHIPPER_STACK + assembler + queue + SCANNED_RECORD + 2 * BATCH + REPLY)
+}
+const SHIPPER_STACK: u64 = 2 * 1024 * 1024;
+const ROW_OVERHEAD: u64 = 16 * 1024; // destination, identifiers, timestamps, usage, JSON syntax
+const SCANNED_RECORD: u64 = 1024 * 1024 + 65;
+const BATCH: u64 = 4 * 1024 * 1024;
+const REPLY: u64 = 64 * 1024;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -96,6 +113,15 @@ mod tests {
         let maximal = compose(Limits { requests: 65_536, chunk_bytes: 2_048, connections: 65_536, queue: 65_536 }).unwrap();
         assert!(maximal.total > compose(EXAMPLE).unwrap().total);
         assert!(maximal.total < 1 << 40);
+    }
+
+    #[test]
+    fn shipping_budget_matches_documented_terms_and_rejects_refused_limits() {
+        assert_eq!(shipping(64, 1 << 20), Some(2_097_152 + 64 * 1_048_576 + 64 * 2 * (1_048_576 + 16_384) + 1_048_641 + 8_388_608 + 65_536));
+        assert!(shipping(0, 1 << 20).is_none()); assert!(shipping(65_537, 1 << 20).is_none());
+        assert!(shipping(1, 4_095).is_none()); assert!(shipping(1, (16 << 20) + 1).is_none());
+        assert!(shipping(65_536, 16 << 20).unwrap() < 1 << 44);
+        assert!(shipping(65, 1 << 20) > shipping(64, 1 << 20)); assert!(shipping(64, (1 << 20) + 1) > shipping(64, 1 << 20));
     }
 
     #[test]

@@ -2,10 +2,16 @@
 
 VERUS=/path/to/verus python3 scripts/check_mutations.py
 Normal executable scenarios are tested separately with cargo test --workspace.
+
+Mutations confined to the bodies of distinct exec or proof functions are checked
+many to a verifier run (see "Verus's simplified VIR" below for why that is
+sound); every other mutation, and any batch the VIR check cannot vouch for,
+is verified on its own.
 """
 from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -333,15 +339,228 @@ MUTATIONS = [
     ("metadata.rs", "completion_decode_wrong_outcome", "Some(Completion { time_ms, outcome, upload_bytes, download_bytes })", "Some(Completion { time_ms, outcome: 0, upload_bytes, download_bytes })"),
     ("metadata.rs", "completion_decode_wrong_upload", "let upload_bytes = u64_from_le_bytes(slice_subrange(bytes, 9, 17));", "let upload_bytes = u64_from_le_bytes(slice_subrange(bytes, 17, 25));"),
     ("metadata.rs", "completion_decode_wrong_download", "let download_bytes = u64_from_le_bytes(slice_subrange(bytes, 17, 25));", "let download_bytes = u64_from_le_bytes(slice_subrange(bytes, 9, 17));"),
+
+    # Shipper core: tailing scanner, exchange assembly, batch limits, upload
+    # progress, identities, and enrollment.
+    ("recovery.rs", "scanner_resume_ignores_offset", "{ Scanner { source, cursor: Cursor::new(offset), session } }", "{ Scanner { source, cursor: Cursor::new(56), session } }"),
+    ("exchange_assembler.rs", "assembler_forgets_truncation", "let take = if payload.len() <= room { payload.len() } else { self.truncated = true; room };", "let take = if payload.len() <= room { payload.len() } else { room };"),
+    ("exchange_assembler.rs", "assembler_keeps_bytes_beyond_cap", "let kept = slice_subrange(payload, 0, take);", "let kept = payload;"),
+    ("exchange_assembler.rs", "assembler_appends_out_of_order", "let ghost before = self.upload@;\n            let ghost all = self.upload_all@;\n            append(&mut self.upload, kept);", "let ghost before = self.upload@;\n            let ghost all = self.upload_all@;\n            let mut swapped = vstd::slice::slice_to_vec(kept); append(&mut swapped, self.upload.as_slice()); self.upload = swapped;"),
+    ("exchange_assembler.rs", "assembler_total_ignores_dropped_bytes", "self.download_total = saturating_add(self.download_total, payload.len() as u64);", "self.download_total = saturating_add(self.download_total, take as u64);"),
+    ("exchange_assembler.rs", "assembler_never_evicts_at_capacity", "None => if self.open.len() == self.max_open { self.evict_oldest() } else { None },", "None => None,"),
+    ("exchange_assembler.rs", "assembler_duplicate_start_keeps_both", "                    let mut e = self.take(index); e.incomplete = true; Some(e)", "                    None"),
+    ("exchange_assembler.rs", "assembler_restart_not_marked_incomplete", "                    let mut e = self.take(index); e.incomplete = true; Some(e)", "                    let e = self.take(index); Some(e)"),
+    ("exchange_assembler.rs", "assembler_completion_leaves_request_open", "                if header.kind == 4 {\n                    let mut e = self.take(index);", "                if header.kind == 5 {\n                    let mut e = self.take(index);"),
+    ("exchange_assembler.rs", "assembler_orphan_not_marked", "let mut e = Exchange::open(header.tenant, header.request, None, true);", "let mut e = Exchange::open(header.tenant, header.request, None, false);"),
+    ("exchange_assembler.rs", "assembler_eviction_not_marked_incomplete", "        let mut out = self.take(0);\n        out.incomplete = true;\n        proof { assert(before.remove(0) =~= before.drop_first()); }\n        Some(out)", "        let out = self.take(0);\n        proof { assert(before.remove(0) =~= before.drop_first()); }\n        Some(out)"),
+    ("exchange_assembler.rs", "assembler_find_returns_wrong_request", "if self.open[i].request == request { return Some(i); }", "if true { return Some(i); }"),
+    ("exchange_assembler.rs", "assembler_new_accepts_zero_capacity", "        requires 0 < max_open,\n        ensures out.valid()", "        requires 0 <= max_open,\n        ensures out.valid()"),
+    ("exchange_assembler.rs", "saturating_add_wraps", "if a > u64::MAX - b { u64::MAX } else { a + b }", "if a > u64::MAX - b { 0 } else { a + b }"),
+    ("shipping_identity.rs", "exchange_key_drops_session", "    let mut bytes = Vec::with_capacity(24);\n    append(&mut bytes, session.as_slice());\n", "    let mut bytes = Vec::with_capacity(24);\n"),
+    ("shipping_identity.rs", "part_key_repeats_message", "    append(&mut bytes, u32_to_le_bytes(part).as_slice());", "    append(&mut bytes, u32_to_le_bytes(message).as_slice());"),
+    ("shipping_identity.rs", "batch_id_ignores_first", "    append(&mut bytes, u64_to_le_bytes(first).as_slice());\n    append(&mut bytes, u64_to_le_bytes(end).as_slice());", "    append(&mut bytes, u64_to_le_bytes(0).as_slice());\n    append(&mut bytes, u64_to_le_bytes(end).as_slice());"),
+    ("shipping_identity.rs", "part_key_encoding_ignores_part", "message_key_encoding(session, request, message) + spec_u32_to_le_bytes(part)", "message_key_encoding(session, request, message) + spec_u32_to_le_bytes(0)"),
+    ("shipping_identity.rs", "batch_id_encoding_ignores_checksum", "session + spec_u64_to_le_bytes(first) + spec_u64_to_le_bytes(end) + spec_u64_to_le_bytes(checksum)", "session + spec_u64_to_le_bytes(first) + spec_u64_to_le_bytes(end) + spec_u64_to_le_bytes(0)"),
+    ("batch_builder.rs", "batch_exceeds_row_limit", "if self.rows >= MAX_ROWS || row.len() >= MAX_BYTES - self.body.len() { return false; }", "if row.len() >= MAX_BYTES - self.body.len() { return false; }"),
+    ("batch_builder.rs", "batch_exceeds_byte_limit", "if self.rows >= MAX_ROWS || row.len() >= MAX_BYTES - self.body.len() { return false; }", "if self.rows >= MAX_ROWS || row.len() > MAX_BYTES - self.body.len() { return false; }"),
+    ("batch_builder.rs", "batch_drops_newline", "        append(&mut self.body, row);\n        self.body.push(10);", "        append(&mut self.body, row);"),
+    ("batch_builder.rs", "batch_finish_keeps_row_count", "        core::mem::swap(&mut body, &mut self.body);\n        self.rows = 0;", "        core::mem::swap(&mut body, &mut self.body);"),
+    ("batch_builder.rs", "batch_oversized_off_by_one", "{ row.len() >= MAX_BYTES }", "{ row.len() > MAX_BYTES }"),
+    ("upload_cursor.rs", "cursor_acknowledges_any_id", "Some(b) => equal_bytes(b.id.as_slice(), id), None => false };", "Some(_) => true, None => false };"),
+    ("upload_cursor.rs", "cursor_acknowledge_resolves_wrong_end", "        let batch = self.in_flight.take().unwrap();\n        self.resolved = batch.end;", "        let batch = self.in_flight.take().unwrap();\n        self.resolved = batch.first;"),
+    ("upload_cursor.rs", "cursor_opens_second_batch", "if self.in_flight.is_some() || count == 0 || count > self.emitted - self.resolved { return false; }", "if count == 0 || count > self.emitted - self.resolved { return false; }"),
+    ("upload_cursor.rs", "cursor_opens_beyond_emitted", "if self.in_flight.is_some() || count == 0 || count > self.emitted - self.resolved { return false; }", "if self.in_flight.is_some() || count == 0 { return false; }"),
+    ("upload_cursor.rs", "cursor_batch_id_uses_wrong_first", "let id = batch_id(session, self.resolved, self.resolved + count, checksum);", "let id = batch_id(session, self.emitted, self.resolved + count, checksum);"),
+    ("upload_cursor.rs", "cursor_abandon_resolves", "    { self.in_flight = None; }", "    { if let Some(b) = self.in_flight.take() { self.resolved = b.end; } }"),
+    ("upload_cursor.rs", "cursor_restore_accepts_inverted_counts", "        if resolved > emitted { return None; }\n", ""),
+    ("upload_cursor.rs", "cursor_poison_keeps_place", "        let Some(batch) = self.in_flight.take() else { return false; };\n        self.resolved = batch.end;", "        let Some(batch) = self.in_flight.take() else { return false; };\n        self.resolved = batch.first;"),
+    ("enrollment.rs", "enrollment_uploads_when_expired", "match self.state { State::Enrolled { expires_at } => now < expires_at, _ => false }", "match self.state { State::Enrolled { expires_at } => true, _ => false }"),
+    ("enrollment.rs", "enrollment_refreshes_in_a_loop", "if !self.refreshed_after_rejection { self.refreshed_after_rejection = true; return Recovery::Refresh; }", "if !self.refreshed_after_rejection { return Recovery::Refresh; }"),
+    ("enrollment.rs", "enrollment_revives_after_stop", "if matches!(self.state, State::Stopped) || now >= expires_at { return false; }", "if now >= expires_at { return false; }"),
+    ("enrollment.rs", "enrollment_accepts_expired_token", "if matches!(self.state, State::Stopped) || now >= expires_at { return false; }", "if matches!(self.state, State::Stopped) { return false; }"),
+    ("enrollment.rs", "enrollment_revoke_not_absorbing", "    { self.state = State::Stopped; }", "    { self.state = State::Unenrolled; }"),
+    ("enrollment.rs", "enrollment_rejected_ignores_stop", "        if matches!(self.state, State::Stopped) { return Recovery::Stop; }\n", ""),
+    ("enrollment.rs", "enrollment_refresh_window_only_after_expiry", "State::Enrolled { expires_at } => expires_at <= now || expires_at - now <= RENEWAL_WINDOW_SECONDS,", "State::Enrolled { expires_at } => expires_at <= now,"),
+    ("enrollment.rs", "throttle_delay_unbounded", "if seconds > MAX_DELAY_SECONDS { MAX_DELAY_SECONDS } else { seconds }", "seconds"),
+    ("enrollment.rs", "transport_delay_can_be_zero", "if attempt < 3 { 2 * (attempt as u64 + 1) }", "if attempt < 3 { 2 * (attempt as u64) }"),
+
+    # Shipper machine: destination by type, token containment, conservation,
+    # batch fidelity, bounded waiting, and progress.
+    ("shipper.rs", "machine_refresh_leaks_token", "return Action::Send(Request { path: Path::Refresh, bearer: Some(bearer), body: Vec::new(), batch_id: None });", "return Action::Send(Request { path: Path::Refresh, bearer: Some(bearer), body: copy_bytes(self.token.as_slice()), batch_id: None });"),
+    ("shipper.rs", "machine_ingest_skips_front_exchange", "        let mut body: Vec<u8> = Vec::new();\n        let mut i: usize = 0;", "        let mut body: Vec<u8> = Vec::new();\n        let mut i: usize = 1;"),
+    ("shipper.rs", "machine_ingest_opens_wrong_range", "let _opened = self.cursor.open_batch(count as u64, &self.session, sum);", "let _opened = self.cursor.open_batch(1, &self.session, sum);"),
+    ("shipper.rs", "machine_ack_pops_wrong_count", "                self.pop_front(count as usize);\n                self.enrollment.uploaded();", "                self.pop_front(1);\n                self.enrollment.uploaded();"),
+    ("shipper.rs", "machine_ack_leaves_batch_in_flight", "                let _ok = self.cursor.acknowledge(id.as_slice());\n                proof { assert(_ok); self.cursor.bounds(); }\n", "                proof { self.cursor.bounds(); }\n"),
+    ("shipper.rs", "machine_poison_keeps_exchange_queued", "                    proof { assert(_poisoned); self.cursor.bounds(); }\n                    self.pop_front(1);", "                    proof { assert(_poisoned); self.cursor.bounds(); }"),
+    ("shipper.rs", "machine_enqueue_accepts_out_of_order", "if token.index != counted { return Err(token); }", ""),
+    ("shipper.rs", "machine_enqueue_drops_body", "let pending = Pending { body, rows, source: Ghost(token.exchange.request_id()) };", "let pending = Pending { body: Vec::new(), rows, source: Ghost(token.exchange.request_id()) };"),
+    ("shipper.rs", "machine_uploads_before_enrollment", "        if self.enrollment.needs_bootstrap() {\n            self.awaiting = Some(Path::Bootstrap);", "        if false {\n            self.awaiting = Some(Path::Bootstrap);"),
+    ("shipper.rs", "machine_ignores_forced_refresh", "if self.force_refresh || self.enrollment.needs_refresh(now) {", "if self.enrollment.needs_refresh(now) {"),
+    ("shipper.rs", "machine_throttle_can_be_zero", "        let delay = throttle_delay(self.throttle_attempt, retry_after);\n        self.throttle_attempt = bump(self.throttle_attempt);", "        let delay = 0;\n        self.throttle_attempt = bump(self.throttle_attempt);"),
+    ("shipper.rs", "machine_revoke_keeps_credential", "        self.enrollment.revoked();\n        self.jwt = None;", "        self.enrollment.revoked();"),
+    ("shipper.rs", "machine_runs_while_stopped", "        if self.enrollment.is_stopped() { return Action::Stopped; }\n", ""),
+    ("shipper.rs", "machine_resends_checkpointed_exchanges", "        if index < self.skip { return None; }\n", ""),
+    ("shipper.rs", "machine_reads_past_capacity", "!self.read_failed && !self.at_end && outstanding < self.max_open as u64 && self.queue.len() < self.max_open - outstanding as usize", "!self.read_failed && !self.at_end"),
+    ("shipper.rs", "checksum_ignores_input", "        h = reduced as u64;", "        h = h;"),
+    ("shipper.rs", "bootstrap_body_unescaped", "        if b == 34 || b == 92 { out.push(92); }\n", ""),
+    ("shipper.rs", "machine_acknowledges_any_status", "            200 | 202 => {\n                let id = match", "            200 | 202 | 500 => {\n                let id = match"),
+    ("shipper.rs", "machine_isolates_single_exchange", "                if count > 1 {\n                    self.cursor.abandon();", "                if count > 0 {\n                    self.cursor.abandon();"),
+    ("shipper.rs", "machine_adopts_expired_credential", "                    if self.enrollment.enrolled(credential.expires_at, now) {", "                    if self.enrollment.enrolled(credential.expires_at, 0) {"),
+    ("shipper.rs", "machine_sleep_keeps_delay", "            let d = self.delay;\n            self.delay = 0;", "            let d = self.delay;"),
+
+    # Verified driver: every token is queued at once, headers are checked before
+    # admission, reads and flushes respect the machine's limits, every send gets
+    # its reply, and checkpoints carry the machine's own progress.
+    ("shipping_driver.rs", "driver_drops_token", "                        Some(token) => settle(machine, effects, token),", "                        Some(_) => {}"),
+    ("shipping_driver.rs", "driver_admits_unchecked_header", "if header_ok(&header, payload.len()) {", "if true {"),
+    ("shipping_driver.rs", "driver_reads_when_unwanted", "    while machine.wants_records()\n", "    while true\n"),
+    ("shipping_driver.rs", "driver_flushes_without_room", "while machine.open_exchanges() > 0 && machine.has_room()", "while machine.open_exchanges() > 0"),
+    ("shipping_driver.rs", "driver_ignores_reply", "let outcome = machine.reply(replied_at, reply);", "let outcome = Outcome::Nothing;"),
+    ("exchange_assembler.rs", "emission_spec_evicts_newest", "else if open.len() == max_open { (open.drop_first().push(request), Some(open[0])) }", "else if open.len() == max_open { (open.drop_first().push(request), Some(open[open.len() - 1])) }"),
+    ("shipper.rs", "machine_forgets_emission", "                self.emissions = Ghost(self.emissions@.push(exchange.request_id()));\n                proof { assert(self.emissions@.drop_last() =~= old(self).emissions@); }\n                self.number(exchange)\n            }\n        }\n    }\n\n    /// Emit the oldest open exchange", "                self.number(exchange)\n            }\n        }\n    }\n\n    /// Emit the oldest open exchange"),
+    ("shipper.rs", "machine_records_wrong_source", "source: Ghost(token.exchange.request_id())", "source: Ghost(0)"),
+    ("egress.rs", "egress_permit_forgets_tenant", "origin: Origin::Provider { tenant: authority.tenant_id(), origin: route.origin, credential: route.credential }", "origin: Origin::Provider { tenant: 0, origin: route.origin, credential: route.credential }"),
+    ("egress.rs", "egress_permit_swaps_credential_index", "credential: route.credential } })", "credential: route.origin } })"),
+    ("shipping_driver.rs", "driver_checkpoints_stale_progress", "                let (resolved, poisoned) = machine.progress();\n                effects.checkpoint(machine, resolved, poisoned);\n                effects.observe(Event::PoisonedUnsent, machine);", "                let (resolved, poisoned) = machine.progress();\n                effects.checkpoint(machine, 0, poisoned);\n                effects.observe(Event::PoisonedUnsent, machine);"),
 ]
 
 
 MARKERS = ["postcondition not satisfied", "precondition not satisfied", "error: requires not satisfied", "assertion failed", "invariant not satisfied"]
+LOG = ["--log", "vir-simple", "--log", "vir-option=no_span+no_type"]
 
 
-def command(source, module=None):
+def command(source, modules=(), log_dir=None, lifetime=True):
     args = [VERUS, str(source / "lib.rs"), "--crate-type", "lib", "--triggers-mode", "silent"]
-    return args + (["--verify-module", module] if module else [])
+    for module in modules:
+        args += ["--verify-module", module]
+    if log_dir:
+        args += LOG + ["--log-dir", str(log_dir)]
+    if not lifetime:
+        args.append("--no-lifetime")
+    return args
+
+
+# --- Verus's simplified VIR, the crate as the verifier sees it -----------------
+#
+# A batch of mutations is sound to judge from one verifier run only if no
+# mutation changed anything another function's proof can see. Verus checks each
+# function against the specifications of what it calls, never against their
+# bodies, so a mutation confined to the body of an exec or proof function can be
+# refuted only inside that function, and cannot change any other function's
+# outcome. The VIR log makes that condition checkable: it is diffed against the
+# unmutated crate, and the batch is accepted only when the sole differences are
+# the bodies of exec/proof functions, one per mutation.
+
+# Crate-wide counters and diagnostic source positions carry no meaning for the comparison.
+COUNTERS = re.compile(r"(:id|RustcId)\s+\d+")
+DIAGNOSTIC_SPANS = re.compile(r':spans \("[^"]*"\)')
+SPAN = re.compile(r"^;; (\S+?):(\d+):\d+: (\d+):\d+")
+NAME = re.compile(r":name \((?:Fun :path|Dt Path) (\S+?)\)")
+FIELD = re.compile(r'\\.|[()"]|:(?:body|mode|item_kind) ')
+
+
+def parse_vir(path):
+    """Return {key: (kind, spec, body, mode)} and {file: [(start, end, key)]} for a VIR log."""
+    items, spans = {}, {}
+    span = None
+    for chunk in re.split(r"\n(?=[(;])", Path(path).read_text()):
+        if chunk.startswith(";;"):
+            if match := SPAN.match(chunk):
+                span = (Path(match[1]).name, int(match[2]), int(match[3]))
+            continue
+        if not chunk.startswith("("):
+            continue
+        kind = chunk[1:].split(None, 1)[0]
+        text = " ".join(DIAGNOSTIC_SPANS.sub(":spans (_)", COUNTERS.sub(r"\1 _", chunk)).split())
+        body, mode = "", None
+        if kind == "Function":
+            depth, in_string, fields = 0, False, {}
+            for token in FIELD.finditer(text):
+                t = token[0]
+                if t.startswith("\\"):
+                    continue
+                if in_string:
+                    in_string = t != '"'
+                elif t == '"':
+                    in_string = True
+                elif t == "(":
+                    depth += 1
+                elif t == ")":
+                    depth -= 1
+                elif depth == 1:
+                    fields[t.strip()] = token.end()
+            body_at = fields[":body"]
+            body, text = text[body_at:], text[:body_at]
+            mode = text[fields[":mode"]:].split(None, 1)[0]
+            if "(ItemKind Const)" in text[fields[":item_kind"]:].split(")", 1)[0] + ")":
+                mode = "Const"
+        name = NAME.search(text)
+        key = (kind, name[1]) if name and kind in ("Function", "Datatype") else (kind, text)
+        items[key] = (kind, text, body, mode)
+        if span and name:
+            spans.setdefault(span[0], []).append((span[1], span[2], key))
+    for file_spans in spans.values():
+        file_spans.sort()
+    return items, spans
+
+
+def item_at(spans, file, line):
+    """The item whose source region holds this line: the last one starting at or above it."""
+    found = None
+    for start, _end, key in spans.get(file, ()):
+        if start > line:
+            break
+        found = key
+    return found
+
+
+def local_changes(baseline, mutated):
+    """(exec/proof functions whose bodies alone differ, items that differ in any other way).
+
+    None when the item sets differ, which no body-only change can cause.
+    """
+    if baseline.keys() != mutated.keys():
+        return None
+    changed, beyond = set(), set()
+    for key, (kind, spec, body, mode) in mutated.items():
+        base_kind, base_spec, base_body, _ = baseline[key]
+        if kind != base_kind or spec != base_spec or (body != base_body and (kind != "Function" or mode not in ("Exec", "Proof"))):
+            beyond.add(key)
+        elif body != base_body:
+            changed.add(key)
+    return changed, beyond
+
+
+ERROR = re.compile(r"^(error|warning|note)(?:\[\w+\])?: (.*)$", re.M)
+LOCATION = re.compile(r"^\s*(?:-->|:::) (\S+?):(\d+):\d+", re.M)
+
+
+def error_blocks(output):
+    """(message, [(file, line)]) for each error Verus reported."""
+    headers = list(ERROR.finditer(output))
+    blocks = []
+    for i, header in enumerate(headers):
+        if header[1] != "error":
+            continue
+        text = output[header.end():headers[i + 1].start() if i + 1 < len(headers) else len(output)]
+        locations = [(Path(m[1]).name, int(m[2])) for m in LOCATION.finditer(text)]
+        blocks.append((header[2], locations))
+    return blocks
+
+
+# --- Running the mutations ----------------------------------------------------
+
+def apply(workdir, name, mutations):
+    """Copy the crate and apply each (filename, before, after)."""
+    target = workdir / name / "src"
+    shutil.copytree(SOURCE, target)
+    clean = True
+    for filename, before, after in mutations:
+        path = target / filename
+        text = path.read_text()
+        clean = clean and text.count(before) == 1
+        path.write_text(text.replace(before, after))
+    return target, clean
 
 
 def check(workdir, filename, name, before, after):
@@ -351,19 +570,97 @@ def check(workdir, filename, name, before, after):
     of the whole crate too, so only a module that still verifies on its own falls
     back to verifying every module, which catches defects refuted by a caller.
     """
-    original = (SOURCE / filename).read_text()
-    assert original.count(before) == 1, (name, original.count(before))
-    target = workdir / name / "src"
-    shutil.copytree(SOURCE, target)
-    (target / filename).write_text(original.replace(before, after))
-    for module in (Path(filename).stem, None):
-        result = subprocess.run(command(target, module), capture_output=True, text=True)
+    target, _clean = apply(workdir, name, [(filename, before, after)])
+    for modules in ([Path(filename).stem], []):
+        result = subprocess.run(command(target, modules), capture_output=True, text=True)
         output = result.stdout + result.stderr
         if result.returncode != 0:
             if not any(marker in output for marker in MARKERS):
                 raise RuntimeError(f"{name}: expected a proof failure, got:\n{output}")
-            return f"{name}: rejected by proof" + ("" if module else " outside its module")
+            return f"{name}: rejected by proof" + ("" if modules else " outside its module")
     raise RuntimeError(f"{name}: expected a proof failure, got:\n{output}")
+
+
+def check_batch(workdir, baseline, index, batch, attempt=0):
+    """Verify every mutation of a batch in one run; fall back to single runs for what the batch cannot judge.
+
+    `batch` is [(mutation, expected function key)], one mutation per function.
+    """
+    name = f"batch{index}" + (f"-{attempt}" if attempt else "")
+    target, clean = apply(workdir, name, [(m[0], m[2], m[3]) for m, _ in batch])
+    modules = sorted({Path(m[0]).stem for m, _ in batch})
+    log_dir = workdir / name / "vir"
+    result = subprocess.run(command(target, modules, log_dir, lifetime=False), capture_output=True, text=True)
+    output = result.stdout + result.stderr
+    expected = {key: m for m, key in batch}
+    reason = None
+    if not clean:
+        reason = "mutations overlap"
+    elif not (log_dir / "crate-simple.vir").exists():
+        reason = "no VIR log"
+    elif (local := local_changes(baseline, (parsed := parse_vir(log_dir / "crate-simple.vir"))[0])) is None:
+        reason = "the set of items differs"
+    else:
+        items, spans = parsed
+        changed, beyond = local
+        if beyond and beyond <= set(expected) and attempt == 0:
+            # Mutations that edited their own function's specification: single runs for
+            # those, one more batched run for the rest.
+            print(f"{name}: {len(beyond)} mutations change a specification; rerunning the other {len(batch) - len(beyond)} together", flush=True)
+            rest = [(m, key) for m, key in batch if key not in beyond]
+            return [check(workdir, *expected[key]) for key in sorted(beyond)] + (check_batch(workdir, baseline, index, rest, 1) if rest else [])
+        if beyond:
+            reason = f"changes reach beyond the mutated functions: {sorted(k[1] for k in beyond)}"
+        elif changed != set(expected):
+            reason = f"changed bodies do not match the mutated functions: {sorted(k[1] for k in changed ^ set(expected))}"
+        else:
+            refuted = set()
+            for message, locations in error_blocks(output):
+                if not locations:
+                    continue  # "aborting due to N previous errors"
+                owner = item_at(spans, *locations[0])
+                if owner not in expected:
+                    reason = f"error outside the mutated functions: {message} at {locations[0]}"
+                    break
+                if any(marker in message for marker in MARKERS):
+                    refuted.add(owner)
+            if reason is None and (missing := set(expected) - refuted):
+                reason = f"not refuted in their own functions: {sorted(expected[k][1] for k in missing)}"
+    if reason is None:
+        return [f"{m[1]}: rejected by proof" for m, _ in batch]
+    print(f"{name}: {reason}; checking its {len(batch)} mutations one at a time", flush=True)
+    return [check(workdir, *m) for m, _ in batch]
+
+
+def plan(baseline, baseline_spans):
+    """Split the mutations into batches of distinct exec/proof functions, plus the rest for single runs."""
+    singles, keyed = [], []
+    for mutation in MUTATIONS:
+        filename, name, before, _after = mutation
+        source = (SOURCE / filename).read_text()
+        assert source.count(before) == 1, (name, source.count(before))
+        line = source[:source.index(before)].count("\n") + 1
+        key = item_at(baseline_spans, filename, line)
+        if key is None or key[0] != "Function" or baseline[key][3] not in ("Exec", "Proof"):
+            singles.append(mutation)
+        else:
+            keyed.append((mutation, key))
+    # A mutation joins the first batch whose copy of its function is untouched and
+    # in whose edited text its `before` is still unique, so earlier edits in the
+    # batch cannot hide it or duplicate it.
+    batches, texts = [], []
+    for mutation, key in keyed:
+        filename, _name, before, after = mutation
+        for batch, text in zip(batches, texts):
+            current = text.setdefault(filename, (SOURCE / filename).read_text())
+            if all(k != key for _, k in batch) and current.count(before) == 1:
+                batch.append((mutation, key))
+                text[filename] = current.replace(before, after)
+                break
+        else:
+            batches.append([(mutation, key)])
+            texts.append({filename: (SOURCE / filename).read_text().replace(before, after)})
+    return batches, singles
 
 
 # Optional focused reruns after changing one proof module; default remains all.
@@ -372,10 +669,15 @@ if selected := os.environ.get("MUTATION_FILTER"):
     if not MUTATIONS:
         raise SystemExit(f"no mutations match {selected!r}")
 
-subprocess.run(command(SOURCE), check=True)
 with tempfile.TemporaryDirectory(prefix="gateway-mutations-") as temporary:
-    # Each mutation verifies in its own copy, so the independent runs share the machine.
+    workdir = Path(temporary)
+    subprocess.run(command(SOURCE, log_dir=workdir / "baseline"), check=True)
+    baseline, baseline_spans = parse_vir(workdir / "baseline" / "crate-simple.vir")
+    batches, singles = plan(baseline, baseline_spans)
+    jobs = [lambda i=i, b=b: check_batch(workdir, baseline, i, b) for i, b in enumerate(batches)]
+    jobs += [lambda m=m: [check(workdir, *m)] for m in singles]
+    # Each job verifies its own copy, so the independent runs share the machine.
     with ThreadPoolExecutor(max_workers=os.cpu_count() or 1) as pool:
-        for report in pool.map(lambda m: check(Path(temporary), *m), MUTATIONS):
-            print(report, flush=True)
-print(f"{len(MUTATIONS)} mutations rejected by proof", flush=True)
+        for reports in pool.map(lambda job: job(), jobs):
+            print("\n".join(reports), flush=True)
+print(f"{len(MUTATIONS)} mutations rejected by proof ({len(batches)} batched runs, {len(singles)} single runs)", flush=True)

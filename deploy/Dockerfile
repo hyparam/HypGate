@@ -24,5 +24,5 @@ WORKDIR /src
 COPY . .
 RUN cargo build --release --locked --bin soundgate
 RUN cargo test --workspace --locked
-RUN if command -v verus >/dev/null; then cargo verus verify -p gateway-core --locked -- --triggers-mode silent; fi
+RUN if command -v verus >/dev/null; then verus crates/gateway-core/src/lib.rs --crate-type lib --triggers-mode silent; fi
 CMD ["bash", "scripts/check_deployment.sh"]

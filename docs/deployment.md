@@ -49,6 +49,11 @@ some process failures, not host, disk, proxy, network, or regional loss. Host-le
 redundancy needs another TLS-protected deployment boundary; the executable must
 remain loopback-bound. Shared upstream or storage failures can affect both instances.
 
+When shipping is configured, the state directory must persist across restarts
+so the enrollment and checkpoint are reused; a lost checkpoint re-sends the
+log and the server drops the repeated rows. The shipper stops two seconds after
+the logger; a thread stuck in a request is abandoned at process exit.
+
 ## Clean-environment reproduction
 
 `scripts/check_deployment.sh` performs the documented operator path from a fresh

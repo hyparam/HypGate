@@ -53,31 +53,47 @@ contain request and response bodies. Remote access needs a
 [TLS reverse proxy](docs/deployment.md). See [running the gateway](docs/running.md)
 for provider configuration, scanning logs, and shutdown behavior.
 
-## Important properties we aim to prove
+## What the gateway guarantees
 
-These are the project's proof targets, not a claim that the whole gateway already
-satisfies them formally. “Core proved” means a synchronous model or transition is
-checked by Verus, conditional on the documented adapter contracts.
+Three statements an operator can hold the gateway to. Each is a theorem over a
+verified state machine joined to the outside world by a small, enumerated,
+lint-pinned set of trusted adapters. [PROOFS.md](PROOFS.md) states each one
+precisely, names its premises, and lists every finer-grained property proved
+beneath it.
 
-| Property | Intended guarantee | Evidence today |
-| --- | --- | --- |
-| Authorization and fail-closed security | Every upstream dispatch requires an authenticated tenant's grant; authentication or policy failures cannot authorize forwarding, in either logging mode. | Core token issuance proved; HTTP binding tested. Complete mediation remains a trusted adapter obligation. |
-| Tenant and credential isolation | Requests, completions, and credentials cannot cross tenant/request boundaries; gateway authentication material never becomes an upstream credential. | Core tenant/credential-handle and ticket checks proved; secret/header handling tested. Composed isolation and audit access controls remain open. |
-| Routing and configuration confinement | Candidate configuration and request fields cannot expand operator grants or change the authorized destination/credential binding. | Normalized configuration and route selection proved; URI, DNS, TLS, and actual dispatch remain trusted/tested. |
-| Byte integrity and ordering | Forwarded body bytes form an unchanged, ordered prefix of the input, across chunks and partial writes, without skipped or duplicated advancement. | Core byte-prefix and completion properties proved; async HTTP integration tested. Peer receipt is not proved. |
-| Strict audit-before-forwarding | Every submitted body range in strict mode is covered by a durable log acknowledgment for that request and chunk. | Core gate and exact journal-receipt/stream binding proved; disk sync adapter tested. Filesystem crash guarantees remain open. |
-| Crash-safe recovery | Recovery exposes only complete records, and acknowledged records survive every crash in the specified storage model. | Journal acknowledgment ordering and conditional synced-prefix survival proved; header/payload encoding, header decoding, frame extents, and scanner cursor transitions proved; scanner I/O tested. Process-kill recovery tested and storage assumptions documented; conditional scanner steps proved; acknowledged-prefix reconstruction proved under preserved-byte/read/checksum assumptions. Linux ext4 error/process-death tests passed; physical power-loss validation remains open. |
-| Cancellation and no replay | Cancellation prevents new submissions; uncertain effects, crashes, or failover never trigger automatic replay of a possibly executed generation. | Core cancellation/stale-event checks proved; transport has no replay path. Async cancellation and recovery composition remain unproved. |
-| Resource bounds and safe release | Slots, buffers, queues, and outstanding operations stay within explicit budgets; capacity cannot be reused while work retaining it remains alive. | Logical slot limits, ID isolation, and combined payload bound under an explicit stream-to-slot mapping proved; fixed disk-FIFO order, slot capacity, permanent closure, and actual queued-frame byte bound proved; HTTP mailbox occupancy and endpoint closure proved; ownership and deadlines tested. Conditional allocation composition and shutdown/release arguments are documented; mechanized async refinement remains open. |
-| Logging-mode separation | Availability mode may lose audit coverage but cannot relax authorization, routing, or tenant isolation; logging failure cannot create unbounded replacement work. | Core logging-mode transitions proved; bounded logger and failure handling tested. Submission and lifecycle composition are checked under the documented adapter assumptions. |
-| Honest completion and conditional progress | Failed/truncated streams cannot masquerade as successful completion; under stated scheduler and I/O assumptions, admitted work terminates or times out and releases resources. | Core admission/release and conditional streaming progress proved; EOF/error behavior and deadlines tested. Permanent worker closure and drain rank are proved; the conditional shutdown/resource argument is documented. Mechanized async liveness verification remains open. |
+**Your traffic goes only where you said.** Request bodies reach only the
+provider a root grant names, with that grant's credential; audit records go only
+to the local log file; and, only if a `shipping` section is configured, log
+contents go to the one HypAware server it names, with a credential that server
+issued. No other socket exists in the binary. Every provider body byte passes
+one verified write gate (`ResolvedRoute::write_bytes`); every shipper request
+is chosen by a verified machine and carries a path but no host; both socket
+sites take one verified egress permit, and clippy denies every other socket,
+lookup, listener, file write, and secret read in the runtime.
 
-Verus does not verify Tokio, Hyper, rustls, the OS, DNS/PKI, or the filesystem for us.
-Availability also depends on deployment: an external load balancer must route around
-a failed gateway instance, and interrupted generations are not transparently replayed.
-The [security contract](docs/security-contract.md) and the documents indexed below
-specify the assumptions and limits; these targets do not promise secrecy of arbitrary
-opaque body contents or survival of permanent storage loss.
+**What was logged is what is shipped, once and in order.** Every exchange in the
+log is grouped, bounded, and uploaded in emission order; an upload is counted
+only when the server acknowledges the exact batch it was sent; a restart
+replays from the file and reproduces identical identities, so the server's
+dedup stores each exchange once. Proved end to end over the verified machine
+and its driver loop: conservation (the queue is always the unresolved suffix
+of what was emitted), batch fidelity, acknowledgment of exactly the batch
+sent, and replay numbering as a function of the log alone. The projection of
+provider JSON into rows is the one trusted, tested step.
+
+**There is no crash state.** The verified core cannot panic, overflow, or index
+out of bounds, and every reachable shipper state has a next action with a
+bounded wait; the shipper runs on its own thread with no handle to admission,
+routing, or the logger, so its failure changes metrics and nothing else; and a
+process kill at any point resumes to a state consistent with the log. The
+shipper's totality, bounded waiting, and replay are proved; panic containment
+and a crash after every step of a run are tested; the gateway's own crash-safe
+recovery is proved under the storage contract.
+
+What Verus does not verify for us: Tokio, Hyper, rustls, the OS, DNS and PKI,
+the filesystem under power loss, the HypAware server honoring its ledger, and
+provider-specific JSON parsing. Each is a named premise of a theorem, not an
+unstated gap.
 
 ## Documentation
 
@@ -113,6 +129,7 @@ Runtime and adapters:
 | [Async transfer](docs/async-transfer.md) | Tokio body driver and the durable-log contract |
 | [HTTPS transport](docs/https-transport.md) | Upstream TLS exchange and handshake isolation |
 | [Disk logging](docs/disk-logging.md) | Bounded disk worker, sync acknowledgments, recovery scanner |
+| [Cloud shipping](docs/cloud-shipping.md) | HypAware shipper thread: protocol, configuration, proved and trusted parts |
 | [HTTP ownership](docs/http-ownership.md) | HTTP owner counts derived from the worker and connection registries |
 | [HTTP buffer lifetimes](docs/http-buffer-lifetimes.md) | HTTP body buffers, mailbox credit, and cancellation |
 | [Audit buffer lifetimes](docs/audit-buffer-lifetimes.md) | Audit queue credit, worker ownership, and receipt delivery |
@@ -162,7 +179,16 @@ The workspace pins vstd and commits Cargo.lock.
 cargo test --workspace --locked
 cargo verus verify -p gateway-core --locked -- --triggers-mode silent
 VERUS=/path/to/verus python3 scripts/check_mutations.py
+cargo clippy -p gateway-runtime --locked
+bash scripts/check_effect_sites.sh
 ```
+
+The clippy run enforces the panic-free standard on the cloud-shipping
+adapters (`crates/gateway-runtime/src/shipping`): unwrap, expect, panic,
+indexing, and unchecked arithmetic are denied there. It also denies every
+socket, name lookup, listener, file write, and secret read outside the
+audited effect sites (`clippy.toml`); the script fails if that set of sites
+changes.
 
 Opt-in load, memory, benchmark, and failover workloads (the last needs HAProxy and
 OpenSSL on PATH; results are discussed in the [benchmarks](docs/benchmarks.md),
@@ -176,16 +202,16 @@ cargo test -p gateway-runtime --release --locked server::tests::benchmark -- --i
 SOUNDGATE_HAPROXY=/path/to/haproxy cargo test -p gateway-runtime --locked proxy_gateway_process_failover -- --ignored --nocapture
 ```
 
-Validation on 2026-10-24: 324 core verification checks passed, 261 workspace tests and seven compile-fail doctests
-passed, and all 291 deliberate mutations failed their proof obligations. The opt-in TLS proxy/gateway
+Validation on 2026-10-25: 456 core verification checks passed, 295 workspace tests including seven compile-fail
+doctests passed, all 364 deliberate mutations failed their proof obligations, and the runtime passed its
+panic and effect-site lints. The opt-in TLS proxy/gateway
 process-failover test and six load/fault workloads passed on 2026-10-23.
 Two ten-minute overload runs and the final 100-wave-per-mode isolated memory soak
 also passed; measurements and limits are in the benchmark notes.
 These counts are checks, not a count of independent security guarantees.
 
-[Automated checks](.github/workflows/ci.yml) are configured to reproduce the tests and proofs on Linux.
-Current GitHub Actions runs cannot start because of an account billing/spending-limit
-restriction; the local milestone-6 checks passed, but remote CI is not green.
+[Automated checks](.github/workflows/ci.yml) reproduce the tests and proofs on Linux
+for every pull request and every push to `master`.
 `bash scripts/check_deployment.sh` reproduces the documented deployment from a clean
 checkout, and `deploy/Dockerfile` repeats the build, tests, proofs, and that check in
 a digest-pinned container; see [clean-environment reproduction](docs/deployment.md#clean-environment-reproduction).

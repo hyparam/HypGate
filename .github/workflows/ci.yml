@@ -2,6 +2,7 @@ name: CI
 
 on:
   push:
+    branches: [master]
   pull_request:
   workflow_dispatch:
 
@@ -25,6 +26,8 @@ jobs:
         run: rustup show active-toolchain
       - name: Test executable workspace
         run: cargo test --workspace --locked
+      - name: Panic lints and pinned effect sites
+        run: rustup component add clippy && bash scripts/check_effect_sites.sh
       - name: Concurrent logging failure workloads
         run: cargo test -p gateway-runtime --locked failed_log -- --ignored --nocapture --test-threads=1
       - name: Isolated gateway memory workload
@@ -84,7 +87,9 @@ jobs:
       - name: Report verifier version
         run: verus --version
       - name: Verify production core
-        run: cargo verus verify -p gateway-core --locked -- --triggers-mode silent
+        # The release archive ships vstd already verified; cargo-verus would rebuild and
+        # re-verify it from source on every run.
+        run: verus crates/gateway-core/src/lib.rs --crate-type lib --triggers-mode silent
       - name: Reject deliberate defects
         run: python3 scripts/check_mutations.py
 

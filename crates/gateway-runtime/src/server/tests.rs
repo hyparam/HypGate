@@ -902,3 +902,108 @@ async fn shutdown_closes_shared_worker_admission_before_waiting_for_existing_wor
         }
     }).await.unwrap();
 }
+
+/// A shipper thread that panics changes the shipping metrics and nothing
+/// else: the gateway keeps forwarding, stays ready, and shuts down; the
+/// panic is reported by the shipper handle alone.
+#[tokio::test]
+async fn shipping_thread_panic_changes_only_metrics() {
+    use crate::shipping::Shipper;
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let (upstream, acceptor, roots) = tls().await;
+        let config = config(upstream.local_addr().unwrap().port(), false);
+        let dir = TempDir::new(); let path = dir.0.join("audit.log");
+        let log = DiskLog::create(&path, 4, Duration::from_secs(2)).unwrap();
+        let shipper = Shipper::spawn_for_test(|| panic!("injected shipper failure")).unwrap();
+        let metrics = shipper.metrics();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !metrics.panicked() { tokio::time::sleep(Duration::from_millis(10)).await; }
+        }).await.unwrap();
+        let app = Gateway::with_shipping_metrics(config, HttpsTransport::with_roots(roots, Duration::from_secs(5)).unwrap(), log, Some(metrics.clone()));
+        let (port, shutdown, gateway) = spawn_gateway(&app, 4, Duration::from_secs(8)).await;
+        let (release, waiting) = oneshot::channel();
+        let upstream_task = stalling_provider(upstream, acceptor, waiting, false);
+        let (response, connection) = send(port, "/routes/7", "gateway", "POST").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        release.send(()).unwrap();
+        assert_eq!(response.collect().await.unwrap().to_bytes(), "data: hello\n\ndata: [DONE]\n\n");
+        connection.await.unwrap(); upstream_task.await.unwrap();
+        for (path, status) in [("/healthz", 200), ("/readyz", 200)] {
+            let (r, c) = send(port, path, "", "GET").await;
+            assert_eq!(r.status().as_u16(), status, "{path}"); r.collect().await.unwrap(); c.await.unwrap();
+        }
+        let (text, c) = send(port, "/metrics", "", "GET").await;
+        let text = String::from_utf8(text.collect().await.unwrap().to_bytes().to_vec()).unwrap(); c.await.unwrap();
+        assert!(text.contains("soundgate_shipping_enabled 1\n") && text.contains("soundgate_shipping_stopped 1\n"), "{text}");
+        assert!(text.contains("soundgate_shipping_batches_acknowledged_total 0\n"));
+        shutdown.send(()).unwrap(); gateway.await.unwrap().unwrap();
+        let result = tokio::task::spawn_blocking(move || shipper.shutdown(Duration::from_secs(2))).await.unwrap();
+        assert_eq!(result.unwrap_err().to_string(), "shipper panicked");
+    }).await.unwrap();
+}
+
+/// A gateway with the shipper configured forwards through the provider fixture
+/// while the shipper uploads the same exchange; a hanging HypAware server never
+/// touches readiness or forwarding, and shutdown still completes.
+#[tokio::test]
+async fn shipping_uploads_forwarded_exchanges_without_touching_readiness() {
+    use crate::shipping::{Shipper, ShippingConfig};
+    tokio::time::timeout(Duration::from_secs(30), async {
+        for hang in [false, true] {
+            let (upstream, acceptor, roots) = tls().await;
+            let config = config(upstream.local_addr().unwrap().port(), false);
+            let dir = TempDir::new(); let path = dir.0.join("audit.log"); let state = dir.0.join("state"); std::fs::create_dir(&state).unwrap();
+            let log = DiskLog::create(&path, 4, Duration::from_secs(2)).unwrap();
+            let (cloud_port, cloud_roots, cloud, _cloud_task) = crate::shipping::tests::fake_server_for_gateway(hang).await;
+            let shipping = ShippingConfig::from_root_json(&serde_json::to_vec(&json!({"identities":[],"destinations":[],"credentials":[],"grants":[],
+                "limits":{"requests":1,"chunk_bytes":4},"logging":"strict",
+                "shipping":{"server": format!("https://localhost:{cloud_port}/"), "token_env": "T", "state_dir": state.to_str().unwrap(), "poll_ms": 100}})).unwrap(),
+                |_| Some(crate::shipping::tests::TOKEN.to_owned())).unwrap().unwrap();
+            let shipper = Shipper::spawn_with_roots(shipping, path.clone(), Some(cloud_roots)).unwrap();
+            let app = Gateway::with_shipping_metrics(config, HttpsTransport::with_roots(roots, Duration::from_secs(5)).unwrap(), log, Some(shipper.metrics()));
+            let (port, shutdown, gateway) = spawn_gateway(&app, 4, Duration::from_secs(8)).await;
+            let (release, waiting) = oneshot::channel();
+            let upstream_task = stalling_provider(upstream, acceptor, waiting, false);
+            let (response, connection) = send(port, "/routes/7", "gateway", "POST").await;
+            assert_eq!(response.status(), StatusCode::OK);
+            release.send(()).unwrap();
+            assert_eq!(response.collect().await.unwrap().to_bytes(), "data: hello\n\ndata: [DONE]\n\n");
+            connection.await.unwrap(); upstream_task.await.unwrap();
+            let metrics = shipper.metrics();
+            if hang {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                assert_eq!(metrics.batches_acknowledged(), 0);
+                assert!(cloud.lock().unwrap().requests.iter().any(|p| p == "/v1/identity/bootstrap"), "the shipper did reach the hanging server");
+            } else {
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    while metrics.batches_acknowledged() == 0 { tokio::time::sleep(Duration::from_millis(20)).await; }
+                }).await.unwrap();
+            }
+            for (path, status) in [("/healthz", 200), ("/readyz", 200)] {
+                let (r, c) = send(port, path, "", "GET").await;
+                assert_eq!(r.status().as_u16(), status, "{path} with hang={hang}"); r.collect().await.unwrap(); c.await.unwrap();
+            }
+            let (text, c) = send(port, "/metrics", "", "GET").await;
+            let text = String::from_utf8(text.collect().await.unwrap().to_bytes().to_vec()).unwrap(); c.await.unwrap();
+            assert!(text.contains("soundgate_shipping_enabled 1\n"), "{text}");
+            assert!(text.contains(&format!("soundgate_shipping_batches_acknowledged_total {}\n", u8::from(!hang))), "{text}");
+            assert!(text.contains("soundgate_shipping_stopped 0\n"));
+            shutdown.send(()).unwrap(); gateway.await.unwrap().unwrap();
+            let started = std::time::Instant::now();
+            let result = tokio::task::spawn_blocking(move || shipper.shutdown(Duration::from_secs(2))).await.unwrap();
+            assert_eq!(result.is_err(), hang, "a shipper stuck in a request is left behind, a free one joins");
+            assert!(started.elapsed() < Duration::from_secs(4));
+            if !hang {
+                let cloud = cloud.lock().unwrap();
+                let rows: Vec<_> = cloud.batches.iter().flat_map(|b| b.1.iter()).collect();
+                assert_eq!(rows.len(), 2);
+                assert_eq!(rows[0]["content_text"], "{\"stream\":true}");
+                assert_eq!(rows[1]["content_text"], "data: hello\n\ndata: [DONE]\n\n", "unparsed SSE ships verbatim");
+                assert_eq!(rows[1]["attributes"]["gateway"]["status_code"], 200);
+                assert_eq!(rows[0]["attributes"]["gateway"]["outcome"], "success");
+                assert_eq!(rows[0]["provider"], "localhost");
+                assert!(!rows.iter().any(|r| r.to_string().contains("provider-secret") || r.to_string().contains("caller-secret")));
+            }
+        }
+    }).await.unwrap();
+}

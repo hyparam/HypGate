@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![deny(clippy::disallowed_methods)]
 //! Trusted runtime ownership around the verified synchronous core.
 pub mod admission;
 pub mod budget;
@@ -13,3 +14,4 @@ mod credited_job;
 #[cfg(test)]
 mod test_support;
 pub mod server;
+pub mod shipping;

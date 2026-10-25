@@ -74,6 +74,8 @@ impl DiskLog {
     }
 
     /// Enforce the gateway's chunk budget before encoding any audit payload.
+    // Effect site: the audit log file, created new at the operator's path.
+    #[allow(clippy::disallowed_methods)]
     pub fn create_with_payload_limit(path: &Path, queue_capacity: usize, deadline: Duration, payload_limit: usize) -> io::Result<Self> {
         if payload_limit == 0 || payload_limit > MAX_RECORD_BYTES
             || queue_capacity == 0 || queue_capacity > 1024 || deadline.is_zero()
@@ -309,6 +311,13 @@ pub struct LogReader<R: Read> { scanner: gateway_core::recovery::Scanner<ReadSou
 impl<R: Read> LogReader<R> {
     pub fn new(reader: R) -> Result<Self, ScanError> {
         Ok(Self { scanner: gateway_core::recovery::Scanner::new(ReadSource { reader })? })
+    }
+    /// Continue a file whose header `new` already validated, from a byte offset
+    /// an earlier reader reported as its valid end. The reader must already be
+    /// positioned at that offset.
+    pub fn resume(reader: R, session: [u8; 16], offset: u64) -> Result<Self, ScanError> {
+        if offset < 56 { return Err(ScanError::Corrupt); }
+        Ok(Self { scanner: gateway_core::recovery::Scanner::resume(ReadSource { reader }, session, offset) })
     }
     pub fn session(&self) -> [u8; 16] { self.scanner.session() }
     pub fn valid_end(&self) -> u64 { self.scanner.offset() }

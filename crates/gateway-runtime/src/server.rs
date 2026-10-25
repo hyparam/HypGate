@@ -29,13 +29,20 @@ pub struct Gateway {
     connection_slots: std::sync::OnceLock<Arc<ConnectionSlots>>,
     audit_gaps: AtomicU64,
     failed_exchanges: AtomicU64,
+    // Read-only view of the shipper thread's counters for `/metrics`. The
+    // gateway never calls into the shipper and readiness never reads this.
+    shipping: Option<Arc<crate::shipping::Metrics>>,
 }
 impl Gateway {
     pub fn new(config: GatewayConfig, transport: HttpsTransport, log: DiskLog) -> Arc<Self> {
+        Self::with_shipping_metrics(config, transport, log, None)
+    }
+    pub fn with_shipping_metrics(config: GatewayConfig, transport: HttpsTransport, log: DiskLog,
+        shipping: Option<Arc<crate::shipping::Metrics>>) -> Arc<Self> {
         Arc::new(Self { worker_slots: WorkerSlots::new(config.request_limit()), config: Arc::new(config), transport, log, workers: TaskTracker::new(),
             connection_slots: std::sync::OnceLock::new(),
             cancel_workers: tokio_util::sync::CancellationToken::new(),
-            audit_gaps: AtomicU64::new(0), failed_exchanges: AtomicU64::new(0) })
+            audit_gaps: AtomicU64::new(0), failed_exchanges: AtomicU64::new(0), shipping })
     }
     pub fn audit_gaps(&self) -> u64 { self.audit_gaps.load(Ordering::Relaxed) }
     pub fn failed_exchanges(&self) -> u64 { self.failed_exchanges.load(Ordering::Relaxed) }
@@ -51,6 +58,7 @@ impl Gateway {
                         Some((active, limit)) => { let _ = write!(text, "soundgate_admission_healthy 1\nsoundgate_requests_active {active}\nsoundgate_requests_limit {limit}\n"); }
                         None => text.push_str("soundgate_admission_healthy 0\n"),
                     }
+                    match &self.shipping { Some(metrics) => metrics.render(&mut text), None => text.push_str("soundgate_shipping_enabled 0\n") }
                     let mut response = Response::new(GatewayBody::Fixed(Full::new(Bytes::from(text))));
                     response.headers_mut().insert("content-type", http::HeaderValue::from_static("text/plain; version=0.0.4"));
                     return Ok(response);

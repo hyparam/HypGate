@@ -5,6 +5,7 @@ use vstd::prelude::*;
 
 pub mod policy;
 pub mod resolved_route;
+pub mod egress;
 pub mod resource;
 pub mod stream;
 pub mod owned_stream;
@@ -30,6 +31,13 @@ pub mod http_accounting;
 pub mod lifecycle_composition;
 pub mod buffer_accounting;
 pub mod owned_accounting;
+pub mod exchange_assembler;
+pub mod shipping_identity;
+pub mod batch_builder;
+pub mod upload_cursor;
+pub mod enrollment;
+pub mod shipper;
+pub mod shipping_driver;
 
 #[cfg(test)]
 #[path = "tests/streaming.rs"]

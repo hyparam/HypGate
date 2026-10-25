@@ -23,6 +23,11 @@ struct Root {
     grants: Vec<RouteInput>,
     limits: Limits,
     logging: Logging,
+    // Parsed separately by `shipping::ShippingConfig`; the gateway's own
+    // configuration never holds the cloud token or server.
+    #[serde(default)]
+    #[allow(dead_code)]
+    shipping: Option<serde::de::IgnoredAny>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -58,6 +63,7 @@ struct Credential { kind: CredentialKind, value: HeaderValue }
 // The parsed URI drives dispatch; the exact configured text is what the audit
 // log's request-start record carries, so a reader sees the operator's string.
 pub(crate) struct Destination { uri: Uri, text: String }
+impl Destination { pub(crate) fn uri(&self) -> &Uri { &self.uri } }
 
 pub struct GatewayConfig {
     chunk_bytes: usize,
@@ -77,7 +83,7 @@ fn destination(text: &str) -> Result<Destination, ConfigError> {
     Ok(Destination { uri: destination_uri(text)?, text: text.to_owned() })
 }
 
-fn destination_uri(text: &str) -> Result<Uri, ConfigError> {
+pub(crate) fn destination_uri(text: &str) -> Result<Uri, ConfigError> {
     // Keep spelling strict rather than rely on permissive URL normalization.
     if text.len() > MAX_DESTINATION_BYTES || !text.starts_with("https://") || !text.is_ascii()
         || text.bytes().any(|b| b <= 32 || b == 127 || b == b'\\' || b == b'#') {
@@ -184,6 +190,11 @@ impl<'a> RoutedRequest<'a> {
     pub(crate) fn stream(&mut self) -> &mut Request<'a> { &mut self.request }
     pub fn destination(&self) -> &Uri {
         &self.resolved.destination(self.request.authority()).expect("private request/route binding").uri
+    }
+    /// The permit a socket may be opened under: the verified core binds it to
+    /// this request's resolved destination and route.
+    pub(crate) fn egress(&self) -> gateway_core::egress::Egress<'_, Destination> {
+        gateway_core::egress::Egress::provider(&self.resolved, self.request.authority()).expect("private request/route binding")
     }
     /// The configured destination string exactly as the operator wrote it.
     pub fn destination_text(&self) -> &str {
