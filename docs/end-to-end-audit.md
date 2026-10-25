@@ -77,10 +77,10 @@ parsed `shipping` section's `ShippingServer`.
 | Audit record write and sync | `Storage::write_all`/`Storage::sync` called by `DiskWorker::run` on the worker thread started in `DiskLog::start_limited` | One worker thread; frame came through the verified queue reservation |
 | Read audit file for recovery | `LogReader::new`/`LogReader::next_record` over `disk_log::ReadSource` | Read-only; never truncates, appends, or replays |
 | Dedicated threads | `DiskLog::start_limited` (1), `handshake::Pool::with_limits` (4), `Resolver::with_limit` (4), `shipping::Shipper::spawn` (1, only with a `shipping` section) | Fixed counts at construction; never replaced after a timeout |
-| Read the cloud token | `std::env::var` through `ShippingConfig::from_root_json` in `main.rs::run` and `ship` | Startup only; the value moves into the shipper thread and is never held by `GatewayConfig` |
+| Read the cloud token | `main.rs::secret` through `ShippingConfig::from_root_json` in `run` and `ship` | Startup only; the value moves into the verified machine and is never held by `GatewayConfig` |
 | Open the audit log for shipping | `File::open` in `shipping::Engine::{open_session,read}` (the `Effects` implementation the verified driver calls) | Read-only handle on the operator's log path; the verified scanner never writes |
 | Write shipper state | `OpenOptions` (create-new, 0600), `write_all`, `sync_all`, `fs::rename` in `shipping::state::write_private` | Only `identity.json` and `checkpoint.json` under the configured state directory; contents are the server credential, a token fingerprint, and counters |
-| Cloud DNS, TCP, TLS, and HTTP | `to_socket_addrs`, `TcpStream::connect`, `TlsConnector::connect`, `handshake`, `send_request` in `shipping::client::Client::run` | Host and port come only from the validated `shipping.server`; called only from the shipper thread with the server-issued credential, never a provider credential |
+| Cloud DNS, TCP, TLS, and HTTP | `to_socket_addrs` and `TcpStream::connect` in `shipping::client::open_socket` under an `Egress::cloud` permit; `TlsConnector::connect`, `handshake`, `send_request` in `shipping::client::Client::run` | Host and port come only from the `ShippingServer` the configuration parser built; the request itself was chosen by the verified machine; called only from the shipper thread with the server-issued credential, never a provider credential |
 
 No other `connect`, `send_request`, `write_all`, `sync_all`, `spawn`, or file-open
 call exists in production runtime source outside `transport.rs`, `disk_log.rs`,

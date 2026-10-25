@@ -159,9 +159,9 @@ windows.
 cancellation and whole-process memory remain documented rather than
 mechanized, as the supporting table below records.
 
-## Plan to close the gaps
+## How the gaps were closed
 
-Each phase is one logical commit on the `hypaware-shipping` branch.
+Six phases, one logical commit each, on the `hypaware-shipping` branch.
 
 1. **Verified shipper machine (core).** Done. One state machine owning the
    assembler, cursor, enrollment, queue, backoff, and batching. Operations:
@@ -190,8 +190,11 @@ Each phase is one logical commit on the `hypaware-shipping` branch.
    shutdown unchanged while only the metrics report it, and a core test
    crashes the machine after every step of a run and checks the restarted
    run leaves the ledger identical.
-6. **Documentation.** This file, the proof index, the end-to-end audit, and
-   the security contract updated to point at the theorems.
+6. **Documentation.** Done. This file, the [proof index](docs/proof-index.md),
+   the [end-to-end audit](docs/end-to-end-audit.md), the
+   [security contract](docs/security-contract.md), and
+   [cloud shipping](docs/cloud-shipping.md) point at the theorems and name
+   the remaining premises.
 
 ## Specific properties proved
 

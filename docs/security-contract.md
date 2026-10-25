@@ -120,8 +120,12 @@ thread in the same process that reads the audit log and uploads to one
 configured HypAware server with a credential that server issued. Every
 decision about what to send is made by the verified shipper machine, whose
 requests carry a path and a body but no host and whose only body containing
-the operator token is a bootstrap; the thread performs those requests against
-the client built from the configured server. The token is confined by
+the operator token is a bootstrap; the verified driver loop feeds it, and the
+thread performs those requests against the client built from the configured
+server under an `egress::Egress` permit, the same permit type the provider
+transport requires. Every other socket, lookup, listener, file write, and
+secret read in the runtime is denied by `clippy.toml` and the audited sites
+are pinned by `scripts/check_effect_sites.sh`. The token is confined by
 ownership and module structure, not by a process boundary: it is read once at
 startup, moved into the machine, and never placed in the gateway
 configuration, on the request path, or in the log. The shipper has no handle

@@ -56,36 +56,39 @@ for provider configuration, scanning logs, and shutdown behavior.
 ## What the gateway guarantees
 
 Three statements an operator can hold the gateway to. Each is a theorem over a
-verified state machine joined to the outside world by a small, enumerated set
-of trusted adapters. [PROOFS.md](PROOFS.md) states each one precisely, names
-its premises, lists every finer-grained property proved beneath it, and tracks
-the work that still narrows the trusted part.
+verified state machine joined to the outside world by a small, enumerated,
+lint-pinned set of trusted adapters. [PROOFS.md](PROOFS.md) states each one
+precisely, names its premises, and lists every finer-grained property proved
+beneath it.
 
 **Your traffic goes only where you said.** Request bodies reach only the
 provider a root grant names, with that grant's credential; audit records go only
 to the local log file; and, only if a `shipping` section is configured, log
 contents go to the one HypAware server it names, with a credential that server
-issued. No other socket exists in the binary. The provider half is proved
-through a single write gate (`ResolvedRoute::write_bytes`) that every body byte
-passes; the shipper half is being moved into the same shape: a verified machine
-whose only outgoing requests carry a path but no host, so the destination is a
-type, not a string.
+issued. No other socket exists in the binary. Every provider body byte passes
+one verified write gate (`ResolvedRoute::write_bytes`); every shipper request
+is chosen by a verified machine and carries a path but no host; both socket
+sites take one verified egress permit, and clippy denies every other socket,
+lookup, listener, file write, and secret read in the runtime.
 
 **What was logged is what is shipped, once and in order.** Every exchange in the
 log is grouped, bounded, and uploaded in emission order; an upload is counted
 only when the server acknowledges the exact batch it was sent; a restart
 replays from the file and reproduces identical identities, so the server's
-dedup stores each exchange once. The assembler, cursor, batch limits, and
-identity injectivity are proved today; the conservation theorem that no
-exchange is dropped between them is the next step.
+dedup stores each exchange once. Proved end to end over the verified machine
+and its driver loop: conservation (the queue is always the unresolved suffix
+of what was emitted), batch fidelity, acknowledgment of exactly the batch
+sent, and replay numbering as a function of the log alone. The projection of
+provider JSON into rows is the one trusted, tested step.
 
 **There is no crash state.** The verified core cannot panic, overflow, or index
 out of bounds, and every reachable shipper state has a next action with a
 bounded wait; the shipper runs on its own thread with no handle to admission,
 routing, or the logger, so its failure changes metrics and nothing else; and a
-process kill at any point resumes to a state consistent with the log. Progress
-and recovery theorems for the shipper are in progress; the gateway's own
-crash-safe recovery is proved under the storage contract.
+process kill at any point resumes to a state consistent with the log. The
+shipper's totality, bounded waiting, and replay are proved; panic containment
+and a crash after every step of a run are tested; the gateway's own crash-safe
+recovery is proved under the storage contract.
 
 What Verus does not verify for us: Tokio, Hyper, rustls, the OS, DNS and PKI,
 the filesystem under power loss, the HypAware server honoring its ledger, and
