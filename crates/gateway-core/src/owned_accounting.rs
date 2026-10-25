@@ -21,6 +21,18 @@ pub open spec fn owners_match(slots: Seq<u64>, owners: Seq<Option<crate::owned_s
         }
 }
 
+// Pins the definition: dropping the read-buffer side from the model cannot
+// silently make a weaker total pass the upper-bound theorem.
+pub proof fn single_owner_covers_both_buffers(owner: crate::owned_stream::OwnedStream)
+    ensures crate::buffer_accounting::byte_sum(owner_buffers(seq![Some(owner)]))
+        == owner.state().body().len() + owner.read_bytes().len(),
+{
+    let buffers = owner_buffers(seq![Some(owner)]);
+    assert(buffers.len() == 1);
+    assert(buffers[0] == owner.state().body() + owner.read_bytes());
+    reveal_with_fuel(crate::buffer_accounting::byte_sum, 2);
+}
+
 proof fn bound_prefix(slots: Seq<u64>, owners: Seq<Option<crate::owned_stream::OwnedStream>>, capacity: nat)
     requires owners_match(slots, owners, capacity),
     ensures crate::resource::occupied(slots) <= slots.len(),
