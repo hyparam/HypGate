@@ -57,9 +57,7 @@ async fn benchmark(availability: bool, profile: Profile) {
         let dir = TempDir::new(); let path = dir.0.join("benchmark.log");
         let app = Gateway::new(config, HttpsTransport::with_roots(roots, Duration::from_secs(300)).unwrap(),
             DiskLog::create(&path, 16, Duration::from_secs(2)).unwrap());
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap(); let port = listener.local_addr().unwrap().port();
-        let (shutdown, stopped) = oneshot::channel();
-        let gateway = tokio::spawn(serve(listener, app.clone(), 128, Duration::from_secs(310), async { let _ = stopped.await; }));
+        let (port, shutdown, gateway) = spawn_gateway(&app, 128, Duration::from_secs(310)).await;
         let provider = tokio::spawn(async move {
             let mut connections = JoinSet::new();
             for _ in 0..forwarded {

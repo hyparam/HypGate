@@ -4,9 +4,15 @@ use http_body_util::BodyExt;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::{fs::File, sync::Mutex};
-use tokio::net::TcpStream;
+use tokio::{io::AsyncReadExt, net::TcpStream};
 use tokio_rustls::rustls::RootCertStore;
 use crate::test_support::{self_signed, tls, TempDir};
+
+mod benchmark;
+mod memory;
+mod overload;
+mod process_crash;
+mod stalled_log;
 
 fn config(port: u16, availability: bool) -> GatewayConfig { config_with_limits(port, availability, 1, 3) }
 fn config_with_limits(port: u16, availability: bool, requests: usize, chunk_bytes: usize) -> GatewayConfig {
@@ -27,6 +33,16 @@ async fn send(port: u16, path: &str, token: &str, method: &str) -> (Response<Inc
         .body(Full::new(Bytes::from_static(b"{\"stream\":true}"))).unwrap();
     (sender.send_request(request).await.unwrap(), connection)
 }
+/// Serve `app` on a fresh loopback port until the returned sender fires or drops.
+async fn spawn_gateway(app: &Arc<Gateway>, connections: usize, deadline: Duration)
+    -> (u16, oneshot::Sender<()>, JoinHandle<io::Result<()>>)
+{
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (shutdown, stopped) = oneshot::channel();
+    let gateway = tokio::spawn(serve(listener, app.clone(), connections, deadline, async { let _ = stopped.await; }));
+    (port, shutdown, gateway)
+}
 
 #[derive(Clone, Copy)]
 enum Stop { None, Disconnect, Drain, Abort, SharedAbort }
@@ -41,16 +57,11 @@ async fn exercise(availability: bool, failed_log: bool, truncated: bool, stop: S
         // Shutdown tests must expire through the drain, not the transport deadline.
         let deadline = if matches!(stop, Stop::Drain | Stop::Abort | Stop::SharedAbort) { 60 } else { 5 };
         let app = Gateway::new(config, HttpsTransport::with_roots(roots, Duration::from_secs(deadline)).unwrap(), log);
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap(); let port = listener.local_addr().unwrap().port();
-        let (shutdown, stopped) = oneshot::channel();
-        let gateway = tokio::spawn(serve(listener, app.clone(), 4, Duration::from_secs(deadline + 3), async { let _ = stopped.await; }));
+        let (port, shutdown, gateway) = spawn_gateway(&app, 4, Duration::from_secs(deadline + 3)).await;
         let shutdown_port = port;
         let mut shared = None;
         let port = if matches!(stop, Stop::SharedAbort) {
-            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let port = listener.local_addr().unwrap().port();
-            let (shutdown, stopped) = oneshot::channel();
-            let task = tokio::spawn(serve(listener, app.clone(), 4, Duration::from_secs(63), async { let _ = stopped.await; }));
+            let (port, shutdown, task) = spawn_gateway(&app, 4, Duration::from_secs(63)).await;
             shared = Some((shutdown, task));
             port
         } else { port };
@@ -236,9 +247,7 @@ async fn concurrent_tenants_keep_credentials_bodies_and_audit_records_isolated()
         let dir = TempDir::new(); let path = dir.0.join("audit.log");
         let app = Gateway::new(config, HttpsTransport::with_roots(roots, Duration::from_secs(5)).unwrap(),
             DiskLog::create(&path, 4, Duration::from_secs(2)).unwrap());
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap(); let port = listener.local_addr().unwrap().port();
-        let (shutdown, stopped) = oneshot::channel();
-        let gateway = tokio::spawn(serve(listener, app.clone(), 4, Duration::from_secs(8), async { let _ = stopped.await; }));
+        let (port, shutdown, gateway) = spawn_gateway(&app, 4, Duration::from_secs(8)).await;
         // Neither provider response starts until both tenant requests have arrived.
         let barrier = Arc::new(tokio::sync::Barrier::new(2));
         let upstream_task = tokio::spawn(async move {
@@ -319,20 +328,15 @@ async fn shutdown_cancels_stalled_workers_owned_by_another_listener() {
     for availability in [false, true] { exercise(availability, false, false, Stop::SharedAbort).await; }
 }
 
-mod benchmark;
-
 #[tokio::test]
 async fn client_disconnect_before_headers_cancels_request_and_upstream_socket() {
-    use tokio::io::AsyncReadExt;
     tokio::time::timeout(Duration::from_secs(5), async {
         let (upstream, acceptor, roots) = tls().await;
         let dir = TempDir::new();
         let app = Gateway::new(config(upstream.local_addr().unwrap().port(), false),
             HttpsTransport::with_roots(roots, Duration::from_secs(60)).unwrap(),
             DiskLog::create(&dir.0.join("audit.log"), 4, Duration::from_secs(2)).unwrap());
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap(); let port = listener.local_addr().unwrap().port();
-        let (shutdown, stopped) = oneshot::channel();
-        let gateway = tokio::spawn(serve(listener, app.clone(), 4, Duration::from_secs(65), async { let _ = stopped.await; }));
+        let (port, shutdown, gateway) = spawn_gateway(&app, 4, Duration::from_secs(65)).await;
         let (received, request_received) = oneshot::channel();
         let provider = tokio::spawn(async move {
             let (socket, _) = upstream.accept().await.unwrap();
@@ -375,16 +379,13 @@ async fn client_disconnect_before_headers_cancels_request_and_upstream_socket() 
 
 #[tokio::test]
 async fn incomplete_connections_expire_without_workers_and_capacity_recovers() {
-    use tokio::io::AsyncReadExt;
     tokio::time::timeout(Duration::from_secs(5), async {
         let dir = TempDir::new();
         let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let app = Gateway::new(config(upstream.local_addr().unwrap().port(), false),
             HttpsTransport::with_roots(RootCertStore::empty(), Duration::from_secs(60)).unwrap(),
             DiskLog::create(&dir.0.join("audit.log"), 4, Duration::from_secs(2)).unwrap());
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap(); let port = listener.local_addr().unwrap().port();
-        let (shutdown, stopped) = oneshot::channel();
-        let gateway = tokio::spawn(serve(listener, app.clone(), 2, Duration::from_millis(200), async { let _ = stopped.await; }));
+        let (port, shutdown, gateway) = spawn_gateway(&app, 2, Duration::from_millis(200)).await;
         let mut peers = JoinSet::new();
         for _ in 0..8 {
             let mut socket = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
@@ -414,7 +415,6 @@ async fn incomplete_connections_expire_without_workers_and_capacity_recovers() {
     }).await.unwrap();
 }
 
-
 #[tokio::test]
 async fn poisoned_admission_is_unready_and_fail_closed_in_both_logging_modes() {
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -425,9 +425,7 @@ async fn poisoned_admission_is_unready_and_fail_closed_in_both_logging_modes() {
                 HttpsTransport::with_roots(RootCertStore::empty(), Duration::from_secs(60)).unwrap(),
                 DiskLog::create(&dir.0.join("audit.log"), 4, Duration::from_secs(2)).unwrap());
             app.config.poison_admission_for_test();
-            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap(); let port = listener.local_addr().unwrap().port();
-            let (shutdown, stopped) = oneshot::channel();
-            let gateway = tokio::spawn(serve(listener, app.clone(), 4, Duration::from_secs(10), async { let _ = stopped.await; }));
+            let (port, shutdown, gateway) = spawn_gateway(&app, 4, Duration::from_secs(10)).await;
             for (path, method, status) in [("/healthz", "GET", 200), ("/readyz", "GET", 503), ("/routes/7", "POST", 503)] {
                 let (response, connection) = send(port, path, "gateway", method).await;
                 assert_eq!(response.status().as_u16(), status);
@@ -446,9 +444,6 @@ async fn poisoned_admission_is_unready_and_fail_closed_in_both_logging_modes() {
         }
     }).await.unwrap();
 }
-
-mod process_crash;
-
 
 #[tokio::test]
 async fn bodyless_http_statuses_finish_worker_accounting() {
@@ -507,10 +502,6 @@ async fn bodyless_status_rejects_payload_or_missing_completion() {
     }).await.unwrap();
 }
 
-mod overload;
-
-mod stalled_log;
-
 #[tokio::test]
 async fn worker_budget_covers_cleanup_without_consuming_request_slots() {
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -523,10 +514,7 @@ async fn worker_budget_covers_cleanup_without_consuming_request_slots() {
         // or post-EOF cleanup. Registry-only admission cannot bound this state.
         let lease = app.worker_slots.acquire(&app.workers).unwrap();
         assert_eq!(app.config.usage(), Some((0, 1)));
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let (shutdown, stopped) = oneshot::channel();
-        let gateway = tokio::spawn(serve(listener, app.clone(), 32, Duration::from_secs(3), async { let _ = stopped.await; }));
+        let (port, shutdown, gateway) = spawn_gateway(&app, 32, Duration::from_secs(3)).await;
         let mut clients = JoinSet::new();
         for _ in 0..16 {
             clients.spawn(async move {
@@ -558,8 +546,6 @@ async fn worker_budget_covers_cleanup_without_consuming_request_slots() {
     }).await.unwrap();
 }
 
-mod memory;
-
 #[tokio::test]
 async fn poisoned_worker_registry_is_unready_and_fail_closed_in_both_modes() {
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -577,10 +563,7 @@ async fn poisoned_worker_registry_is_unready_and_fail_closed_in_both_modes() {
             assert!(app.workers.is_empty());
             assert_eq!(app.worker_slots.usage(), None);
             assert_eq!(app.config.usage(), Some((0, 1)));
-            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let port = listener.local_addr().unwrap().port();
-            let (shutdown, stopped) = oneshot::channel();
-            let gateway = tokio::spawn(serve(listener, app.clone(), 4, Duration::from_secs(3), async { let _ = stopped.await; }));
+            let (port, shutdown, gateway) = spawn_gateway(&app, 4, Duration::from_secs(3)).await;
             for (path, method, status) in [("/healthz", "GET", 200), ("/readyz", "GET", 503), ("/routes/7", "POST", 503)] {
                 let (response, connection) = send(port, path, "gateway", method).await;
                 assert_eq!(response.status().as_u16(), status);
@@ -600,16 +583,13 @@ async fn poisoned_worker_registry_is_unready_and_fail_closed_in_both_modes() {
 
 #[tokio::test]
 async fn inbound_wire_head_and_header_count_limits_apply_before_health_dispatch() {
-    use tokio::io::AsyncReadExt;
     tokio::time::timeout(Duration::from_secs(10), async {
         let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let dir = TempDir::new();
         let app = Gateway::new(config(upstream.local_addr().unwrap().port(), false),
             HttpsTransport::with_roots(RootCertStore::empty(), Duration::from_secs(2)).unwrap(),
             DiskLog::create(&dir.0.join("headers.log"), 2, Duration::from_secs(1)).unwrap());
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap(); let port = listener.local_addr().unwrap().port();
-        let (shutdown, stopped) = oneshot::channel();
-        let gateway = tokio::spawn(serve(listener, app.clone(), 4, Duration::from_secs(3), async { let _ = stopped.await; }));
+        let (port, shutdown, gateway) = spawn_gateway(&app, 4, Duration::from_secs(3)).await;
         let prefix = "GET /healthz HTTP/1.1\r\nHost: localhost\r\nX-Pad: ";
         let mut cases = Vec::new();
         for extra in [0, 1] {
@@ -637,7 +617,6 @@ async fn inbound_wire_head_and_header_count_limits_apply_before_health_dispatch(
 
 #[tokio::test]
 async fn aborting_server_drops_connections_and_recovers_worker_credit_across_restarts() {
-    use tokio::io::AsyncReadExt;
     tokio::time::timeout(Duration::from_secs(15), async {
         for availability in [false, true] {
             let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -686,7 +665,6 @@ async fn aborting_server_drops_connections_and_recovers_worker_credit_across_res
 
 #[tokio::test]
 async fn serve_invocations_share_connection_credit_and_reject_limit_changes() {
-    use tokio::io::AsyncReadExt;
     tokio::time::timeout(Duration::from_secs(10), async {
         let dir = TempDir::new();
         let app = Gateway::new(config(443, false),
@@ -740,14 +718,9 @@ async fn shutdown_closes_shared_worker_admission_before_waiting_for_existing_wor
             let app = Gateway::new(config_with_limits(upstream.local_addr().unwrap().port(), availability, 2, 16384),
                 HttpsTransport::with_roots(RootCertStore::empty(), Duration::from_secs(2)).unwrap(),
                 DiskLog::create(&dir.0.join("shutdown.log"), 2, Duration::from_secs(1)).unwrap());
-            let first = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let second = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let port = second.local_addr().unwrap().port();
-            let (stop_first, first_stopped) = oneshot::channel();
-            let (stop_second, second_stopped) = oneshot::channel();
             let lease = app.worker_slots.acquire(&app.workers).unwrap();
-            let first = tokio::spawn(serve(first, app.clone(), 8, Duration::from_secs(3), async { let _ = first_stopped.await; }));
-            let second = tokio::spawn(serve(second, app.clone(), 8, Duration::from_secs(3), async { let _ = second_stopped.await; }));
+            let (_, stop_first, first) = spawn_gateway(&app, 8, Duration::from_secs(3)).await;
+            let (port, stop_second, second) = spawn_gateway(&app, 8, Duration::from_secs(3)).await;
             stop_first.send(()).unwrap();
             while app.worker_slots.healthy() { tokio::task::yield_now().await; }
             assert!(!first.is_finished()); // Existing credit still protects drain.

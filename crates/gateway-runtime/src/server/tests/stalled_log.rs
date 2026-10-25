@@ -20,9 +20,7 @@ async fn exercise(availability: bool, shutdown_blocked: bool) {
     let (log, started, release, writes) = DiskLog::stalled_for_test(2, Duration::from_secs(1));
     let app = Gateway::new(config_with_limits(upstream.local_addr().unwrap().port(), availability, SLOTS, 16384),
         HttpsTransport::with_roots(roots, Duration::from_secs(5)).unwrap(), log);
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap(); let port = listener.local_addr().unwrap().port();
-    let (shutdown, stopped) = oneshot::channel();
-    let gateway = tokio::spawn(serve(listener, app.clone(), 64, Duration::from_secs(7), async { let _ = stopped.await; }));
+    let (port, shutdown, gateway) = spawn_gateway(&app, 64, Duration::from_secs(7)).await;
     let connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let accepted = connections.clone();
     let (stop_provider, provider_stopped) = oneshot::channel();
