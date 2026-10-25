@@ -1,5 +1,7 @@
 # Language and verification research
 
+Historical note: this is the original language/verifier comparison. The decision it fed is settled (Rust plus Verus); current proof scope is in the [proof index](../proof-index.md) and [security contract](../security-contract.md).
+
 Research date: 2026-10-23. Recommendations are provisional. This is a source review,
 not a benchmark or a successful verification experiment.
 

@@ -1,5 +1,7 @@
 # Follow-up: implementation and proof viability
 
+Historical note: this feasibility follow-up is superseded by the production core and the [implementation milestones](../implementation-plan.md). The `experiments/` paths it names no longer exist in the tree; use the commits it cites.
+
 Date: 2026-10-23. This extends the [first experiments](experiment-results.md).
 It is a feasibility study, not a production gateway or a performance benchmark.
 
@@ -9,7 +11,7 @@ revisit or reproduce it, use a separate checkout of commit `7869347`, which cont
 the Go source, generated code, proofs, and runners.
 
 The Verus prototypes are now superseded by the production
-[stream core](../crates/gateway-core/src/stream.rs) and have been removed too.
+[stream core](../../crates/gateway-core/src/stream.rs) and have been removed too.
 Their code and runners remain at Git commit `efe687426377ebfd39a1bbe7968fe176eac9817c`;
 commands in the Verus section below apply to a separate checkout of that revision.
 

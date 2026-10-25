@@ -1,11 +1,13 @@
 # Initial experiments and implementation plan
 
+Historical note: these are the initial feasibility experiments. Their code was removed; they are superseded by the production core in [crates/gateway-core](../../crates/gateway-core/src/lib.rs) and the [implementation milestones](../implementation-plan.md). The `experiments/` paths below no longer exist in the tree; use the commits cited.
+
 Date: 2026-10-23. These experiments compare a small offset-based policy core,
 not whole gateways. Rust and Verus are now the active implementation path.
 
 The Verus prototypes have also been removed: the production proofs now live in
-[crates/gateway-core](../crates/gateway-core/src/lib.rs), with mutation checks in
-[scripts/check_mutations.py](../scripts/check_mutations.py). The original Verus
+[crates/gateway-core](../../crates/gateway-core/src/lib.rs), with mutation checks in
+[scripts/check_mutations.py](../../scripts/check_mutations.py). The original Verus
 experiment sources and runners remain in Git at `efe687426377ebfd39a1bbe7968fe176eac9817c`.
 
 This records the first experiment. The [follow-up](viability-followup.md) now

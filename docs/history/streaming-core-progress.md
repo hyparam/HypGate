@@ -1,6 +1,8 @@
 # Milestone 1: multi-chunk streaming and resource admission
 
-Status: implementation started; milestone 1 is not complete.
+Historical note: this records the first milestone-1 streaming/authorization increment. Milestone 1 is complete; this note is superseded by the [milestone 1 exit audit](../milestone-1-exit-audit.md), [runtime ownership](../runtime-ownership.md), and the current totals in the [README](../../README.md).
+
+Status at this checkpoint: implementation started; milestone 1 was not yet complete.
 
 `crates/gateway-core/src/stream.rs` replaces per-byte iteration with an immutable owned
 chunk, a borrowed slice view, and one outstanding write reservation. The older
@@ -9,7 +11,7 @@ experiments remain as research baselines. The core is now a Cargo library; it do
 `crates/gateway-core/src/resource.rs` adds `ResourceAdmission`, a bounded slot registry
 with opaque request keys, monotonically allocated owner IDs, and a configured
 per-request payload allowance. This is resource accounting, not caller authorization;
-the [security contract](security-contract.md) specifies that separate boundary.
+the [security contract](../security-contract.md) specifies that separate boundary.
 
 ## Write lifecycle
 
@@ -50,8 +52,9 @@ prove liveness or force a blocking syscall to return.
 
 The initial streaming and registry increment passed 15 verification checks.
 After extraction into the Cargo library and addition of authorization on 2026-10-23,
-the combined core passes **34 verified checks, 0 errors**, six integration tests,
-and 19 mutation checks (12 streaming/registry and seven authorization mutations).
+the combined core passed 34 verified checks, six integration tests, and 19 mutation
+checks (12 streaming/registry and seven authorization mutations). Those are the
+counts at that checkpoint; current totals are maintained in the [README](../../README.md).
 
 All public executable operations have Verus contracts. The invariant bounds the
 completed, reserved, and durable offsets; strict reservations remain within the
@@ -75,13 +78,7 @@ accepting a stale log acknowledgment. The registry runner rejects ID reuse,
 evicting a live request, changing the configured budget, and stale release.
 The runners distinguish failed proof obligations from incidental compiler errors.
 
-With the Verus/Rust versions pinned in [the experiment results](experiment-results.md):
-
-```sh
-cargo test --workspace --locked
-cargo verus verify -p gateway-core --locked -- --triggers-mode silent
-VERUS=/path/to/verus python3 scripts/check_mutations.py
-```
+The reproduction commands and pinned toolchain are in the [README](../../README.md).
 
 ## Boundaries and remaining work
 
@@ -99,7 +96,7 @@ The initial experiment exposed public constructors that could bypass that
 discipline. The production `OwnedStream` wrapper now consumes the key, owns the
 stream, and consumes both on retirement; raw construction/claim/release APIs are
 crate-private. Registry identity and async effects still require the bindings in
-[runtime ownership](runtime-ownership.md), not a whole-gateway isolation claim. Request IDs, chunk numbers, and write
+[runtime ownership](../runtime-ownership.md), not a whole-gateway isolation claim. Request IDs, chunk numbers, and write
 generations reject exhaustion rather than wrapping.
 
 The registry bounds logical active slots and offers a fixed allowance per slot.
@@ -118,7 +115,7 @@ and compose resource admission with the now-verified security token boundary.
 The library extraction is complete; connecting its contracts to the streaming
 adapter remains milestone 2 work.
 
-Follow-up: the [runtime ownership wrapper](runtime-ownership.md) enforces private
+Follow-up: the [runtime ownership wrapper](../runtime-ownership.md) enforces private
 stream/lease ownership in safe Rust and tests cleanup and cross-registry tickets.
 This is not a proof of composed resource release or complete allocation accounting.
 

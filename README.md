@@ -85,7 +85,7 @@ The [implementation milestones](docs/implementation-plan.md) are the active plan
 with all six complete under their documented assumptions. The [milestone 6 exit
 audit](docs/milestone-6-exit-audit.md) records the composed ownership and submission
 proofs, production correspondence, and remaining trusted boundaries.
-The [first streaming-core increment](docs/streaming-core-progress.md) records the
+The [first streaming-core increment](docs/history/streaming-core-progress.md) records the
 current interface, checked behavior, and remaining milestone-one work.
 The [proof index](docs/proof-index.md) maps advertised guarantees to exact source
 contracts and the assumptions still required for composition. The
@@ -133,13 +133,13 @@ The [end-to-end audit](docs/end-to-end-audit.md) traces one request from
 authorization through every enumerated network and disk effect site, each failure
 exit, and shutdown, marking every step proved, tested, or assumed.
 
-See [language and verification research](docs/verification-research.md) for the
+See [language and verification research](docs/history/verification-research.md) for the
 candidate comparison, agreed scope, proposed proof obligations, and next experiment.
 
-See [experiment results and implementation plan](docs/experiment-results.md) for
+See [experiment results and implementation plan](docs/history/experiment-results.md) for
 the initial comparison, Verus proof, limitations, and reproduction instructions.
 
-The [viability follow-up](docs/viability-followup.md) records byte-level Verus proofs
+The [viability follow-up](docs/history/viability-followup.md) records byte-level Verus proofs
 and the decision to continue with Rust and Verus. Perennial research is retained
 for reference; its experimental code was removed and remains in Git history at
 commit `7869347`.
