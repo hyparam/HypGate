@@ -183,14 +183,14 @@ async fn dropping_final_logger_handle_wakes_and_releases_idle_worker() {
 #[tokio::test]
 async fn poisoned_fixed_queue_refuses_logging_and_worker_can_shutdown() {
     let mut log = DiskLog::start(sink(), 1, Duration::from_secs(2), [0; 16]).unwrap();
-    let queue = log.worker.lock().unwrap().queue.clone();
+    let queue = log.queue.0.clone();
     assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         queue.panic_during_encoding();
     })).is_err());
     assert!(!log.healthy());
     assert!(matches!(log.append(record(b"refused", 1)).await, Err(error) if error.kind() == io::ErrorKind::BrokenPipe));
     log.shutdown(Duration::from_secs(2)).await.unwrap();
-    assert!(log.worker.lock().unwrap().thread.is_none());
+    assert!(log.thread.lock().unwrap().is_none());
 }
 
 #[tokio::test]
@@ -303,7 +303,7 @@ async fn shutdown_closes_all_clones_drains_admitted_jobs_and_joins() {
     assert!(log.clone().append(record(b"late", 3)).await.is_err());
     release.send(()).unwrap();
     first.await.unwrap().unwrap(); second.await.unwrap().unwrap(); closing.await.unwrap().unwrap();
-    assert!(log.worker.lock().unwrap().thread.is_none());
+    assert!(log.thread.lock().unwrap().is_none());
     let mut expected = encode(record(b"first", 1)); expected.extend(encode(record(b"second", 2)));
     assert_eq!(*bytes.lock().unwrap(), expected);
     log.shutdown(Duration::from_secs(1)).await.unwrap();
@@ -321,13 +321,13 @@ async fn shutdown_deadline_does_not_wait_for_stuck_sync_or_replace_worker() {
     inside.await.unwrap();
     assert_eq!(log.shutdown(Duration::from_millis(20)).await.unwrap_err().kind(), io::ErrorKind::TimedOut);
     assert!(!log.healthy());
-    assert!(log.worker.lock().unwrap().thread.is_some());
+    assert!(log.thread.lock().unwrap().is_some());
     assert!(log.clone().append(record(b"late", 2)).await.is_err());
     release.send(()).unwrap();
     // The already-running sync may still finish durably after timeout.
     pending.await.unwrap().unwrap();
     log.shutdown(Duration::from_secs(1)).await.unwrap();
-    assert!(log.worker.lock().unwrap().thread.is_none());
+    assert!(log.thread.lock().unwrap().is_none());
 }
 
 // Errors are transient at the source so a scanner that incorrectly resumes could
@@ -429,14 +429,14 @@ async fn worker_panic_marks_health_failed_even_after_append_caller_is_canceled()
         caller.abort(); assert!(caller.await.err().unwrap().is_cancelled());
         assert!(log.healthy());
         release.send(()).unwrap();
-        while !log.worker.lock().unwrap().thread.as_ref().unwrap().is_finished() {
+        while !log.thread.lock().unwrap().as_ref().unwrap().is_finished() {
             tokio::task::yield_now().await;
         }
         // No live append observer or deadline was needed to detect worker death.
         assert!(!log.healthy());
         assert!(log.clone().append(record(b"later", 2)).await.is_err());
         assert_eq!(log.shutdown(Duration::from_secs(1)).await.unwrap_err().kind(), io::ErrorKind::Other);
-        assert!(log.worker.lock().unwrap().thread.is_none());
+        assert!(log.thread.lock().unwrap().is_none());
     }).await.unwrap();
 }
 

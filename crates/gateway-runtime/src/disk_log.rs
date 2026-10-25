@@ -37,15 +37,17 @@ type Job = (RecordFrame, Completion);
 /// to escape a stuck filesystem call. A timeout closes logging health permanently.
 #[derive(Clone)]
 pub struct DiskLog {
-    worker: Arc<Mutex<Worker>>,
+    queue: Arc<SharedQueue>,
+    thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
     healthy: Arc<AtomicBool>,
     deadline: Duration,
     session: [u8; 16],
     payload_limit: usize,
 }
 
-struct Worker { queue: Arc<Queue>, thread: Option<std::thread::JoinHandle<()>> }
-impl Drop for Worker { fn drop(&mut self) { self.queue.close(); } }
+// Dropping the last clone closes admission so the worker exits once drained.
+struct SharedQueue(Arc<Queue>);
+impl Drop for SharedQueue { fn drop(&mut self) { self.0.close(); } }
 
 // Health must not depend on an append caller surviving to observe failure.
 struct UnhealthyOnExit(Arc<AtomicBool>, Arc<Queue>);
@@ -121,13 +123,12 @@ impl DiskLog {
                 assert!(owner.release(released), "completed disk job owns active credit");
             }
         })?;
-        Ok(Self { worker: Arc::new(Mutex::new(Worker { queue, thread: Some(thread) })),
+        Ok(Self { queue: Arc::new(SharedQueue(queue)), thread: Arc::new(Mutex::new(Some(thread))),
             healthy, deadline, session, payload_limit })
     }
 
     pub fn healthy(&self) -> bool {
-        self.healthy.load(Ordering::Acquire)
-            && self.worker.lock().map(|worker| worker.queue.is_open()).unwrap_or(false)
+        self.healthy.load(Ordering::Acquire) && self.queue.0.is_open()
     }
 
     /// Close admission across all clones, drain queued jobs, and join the worker.
@@ -136,13 +137,13 @@ impl DiskLog {
         if deadline.is_zero() || deadline > Duration::from_secs(300) {
             return Err(io::ErrorKind::InvalidInput.into());
         }
-        self.worker.lock().unwrap().queue.close();
+        self.queue.0.close();
         let joined = tokio::time::timeout(deadline, async {
             loop {
                 {
-                    let mut worker = self.worker.lock().unwrap();
-                    if worker.thread.as_ref().is_none_or(|thread| thread.is_finished()) {
-                        if let Some(thread) = worker.thread.take() {
+                    let mut thread = self.thread.lock().unwrap();
+                    if thread.as_ref().is_none_or(|thread| thread.is_finished()) {
+                        if let Some(thread) = thread.take() {
                             if thread.join().is_err() {
                                 self.healthy.store(false, Ordering::Release);
                                 return Err(io::ErrorKind::Other.into());
@@ -194,10 +195,7 @@ impl DiskLog {
         (log, started, release, writes)
     }
     #[cfg(test)]
-    pub(crate) fn queued_for_test(&self) -> usize {
-        let worker = self.worker.lock().unwrap();
-        worker.queue.len()
-    }
+    pub(crate) fn queued_for_test(&self) -> usize { self.queue.0.len() }
     pub fn session(&self) -> [u8; 16] { self.session }
 }
 
@@ -212,8 +210,8 @@ impl AuditLog for DiskLog {
         // plus the worker's one active frame bound retained log payloads.
         // The queue lock serializes construction/insertion with shutdown.
         // Unlike an mpsc sender clone, this Arc cannot keep admission open
-        // after Queue::close. Do not hold the worker mutex while encoding.
-        let queue = self.worker.lock().map_err(|_| io::ErrorKind::BrokenPipe)?.queue.clone();
+        // after Queue::close.
+        let queue = self.queue.0.clone();
         // One deadline covers waiting for a free slot and waiting for the sync
         // acknowledgment: a worker that stops freeing slots fails the append and
         // poisons health exactly as a worker that stops acknowledging does.
