@@ -1,13 +1,12 @@
 # Security contract
 
-This contract was written before the transport existed. It records the obligations
-it imposed on the implementation and where each one stands. Core authorization,
-normalized configuration, streaming, resource, and upstream-mediation properties
-are checked. Production body writes pass the checked `ResolvedRoute::write_bytes`
-gate ([milestone 6 exit audit](milestone-6-exit-audit.md)), and the
-[end-to-end audit](end-to-end-audit.md) traces that mediation through every effect
-site and failure exit. Hyper, TLS, DNS, and the OS remain trusted adapters, and
-there is no single mechanized theorem over the async runtime. The
+The security properties the gateway must have, and where each one stands. Core
+authorization, normalized configuration, streaming, resource, and upstream-mediation
+properties are checked by Verus. Production body writes pass the checked
+`ResolvedRoute::write_bytes` gate ([milestone 6 exit audit](milestone-6-exit-audit.md)),
+and the [end-to-end audit](end-to-end-audit.md) traces that mediation through every
+effect site and failure exit. Hyper, TLS, DNS, and the OS remain trusted adapters,
+and there is no single mechanized theorem over the async runtime. The
 [authorization notes](authorization-core.md) give the exact boundary.
 
 ## Threat and policy boundary
