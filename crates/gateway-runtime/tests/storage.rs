@@ -2,6 +2,8 @@
 //! Never run these against an operator's normal log directory.
 use gateway_runtime::{disk_log::{DiskLog, LogReader, ScanError}, transfer::{AuditLog, Direction, LogRecord}};
 use std::{fs::{self, File}, io::Write, path::PathBuf, time::Duration};
+mod common;
+use common::TempDir;
 
 fn fixture() -> PathBuf {
     assert!(cfg!(target_os = "linux"), "storage fixture requires Linux");
@@ -9,8 +11,6 @@ fn fixture() -> PathBuf {
     assert_eq!(fs::read(root.join(".soundgate-ext4-fixture")).unwrap(), b"soundgate-private-ext4-64MiB\n");
     root
 }
-struct TestDir(PathBuf);
-impl Drop for TestDir { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); } }
 fn record(chunk: u64, bytes: &[u8]) -> LogRecord<'_> {
     LogRecord { tenant: 7, request: 11, chunk, direction: Direction::Upload, bytes }
 }
@@ -19,7 +19,7 @@ fn record(chunk: u64, bytes: &[u8]) -> LogRecord<'_> {
 #[ignore = "requires the isolated ext4 fixture created by scripts/check_storage.sh"]
 async fn filesystem_full_preserves_acknowledged_prefix_and_fails_closed() {
     tokio::time::timeout(Duration::from_secs(30), async {
-        let dir = TestDir(fixture().join("full-test")); fs::create_dir(&dir.0).unwrap();
+        let dir = TempDir(fixture().join("full-test")); fs::create_dir(&dir.0).unwrap();
         let path = dir.0.join("audit.log");
         let mut log = DiskLog::create(&path, 2, Duration::from_secs(5)).unwrap();
         let first = vec![17; 64 * 1024];

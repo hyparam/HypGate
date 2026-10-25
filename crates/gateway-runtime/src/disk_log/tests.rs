@@ -1,5 +1,6 @@
 use super::*;
-use std::{io::Cursor, sync::{Mutex, mpsc as blocking}, time::{SystemTime, UNIX_EPOCH}};
+use crate::test_support::TempDir;
+use std::{io::Cursor, sync::{Mutex, mpsc as blocking}};
 
 fn record(bytes: &[u8], chunk: u64) -> LogRecord<'_> {
     LogRecord { tenant: 1, request: 2, chunk, direction: Direction::Download, bytes }
@@ -36,25 +37,6 @@ fn header() -> Vec<u8> {
     let mut h = FILE_MAGIC.to_vec(); h.extend_from_slice(&[7; 16]);
     h.extend_from_slice(&Sha256::digest(&h)); h
 }
-struct TempDir(std::path::PathBuf);
-impl TempDir {
-    fn new() -> Self {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        loop {
-            // Wall-clock timestamps alone can collide across parallel tests.
-            let p = std::env::temp_dir().join(format!("soundgate-log-{}-{}-{}", std::process::id(),
-                SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos(),
-                NEXT.fetch_add(1, Ordering::Relaxed)));
-            match std::fs::create_dir(&p) {
-                Ok(()) => return Self(p),
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-                Err(error) => panic!("create disk-log test directory: {error}"),
-            }
-        }
-    }
-}
-impl Drop for TempDir { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }
 
 #[tokio::test]
 async fn maximum_record_roundtrips_and_excess_is_rejected_without_poisoning() {

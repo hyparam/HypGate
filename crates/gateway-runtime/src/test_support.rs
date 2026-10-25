@@ -18,3 +18,15 @@ pub(crate) async fn tls() -> (TcpListener, TlsAcceptor, RootCertStore) {
     let (_, acceptor, roots) = self_signed();
     (TcpListener::bind("127.0.0.1:0").await.unwrap(), acceptor, roots)
 }
+
+/// A fresh directory under the system temp dir, removed on drop.
+pub(crate) struct TempDir(pub(crate) std::path::PathBuf);
+impl TempDir {
+    pub(crate) fn new() -> Self {
+        let mut random = [0; 16]; getrandom::fill(&mut random).unwrap();
+        let name: String = random.iter().map(|b| format!("{b:02x}")).collect();
+        let path = std::env::temp_dir().join(format!("soundgate-test-{name}"));
+        std::fs::create_dir(&path).unwrap(); Self(path)
+    }
+}
+impl Drop for TempDir { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }

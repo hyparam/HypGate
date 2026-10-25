@@ -6,18 +6,8 @@ use sha2::{Digest, Sha256};
 use std::{fs::File, sync::Mutex};
 use tokio::net::TcpStream;
 use tokio_rustls::rustls::RootCertStore;
-use crate::test_support::{self_signed, tls};
+use crate::test_support::{self_signed, tls, TempDir};
 
-struct TempDir(std::path::PathBuf);
-impl TempDir {
-    fn new() -> Self {
-        let mut random = [0; 16]; getrandom::fill(&mut random).unwrap();
-        let name: String = random.iter().map(|b| format!("{b:02x}")).collect();
-        let path = std::env::temp_dir().join(format!("soundgate-server-{name}"));
-        std::fs::create_dir(&path).unwrap(); Self(path)
-    }
-}
-impl Drop for TempDir { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }
 fn config(port: u16, availability: bool) -> GatewayConfig { config_with_limits(port, availability, 1, 3) }
 fn config_with_limits(port: u16, availability: bool, requests: usize, chunk_bytes: usize) -> GatewayConfig {
     let routes = json!([{"tenant":1,"selector":7,"origin":0,"credential":0}]);

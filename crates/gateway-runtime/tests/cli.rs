@@ -1,14 +1,11 @@
-use std::{fs, io::{BufRead, BufReader, Read, Write}, net::TcpStream, process::{Child, Command, Stdio}, time::{Duration, SystemTime, UNIX_EPOCH}};
-
-struct Process(Child);
-impl Drop for Process { fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); } }
+use std::{fs, io::{BufRead, BufReader, Read, Write}, net::TcpStream, process::{Command, Stdio}, time::Duration};
+mod common;
+use common::{Process, TempDir};
 
 #[test]
 fn executable_starts_and_serves_health_with_real_configuration() {
-    let dir = std::env::temp_dir().join(format!("soundgate-cli-{}-{}", std::process::id(),
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
-    fs::create_dir(&dir).unwrap();
-    let root = dir.join("root.json"); let routes = dir.join("routes.json"); let log = dir.join("audit.log");
+    let dir = TempDir::new("soundgate-cli");
+    let root = dir.0.join("root.json"); let routes = dir.0.join("routes.json"); let log = dir.0.join("audit.log");
     fs::write(&root, br#"{"identities":[],"destinations":[],"credentials":[],"grants":[],"limits":{"requests":1,"chunk_bytes":4},"logging":"strict"}"#).unwrap();
     fs::write(&routes, br#"{"routes":[]}"#).unwrap();
     let mut child = Process(Command::new(env!("CARGO_BIN_EXE_soundgate"))
@@ -22,15 +19,13 @@ fn executable_starts_and_serves_health_with_real_configuration() {
     let mut response = String::new(); socket.read_to_string(&mut response).unwrap();
     assert!(response.starts_with("HTTP/1.1 200 OK")); assert!(response.contains("ok\n"));
     assert!(fs::metadata(log).unwrap().len() >= 56);
-    drop(child); fs::remove_dir_all(dir).unwrap();
+    drop(child); fs::remove_dir_all(&dir.0).unwrap();
 }
 
 #[test]
 fn scan_command_reports_valid_prefix_without_printing_payload_or_editing_log() {
     use gateway_runtime::{disk_log::DiskLog, transfer::{AuditLog, Direction, LogRecord}};
-    let dir = std::env::temp_dir().join(format!("soundgate-scan-{}-{}", std::process::id(),
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
-    fs::create_dir(&dir).unwrap(); let path = dir.join("audit.log");
+    let dir = TempDir::new("soundgate-scan"); let path = dir.0.join("audit.log");
     tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
         let mut log = DiskLog::create(&path, 1, Duration::from_secs(2)).unwrap();
         log.append(LogRecord { tenant: 1, request: 2, chunk: 3, direction: Direction::Upload,
@@ -50,5 +45,5 @@ fn scan_command_reports_valid_prefix_without_printing_payload_or_editing_log() {
         assert_eq!(rows[1]["status"], if incomplete { "incomplete" } else { "complete" });
         assert_eq!(fs::read(&path).unwrap(), before);
     }
-    fs::remove_dir_all(dir).unwrap();
+    fs::remove_dir_all(&dir.0).unwrap();
 }

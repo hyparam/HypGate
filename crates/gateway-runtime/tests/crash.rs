@@ -1,22 +1,9 @@
 //! Process death leaves the OS running: this validates process-crash recovery,
 //! not power loss, device caches, or the full filesystem durability assumption.
 use gateway_runtime::{disk_log::{DiskLog, LogReader, ScanError}, transfer::{AuditLog, Direction, LogRecord}};
-use std::{fs::{self, File}, io::{BufRead, BufReader, Write}, process::{Child, Command, Stdio}, time::Duration};
-
-struct Process(Child);
-impl Drop for Process { fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); } }
-struct TempDir(std::path::PathBuf);
-impl TempDir {
-    fn new() -> Self {
-        let mut nonce = [0; 16]; getrandom::fill(&mut nonce).unwrap();
-        let name: String = nonce.iter().map(|b| format!("{b:02x}")).collect();
-        let root = std::env::var_os("SOUNDGATE_STORAGE_TEST_DIR")
-            .map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);
-        let p = root.join(format!("soundgate-crash-{name}"));
-        fs::create_dir(&p).unwrap(); Self(p)
-    }
-}
-impl Drop for TempDir { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); } }
+use std::{fs::{self, File}, io::{BufRead, BufReader, Write}, process::{Command, Stdio}, time::Duration};
+mod common;
+use common::{Process, TempDir};
 
 #[test]
 fn crash_child() {
@@ -36,7 +23,7 @@ fn crash_child() {
 }
 
 fn kill_and_scan(pause_after_ack: bool) {
-    let dir = TempDir::new(); let path = dir.0.join("audit.log");
+    let dir = TempDir::new("soundgate-crash"); let path = dir.0.join("audit.log");
     let mut command = Command::new(std::env::current_exe().unwrap());
     command.args(["--exact", "crash_child", "--nocapture"])
         .env("SOUNDGATE_CRASH_CHILD_LOG", &path).stdout(Stdio::piped()).stderr(Stdio::piped());
