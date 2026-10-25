@@ -208,9 +208,10 @@ defect.
 ## Metadata records and outcome codes
 
 Every exit of `run_exchange` after the start record was attempted writes one
-completion record (kind 4) inline, unless the logger is unhealthy. The outcome
-code is `TransportError::outcome` for a failed exchange and fixed for the other
-exits:
+completion record (kind 4) inline, unless the logger is unhealthy. The transport
+returns the verified lifecycle's `Fault` directly, so the outcome code is the
+proved `exchange_lifecycle::outcome_of` of what happened, with no mapping in
+between:
 
 | Exit | Outcome | Notes |
 | --- | --- | --- |
@@ -230,8 +231,8 @@ there is no admitted request ID for steps 5 to 7, and steps 8 to 12 refuse
 before any append. Byte counts are zero on every non-success exit even when
 part of a body was forwarded; the body records themselves carry those bytes.
 Clock values are the system clock in milliseconds, clamped to `u64` and zero
-for a pre-epoch clock; nothing orders records across processes. The mapping is
-exhaustive over `TransportError` by construction and tested for success,
+for a pre-epoch clock; nothing orders records across processes. The outcome
+function is proved total over `Fault`; the exits are tested for success,
 truncation, disconnect, timeout, and start-record refusal.
 
 ## Shutdown

@@ -14,21 +14,12 @@ pub trait ResponseSink: AsyncWrite + Unpin {
     /// Complete a successful body and drain any sink-owned application queue.
     fn finish(&mut self) -> impl Future<Output = io::Result<()>> + Send { async { Ok(()) } }
 }
-/// `Log` is a strict-mode refusal: a body or response-head append failed, so
-/// no further bytes were forwarded. Availability mode never returns it.
-#[derive(Debug, PartialEq, Eq)]
-pub enum TransportError { Timeout, Connect, Tls, Http, Metadata, Upload, Download, Client, Log }
-impl TransportError {
-    /// The lifecycle fault this error names; the verified lifecycle maps it to
-    /// the completion record's outcome code.
-    pub fn fault(&self) -> Fault {
-        match self {
-            Self::Connect => Fault::Connect, Self::Tls => Fault::Tls, Self::Http => Fault::Http,
-            Self::Timeout => Fault::Timeout, Self::Upload => Fault::Upload, Self::Download => Fault::Download,
-            Self::Client => Fault::Client, Self::Log => Fault::Log, Self::Metadata => Fault::Metadata,
-        }
-    }
-}
+/// A failed exchange names the verified lifecycle's fault directly, so the
+/// completion record's outcome code is a checked function of what happened
+/// with no mapping in between. `Log` is a strict-mode refusal: a body or
+/// response-head append failed, so no further bytes were forwarded.
+/// Availability mode never returns it.
+pub type TransportError = Fault;
 // A strict-mode logging refusal during a body copy keeps its own code; other
 // transfer failures are attributed to the direction being copied.
 fn body_error(error: TransferError, direction: TransportError) -> TransportError {

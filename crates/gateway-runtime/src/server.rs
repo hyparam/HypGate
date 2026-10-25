@@ -154,7 +154,7 @@ impl Gateway {
                 let _ = output.shutdown().await; // only success sends the clean EOF marker
             }
             Some(Err(e)) => {
-                life.failed(e.fault());
+                life.failed(e);
                 self.failed_exchanges.fetch_add(1, Ordering::Relaxed);
                 if output.head.is_some() {
                     let status = if e == TransportError::Timeout { StatusCode::GATEWAY_TIMEOUT } else { StatusCode::BAD_GATEWAY };
