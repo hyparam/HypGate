@@ -13,3 +13,4 @@ mod credited_job;
 #[cfg(test)]
 mod test_support;
 pub mod server;
+pub mod shipping;

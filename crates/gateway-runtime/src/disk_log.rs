@@ -310,6 +310,13 @@ impl<R: Read> LogReader<R> {
     pub fn new(reader: R) -> Result<Self, ScanError> {
         Ok(Self { scanner: gateway_core::recovery::Scanner::new(ReadSource { reader })? })
     }
+    /// Continue a file whose header `new` already validated, from a byte offset
+    /// an earlier reader reported as its valid end. The reader must already be
+    /// positioned at that offset.
+    pub fn resume(reader: R, session: [u8; 16], offset: u64) -> Result<Self, ScanError> {
+        if offset < 56 { return Err(ScanError::Corrupt); }
+        Ok(Self { scanner: gateway_core::recovery::Scanner::resume(ReadSource { reader }, session, offset) })
+    }
     pub fn session(&self) -> [u8; 16] { self.scanner.session() }
     pub fn valid_end(&self) -> u64 { self.scanner.offset() }
     pub fn next_record(&mut self) -> Result<Option<StoredRecord>, ScanError> {

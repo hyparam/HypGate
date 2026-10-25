@@ -23,6 +23,11 @@ struct Root {
     grants: Vec<RouteInput>,
     limits: Limits,
     logging: Logging,
+    // Parsed separately by `shipping::ShippingConfig`; the gateway's own
+    // configuration never holds the cloud token or server.
+    #[serde(default)]
+    #[allow(dead_code)]
+    shipping: Option<serde::de::IgnoredAny>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -77,7 +82,7 @@ fn destination(text: &str) -> Result<Destination, ConfigError> {
     Ok(Destination { uri: destination_uri(text)?, text: text.to_owned() })
 }
 
-fn destination_uri(text: &str) -> Result<Uri, ConfigError> {
+pub(crate) fn destination_uri(text: &str) -> Result<Uri, ConfigError> {
     // Keep spelling strict rather than rely on permissive URL normalization.
     if text.len() > MAX_DESTINATION_BYTES || !text.starts_with("https://") || !text.is_ascii()
         || text.bytes().any(|b| b <= 32 || b == 127 || b == b'\\' || b == b'#') {
