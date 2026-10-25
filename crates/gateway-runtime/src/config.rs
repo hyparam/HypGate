@@ -36,9 +36,9 @@ enum CredentialKind { Bearer, ApiKey }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RouteInput { tenant: u64, selector: u64, origin: usize, credential: usize }
-impl RouteInput {
-    fn core(self) -> Route {
-        Route { tenant: self.tenant, selector: self.selector, origin: self.origin, credential: self.credential }
+impl From<RouteInput> for Route {
+    fn from(input: RouteInput) -> Self {
+        Self { tenant: input.tenant, selector: input.selector, origin: input.origin, credential: input.credential }
     }
 }
 #[derive(Deserialize)]
@@ -135,8 +135,8 @@ impl GatewayConfig {
         let destinations = root.destinations.into_iter().map(|s| destination(&s))
             .collect::<Result<Vec<_>, _>>()?;
         let owners = root.credentials.iter().map(|c| c.tenant).collect();
-        let policy = Policy::validate(identities, root.grants.into_iter().map(RouteInput::core).collect(),
-            candidate.routes.into_iter().map(RouteInput::core).collect(), destinations.len(), owners)
+        let policy = Policy::validate(identities, root.grants.into_iter().map(Route::from).collect(),
+            candidate.routes.into_iter().map(Route::from).collect(), destinations.len(), owners)
             .ok_or(ConfigError::Policy)?;
         let mut credentials = Vec::new();
         for input in root.credentials {
@@ -174,8 +174,6 @@ impl<'a> RoutedRequest<'a> {
         crate::transfer::copy_body_bound(&mut self.request, reader, writer, log, direction, &self.resolved).await
     }
     pub(crate) fn stream(&mut self) -> &mut Request<'a> { &mut self.request }
-    pub fn request_id(&self) -> u64 { self.request.request_id() }
-    pub fn tenant_id(&self) -> u64 { self.request.tenant_id() }
     pub fn destination(&self) -> &Uri {
         self.resolved.destination(self.request.authority()).expect("private request/route binding")
     }

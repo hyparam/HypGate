@@ -68,7 +68,7 @@ impl HttpsTransport {
         let port = prepared.destination().port_u16().unwrap_or(443);
         let server = ServerName::try_from(host.clone()).map_err(|_| TransportError::Metadata)?;
         let tcp = {
-            let addresses = self.resolver.resolve(host.clone(), port).await.map_err(|_| TransportError::Connect)?
+            let addresses = self.resolver.resolve(host, port).await.map_err(|_| TransportError::Connect)?
                 .adopt(prepared.stream()).map_err(|_| TransportError::Connect)?;
             TcpStream::connect(addresses.as_slice()).await.map_err(|_| TransportError::Connect)?
         };

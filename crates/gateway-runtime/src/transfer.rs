@@ -42,6 +42,7 @@ pub struct TransferStats {
 pub(crate) trait BodyBinding: Sync {
     fn bytes<'r>(&self, request: &'r Request<'_>, ticket: &crate::admission::WriteTicket<'_>, direction: Direction) -> Option<&'r [u8]>;
 }
+#[cfg(test)]
 impl BodyBinding for () {
     fn bytes<'r>(&self, request: &'r Request<'_>, ticket: &crate::admission::WriteTicket<'_>, direction: Direction) -> Option<&'r [u8]> {
         request.pending_bytes(ticket, direction)
@@ -53,16 +54,17 @@ impl<D: Sync, C: Sync> BodyBinding for gateway_core::resolved_route::ResolvedRou
     }
 }
 
-/// Copy one body sequentially using one outstanding write and one awaited log
-/// append. Successful EOF leaves the request usable for the next direction.
-/// Errors or cancellation close it. EOF/framing correctness belongs to the HTTP
-/// body adapter. No detached task, transparent retry, or whole-body buffering.
-pub async fn copy_body<R, W, L>(request: &mut Request<'_>, reader: &mut R,
+#[cfg(test)]
+pub(crate) async fn copy_body<R, W, L>(request: &mut Request<'_>, reader: &mut R,
     writer: &mut W, log: &mut L, direction: Direction) -> Result<TransferStats, TransferError>
 where R: AsyncRead + Unpin, W: AsyncWrite + Unpin, L: AuditLog {
     copy_body_bound(request, reader, writer, log, direction, &()).await
 }
 
+/// Copy one body sequentially using one outstanding write and one awaited log
+/// append. Successful EOF leaves the request usable for the next direction.
+/// Errors or cancellation close it. EOF/framing correctness belongs to the HTTP
+/// body adapter. No detached task, transparent retry, or whole-body buffering.
 pub(crate) async fn copy_body_bound<R, W, L, B>(request: &mut Request<'_>, reader: &mut R,
     writer: &mut W, log: &mut L, direction: Direction, binding: &B) -> Result<TransferStats, TransferError>
 where R: AsyncRead + Unpin, W: AsyncWrite + Unpin, L: AuditLog, B: BodyBinding {

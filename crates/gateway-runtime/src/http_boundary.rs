@@ -38,8 +38,6 @@ impl<'a> PreparedRequest<'a> {
     where R: tokio::io::AsyncRead + Unpin, W: tokio::io::AsyncWrite + Unpin, L: crate::transfer::AuditLog {
         self.routed.copy_body(reader, writer, log, direction).await
     }
-    pub fn request_id(&self) -> u64 { self.routed.request_id() }
-    pub fn tenant_id(&self) -> u64 { self.routed.tenant_id() }
     pub fn destination(&self) -> &Uri { self.routed.destination() }
     pub(crate) fn stream(&mut self) -> &mut crate::admission::Request<'a> { self.routed.stream() }
     // Validate the configured binding before any DNS/TCP/TLS effect, then move
