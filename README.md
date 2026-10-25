@@ -6,41 +6,38 @@ exchange to an audit log on disk, and optionally ships that log to
 [HypAware](https://hypaware.ai) for analysis. No provider API translation, no
 plugins, no other network destinations.
 
-What makes it different: every decision the gateway makes, including who may
-send what where, which bytes are forwarded, what is logged, and what is shipped
-and when, lives in a Rust crate that [Verus](https://github.com/verus-lang/verus)
-proves correct against written contracts. Other gateways are tested on
-examples. LogGate's core is proved on all inputs, and the unverified code
-that touches sockets, TLS, and files is kept thin, audited, and lint-pinned.
+What makes it different: the code that decides what the gateway does is
+proved correct with [Verus](https://github.com/verus-lang/verus). Other
+gateways are tested on examples. LogGate's core is proved for every input, and
+the code that talks to the network and disk is kept small and audited.
 
 ## Three guarantees
 
-### 1. Your traffic goes only where you said
+### 1. Your data only goes where you configured
 
-Request bodies reach only the provider a grant names, with that grant's
-credential. Audit records go only to the local log file. Log contents leave
-the machine only to the one HypAware server you configured. No other socket
-exists in the binary.
+Requests go to the provider you set up, using the key you set up. Logs go to
+the log file on disk. If you turn on shipping, logs go to your HypAware server
+and nowhere else. There is no other network connection in the binary.
 
-### 2. What was logged is what is shipped, once and in order
+### 2. HypAware gets exactly what was logged, once, in order
 
-Every exchange in the log is uploaded in emission order. An upload counts only
-when HypAware acknowledges the exact batch it was sent. A restart replays from
-the log with identical identities, so nothing is lost or duplicated.
+Every exchange in the log is uploaded in the order it happened. An upload only
+counts when the server confirms it received that exact batch. If the gateway
+restarts, it picks up from the log, so nothing is lost and nothing is sent
+twice.
 
-### 3. There is no crash state
+### 3. It cannot crash
 
-The verified core cannot panic, overflow, or index out of bounds. A process
-kill at any point resumes to a state consistent with the log. The shipper runs
-on its own thread, and its failure changes metrics and nothing else.
+The verified core cannot panic, overflow, or read out of bounds. If the
+process is killed at any moment, it restarts in a state that matches the log.
+Shipping runs on its own thread, so if it fails, the gateway keeps serving
+requests.
 
-Each guarantee is a theorem over the verified core, joined to the outside world
-by a small, enumerated set of trusted adapters. [PROOFS.md](PROOFS.md) states
-each one precisely, names its premises, and lists every finer-grained property
-proved beneath it. What is not verified: Tokio, Hyper, rustls, the OS, DNS and
-PKI, the filesystem under power loss, the HypAware server honoring its ledger,
-and provider-specific JSON parsing. Each is a named premise of a theorem, not
-an unstated gap.
+These are theorems about the verified core, plus a short list of things we
+trust and do not prove: Tokio, Hyper, rustls, the OS, DNS, TLS certificates,
+the filesystem under power loss, the HypAware server, and provider JSON
+parsing. [PROOFS.md](PROOFS.md) states each guarantee exactly and lists every
+assumption.
 
 ## Why verify an AI gateway?
 
