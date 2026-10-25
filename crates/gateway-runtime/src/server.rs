@@ -32,8 +32,7 @@ pub struct Gateway {
 }
 impl Gateway {
     pub fn new(config: GatewayConfig, transport: HttpsTransport, log: DiskLog) -> Arc<Self> {
-        let limit = config.usage().map(|(_, limit)| limit).unwrap_or(0);
-        Arc::new(Self { worker_slots: WorkerSlots::new(limit), config: Arc::new(config), transport, log, workers: TaskTracker::new(),
+        Arc::new(Self { worker_slots: WorkerSlots::new(config.request_limit()), config: Arc::new(config), transport, log, workers: TaskTracker::new(),
             connection_slots: std::sync::OnceLock::new(),
             cancel_workers: tokio_util::sync::CancellationToken::new(),
             audit_gaps: AtomicU64::new(0), failed_exchanges: AtomicU64::new(0) })
@@ -42,28 +41,31 @@ impl Gateway {
     pub fn failed_exchanges(&self) -> u64 { self.failed_exchanges.load(Ordering::Relaxed) }
 
     async fn handle(self: Arc<Self>, request: Request<Incoming>, responses: http_body::ConnectionResponses) -> Result<Response<GatewayBody>, Infallible> {
-        if request.method() == http::Method::GET && request.uri().path() == "/metrics" {
-            let mut text = format!("soundgate_audit_gap_requests_total {}\nsoundgate_failed_exchanges_total {}\nsoundgate_audit_healthy {}\n",
-                self.audit_gaps(), self.failed_exchanges(), u8::from(self.log.healthy()));
-            text.push_str(&format!("soundgate_worker_admission_healthy {}\n", u8::from(self.worker_slots.healthy())));
-            match self.config.usage() {
-                Some((active, limit)) => text.push_str(&format!("soundgate_admission_healthy 1\nsoundgate_requests_active {active}\nsoundgate_requests_limit {limit}\n")),
-                None => text.push_str("soundgate_admission_healthy 0\n"),
+        if request.method() == http::Method::GET {
+            match request.uri().path() {
+                "/metrics" => {
+                    use std::fmt::Write as _;
+                    let mut text = format!("soundgate_audit_gap_requests_total {}\nsoundgate_failed_exchanges_total {}\nsoundgate_audit_healthy {}\nsoundgate_worker_admission_healthy {}\n",
+                        self.audit_gaps(), self.failed_exchanges(), u8::from(self.log.healthy()), u8::from(self.worker_slots.healthy()));
+                    match self.config.usage() {
+                        Some((active, limit)) => { let _ = write!(text, "soundgate_admission_healthy 1\nsoundgate_requests_active {active}\nsoundgate_requests_limit {limit}\n"); }
+                        None => text.push_str("soundgate_admission_healthy 0\n"),
+                    }
+                    let mut response = Response::new(GatewayBody::Fixed(Full::new(Bytes::from(text))));
+                    response.headers_mut().insert("content-type", http::HeaderValue::from_static("text/plain; version=0.0.4"));
+                    return Ok(response);
+                }
+                "/healthz" => return Ok(fixed(StatusCode::OK, "ok\n")),
+                "/readyz" => {
+                    if !self.config.admission_healthy() || !self.worker_slots.healthy() {
+                        return Ok(fixed(StatusCode::SERVICE_UNAVAILABLE, "admission unavailable\n"));
+                    }
+                    let ready = !self.config.requires_audit() || self.log.healthy();
+                    return Ok(fixed(if ready { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE },
+                        if ready { "ready\n" } else { "audit unavailable\n" }));
+                }
+                _ => {}
             }
-            let mut response = Response::new(GatewayBody::Fixed(Full::new(Bytes::from(text))));
-            response.headers_mut().insert("content-type", http::HeaderValue::from_static("text/plain; version=0.0.4"));
-            return Ok(response);
-        }
-        if request.method() == http::Method::GET && request.uri().path() == "/healthz" {
-            return Ok(fixed(StatusCode::OK, "ok\n"));
-        }
-        if request.method() == http::Method::GET && request.uri().path() == "/readyz" {
-            if !self.config.admission_healthy() || !self.worker_slots.healthy() {
-                return Ok(fixed(StatusCode::SERVICE_UNAVAILABLE, "admission unavailable\n"));
-            }
-            let ready = !self.config.requires_audit() || self.log.healthy();
-            return Ok(fixed(if ready { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE },
-                if ready { "ready\n" } else { "audit unavailable\n" }));
         }
         let lease = match self.worker_slots.acquire(&self.workers) {
             Some(lease) => lease,
@@ -84,47 +86,50 @@ impl Gateway {
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => {},
-                _ = async {
-            let mut output = Output { head: Some(head), writer };
-            let prepared = match http_boundary::prepare_request_parts(&app.config, parts) {
-                Ok(p) => p,
-                Err(e) => {
-                    let _ = output.start(e.status(), HeaderMap::new()).await;
-                    let _ = output.shutdown().await;
-                    return;
-                }
-            };
-            // If strict logging is already unavailable, do not even open an
-            // upstream connection. Later failures still use the stream gate.
-            if app.config.requires_audit() && !app.log.healthy() {
-                let _ = output.start(StatusCode::SERVICE_UNAVAILABLE, HeaderMap::new()).await;
-                let _ = output.shutdown().await;
-                return;
-            }
-            let mut log = ObservedLog { log: app.log.clone(), gaps: &app.audit_gaps,
-                availability: !app.config.requires_audit(), reported: false };
-            let Some(mut input) = http.input(input) else { return; };
-            let result = app.transport.exchange(prepared, &mut input, &mut output, &mut log, &http).await;
-            match result {
-                Ok(_) => {
-                    let _ = output.shutdown().await; // only success sends the clean EOF marker
-                }
-                Err(e) => {
-                    app.failed_exchanges.fetch_add(1, Ordering::Relaxed);
-                    if output.head.is_some() {
-                        let status = if e == TransportError::Timeout { StatusCode::GATEWAY_TIMEOUT } else { StatusCode::BAD_GATEWAY };
-                        let _ = output.start(status, HeaderMap::new()).await;
-                        let _ = output.shutdown().await;
-                    }
-                    // After headers, dropping the writer makes the body fail;
-                    // never turn a truncated generation into successful HTTP EOF.
-                }
-            }
-                } => {},
+                _ = app.run_exchange(http, parts, input, Output { head: Some(head), writer }) => {},
             }
         });
         let guard = AbortOnDrop(Some(task));
         worker_response(headers, body, guard).await
+    }
+
+    async fn run_exchange(self: Arc<Self>, http: http_body::WorkerHttp, parts: http::request::Parts,
+        input: Incoming, mut output: Output)
+    {
+        let prepared = match http_boundary::prepare_request_parts(&self.config, parts) {
+            Ok(p) => p,
+            Err(e) => {
+                let _ = output.start(e.status(), HeaderMap::new()).await;
+                let _ = output.shutdown().await;
+                return;
+            }
+        };
+        // If strict logging is already unavailable, do not even open an
+        // upstream connection. Later failures still use the stream gate.
+        if self.config.requires_audit() && !self.log.healthy() {
+            let _ = output.start(StatusCode::SERVICE_UNAVAILABLE, HeaderMap::new()).await;
+            let _ = output.shutdown().await;
+            return;
+        }
+        let mut log = ObservedLog { log: self.log.clone(), gaps: &self.audit_gaps,
+            availability: !self.config.requires_audit(), reported: false };
+        let Some(mut input) = http.input(input) else { return; };
+        let result = self.transport.exchange(prepared, &mut input, &mut output, &mut log, &http).await;
+        match result {
+            Ok(_) => {
+                let _ = output.shutdown().await; // only success sends the clean EOF marker
+            }
+            Err(e) => {
+                self.failed_exchanges.fetch_add(1, Ordering::Relaxed);
+                if output.head.is_some() {
+                    let status = if e == TransportError::Timeout { StatusCode::GATEWAY_TIMEOUT } else { StatusCode::BAD_GATEWAY };
+                    let _ = output.start(status, HeaderMap::new()).await;
+                    let _ = output.shutdown().await;
+                }
+                // After headers, dropping the writer makes the body fail;
+                // never turn a truncated generation into successful HTTP EOF.
+            }
+        }
     }
 }
 
