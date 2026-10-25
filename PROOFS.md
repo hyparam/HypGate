@@ -64,18 +64,38 @@ the gate's bytes to the socket it opened under the permit and the machine's
 requests to the client it built from the configured server; `send_request`
 and `write_all` sites are still enumerated by review rather than lint.
 
-## Guarantee 2: what was logged is what is shipped, once and in order
+## Guarantee 2: correctness, starting with no data loss
 
-**Statement.** Every exchange recorded in the audit log is grouped from its
-records in file order, bounded in retained size with truncation recorded,
-projected into rows whose identities are a function of the log alone, and
-uploaded in emission order. An exchange is counted as delivered only when the
-server acknowledges the exact batch it was sent in. A restart replays the log
-and resends at most what was unacknowledged, with identical identities, so the
-server's dedup stores each exchange once.
+**Statement.** Nothing is silently lost, altered, or duplicated between the
+provider, the audit log, and HypAware. In strict mode a body byte is released
+to the socket only after its audit record has a durable receipt, so the log is
+complete for everything the provider or client saw; a logging failure fails the
+request rather than skipping the record, and availability mode counts every
+gap it allows. Forwarded bytes are an unchanged, ordered prefix of the input.
+Every acknowledged record survives a crash in the storage model, and recovery
+exposes only complete records. Every exchange recorded in the audit log is
+grouped from its records in file order, bounded in retained size with
+truncation recorded, projected into rows whose identities are a function of
+the log alone, and uploaded in emission order. An exchange is counted as
+delivered only when the server acknowledges the exact batch it was sent in. A
+restart replays the log and resends at most what was unacknowledged, with
+identical identities, so the server's dedup stores each exchange once. A
+truncated stream is never reported as a clean completion.
 
 **Proved today.**
 
+- Strict mode gates every body range on an exact durable receipt for that
+  request, chunk, direction, and payload (`ResolvedRoute::write_bytes`,
+  `StreamChunk::{prepare,pending_bytes,complete}`); the logging-mode
+  transitions keep authorization identical in availability mode.
+- Forwarded bytes are an ordered, unchanged prefix of the input across chunks
+  and partial writes, with no skipped or duplicated advancement; cancellation
+  prevents new submissions and a failed or truncated stream cannot complete as
+  success.
+- Acknowledged records survive every crash in the storage model
+  (`Journal::acknowledged_prefix_survives`), and the acknowledged prefix is
+  reconstructed in order under the read and checksum contracts
+  (`AuditJournal::reconstruct_acknowledged`).
 - The scanner returns only complete, checksum-valid records and resumes at a
   validated offset in the same session.
 - The assembler keeps open exchanges bounded and unique per request, retains
@@ -109,8 +129,10 @@ server's dedup stores each exchange once.
   only on an acknowledgment or a poison, so a crash before the checkpoint is
   written causes a resend, never a skip.
 
-**Premises.** Hex encoding; the server honors its batch ledger and part-id
-dedup; the projection of an exchange's provider JSON into text and usage is
+**Premises.** The storage contract (synced bytes survive, see the
+[storage contract](docs/storage-crash-contract.md)); the disk adapter reports
+write and sync outcomes truthfully; hex encoding; the server honors its batch
+ledger and part-id dedup; the projection of an exchange's provider JSON into text and usage is
 faithful (tested against recorded bodies, not proved); the runtime's `Effects`
 implementation performs what it is asked (sends to the configured server,
 returns the log's records in order, writes the checkpoint it is given); the

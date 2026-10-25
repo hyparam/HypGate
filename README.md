@@ -13,18 +13,33 @@ the code that talks to the network and disk is kept small and audited.
 
 ## Three guarantees
 
-### 1. Your data only goes where you configured
+### 1. Data only goes where you configured
 
 Requests go to the provider you set up, using the key you set up. Logs go to
 the log file on disk. If you turn on shipping, logs go to your HypAware server
 and nowhere else. There is no other network connection in the binary.
 
-### 2. HypAware gets exactly what was logged, once, in order
+### 2. Correctness: no data loss
 
-Every exchange in the log is uploaded in the order it happened. An upload only
-counts when the server confirms it received that exact batch. If the gateway
-restarts, it picks up from the log, so nothing is lost and nothing is sent
-twice.
+Nothing is silently lost, altered, or duplicated between the provider, the log,
+and HypAware.
+
+- **The log is complete.** In strict mode no byte reaches the provider or the
+  client before its log record is on disk and synced. If a record cannot be
+  written, the request fails instead of going unlogged. Availability mode may
+  forward without a record, but every such gap is counted and reported.
+- **The log is exact.** Logged bytes are the bytes that were forwarded, in
+  order, with no gaps or repeats within a request.
+- **Records survive a crash.** Every record the gateway acknowledged is still
+  there after the process is killed. Recovery reports only complete records and
+  never rewrites, truncates, or replays the file.
+- **What was logged is what is shipped.** Every exchange in the log is uploaded
+  in the order it happened. An upload only counts when the server confirms it
+  received that exact batch. After a restart the gateway resends only what was
+  not confirmed, with the same identities, so the server stores each exchange
+  once.
+- **Failures are honest.** A truncated stream is reported as an error, never as
+  a clean completion. An exchange cut short by the size cap is marked truncated.
 
 ### 3. It cannot crash
 
