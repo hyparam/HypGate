@@ -104,7 +104,7 @@ impl Gateway {
             let mut log = ObservedLog { log: app.log.clone(), gaps: &app.audit_gaps,
                 availability: !app.config.requires_audit(), reported: false };
             let Some(mut input) = http.input(input) else { return; };
-            let result = app.transport.exchange_with_http(prepared, &mut input, &mut output, &mut log, &http).await;
+            let result = app.transport.exchange(prepared, &mut input, &mut output, &mut log, &http).await;
             match result {
                 Ok(_) => {
                     let _ = output.shutdown().await; // only success sends the clean EOF marker

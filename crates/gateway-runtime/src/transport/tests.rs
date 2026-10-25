@@ -49,6 +49,12 @@ fn prepare(c: &GatewayConfig) -> PreparedRequest<'_> {
     h.insert("x-api-key", "caller-key".parse().unwrap());
     http_boundary::prepare(c, &http::Method::POST, &"/routes/7".parse().unwrap(), &h).unwrap()
 }
+// Each exchange needs its own worker: a worker issues every HTTP role once.
+fn worker_http() -> http_body::WorkerHttp {
+    let registry = Arc::new(std::sync::Mutex::new(gateway_core::http_worker::WorkerRegistry::new(1)));
+    let (_task, issuer) = registry.lock().unwrap().acquire().unwrap();
+    http_body::WorkerHttp::new(registry, issuer)
+}
 async fn tls() -> (TcpListener, TlsAcceptor, RootCertStore) {
     let cert = generate_simple_self_signed(vec!["localhost".into()]).unwrap();
     let mut roots = RootCertStore::empty(); roots.add(cert.cert.der().clone()).unwrap();
@@ -80,7 +86,8 @@ async fn tls_exchange_preserves_native_payloads_and_scoped_credentials() {
     let mut output = Output::new(); let mut log = Log::default();
     let transport = HttpsTransport::with_roots(roots, Duration::from_secs(5)).unwrap();
     let mut input = &b"{\"stream\":true}"[..];
-    let exchange = transport.exchange(prepare(&config), &mut input, &mut output, &mut log);
+    let http = worker_http();
+    let exchange = transport.exchange(prepare(&config), &mut input, &mut output, &mut log, &http);
     let (result, ()) = tokio::join!(exchange, upstream);
     let stats = result.unwrap();
     assert_eq!(output.status, Some(StatusCode::OK));
@@ -101,7 +108,8 @@ async fn untrusted_certificate_is_rejected_before_http_credentials_are_sent() {
     };
     let transport = HttpsTransport::with_roots(RootCertStore::empty(), Duration::from_secs(5)).unwrap();
     let mut output = Output::new(); let mut log = Log::default(); let mut input = &b"secret body"[..];
-    let (result, ()) = tokio::join!(transport.exchange(prepare(&config), &mut input, &mut output, &mut log), upstream);
+    let http = worker_http();
+    let (result, ()) = tokio::join!(transport.exchange(prepare(&config), &mut input, &mut output, &mut log, &http), upstream);
     assert!(matches!(result, Err(TransportError::Tls))); assert!(output.status.is_none());
     assert!(log.upload.is_empty()); assert!(config.admit(b"gateway", 7).is_ok());
 }
@@ -129,7 +137,8 @@ async fn trusted_certificate_with_large_wrong_purpose_list_is_rejected_before_up
             let transport = HttpsTransport::with_roots(roots, Duration::from_secs(3)).unwrap();
             let mut output = Output::new(); let mut log = Log::default();
             let mut input = &b"secret body"[..];
-            let (result, ()) = tokio::join!(transport.exchange(prepare(&config), &mut input, &mut output, &mut log), provider);
+            let http = worker_http();
+            let (result, ()) = tokio::join!(transport.exchange(prepare(&config), &mut input, &mut output, &mut log, &http), provider);
             assert!(matches!(result, Err(TransportError::Tls)));
             assert_eq!(input, b"secret body");
             assert!(output.status.is_none()); assert!(output.bytes.is_empty());
@@ -440,7 +449,8 @@ async fn tls_key_update_burst_limit_rejects_without_response_or_replay() {
             };
             let transport = HttpsTransport::with_roots(roots, Duration::from_secs(3)).unwrap();
             let mut output = Output::new(); let mut log = Log::default(); let mut input = &b""[..];
-            let (result, ()) = tokio::join!(transport.exchange(prepare(&config), &mut input, &mut output, &mut log), provider);
+            let http = worker_http();
+            let (result, ()) = tokio::join!(transport.exchange(prepare(&config), &mut input, &mut output, &mut log, &http), provider);
             if updates == 32 {
                 result.unwrap(); assert_eq!(output.status, Some(StatusCode::OK));
                 assert_eq!(output.bytes, b"ok"); assert_eq!(log.download, b"ok");
@@ -479,7 +489,8 @@ async fn oversized_handshake_is_rejected_from_its_length_before_upload() {
             let transport = HttpsTransport::with_roots(RootCertStore::empty(), Duration::from_secs(1)).unwrap();
             let mut output = Output::new(); let mut log = Log::default();
             let mut input = &b"secret body"[..];
-            let (result, ()) = tokio::join!(transport.exchange(prepare(&config), &mut input, &mut output, &mut log), provider);
+            let http = worker_http();
+            let (result, ()) = tokio::join!(transport.exchange(prepare(&config), &mut input, &mut output, &mut log, &http), provider);
             let expected = if declared == 65535 { TransportError::Timeout } else { TransportError::Tls };
             assert!(matches!(result, Err(ref error) if *error == expected));
             assert_eq!(input, b"secret body");
@@ -507,7 +518,8 @@ async fn redirects_are_returned_without_opening_a_second_connection() {
     };
     let transport = HttpsTransport::with_roots(roots, Duration::from_secs(5)).unwrap();
     let mut output = Output::new(); let mut log = Log::default(); let mut input = &b"{}"[..];
-    let (result, ()) = tokio::join!(transport.exchange(prepare(&config), &mut input, &mut output, &mut log), upstream);
+    let http = worker_http();
+    let (result, ()) = tokio::join!(transport.exchange(prepare(&config), &mut input, &mut output, &mut log, &http), upstream);
     result.unwrap(); assert_eq!(output.status, Some(StatusCode::TEMPORARY_REDIRECT));
     assert!(!output.headers.contains_key("location")); assert_eq!(output.bytes, b"redirect");
 }
@@ -525,7 +537,8 @@ async fn deadline_drops_connection_and_releases_admission() {
     };
     let transport = HttpsTransport::with_roots(roots, Duration::from_millis(50)).unwrap();
     let mut output = Output::new(); let mut log = Log::default(); let mut input = &b"{}"[..];
-    let (result, ()) = tokio::join!(transport.exchange(prepare(&config), &mut input, &mut output, &mut log), upstream);
+    let http = worker_http();
+    let (result, ()) = tokio::join!(transport.exchange(prepare(&config), &mut input, &mut output, &mut log, &http), upstream);
     assert!(matches!(result, Err(TransportError::Timeout)));
     assert!(output.status.is_none()); assert!(config.admit(b"gateway", 7).is_ok());
 }
@@ -547,7 +560,8 @@ async fn truncated_response_is_never_reported_as_success() {
     };
     let transport = HttpsTransport::with_roots(roots, Duration::from_secs(5)).unwrap();
     let mut output = Output::new(); let mut log = Log::default(); let mut input = &b"{}"[..];
-    let (result, ()) = tokio::join!(transport.exchange(prepare(&config), &mut input, &mut output, &mut log), upstream);
+    let http = worker_http();
+    let (result, ()) = tokio::join!(transport.exchange(prepare(&config), &mut input, &mut output, &mut log, &http), upstream);
     assert!(matches!(result, Err(TransportError::Http | TransportError::Download)));
     assert!(config.admit(b"gateway", 7).is_ok());
 }
@@ -572,7 +586,8 @@ async fn unsolicited_protocol_switch_is_rejected_before_client_headers() {
     };
     let transport = HttpsTransport::with_roots(roots, Duration::from_secs(2)).unwrap();
     let mut output = Output::new(); let mut log = Log::default(); let mut input = &b"{}"[..];
-    let (result, ()) = tokio::join!(transport.exchange(prepare(&config), &mut input, &mut output, &mut log), upstream);
+    let http = worker_http();
+    let (result, ()) = tokio::join!(transport.exchange(prepare(&config), &mut input, &mut output, &mut log, &http), upstream);
     assert!(output.status.is_none(), "unexpected client status: {:?}", output.status);
     assert!(matches!(result, Err(TransportError::Metadata)));
     assert!(output.bytes.is_empty());
@@ -598,7 +613,8 @@ async fn interim_response_does_not_replace_final_status_or_payload() {
     };
     let transport = HttpsTransport::with_roots(roots, Duration::from_secs(2)).unwrap();
     let mut output = Output::new(); let mut log = Log::default(); let mut input = &b"{}"[..];
-    let (result, ()) = tokio::join!(transport.exchange(prepare(&config), &mut input, &mut output, &mut log), upstream);
+    let http = worker_http();
+    let (result, ()) = tokio::join!(transport.exchange(prepare(&config), &mut input, &mut output, &mut log, &http), upstream);
     assert_eq!(result.unwrap().download.accepted_bytes, 2);
     assert_eq!(output.status, Some(StatusCode::OK)); assert_eq!(output.bytes, b"{}");
     assert!(!output.headers.contains_key("link"));
@@ -614,7 +630,8 @@ async fn canceling_tls_handshake_drops_socket_and_returns_owned_request_credit()
         let config = config(listener.local_addr().unwrap().port());
         let transport = HttpsTransport::with_roots(roots, Duration::from_secs(30)).unwrap();
         let mut output = Output::new(); let mut log = Log::default(); let mut input = &b"{}"[..];
-        let mut exchange = Box::pin(transport.exchange(prepare(&config), &mut input, &mut output, &mut log));
+        let http = worker_http();
+        let mut exchange = Box::pin(transport.exchange(prepare(&config), &mut input, &mut output, &mut log, &http));
         // Accept TCP but never answer the TLS ClientHello. No provider HTTP
         // request should have been submitted at this cancellation point.
         let (mut socket, _) = tokio::select! {
@@ -759,7 +776,8 @@ async fn upstream_wire_head_and_header_count_limits_cover_status_line() {
                 let _ = socket.shutdown().await;
             };
             let mut output = Output::new(); let mut log = Log::default(); let mut input = &b""[..];
-            let (result, ()) = tokio::join!(transport.exchange(prepare(&config), &mut input, &mut output, &mut log), provider);
+            let http = worker_http();
+            let (result, ()) = tokio::join!(transport.exchange(prepare(&config), &mut input, &mut output, &mut log, &http), provider);
             if accepted { result.unwrap(); assert_eq!(output.status, Some(StatusCode::OK)); }
             else { assert!(matches!(result, Err(TransportError::Http))); assert!(output.status.is_none()); }
             assert!(output.bytes.is_empty()); assert!(log.download.is_empty());
@@ -902,7 +920,8 @@ async fn retry_cookie_is_echoed_above_the_buffer_limit_and_closure_fails_before_
         let transport = HttpsTransport::with_roots(RootCertStore::empty(), Duration::from_secs(5)).unwrap();
         let mut output = Output::new(); let mut log = Log::default();
         let mut input = &b"secret body"[..];
-        let (result, ()) = tokio::join!(transport.exchange(prepare(&config), &mut input, &mut output, &mut log), provider);
+        let http = worker_http();
+        let (result, ()) = tokio::join!(transport.exchange(prepare(&config), &mut input, &mut output, &mut log, &http), provider);
         assert!(matches!(result, Err(TransportError::Tls)));
         assert_eq!(input, b"secret body");
         assert!(output.status.is_none()); assert!(output.bytes.is_empty());
