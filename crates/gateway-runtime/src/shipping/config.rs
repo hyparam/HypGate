@@ -1,7 +1,7 @@
 //! The optional `shipping` section of the root policy. Parsed on its own so the
 //! gateway configuration never carries the cloud server or its token.
-use crate::config::{destination, ConfigError, MAX_CREDENTIAL_BYTES};
-use serde::Deserialize;
+use crate::config::{destination, field, object, optional, string, u64_of, usize_of, ConfigError, MAX_CREDENTIAL_BYTES};
+use gateway_core::json;
 use std::path::PathBuf;
 
 const MAX_CONFIG: usize = 1024 * 1024;
@@ -11,22 +11,30 @@ pub const MAX_OPEN_EXCHANGES: usize = 65_536;
 pub const MIN_POLL_MS: u64 = 100;
 pub const MAX_POLL_MS: u64 = 60_000;
 
-#[derive(Deserialize)]
-struct Root { #[serde(default)] shipping: Option<Section> }
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Section {
     server: String,
     token_env: String,
     state_dir: String,
-    #[serde(default = "default_open")] max_open_exchanges: usize,
-    #[serde(default = "default_bytes")] max_exchange_bytes: usize,
-    #[serde(default = "default_poll")] poll_ms: u64,
+    max_open_exchanges: usize,
+    max_exchange_bytes: usize,
+    poll_ms: u64,
 }
-fn default_open() -> usize { 64 }
-fn default_bytes() -> usize { 1024 * 1024 }
-fn default_poll() -> u64 { 1000 }
+/// The `shipping` section of the root policy, if present and not null.
+fn section(root: &[u8]) -> Result<Option<Section>, ConfigError> {
+    let value = json::parse(root).ok_or(ConfigError::Syntax)?;
+    let members = value.as_object().ok_or(ConfigError::Syntax)?;
+    if members.iter().filter(|m| m.key.as_slice() == b"shipping").count() > 1 { return Err(ConfigError::Syntax); }
+    let Some(section) = optional(members, "shipping").filter(|v| !v.is_null()) else { return Ok(None); };
+    let m = object(section, &["server", "token_env", "state_dir", "max_open_exchanges", "max_exchange_bytes", "poll_ms"])?;
+    Ok(Some(Section {
+        server: string(field(m, "server")?)?,
+        token_env: string(field(m, "token_env")?)?,
+        state_dir: string(field(m, "state_dir")?)?,
+        max_open_exchanges: optional(m, "max_open_exchanges").map(usize_of).transpose()?.unwrap_or(64),
+        max_exchange_bytes: optional(m, "max_exchange_bytes").map(usize_of).transpose()?.unwrap_or(1024 * 1024),
+        poll_ms: optional(m, "poll_ms").map(u64_of).transpose()?.unwrap_or(1000),
+    }))
+}
 
 /// The configured HypAware server. Only `ShippingConfig::from_root_json`
 /// makes one, so a cloud egress permit exists only when the root policy has a
@@ -60,8 +68,7 @@ impl ShippingConfig {
     /// provider credential: 1 to 512 visible ASCII bytes.
     pub fn from_root_json(root: &[u8], mut secret: impl FnMut(&str) -> Option<String>) -> Result<Option<Self>, ConfigError> {
         if root.len() > MAX_CONFIG { return Err(ConfigError::Limits); }
-        let root: Root = serde_json::from_slice(root).map_err(|_| ConfigError::Syntax)?;
-        let Some(section) = root.shipping else { return Ok(None); };
+        let Some(section) = section(root)? else { return Ok(None); };
         let parts = destination(&section.server)?;
         let host = String::from_utf8(parts.host).map_err(|_| ConfigError::Destination)?;
         let authority = String::from_utf8(parts.authority).map_err(|_| ConfigError::Destination)?;

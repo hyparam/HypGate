@@ -1,10 +1,11 @@
-//! Trusted parsing and secret loading. The normalized grant relation is checked
-//! by the verified core, including selection of concrete destination/credential
-//! values. JSON parsing, hashing, and secret provisioning remain trusted;
-//! destinations are parsed by the verified core.
+//! Configuration loading. The JSON is read by the verified `gateway_core::json`
+//! reader and the normalized grant relation is checked by the verified core,
+//! including selection of concrete destination/credential values; destinations
+//! are parsed by the verified core. The schema walk here (which keys, which
+//! kinds), hashing, and secret provisioning remain trusted.
 use crate::admission::{Admission, AdmissionError, Request};
+use gateway_core::json::{self, Member, Value};
 use gateway_core::policy::{Identity, Policy, Route};
-use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 const MAX_CONFIG: usize = 1024 * 1024;
@@ -15,8 +16,28 @@ pub(crate) const MAX_CREDENTIAL_BYTES: usize = 8192;
 #[derive(Debug, PartialEq, Eq)]
 pub enum ConfigError { Syntax, Limits, Identity, Destination, Credential, Policy }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+/// The members of an object whose keys are all in `allowed`, each at most once.
+pub(crate) fn object<'a>(value: &'a Value, allowed: &[&str]) -> Result<&'a [Member], ConfigError> {
+    let members = value.as_object().ok_or(ConfigError::Syntax)?;
+    for (k, m) in members.iter().enumerate() {
+        if !allowed.iter().any(|a| a.as_bytes() == m.key.as_slice()) { return Err(ConfigError::Syntax); }
+        if members[..k].iter().any(|p| p.key == m.key) { return Err(ConfigError::Syntax); }
+    }
+    Ok(members)
+}
+pub(crate) fn optional<'a>(members: &'a [Member], name: &str) -> Option<&'a Value> {
+    members.iter().find(|m| m.key.as_slice() == name.as_bytes()).map(|m| &m.value)
+}
+pub(crate) fn field<'a>(members: &'a [Member], name: &str) -> Result<&'a Value, ConfigError> {
+    optional(members, name).ok_or(ConfigError::Syntax)
+}
+pub(crate) fn string(value: &Value) -> Result<String, ConfigError> {
+    String::from_utf8(value.as_str().ok_or(ConfigError::Syntax)?.clone()).map_err(|_| ConfigError::Syntax)
+}
+pub(crate) fn u64_of(value: &Value) -> Result<u64, ConfigError> { value.as_u64().ok_or(ConfigError::Syntax) }
+pub(crate) fn usize_of(value: &Value) -> Result<usize, ConfigError> { usize::try_from(u64_of(value)?).map_err(|_| ConfigError::Syntax) }
+fn array(value: &Value) -> Result<&[Value], ConfigError> { value.as_array().map(Vec::as_slice).ok_or(ConfigError::Syntax) }
+
 struct Root {
     identities: Vec<IdentityInput>,
     destinations: Vec<String>,
@@ -24,37 +45,60 @@ struct Root {
     grants: Vec<RouteInput>,
     limits: Limits,
     logging: Logging,
-    // Parsed separately by `shipping::ShippingConfig`; the gateway's own
-    // configuration never holds the cloud token or server.
-    #[serde(default)]
-    #[allow(dead_code)]
-    shipping: Option<serde::de::IgnoredAny>,
 }
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+impl Root {
+    fn read(bytes: &[u8]) -> Result<Self, ConfigError> {
+        let value = json::parse(bytes).ok_or(ConfigError::Syntax)?;
+        // `shipping` is read separately by `shipping::ShippingConfig`; the
+        // gateway's own configuration never holds the cloud token or server.
+        let root = object(&value, &["identities", "destinations", "credentials", "grants", "limits", "logging", "shipping"])?;
+        let identities = array(field(root, "identities")?)?.iter().map(|v| {
+            let m = object(v, &["tenant", "sha256"])?;
+            Ok(IdentityInput { tenant: u64_of(field(m, "tenant")?)?, sha256: string(field(m, "sha256")?)? })
+        }).collect::<Result<Vec<_>, _>>()?;
+        let destinations = array(field(root, "destinations")?)?.iter().map(string).collect::<Result<Vec<_>, _>>()?;
+        let credentials = array(field(root, "credentials")?)?.iter().map(|v| {
+            let m = object(v, &["tenant", "kind", "env"])?;
+            let kind = match string(field(m, "kind")?)?.as_str() {
+                "bearer" => CredentialKind::Bearer, "api_key" => CredentialKind::ApiKey, _ => return Err(ConfigError::Syntax),
+            };
+            Ok(CredentialInput { tenant: u64_of(field(m, "tenant")?)?, kind, env: string(field(m, "env")?)? })
+        }).collect::<Result<Vec<_>, _>>()?;
+        let grants = routes(field(root, "grants")?)?;
+        let limits = {
+            let m = object(field(root, "limits")?, &["requests", "chunk_bytes"])?;
+            Limits { requests: usize_of(field(m, "requests")?)?, chunk_bytes: usize_of(field(m, "chunk_bytes")?)? }
+        };
+        let logging = match string(field(root, "logging")?)?.as_str() {
+            "strict" => Logging::Strict, "availability" => Logging::Availability, _ => return Err(ConfigError::Syntax),
+        };
+        Ok(Root { identities, destinations, credentials, grants, limits, logging })
+    }
+}
 struct IdentityInput { tenant: u64, sha256: String }
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct CredentialInput { tenant: u64, kind: CredentialKind, env: String }
-#[derive(Deserialize)]
-#[serde(rename_all = "snake_case")]
 enum CredentialKind { Bearer, ApiKey }
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct RouteInput { tenant: u64, selector: u64, origin: usize, credential: usize }
 impl From<RouteInput> for Route {
     fn from(input: RouteInput) -> Self {
         Self { tenant: input.tenant, selector: input.selector, origin: input.origin, credential: input.credential }
     }
 }
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+fn routes(value: &Value) -> Result<Vec<RouteInput>, ConfigError> {
+    array(value)?.iter().map(|v| {
+        let m = object(v, &["tenant", "selector", "origin", "credential"])?;
+        Ok(RouteInput { tenant: u64_of(field(m, "tenant")?)?, selector: u64_of(field(m, "selector")?)?,
+            origin: usize_of(field(m, "origin")?)?, credential: usize_of(field(m, "credential")?)? })
+    }).collect()
+}
 struct Candidate { routes: Vec<RouteInput> }
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+impl Candidate {
+    fn read(bytes: &[u8]) -> Result<Self, ConfigError> {
+        let value = json::parse(bytes).ok_or(ConfigError::Syntax)?;
+        Ok(Candidate { routes: routes(field(object(&value, &["routes"])?, "routes")?)? })
+    }
+}
 struct Limits { requests: usize, chunk_bytes: usize }
-#[derive(Deserialize)]
-#[serde(rename_all = "snake_case")]
 enum Logging { Strict, Availability }
 
 // Intentionally no Debug implementation: neither errors nor diagnostics should
@@ -120,8 +164,8 @@ impl GatewayConfig {
         -> Result<Self, ConfigError>
     {
         if root.len() > MAX_CONFIG || candidate.len() > MAX_CONFIG { return Err(ConfigError::Limits); }
-        let root: Root = serde_json::from_slice(root).map_err(|_| ConfigError::Syntax)?;
-        let candidate: Candidate = serde_json::from_slice(candidate).map_err(|_| ConfigError::Syntax)?;
+        let root = Root::read(root)?;
+        let candidate = Candidate::read(candidate)?;
         if !gateway_core::resource::validate_limits(root.limits.requests, root.limits.chunk_bytes) {
             return Err(ConfigError::Limits);
         }

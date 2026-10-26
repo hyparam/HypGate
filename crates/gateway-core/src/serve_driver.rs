@@ -213,8 +213,8 @@ pub fn serve<E: Effects>(effects: &mut E) -> (out: Driven)
     if !drained {
         effects.cancel_live();
         d.record(Ghost(Step::Cancel));
-        let again = effects.wait_drained(Window::Cancel);
-        d.record(Ghost(Step::Wait(Window::Cancel, again)));
+        let _waited = effects.wait_drained(Window::Cancel);
+        d.record(Ghost(Step::Wait(Window::Cancel, _waited)));
     }
     let log_ok = effects.close_log();
     d.record(Ghost(Step::CloseLog(log_ok)));

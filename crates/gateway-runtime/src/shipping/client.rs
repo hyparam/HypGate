@@ -25,7 +25,7 @@ pub struct Reply { pub status: u16, pub retry_after: Option<u64>, pub body: Vec<
 impl Reply {
     /// The `error` code of a `{"error":"..."}` body, if any.
     pub fn error_code(&self) -> Option<String> {
-        serde_json::from_slice::<serde_json::Value>(&self.body).ok()?.get("error")?.as_str().map(str::to_owned)
+        String::from_utf8(gateway_core::json::parse(&self.body)?.get(b"error")?.as_str()?.clone()).ok()
     }
 }
 

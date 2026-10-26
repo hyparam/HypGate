@@ -2,7 +2,8 @@
 //! Both are small JSON documents written to a private temporary file and
 //! renamed into place, mode 0600 on Unix. The identity file holds the server's
 //! gateway credential and a fingerprint of the operator token, never the token.
-use serde::{Deserialize, Serialize};
+use gateway_core::json::{self, Value};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{fs, io::{self, Write}, path::Path};
 
@@ -10,7 +11,7 @@ pub const IDENTITY_FILE: &str = "identity.json";
 pub const CHECKPOINT_FILE: &str = "checkpoint.json";
 const MAX_STATE_BYTES: u64 = 64 * 1024;
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct Identity {
     pub jwt: String,
     pub expires_at: u64,
@@ -21,7 +22,7 @@ pub struct Identity {
 
 /// Progress is a count of emitted exchanges resolved on the server, plus the
 /// assembler limits that make exchange numbering reproducible from the file.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct Checkpoint {
     pub session: String,
     pub resolved: u64,
@@ -50,17 +51,28 @@ fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     fs::File::open(path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new(".")))?.sync_all()
 }
 
-fn read_bounded<T: for<'a> Deserialize<'a>>(path: &Path) -> Option<T> {
+fn read_bounded(path: &Path) -> Option<Value> {
     let metadata = fs::metadata(path).ok()?;
     if metadata.len() > MAX_STATE_BYTES { return None; }
-    serde_json::from_slice(&fs::read(path).ok()?).ok()
+    json::parse(&fs::read(path).ok()?)
 }
+fn text(value: &Value, key: &str) -> Option<String> { String::from_utf8(value.get(key.as_bytes())?.as_str()?.clone()).ok() }
+fn number(value: &Value, key: &str) -> Option<u64> { value.get(key.as_bytes())?.as_u64() }
 
-pub fn load_identity(dir: &Path) -> Option<Identity> { read_bounded(&dir.join(IDENTITY_FILE)) }
+pub fn load_identity(dir: &Path) -> Option<Identity> {
+    let value = read_bounded(&dir.join(IDENTITY_FILE))?;
+    Some(Identity { jwt: text(&value, "jwt")?, expires_at: number(&value, "expires_at")?, gateway_id: text(&value, "gateway_id")?,
+        server: text(&value, "server")?, token_fingerprint: text(&value, "token_fingerprint")? })
+}
 pub fn save_identity(dir: &Path, identity: &Identity) -> io::Result<()> {
     write_private(&dir.join(IDENTITY_FILE), &serde_json::to_vec(identity)?)
 }
-pub fn load_checkpoint(dir: &Path) -> Option<Checkpoint> { read_bounded(&dir.join(CHECKPOINT_FILE)) }
+pub fn load_checkpoint(dir: &Path) -> Option<Checkpoint> {
+    let value = read_bounded(&dir.join(CHECKPOINT_FILE))?;
+    Some(Checkpoint { session: text(&value, "session")?, resolved: number(&value, "resolved")?, poisoned: number(&value, "poisoned")?,
+        max_open_exchanges: usize::try_from(number(&value, "max_open_exchanges")?).ok()?,
+        max_exchange_bytes: usize::try_from(number(&value, "max_exchange_bytes")?).ok()? })
+}
 pub fn save_checkpoint(dir: &Path, checkpoint: &Checkpoint) -> io::Result<()> {
     write_private(&dir.join(CHECKPOINT_FILE), &serde_json::to_vec(checkpoint)?)
 }
@@ -72,10 +84,10 @@ pub fn jwt_claims(jwt: &str) -> Option<(String, u64)> {
     let mut parts = jwt.split('.');
     let (_, payload, _) = (parts.next()?, parts.next()?, parts.next()?);
     if parts.next().is_some() || payload.len() > 16 * 1024 { return None; }
-    let claims: serde_json::Value = serde_json::from_slice(&base64url_decode(payload)?).ok()?;
-    let sub = claims.get("sub")?.as_str()?;
+    let claims = json::parse(&base64url_decode(payload)?)?;
+    let sub = text(&claims, "sub")?;
     if sub.is_empty() || sub.len() > 128 { return None; }
-    Some((sub.to_owned(), claims.get("exp")?.as_u64()?))
+    Some((sub, number(&claims, "exp")?))
 }
 
 fn base64url_decode(text: &str) -> Option<Vec<u8>> {

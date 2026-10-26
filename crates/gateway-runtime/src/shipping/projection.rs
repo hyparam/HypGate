@@ -2,8 +2,10 @@
 //! one user part with the request text, one assistant part with the response
 //! text and token usage. Provider bodies are parsed best effort for Anthropic
 //! Messages and OpenAI Responses; anything else ships as raw text. Headers and
-//! raw frames are never included. This is trusted, tested code.
+//! raw frames are never included. Provider bodies are read by the verified
+//! JSON reader; the projection itself is trusted, tested code.
 use gateway_core::exchange_assembler::Exchange;
+use gateway_core::json::{self, Value as Json};
 use gateway_core::shipping_identity::{exchange_key, message_key, part_key};
 use serde_json::{json, Map, Value};
 use super::state::hex;
@@ -40,13 +42,19 @@ fn destination_parts(exchange: &Exchange) -> (String, String) {
     }
 }
 
-fn text_of_content(content: &Value) -> Option<String> {
+/// A string's bytes as text; provider strings are UTF-8 but the reader
+/// passes raw bytes through, so this is lossy by design.
+fn str_of(value: &Json) -> Option<String> { value.as_str().map(|b| String::from_utf8_lossy(b).into_owned()) }
+/// The value at a key path.
+fn at<'a>(value: &'a Json, path: &[&str]) -> Option<&'a Json> { path.iter().try_fold(value, |v, key| v.get(key.as_bytes())) }
+
+fn text_of_content(content: &Json) -> Option<String> {
     match content {
-        Value::String(s) => Some(s.clone()),
-        Value::Array(blocks) => {
-            let parts: Vec<&str> = blocks.iter().filter_map(|b| {
-                let kind = b.get("type").and_then(Value::as_str).unwrap_or("text");
-                if matches!(kind, "text" | "input_text" | "output_text") { b.get("text").and_then(Value::as_str) } else { None }
+        Json::Str(s) => Some(String::from_utf8_lossy(s).into_owned()),
+        Json::Array(blocks) => {
+            let parts: Vec<String> = blocks.iter().filter_map(|b| {
+                let kind = at(b, &["type"]).and_then(str_of).unwrap_or_else(|| "text".to_owned());
+                if matches!(kind.as_str(), "text" | "input_text" | "output_text") { at(b, &["text"]).and_then(str_of) } else { None }
             }).collect();
             if parts.is_empty() { None } else { Some(parts.join("\n")) }
         }
@@ -55,40 +63,40 @@ fn text_of_content(content: &Value) -> Option<String> {
 }
 
 fn parse_request(bytes: &[u8]) -> ParsedRequest {
-    let Ok(value) = serde_json::from_slice::<Value>(bytes) else { return ParsedRequest::default(); };
-    let model = value.get("model").and_then(Value::as_str).map(str::to_owned);
-    let hint = value.pointer("/metadata/user_id").or_else(|| value.get("user")).and_then(Value::as_str)
-        .filter(|s| !s.is_empty() && s.len() <= MAX_SESSION_HINT).map(str::to_owned);
-    let messages = value.get("messages").or_else(|| value.get("input"));
+    let Some(value) = json::parse(bytes) else { return ParsedRequest::default(); };
+    let model = at(&value, &["model"]).and_then(str_of);
+    let hint = at(&value, &["metadata", "user_id"]).or_else(|| at(&value, &["user"])).and_then(str_of)
+        .filter(|s| !s.is_empty() && s.len() <= MAX_SESSION_HINT);
+    let messages = at(&value, &["messages"]).or_else(|| at(&value, &["input"]));
     let user_text = match messages {
-        Some(Value::String(s)) => Some(s.clone()),
-        Some(Value::Array(items)) => items.iter().rev()
-            .find(|m| m.get("role").and_then(Value::as_str) == Some("user"))
-            .and_then(|m| m.get("content")).and_then(text_of_content),
+        Some(Json::Str(s)) => Some(String::from_utf8_lossy(s).into_owned()),
+        Some(Json::Array(items)) => items.iter().rev()
+            .find(|m| at(m, &["role"]).and_then(str_of).as_deref() == Some("user"))
+            .and_then(|m| at(m, &["content"])).and_then(text_of_content),
         _ => None,
     };
     ParsedRequest { model, session_hint: hint, user_text }
 }
 
-fn usage_of(value: &Value) -> Option<Usage> {
-    let usage = value.get("usage")?;
-    let n = |keys: &[&str]| keys.iter().find_map(|k| usage.pointer(&format!("/{}", k.replace('.', "/"))).and_then(Value::as_u64)).unwrap_or(0);
-    let cache_read = n(&["cache_read_input_tokens", "input_tokens_details.cached_tokens", "prompt_tokens_details.cached_tokens"]);
-    let total_input = n(&["input_tokens", "prompt_tokens"]);
-    let output = n(&["output_tokens", "completion_tokens"]);
+fn usage_of(value: &Json) -> Option<Usage> {
+    let usage = at(value, &["usage"])?;
+    let n = |paths: &[&[&str]]| paths.iter().find_map(|path| at(usage, path).and_then(Json::as_u64)).unwrap_or(0);
+    let cache_read = n(&[&["cache_read_input_tokens"], &["input_tokens_details", "cached_tokens"], &["prompt_tokens_details", "cached_tokens"]]);
+    let total_input = n(&[&["input_tokens"], &["prompt_tokens"]]);
+    let output = n(&[&["output_tokens"], &["completion_tokens"]]);
     // Anthropic reports input net of cache; OpenAI reports cached tokens inside input.
-    let input = if usage.get("cache_read_input_tokens").is_some() || usage.get("cache_creation_input_tokens").is_some() { total_input }
+    let input = if at(usage, &["cache_read_input_tokens"]).is_some() || at(usage, &["cache_creation_input_tokens"]).is_some() { total_input }
         else { total_input.saturating_sub(cache_read) };
-    Some(Usage { input, cache_read, cache_write: n(&["cache_creation_input_tokens"]), output })
+    Some(Usage { input, cache_read, cache_write: n(&[&["cache_creation_input_tokens"]]), output })
 }
 
-fn parse_json_response(value: &Value) -> ParsedResponse {
-    let mut out = ParsedResponse { model: value.get("model").and_then(Value::as_str).map(str::to_owned), ..Default::default() };
-    if let Some(content) = value.get("content") { out.text = text_of_content(content).unwrap_or_default(); }
-    else if let Some(Value::Array(items)) = value.get("output") {
-        out.text = items.iter().filter_map(|i| i.get("content").and_then(text_of_content)).collect::<Vec<_>>().join("\n");
-    } else if let Some(Value::Array(choices)) = value.get("choices") {
-        out.text = choices.iter().filter_map(|c| c.pointer("/message/content").and_then(text_of_content)).collect::<Vec<_>>().join("\n");
+fn parse_json_response(value: &Json) -> ParsedResponse {
+    let mut out = ParsedResponse { model: at(value, &["model"]).and_then(str_of), ..Default::default() };
+    if let Some(content) = at(value, &["content"]) { out.text = text_of_content(content).unwrap_or_default(); }
+    else if let Some(Json::Array(items)) = at(value, &["output"]) {
+        out.text = items.iter().filter_map(|i| at(i, &["content"]).and_then(text_of_content)).collect::<Vec<_>>().join("\n");
+    } else if let Some(Json::Array(choices)) = at(value, &["choices"]) {
+        out.text = choices.iter().filter_map(|c| at(c, &["message", "content"]).and_then(text_of_content)).collect::<Vec<_>>().join("\n");
     }
     out.usage = usage_of(value);
     out
@@ -104,23 +112,23 @@ fn parse_sse(bytes: &[u8]) -> ParsedResponse {
     let mut usage = Usage::default(); let mut saw_usage = false;
     for line in bytes.split(|b| *b == b'\n') {
         let Some(data) = line.strip_prefix(b"data:") else { continue; };
-        let Ok(event) = serde_json::from_slice::<Value>(data) else { continue; };
-        match event.get("type").and_then(Value::as_str).unwrap_or("") {
-            "message_start" => if let Some(message) = event.get("message") {
-                out.model = message.get("model").and_then(Value::as_str).map(str::to_owned);
+        let Some(event) = json::parse(data) else { continue; };
+        match at(&event, &["type"]).and_then(str_of).unwrap_or_default().as_str() {
+            "message_start" => if let Some(message) = at(&event, &["message"]) {
+                out.model = at(message, &["model"]).and_then(str_of);
                 if let Some(u) = usage_of(message) { usage.input = u.input; usage.cache_read = u.cache_read; usage.cache_write = u.cache_write; saw_usage = true; }
             },
-            "content_block_delta" => if let Some(text) = event.pointer("/delta/text").and_then(Value::as_str) { out.text.push_str(text); },
-            "message_delta" => if let Some(n) = event.pointer("/usage/output_tokens").and_then(Value::as_u64) { usage.output = n; saw_usage = true; },
-            "response.output_text.delta" => if let Some(text) = event.get("delta").and_then(Value::as_str) { out.text.push_str(text); },
-            "response.completed" => if let Some(response) = event.get("response") {
-                out.model = response.get("model").and_then(Value::as_str).map(str::to_owned);
+            "content_block_delta" => if let Some(text) = at(&event, &["delta", "text"]).and_then(str_of) { out.text.push_str(&text); },
+            "message_delta" => if let Some(n) = at(&event, &["usage", "output_tokens"]).and_then(Json::as_u64) { usage.output = n; saw_usage = true; },
+            "response.output_text.delta" => if let Some(text) = at(&event, &["delta"]).and_then(str_of) { out.text.push_str(&text); },
+            "response.completed" => if let Some(response) = at(&event, &["response"]) {
+                out.model = at(response, &["model"]).and_then(str_of);
                 if let Some(u) = usage_of(response) { usage = u; saw_usage = true; }
             },
             _ => {
                 // Chat-completions style chunks carry text in choices[].delta.content.
-                if let Some(Value::Array(choices)) = event.get("choices") {
-                    for c in choices { if let Some(t) = c.pointer("/delta/content").and_then(Value::as_str) { out.text.push_str(t); } }
+                if let Some(Json::Array(choices)) = at(&event, &["choices"]) {
+                    for c in choices { if let Some(t) = at(c, &["delta", "content"]).and_then(str_of) { out.text.push_str(&t); } }
                 }
                 if let Some(u) = usage_of(&event) { usage = u; saw_usage = true; }
             }
@@ -132,9 +140,9 @@ fn parse_sse(bytes: &[u8]) -> ParsedResponse {
 
 fn parse_response(bytes: &[u8]) -> (ParsedResponse, bool) {
     if is_sse(bytes) { return (parse_sse(bytes), true); }
-    match serde_json::from_slice::<Value>(bytes) {
-        Ok(value) => (parse_json_response(&value), false),
-        Err(_) => (ParsedResponse::default(), false),
+    match json::parse(bytes) {
+        Some(value) => (parse_json_response(&value), false),
+        None => (ParsedResponse::default(), false),
     }
 }
 

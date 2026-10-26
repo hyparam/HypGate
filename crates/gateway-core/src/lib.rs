@@ -52,6 +52,7 @@ pub mod shipper;
 pub mod shipping_driver;
 pub mod exchange_driver;
 pub mod serve_driver;
+pub mod json;
 
 #[cfg(test)]
 #[path = "tests/streaming.rs"]
@@ -86,3 +87,6 @@ mod exchange_driver_tests;
 #[cfg(test)]
 #[path = "tests/serve_driver.rs"]
 mod serve_driver_tests;
+#[cfg(test)]
+#[path = "tests/json.rs"]
+mod json_tests;

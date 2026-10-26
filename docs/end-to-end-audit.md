@@ -69,7 +69,7 @@ gateway's own listener, to wake its blocking accept on shutdown.
 | Effect | Production site | What must already hold when it runs |
 | --- | --- | --- |
 | Listen on loopback | `TcpListener::bind` in `main.rs::bind` | `run` rejects a non-loopback address before loading configuration; configuration and audit log already created |
-| Read root policy, routes, and secrets | `main.rs::bounded_file` and `std::env::var` in `main.rs::secret` | Startup only; bounded file reads, secrets from environment through `GatewayConfig::from_json` and `ShippingConfig::from_root_json` |
+| Read root policy, routes, and secrets | `main.rs::bounded_file` and `std::env::var` in `main.rs::secret` | Startup only; bounded file reads, parsed by the verified `gateway_core::json` reader, secrets from environment through `GatewayConfig::from_json` and `ShippingConfig::from_root_json` |
 | Accept inbound connection | `listener.accept()` in `server::serve` | Connection credit from `ConnectionSlots::acquire` over the verified `ResourceAdmission`; without one the socket is closed unanswered |
 | Start a connection thread and its watcher | `thread::Builder::spawn` in `server::serve` (512 KiB stack) and `server::ClientWatch::start` (64 KiB) | The connection lease is moved into the thread and spent by `leased::run`; the watcher only peeks the client socket and fires the exchange's `net::Cancel` |
 | Wake the accept loop | `TcpStream::connect_timeout` in `server::wake_accept` | Only from `Shutdown::trigger`, to the address the listener bound; the loop checks the flag before serving what it accepted |

@@ -144,12 +144,12 @@ fn now_ms() -> u64 { SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).ma
 struct Issued { jwt: String, gateway_id: String, expires_at: u64 }
 
 fn parse_credential(body: &[u8]) -> Option<Issued> {
-    let value = serde_json::from_slice::<serde_json::Value>(body).ok()?;
-    let jwt = value.get("jwt")?.as_str()?;
-    let expires_at = value.get("expires_at")?.as_u64()?;
+    let value = gateway_core::json::parse(body)?;
+    let jwt = String::from_utf8(value.get(b"jwt")?.as_str()?.clone()).ok()?;
+    let expires_at = value.get(b"expires_at")?.as_u64()?;
     if jwt.len() > 16 * 1024 { return None; }
-    let (gateway_id, exp) = state::jwt_claims(jwt)?;
-    Some(Issued { jwt: jwt.to_owned(), gateway_id, expires_at: expires_at.min(exp) })
+    let (gateway_id, exp) = state::jwt_claims(&jwt)?;
+    Some(Issued { jwt, gateway_id, expires_at: expires_at.min(exp) })
 }
 
 impl Engine {
