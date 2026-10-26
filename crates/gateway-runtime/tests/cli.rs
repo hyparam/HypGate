@@ -25,6 +25,33 @@ fn executable_starts_and_serves_health_with_real_configuration() {
 }
 
 #[test]
+fn sigterm_drains_and_exits_cleanly_with_a_complete_log() {
+    let dir = TempDir::new("loggate-sigterm");
+    let root = dir.0.join("root.json"); let routes = dir.0.join("routes.json"); let log = dir.0.join("audit.log");
+    fs::write(&root, br#"{"identities":[],"destinations":[],"credentials":[],"grants":[],"limits":{"requests":1,"chunk_bytes":4},"logging":"strict"}"#).unwrap();
+    fs::write(&routes, br#"{"routes":[]}"#).unwrap();
+    let mut child = Process(Command::new(env!("CARGO_BIN_EXE_loggate"))
+        .args([root.as_os_str(), routes.as_os_str(), log.as_os_str()]).arg("127.0.0.1:0")
+        .stderr(Stdio::piped()).spawn().unwrap());
+    let mut startup = String::new();
+    BufReader::new(child.0.stderr.take().unwrap()).read_line(&mut startup).unwrap();
+    let address = startup.trim().strip_prefix("loggate listening on ").expect("server startup message").to_owned();
+    // An idle connection holding a connection credit: the drain must not wait for its deadline.
+    let mut idle = TcpStream::connect(&address).unwrap(); idle.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+    let started = std::time::Instant::now();
+    assert!(Command::new("kill").args(["-TERM", &child.0.id().to_string()]).status().unwrap().success());
+    let exit = child.0.wait().unwrap();
+    assert!(exit.success(), "a drained gateway exits cleanly: {exit:?}");
+    assert!(started.elapsed() < Duration::from_secs(25), "the drain is bounded");
+    // The idle connection was closed by the gateway, not left to its deadline.
+    let mut rest = Vec::new(); assert_eq!(idle.read_to_end(&mut rest).map(|_| rest.len()).unwrap_or(0), 0);
+    assert!(TcpStream::connect(&address).is_err(), "the listener is gone");
+    let scan = Command::new(env!("CARGO_BIN_EXE_loggate")).arg("scan").arg(&log).output().unwrap();
+    assert!(scan.status.success(), "the log is complete after a drain: {}", String::from_utf8_lossy(&scan.stderr));
+    drop(child); fs::remove_dir_all(&dir.0).unwrap();
+}
+
+#[test]
 fn scan_command_reports_valid_prefix_without_printing_payload_or_editing_log() {
     let dir = TempDir::new("loggate-scan"); let path = dir.0.join("audit.log");
     {

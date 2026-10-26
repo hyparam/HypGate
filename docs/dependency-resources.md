@@ -697,8 +697,9 @@ fragmentation, and physical pages remain outside this request inventory.
 
 The audit worker explicitly requests a 2 MiB stack, independent of the
 `RUST_MIN_STACK` environment default. Together with four resolver workers that
-also request 2 MiB each, one executable instance requests 10 MiB of fixed
-background thread stacks. Each accepted connection adds a connection thread
+also request 2 MiB each and the signal thread that requests 64 KiB, one
+executable instance requests 10 MiB plus 64 KiB of fixed background thread
+stacks. Each accepted connection adds a connection thread
 with a 512 KiB stack and a watcher thread with a 64 KiB stack, at most C of
 each, charged per inbound connection in the
 [resource composition](resource-composition.md). The accept loop uses the main

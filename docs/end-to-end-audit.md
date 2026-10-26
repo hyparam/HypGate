@@ -49,7 +49,10 @@ what still has no theorem.
 A grep of the non-test runtime source for socket, file, thread, process, and
 environment operations finds only these sites. Code under `#[cfg(test)]` and in
 `tests/` directories is excluded. `gateway-core` performs no I/O and forbids
-`unsafe`; neither crate contains `assume`, `external_body`, or `unsafe`.
+`unsafe`; neither crate contains `assume` or `external_body`. The runtime
+library forbids `unsafe`; the executable has one `unsafe` site, the signal
+handler installation in `signal.rs`, and `scripts/check_effect_sites.sh`
+fails if `unsafe` appears anywhere else in the runtime.
 
 The socket, name-lookup, listener, file-write, and secret-read sites are also
 enforced mechanically: `clippy.toml` disallows those methods throughout
@@ -70,6 +73,7 @@ gateway's own listener, to wake its blocking accept on shutdown.
 | Accept inbound connection | `listener.accept()` in `server::serve` | Connection credit from `ConnectionSlots::acquire` over the verified `ResourceAdmission`; without one the socket is closed unanswered |
 | Start a connection thread and its watcher | `thread::Builder::spawn` in `server::serve` (512 KiB stack) and `server::ClientWatch::start` (64 KiB) | The connection lease is moved into the thread and spent by `leased::run`; the watcher only peeks the client socket and fires the exchange's `net::Cancel` |
 | Wake the accept loop | `TcpStream::connect_timeout` in `server::wake_accept` | Only from `Shutdown::trigger`, to the address the listener bound; the loop checks the flag before serving what it accepted |
+| Install termination signal handlers | `signal(2)` and `write(2)` through `extern "C"` in `signal::on_termination` (64 KiB thread) | Startup only, before serving; the handler writes one byte to a leaked socket pair and the thread calls `Shutdown::trigger` once; the drain that follows is `serve`'s |
 | Run the connection | `exchange_driver::drive` over `server::ConnectionEffects` in `server::serve_connection`; the worker lease is started by the `acquire_worker` effect and finished after the effects drop | Every effect is one the verified driver named, in the order it named it; worker credit from `WorkerSlots::acquire` over the verified `WorkerRegistry`/`DrainRegistry`; all four HTTP roles issued by its `WorkerHttp` |
 | DNS lookup | `Resolver::resolve` (`transport/resolver.rs`) | Called only from `HttpsTransport::connect`, the driver's `connect` effect, with a `PreparedRequest` borrowed; host and port read from its destination; the wait is bounded by the exchange deadline |
 | Upstream TCP connect | `TcpStream::connect_timeout` in `transport::open_socket` | Same owner; addresses come only from the adopted lookup of the configured destination host/port; each attempt gets the deadline's remaining time; the socket is registered with the exchange's `net::Cancel` |
@@ -244,7 +248,7 @@ truncation, disconnect, timeout, and start-record refusal.
 
 ## Shutdown
 
-`serve` after SIGINT/SIGTERM or a listener error:
+`serve` after SIGINT/SIGTERM (through `signal::on_termination` and `Shutdown::trigger`) or a listener error:
 
 | Step | Code | Status | Evidence |
 | --- | --- | --- | --- |

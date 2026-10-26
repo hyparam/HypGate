@@ -1,4 +1,7 @@
 #![deny(clippy::disallowed_methods)]
+#![deny(unsafe_code)]
+#[allow(unsafe_code)]
+mod signal;
 use gateway_runtime::{config::GatewayConfig, disk_log::{DiskLog, LogReader, Metadata, ScanError, StoredRecord}, server::{self, Gateway, Shutdown},
     shipping::{self, Shipper, ShippingConfig}, transport::HttpsTransport};
 use std::{io::{self, Read, Write}, net::{SocketAddr, TcpListener}, path::Path, time::Duration};
@@ -69,11 +72,12 @@ fn serve(args: &[String], address: SocketAddr) -> Result<(), &'static str> {
         let extra = gateway_runtime::budget::shipping(open, bytes).ok_or("shipping budget overflow")?;
         let _ = writeln!(io::stderr().lock(), "loggate shipping thread adds {extra} bytes to that budget");
     }
-    // The executable runs until it is killed; it installs no signal handler,
-    // since that would need a C binding. A kill ends in-flight exchanges
-    // abruptly: every record already acknowledged is durable, and the
-    // recovery scanner tolerates a torn tail. `Shutdown` is for embedders.
+    // SIGTERM and SIGINT trigger the cooperative drain (signal.rs). SIGKILL
+    // still ends in-flight exchanges abruptly: every record already
+    // acknowledged is durable, and the recovery scanner tolerates a torn tail.
     let shutdown = Shutdown::new();
+    let trigger = shutdown.clone();
+    signal::on_termination(move || trigger.trigger()).map_err(|_| "cannot install signal handlers")?;
     let metrics = shipper.as_ref().map(Shipper::metrics);
     let served = server::serve(listener, Gateway::with_shipping_metrics(config, transport, log, metrics), 128, Duration::from_secs(310), &shutdown)
         .map_err(|_| "server failed");

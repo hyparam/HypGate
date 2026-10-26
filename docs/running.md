@@ -159,13 +159,19 @@ already have run it.
 
 ## Shutdown
 
-The executable installs no signal handler, since that would need a C binding:
-SIGINT or SIGTERM ends the process at once. In-flight exchanges end abruptly;
-every record already acknowledged is durable, the recovery scanner tolerates a
-torn tail, and nothing is replayed. Crash guarantees stay conditional on the
-[storage contract](storage-crash-contract.md).
+SIGTERM or SIGINT starts the cooperative drain and the process exits with
+status 0 when it is done: acceptance stops, connections and workers get up to
+ten seconds to finish, remaining exchanges are then cancelled and write their
+completion records, and the logger and shipper close. A second signal during
+the drain is absorbed; the drain is bounded, and SIGKILL remains available.
+SIGKILL or a crash ends in-flight exchanges abruptly; every record already
+acknowledged is durable, the recovery scanner tolerates a torn tail, and
+nothing is replayed. Crash guarantees stay conditional on the
+[storage contract](storage-crash-contract.md). The handler is the
+executable's one C binding (`signal.rs`): it writes a byte to a socket pair
+and a thread triggers `server::Shutdown`.
 
-Embedders trigger `server::Shutdown` instead. It stops acceptance, allows up to
+Embedders trigger `server::Shutdown` themselves. It stops acceptance, allows up to
 ten seconds for connections and workers to drain, then cancels remaining
 exchanges by shutting their sockets, so each writes its completion record and
 returns its credit. The server then gives the logger two seconds to drain and

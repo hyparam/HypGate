@@ -37,6 +37,18 @@ if ! grep -rn --include='*.rs' -B3 '#\[allow(clippy::disallowed_methods)\]' crat
   exit 1
 fi
 
+# The executable's one C binding: the termination signal handlers in
+# signal.rs are the only `unsafe` in the runtime, and the library forbids it.
+unsafe_files=$(grep -rlE --include='*.rs' 'unsafe[^_]' crates/gateway-runtime/src | sort)
+if [ "$unsafe_files" != "crates/gateway-runtime/src/signal.rs" ]; then
+  echo "unsafe appears outside signal.rs: $unsafe_files" >&2
+  exit 1
+fi
+if ! grep -q '^#!\[forbid(unsafe_code)\]' crates/gateway-runtime/src/lib.rs; then
+  echo "gateway-runtime's library must forbid unsafe code" >&2
+  exit 1
+fi
+
 # The runtime links no executor: blocking sockets and threads only.
 if grep -rn 'tokio' crates/gateway-runtime/src crates/gateway-runtime/tests crates/gateway-runtime/Cargo.toml >&2; then
   echo "the runtime must not depend on an async executor" >&2

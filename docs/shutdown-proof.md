@@ -96,10 +96,11 @@ acquisition, and scheduling add delay. A numerical service-level bound requires
 bounds for those scheduler/OS costs. Load tests measure them for particular
 workloads; they do not prove such bounds universally.
 
-The executable itself installs no signal handler, so a signal ends the process
-without this drain; acknowledged records are durable and the recovery scanner
-tolerates a torn tail ([storage contract](storage-crash-contract.md)).
-`Shutdown` is for embedders and tests.
+The executable triggers `Shutdown` from SIGTERM and SIGINT through its one C
+binding (`signal.rs`: a handler that writes a byte to a socket pair, and a
+thread that triggers the drain), so a termination signal gets this drain.
+SIGKILL ends the process without it; acknowledged records are durable and the
+recovery scanner tolerates a torn tail ([storage contract](storage-crash-contract.md)).
 
 ## Scope and retained work
 

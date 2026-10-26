@@ -35,11 +35,12 @@ Connection limits do not by themselves prove an overall memory bound.
 ## Shutdown and restart
 
 Remove an instance from routing before planned shutdown and allow active requests
-to finish before sending SIGTERM. The executable installs no signal handler:
-SIGTERM terminates it immediately (shell status 143), without draining request
-workers, the logger, or the shipper. In-flight exchanges end abruptly. Every
+to finish before sending SIGTERM. SIGTERM starts the cooperative drain: no new
+connections, up to ten seconds for in-flight exchanges, then cancellation with
+completion records, then the logger and shipper close and the process exits
+with status 0. SIGKILL, or a crash, ends in-flight exchanges abruptly. Every
 acknowledged log record remains durable under the [storage contract](storage-crash-contract.md),
-but termination can leave a partial tail. Preserve the old log and use the
+but abrupt termination can leave a partial tail. Preserve the old log and use the
 read-only scan command. Every restart needs a new log path; never append to an
 old session or truncate it to make startup succeed. The cooperative drain API is
 available to embedders; see [shutdown](running.md#shutdown).
@@ -80,7 +81,7 @@ fixture TLS material, validates and runs the [example configuration](../deploy/h
 with only ports and the certificate path substituted, checks that the public frontend
 exposes only `POST /routes/<n>`, shuts the primary down with SIGTERM, and verifies
 that a new request reaches the standby without any replayed exchange. Finally every
-gateway must exit with status 143 after SIGTERM. These fixture requests have
+gateway must exit with status 0 after SIGTERM, having drained. These fixture requests have
 already completed before termination, so `loggate scan` must report a complete log
 holding only paired start/completion records with the configured destination and no body records, without changing its bytes.
 

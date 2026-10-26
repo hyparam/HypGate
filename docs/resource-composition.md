@@ -158,7 +158,7 @@ checks this over 3,000 rounds.
 | Allocation | Bytes | Source |
 | --- | ---: | --- |
 | Verified registries: R request, R worker, C connection, 32 DNS slots | 8 × (2R + C + 32) | [Resource inventory](resource-accounting.md) |
-| Dedicated thread stacks: audit worker, four DNS workers | 10,485,760 | [Dedicated thread stacks](dependency-resources.md#dedicated-thread-stacks); the per-connection and watcher stacks are charged per inbound connection |
+| Dedicated thread stacks: audit worker, four DNS workers, the 64 KiB signal thread | 10,551,296 | [Dedicated thread stacks](dependency-resources.md#dedicated-thread-stacks); the per-connection and watcher stacks are charged per inbound connection |
 | TLS session cache contents, 33 servers × 9 sessions × 131,119 | 38,942,343 | [Shared TLS session storage](dependency-resources.md#shared-tls-session-storage) |
 | Queued DNS jobs, 32 × (253 + 2,048) | 73,632 | DNS inventory |
 | Retained configuration content, bounded by both one-MiB input documents | 2,097,152 | [Configuration storage](configuration.md#configuration-storage-and-startup-scratch) |

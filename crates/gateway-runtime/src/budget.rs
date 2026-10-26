@@ -34,7 +34,7 @@ pub const PER_INBOUND_CONNECTION: u64 = (crate::server::CONNECTION_STACK_BYTES +
 pub const PER_ADMITTED_EXCHANGE: u64 = 589_824 + 196_608 + 65_549 + 49_152 + 81_967
     + 196_608 + 262_228 + 196_617 + 82_194 + 131_072 + 262_238 + 32_768 + 1_835_008 + DNS_REPLY;
 const DNS_REPLY: u64 = 253 + 64 * size_of::<SocketAddr>() as u64;
-const DEDICATED_STACKS: u64 = 5 * 2 * 1024 * 1024; // audit worker and four DNS threads
+const DEDICATED_STACKS: u64 = 5 * 2 * 1024 * 1024 + 64 * 1024; // audit worker, four DNS threads, signal thread
 const SESSION_CACHE_CONTENT: u64 = 33 * 9 * 131_119;
 const DNS_JOBS: u64 = 32 * DNS_REPLY;
 const CONFIGURATION_CONTENT: u64 = 2 * 1024 * 1024;
@@ -94,7 +94,7 @@ mod tests {
         assert_eq!(budget.visible_payload, 6_574_258);
         assert_eq!(budget.inbound_connections, 128 * 1_523_725);
         assert_eq!(budget.admitted_exchanges, 32 * 3_984_134);
-        let fixed = 8 * (64 + 128 + 32) + 10_485_760 + 38_942_343 + 73_632 + 2_097_152;
+        let fixed = 8 * (64 + 128 + 32) + 10_551_296 + 38_942_343 + 73_632 + 2_097_152;
         let sized = 16 * size_of::<QueueSlot>() as u64
             + webpki_roots::TLS_SERVER_ROOTS.len() as u64 * size_of::<TrustAnchor<'static>>() as u64;
         assert_eq!(budget.instance, fixed + sized);
