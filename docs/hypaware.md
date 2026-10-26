@@ -15,30 +15,46 @@ the gateway token never leave the host.
 ## 1. Get a HypAware token
 
 The shipper enrolls with `POST /v1/identity/bootstrap`, so it needs an
-operator-issued bootstrap token. Two kinds work:
+operator-issued bootstrap token. Use an **org service-account token** for
+anything that runs unattended, and a **CI enrollment token** only for a quick
+local trial.
 
-- **Org service-account token** (starts with `hsa_`). An organization admin
-  creates a service account in HypAware and mints a named token for it; the
-  token is shown once and does not expire. Recommended for anything that
-  restarts: re-enrolling with it returns the same server-side gateway, so the
-  gateway id in your queries stays stable.
-- **CI enrollment token** from the HypAware CLI:
+### Service-account token (recommended)
 
-  ```sh
-  hyp remote login hypaware          # once, browser sign-in
-  hyp remote mint --label loggate-dev --expires-days 30
-  ```
+A service account is an automation identity owned by the organization, not by
+a person. An organization admin creates one in the HypAware dashboard under
+the org's service accounts and mints a named token for it. The token starts
+with `hsa_`, is shown once, and never expires; an admin revokes it from the
+same page, and the gateway stops on its next request. Nobody has to sign in
+on the gateway host, and nothing breaks when the person who set it up leaves.
 
-  Each enrollment with such a token creates a new gateway row on the server.
-  Fine for a smoke test, noisy for a deployment.
+Each token is bound to its own server-side gateway. Re-enrolling with the same
+token, even after the state directory is lost, returns the same gateway id, so
+the id you filter on in queries stays stable for the life of the token. Two
+tokens on one account are two gateways.
 
-`hyp remote mint` and `hyp remote tokens` use your personal remote login
-session, which expires after a while. This is a different credential from the
+There is no `hyp` command for this yet; the dashboard is the way, or the API
+the dashboard uses (`POST /v1/org/service-accounts`, then
+`POST /v1/org/service-accounts/<id>/tokens`) with an admin's session.
+
+### CI enrollment token (local trial)
+
+```sh
+hyp remote login hypaware          # once, browser sign-in
+hyp remote mint --label loggate-dev --expires-days 30
+```
+
+This mints a bootstrap token bound to one gateway that belongs to you and
+expires. It depends on your personal remote login session, which itself
+expires after about a month. That session is a different credential from the
 machine enrollment that `hyp status` reports, so `hyp status` can look healthy
 while mint says `remote session expired`; the fix is `hyp remote login hypaware`.
 
+### Handling the token
+
 Hand the token to the gateway through an environment variable only. It is never
-a JSON field or a command-line argument.
+a JSON field or a command-line argument. The shipper stores only a SHA-256
+fingerprint of it beside the gateway credential.
 
 ## 2. Configure shipping
 
@@ -164,22 +180,35 @@ even if a batch is sent twice, so re-running is safe.
 
 Run on 2026-10-25 from a MacBook against the live providers and HypAware Cloud
 with the two-route configuration above, debug build at commit `f1070a2` plus
-this document. The token was a CI enrollment token from `hyp remote mint`; the
-gateway id it printed at mint time was the id the shipper enrolled under.
+the changes in this commit. The same four requests were sent three times: with
+no `shipping` section, with a CI enrollment token from `hyp remote mint`, and
+with a service-account token. For the CI token, the gateway id printed at mint
+time was the id the shipper enrolled under.
 
-| Step | Result |
+| Step | Result, each run |
 | --- | --- |
 | Anthropic Messages, JSON | 200, outcome 0 |
 | Anthropic Messages, SSE stream | 200, outcome 0 |
 | OpenAI Responses, JSON | 200, outcome 0 |
 | OpenAI Responses, SSE stream | 200, outcome 0 |
-| `loggate scan` | 37 records, status `complete`, `loggate_audit_gap_requests_total 0` |
-| Shipping | `enrolled 1`, 4 exchanges emitted, 4 batches acknowledged, 0 poisoned |
-| Server query | 8 rows under the gateway id: a user and an assistant row per exchange |
+| `loggate scan` | 37 or 38 records, status `complete`, `loggate_audit_gap_requests_total 0` |
+| Shipping (both token kinds) | `enrolled 1`, 4 exchanges emitted, 4 batches acknowledged, 0 poisoned |
+| Server query (both token kinds) | 8 rows under the gateway id: a user and an assistant row per exchange |
 
 Response bodies came back byte for byte as the providers sent them, including
 SSE padding. On the server, `provider` was `anthropic` or `openai`, `model` was
 the requested model, `session_id` was the caller id from `metadata.user_id` or
 `user`, and `attributes.usage` carried input, output, and total tokens for all
-four exchanges, streamed or not. A first run with the same four requests and no
-`shipping` section logged identically on disk, which is the local-only path.
+four exchanges, streamed or not.
+
+The local-only log was then uploaded with `loggate ship` and a second
+service-account token, twice: once into an empty state directory, then again
+after deleting `identity.json` and `checkpoint.json`. Both runs enrolled under
+the same gateway id and both reported one acknowledged batch; the server holds
+8 rows for those 4 exchanges, not 16, which is the batch ledger doing its job.
+
+That run also found a bug, fixed in this commit: `loggate ship` panicked at
+startup with "Cannot start a runtime from within a runtime", because the
+subcommand built the shipper's Tokio runtime on the thread that already ran the
+executable's. It now runs on its own thread, as it does beside the gateway, and
+the executable test covers the subcommand to the end of its drain loop.
