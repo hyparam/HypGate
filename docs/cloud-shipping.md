@@ -12,7 +12,11 @@ writer, and a metrics sink, with no decisions in it. The HTTPS client, JSON
 and SSE parsing, the projection of an exchange into HypAware rows, the state
 files, and the server's own behavior are trusted and tested; the shipping
 adapters are held to a panic-free standard by clippy denies on unwrap,
-expect, panic, indexing, and unchecked arithmetic.
+expect, panic, indexing, and unchecked arithmetic. The client runs on the
+shipper's own thread with blocking sockets and rustls used directly, no
+executor: one deadline covers connect, handshake, request, and reply,
+enforced by setting the socket timeout to the time left before every read
+and write.
 
 ## What it does
 
@@ -152,8 +156,9 @@ implemented.
 
 - The HypAware server honors its documented ledger and dedup semantics and
   issues credentials only to holders of a valid operator token.
-- TLS/PKI, DNS, Tokio, and the filesystem, as for the gateway; the HTTPS
-  client's head parsing and writing are the verified codec.
+- rustls, DNS, the OS socket timeouts that enforce the deadline, and the
+  filesystem; the shipper uses no Tokio. The HTTPS client's head parsing,
+  framing, and chunk decoding are the verified codec.
 - The system clock for renewal decisions and row timestamps.
 - The `Effects` implementation performs what it is asked: `send` reaches the
   configured server and returns that server's reply, `read` returns the log's

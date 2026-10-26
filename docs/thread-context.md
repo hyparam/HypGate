@@ -41,12 +41,14 @@ the runtime source, since the macro would enter a runtime outside the lint's
 reach; the executable enters its runtime explicitly.
 
 Who holds a context today: the executable's main thread, spent on the gateway
-runtime or, for `loggate ship`, on the shipping loop's runtime; the shipper
-thread, spent on its own runtime; each credited-job worker thread in the DNS
-and TLS handshake pools, kept for the thread's life and lent to each job, which
-is how a handshake job may block on the gateway runtime's handle. Threads
-started without `spawn_fresh`, such as the audit log worker, hold no context
-and so cannot enter a runtime at all.
+runtime (`loggate ship` and `loggate scan` enter no runtime and leave it
+unspent); each credited-job worker thread in the DNS and TLS handshake pools,
+kept for the thread's life and lent to each job, which is how a handshake job
+may block on the gateway runtime's handle. Threads started without
+`spawn_fresh`, such as the audit log worker and the shipper thread, hold no
+context and so cannot enter a runtime at all. The shipper runs blocking
+sockets and rustls directly ([cloud shipping](cloud-shipping.md)), so the
+fault that motivated this page can no longer arise on its path.
 
 ## Proved, typed, trusted
 

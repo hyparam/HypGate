@@ -1,18 +1,20 @@
 //! One HTTPS request at a time to the configured HypAware server, over the
-//! verified codec. Blocking DNS and an inline handshake on the shipper's own
-//! thread; no redirects, proxies, pooling, or retries here. Response bodies
-//! are capped.
+//! verified codec, on the shipper's own thread: blocking sockets and rustls
+//! used directly, with no executor. No redirects, proxies, pooling, or
+//! retries here. One deadline covers the connect, the handshake, the request,
+//! and the reply; it is enforced by setting the socket timeout to the time
+//! left before every read and write, so a peer that trickles bytes cannot
+//! outlast it. Name resolution is blocking and outside the deadline.
+//! Response bodies are capped.
 use super::config::ShippingServer;
-use crate::http1;
+use crate::http1::{self, blocking::{BodyReader, read_status_head}};
 use gateway_core::egress::Egress;
 use gateway_core::headers::Field;
 use gateway_core::http1_exchange::{UpstreamStatus, upstream_status};
 use gateway_core::http1_framing::Framing;
 use gateway_core::http1_write::{wire_ok, write_request_head};
-use std::{io, net::ToSocketAddrs, sync::Arc, time::Duration};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
-use tokio_rustls::{TlsConnector, rustls::{ClientConfig, RootCertStore, pki_types::ServerName}};
+use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned, pki_types::ServerName};
+use std::{io::{self, Read, Write}, net::{TcpStream, ToSocketAddrs}, sync::Arc, time::{Duration, Instant}};
 
 pub const MAX_REPLY_BYTES: usize = 64 * 1024;
 
@@ -28,16 +30,75 @@ impl Reply {
     }
 }
 
-pub struct Client { connector: TlsConnector, server: ShippingServer, host: String, deadline: Duration }
+pub struct Client { config: Arc<ClientConfig>, server: ShippingServer, host: String, deadline: Duration }
+
+/// The instant a request must be finished by.
+struct Deadline { end: Instant }
+impl Deadline {
+    fn start(total: Duration) -> Result<Self, ClientError> {
+        Ok(Self { end: Instant::now().checked_add(total).ok_or(ClientError::Timeout)? })
+    }
+    /// The time left, or `Timeout` once none is.
+    fn remaining(&self) -> Result<Duration, ClientError> {
+        let left = self.end.saturating_duration_since(Instant::now());
+        if left.is_zero() { Err(ClientError::Timeout) } else { Ok(left) }
+    }
+}
+
+/// The TLS stream under its deadline. Every read and write first sets the
+/// socket timeout to the time left; a timeout is remembered so the caller can
+/// tell it from a protocol fault after the fact.
+struct Timed { tls: StreamOwned<ClientConnection, TcpStream>, deadline: Deadline, expired: bool }
+impl Timed {
+    fn arm(&mut self) -> io::Result<()> {
+        match self.deadline.remaining() {
+            Ok(left) => { self.tls.sock.set_read_timeout(Some(left))?; self.tls.sock.set_write_timeout(Some(left)) }
+            Err(_) => { self.expired = true; Err(io::ErrorKind::TimedOut.into()) }
+        }
+    }
+    fn note<T>(&mut self, result: io::Result<T>) -> io::Result<T> {
+        if let Err(e) = &result {
+            if matches!(e.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock) { self.expired = true; }
+        }
+        result
+    }
+    /// The error to report for a failed operation: the deadline if it passed, else `fault`.
+    fn failure(&self, fault: ClientError) -> ClientError { if self.expired { ClientError::Timeout } else { fault } }
+    /// Drive the handshake to completion under the deadline.
+    fn handshake(&mut self) -> Result<(), ClientError> {
+        while self.tls.conn.is_handshaking() {
+            self.arm().map_err(|_| ClientError::Timeout)?;
+            let step = self.tls.conn.complete_io(&mut self.tls.sock).map(|_| ());
+            if self.note(step).is_err() { return Err(self.failure(ClientError::Tls)); }
+        }
+        Ok(())
+    }
+}
+impl Read for Timed {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> { self.arm()?; let result = self.tls.read(out); self.note(result) }
+}
+impl Write for Timed {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> { self.arm()?; let result = self.tls.write(bytes); self.note(result) }
+    fn flush(&mut self) -> io::Result<()> { self.arm()?; let result = self.tls.flush(); self.note(result) }
+}
 
 // Effect site: the only cloud socket. Resolution and connection happen under a
-// permit minted from the configured shipping server and nothing else.
+// permit minted from the configured shipping server and nothing else, and the
+// connect is bounded by the request deadline.
 #[allow(clippy::disallowed_methods)]
-async fn open_socket(permit: &Egress<'_, ShippingServer>) -> Result<TcpStream, ClientError> {
+fn open_socket(permit: &Egress<'_, ShippingServer>, deadline: &Deadline) -> Result<TcpStream, ClientError> {
     let target = permit.target();
     let addresses: Vec<_> = (target.host(), target.port()).to_socket_addrs().map_err(|_| ClientError::Resolve)?.take(16).collect();
     if addresses.is_empty() { return Err(ClientError::Resolve); }
-    TcpStream::connect(addresses.as_slice()).await.map_err(|_| ClientError::Connect)
+    let mut failure = ClientError::Connect;
+    for address in &addresses {
+        match TcpStream::connect_timeout(address, deadline.remaining()?) {
+            Ok(socket) => return Ok(socket),
+            Err(e) if matches!(e.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock) => failure = ClientError::Timeout,
+            Err(_) => {}
+        }
+    }
+    Err(failure)
 }
 
 impl Client {
@@ -52,23 +113,22 @@ impl Client {
         let mut config = ClientConfig::builder().with_root_certificates(roots).with_no_client_auth();
         config.enable_early_data = false;
         config.cert_decompressors.clear();
-        Ok(Self { connector: TlsConnector::from(Arc::new(config)), server, host, deadline })
+        Ok(Self { config: Arc::new(config), server, host, deadline })
     }
 
     /// `bearer` becomes an `Authorization` header; `headers` are added verbatim.
-    pub async fn request(&self, method: &str, path: &str, bearer: Option<&str>, headers: &[(&str, String)], body: Vec<u8>)
+    /// Blocks the calling thread for at most the deadline plus name resolution.
+    pub fn request(&self, method: &str, path: &str, bearer: Option<&str>, headers: &[(&str, String)], body: Vec<u8>)
         -> Result<Reply, ClientError>
     {
-        tokio::time::timeout(self.deadline, self.run(method, path, bearer, headers, body)).await.map_err(|_| ClientError::Timeout)?
-    }
-
-    async fn run(&self, method: &str, path: &str, bearer: Option<&str>, headers: &[(&str, String)], body: Vec<u8>)
-        -> Result<Reply, ClientError>
-    {
+        let deadline = Deadline::start(self.deadline)?;
         let permit = Egress::cloud(&self.server);
-        let tcp = open_socket(&permit).await?;
+        let tcp = open_socket(&permit, &deadline)?;
         let server = ServerName::try_from(self.host.clone()).map_err(|_| ClientError::Tls)?;
-        let mut tls = self.connector.connect(server, tcp).await.map_err(|_| ClientError::Tls)?;
+        let connection = ClientConnection::new(self.config.clone(), server).map_err(|_| ClientError::Tls)?;
+        let mut tls = Timed { tls: StreamOwned::new(connection, tcp), deadline, expired: false };
+        tls.handshake()?;
+
         let mut fields = vec![
             http1::field(b"host", self.server.authority().as_bytes().to_vec()),
             http1::field(b"connection", b"close".to_vec()),
@@ -82,10 +142,13 @@ impl Client {
         let mut head = Vec::new();
         write_request_head(method.as_bytes(), path.as_bytes(), &fields, &mut head);
         head.extend_from_slice(&body);
-        tls.write_all(&head).await.map_err(|_| ClientError::Http)?;
+        let sent = tls.write_all(&head).and_then(|()| tls.flush());
+        sent.map_err(|_| tls.failure(ClientError::Http))?;
+
         let mut leftover = Vec::new();
         let (status_head, leftover, reply_framing) = loop {
-            let (status_head, rest) = http1::read_status_head(&mut tls, leftover).await.map_err(|_| ClientError::Http)?;
+            let read = read_status_head(&mut tls, leftover);
+            let (status_head, rest) = read.map_err(|_| tls.failure(ClientError::Http))?;
             match upstream_status(status_head.status, &status_head.fields) {
                 UpstreamStatus::Interim => { leftover = rest; }
                 UpstreamStatus::Refused => return Err(ClientError::Http),
@@ -96,15 +159,21 @@ impl Client {
         let retry_after = status_head.fields.iter().find(|f| f.name == b"retry-after")
             .and_then(|f| std::str::from_utf8(&f.value).ok()).and_then(|v| v.trim().parse().ok());
         if let Framing::Length(n) = reply_framing { if n > MAX_REPLY_BYTES as u64 { return Err(ClientError::Http); } }
-        let mut reader = http1::BodyReader::new(&mut tls, leftover, reply_framing);
-        let mut bytes = Vec::new();
-        let mut buffer = [0u8; 4096];
-        loop {
-            let n = reader.read(&mut buffer).await.map_err(|_| ClientError::Http)?;
-            if n == 0 { break; }
-            if bytes.len().checked_add(n).is_none_or(|total| total > MAX_REPLY_BYTES) { return Err(ClientError::Http); }
-            bytes.extend_from_slice(buffer.get(..n).ok_or(ClientError::Http)?);
-        }
+        let body = read_body(&mut tls, leftover, reply_framing);
+        let bytes = body.map_err(|_| tls.failure(ClientError::Http))?;
         Ok(Reply { status: status_head.status, retry_after, body: bytes })
+    }
+}
+
+/// The whole reply body, capped; an error is a framing fault, a short body, or the deadline.
+fn read_body(tls: &mut Timed, leftover: Vec<u8>, framing: Framing) -> Result<Vec<u8>, ()> {
+    let mut reader = BodyReader::new(tls, leftover, framing);
+    let mut bytes = Vec::new();
+    let mut buffer = [0u8; 4096];
+    loop {
+        let n = reader.read(&mut buffer).map_err(|_| ())?;
+        if n == 0 { return Ok(bytes); }
+        if bytes.len().checked_add(n).is_none_or(|total| total > MAX_REPLY_BYTES) { return Err(()); }
+        bytes.extend_from_slice(buffer.get(..n).ok_or(())?);
     }
 }

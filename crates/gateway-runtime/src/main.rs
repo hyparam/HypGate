@@ -33,7 +33,7 @@ fn run(context: ThreadContext) -> Result<(), &'static str> {
     }
     if args.get(1).map(String::as_str) == Some("ship") {
         if args.len() != 4 { return Err("usage: loggate ship ROOT.json LOG"); }
-        return ship(&args[2], &args[3], context);
+        return ship(&args[2], &args[3]);
     }
     if !(4..=5).contains(&args.len()) { return Err("usage: loggate ROOT.json ROUTES.json NEW_LOG [127.0.0.1:8080]"); }
     let address: SocketAddr = args.get(4).map(String::as_str).unwrap_or("127.0.0.1:8080").parse().map_err(|_| "invalid listen address")?;
@@ -98,12 +98,12 @@ async fn serve(args: &[String], address: SocketAddr) -> Result<(), &'static str>
 }
 
 /// Ship a finished log with the root policy's `shipping` section, then exit.
-/// Runs on the main thread, whose context the shipping loop spends on its runtime.
-fn ship(root_path: &str, log_path: &str, context: ThreadContext) -> Result<(), &'static str> {
+/// Runs on the main thread with blocking sockets and enters no runtime.
+fn ship(root_path: &str, log_path: &str) -> Result<(), &'static str> {
     let root = bounded_file(root_path).map_err(|_| "cannot read root policy")?;
     let config = ShippingConfig::from_root_json(&root, secret)
         .map_err(|_| "invalid shipping configuration or missing token")?.ok_or("root policy has no shipping section")?;
-    let metrics = shipping::ship_to_end(config, Path::new(log_path).to_path_buf(), context)?;
+    let metrics = shipping::ship_to_end(config, Path::new(log_path).to_path_buf())?;
     let mut text = String::new(); metrics.render(&mut text);
     print!("{text}");
     Ok(())

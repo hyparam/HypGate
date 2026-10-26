@@ -17,6 +17,7 @@ getrandom = "0.3"
 tokio = { version = "1", features = ["io-util", "macros", "rt", "sync", "time", "net", "signal"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "std"] }
 webpki-roots = "1"
 
 [dev-dependencies]

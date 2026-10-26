@@ -2,7 +2,8 @@
 //! drives the verified shipper machine, which groups records into exchanges,
 //! batches their projections, and decides every request, retry, and
 //! checkpoint. This module performs those actions against the one configured
-//! server and reports replies back. It shares no executor, pool, or handle with
+//! server and reports replies back. It runs no executor at all: blocking
+//! sockets and rustls on its own thread, sharing no pool or handle with
 //! request workers; its only inputs are the log path, the server, the token,
 //! and a state directory, and its only outputs are metrics. Failure here never
 //! touches admission or readiness.
@@ -13,10 +14,8 @@ use gateway_core::framing::Header;
 use gateway_core::shipper::{Credential, Machine, Outcome, Path as ShipPath, Reply as MachineReply, Request};
 use gateway_core::shipping_driver::{drive, Effects, Event, Halt, Mode, Projected, Read};
 use std::{fs::File, io::{self, Seek, SeekFrom}, path::PathBuf, sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}, mpsc}, time::{Duration, SystemTime}};
-use tokio_rustls::rustls::RootCertStore;
+use rustls::RootCertStore;
 use crate::disk_log::{LogReader, ScanError};
-use crate::thread_runtime::EnteredRuntime;
-use gateway_core::thread_context::ThreadContext;
 
 pub mod config;
 pub mod client;
@@ -65,25 +64,23 @@ impl Shipper {
     /// Start the thread. The log must already exist with a valid header.
     pub fn spawn(config: ShippingConfig, log_path: PathBuf) -> io::Result<Self> { Self::spawn_with_roots(config, log_path, None) }
     pub fn spawn_with_roots(config: ShippingConfig, log_path: PathBuf, roots: Option<RootCertStore>) -> io::Result<Self> {
-        Self::spawn_thread(move |stop, metrics, context| {
-            let runtime = match EnteredRuntime::current_thread(context) {
-                Ok(runtime) => runtime, Err(_) => { metrics.stopped.store(true, Ordering::Relaxed); return; }
-            };
-            let result = Engine::new(config, log_path, roots, stop, metrics.clone(), runtime).run(Mode::Follow);
+        Self::spawn_thread(move |stop, metrics| {
+            let result = Engine::new(config, log_path, roots, stop, metrics.clone()).run(Mode::Follow);
             if result.is_err() { metrics.stopped.store(true, Ordering::Relaxed); }
         })
     }
     /// The thread body runs under `catch_unwind`: a panic marks the shipper
     /// stopped and panicked and ends the thread. Nothing else in the process
-    /// observes it; the gateway holds only this metrics view.
-    fn spawn_thread(body: impl FnOnce(Arc<AtomicBool>, Arc<Metrics>, ThreadContext) + Send + 'static) -> io::Result<Self> {
+    /// observes it; the gateway holds only this metrics view. The thread is
+    /// started without a thread context, so it cannot enter a runtime.
+    fn spawn_thread(body: impl FnOnce(Arc<AtomicBool>, Arc<Metrics>) + Send + 'static) -> io::Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let metrics = Arc::new(Metrics::default());
         let (done, finished) = mpsc::channel();
         let (flag, shared) = (stop.clone(), metrics.clone());
-        let thread = crate::thread_runtime::spawn_fresh(std::thread::Builder::new().name("loggate-shipping".into()).stack_size(STACK_BYTES), move |context| {
+        let thread = std::thread::Builder::new().name("loggate-shipping".into()).stack_size(STACK_BYTES).spawn(move || {
             let _done = done; // dropped when the thread ends, however it ends
-            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(flag, shared.clone(), context)));
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(flag, shared.clone())));
             if outcome.is_err() {
                 shared.panicked.store(true, Ordering::Relaxed);
                 shared.stopped.store(true, Ordering::Relaxed);
@@ -92,7 +89,7 @@ impl Shipper {
         Ok(Self { stop, finished, thread: Some(thread), metrics })
     }
     #[cfg(test)]
-    pub(crate) fn spawn_for_test(body: impl FnOnce() + Send + 'static) -> io::Result<Self> { Self::spawn_thread(move |_, _, _| body()) }
+    pub(crate) fn spawn_for_test(body: impl FnOnce() + Send + 'static) -> io::Result<Self> { Self::spawn_thread(move |_, _| body()) }
     pub fn metrics(&self) -> Arc<Metrics> { self.metrics.clone() }
     /// Ask the thread to stop after its current step and join it within the
     /// deadline. A thread still inside a request is left to finish on its own;
@@ -112,14 +109,13 @@ impl Shipper {
 impl Drop for Shipper { fn drop(&mut self) { self.stop.store(true, Ordering::Relaxed); } }
 
 /// Ship a finished log on the current thread until every exchange is resolved
-/// or the enrollment is stopped for good. Used by `loggate ship`. The caller's
-/// thread context is spent on the runtime the loop blocks on.
-pub fn ship_to_end(config: ShippingConfig, log_path: PathBuf, context: ThreadContext) -> Result<Metrics, &'static str> { ship_to_end_with_roots(config, log_path, None, context) }
-pub fn ship_to_end_with_roots(config: ShippingConfig, log_path: PathBuf, roots: Option<RootCertStore>, context: ThreadContext) -> Result<Metrics, &'static str> {
-    let runtime = EnteredRuntime::current_thread(context).map_err(|_| "cannot start shipping runtime")?;
+/// or the enrollment is stopped for good. Used by `loggate ship`. Blocks the
+/// calling thread and enters no runtime.
+pub fn ship_to_end(config: ShippingConfig, log_path: PathBuf) -> Result<Metrics, &'static str> { ship_to_end_with_roots(config, log_path, None) }
+pub fn ship_to_end_with_roots(config: ShippingConfig, log_path: PathBuf, roots: Option<RootCertStore>) -> Result<Metrics, &'static str> {
     let metrics = Arc::new(Metrics::default());
     let stop = Arc::new(AtomicBool::new(false));
-    let result = Engine::new(config, log_path, roots, stop, metrics.clone(), runtime).run(Mode::Drain);
+    let result = Engine::new(config, log_path, roots, stop, metrics.clone()).run(Mode::Drain);
     result.map(|_| Arc::try_unwrap(metrics).unwrap_or_default())
 }
 
@@ -133,7 +129,6 @@ struct Engine {
     roots: Option<RootCertStore>,
     stop: Arc<AtomicBool>,
     metrics: Arc<Metrics>,
-    runtime: EnteredRuntime,
     client: Option<Client>,
     session: Option<[u8; 16]>,
     reader: Option<LogReader<File>>,
@@ -158,9 +153,8 @@ fn parse_credential(body: &[u8]) -> Option<Issued> {
 }
 
 impl Engine {
-    fn new(config: ShippingConfig, log_path: PathBuf, roots: Option<RootCertStore>, stop: Arc<AtomicBool>, metrics: Arc<Metrics>,
-        runtime: EnteredRuntime) -> Self {
-        Engine { config, log_path, roots, stop, metrics, runtime, client: None, session: None, reader: None, valid_end: 56, issued: None }
+    fn new(config: ShippingConfig, log_path: PathBuf, roots: Option<RootCertStore>, stop: Arc<AtomicBool>, metrics: Arc<Metrics>) -> Self {
+        Engine { config, log_path, roots, stop, metrics, client: None, session: None, reader: None, valid_end: 56, issued: None }
     }
 
     /// Sleep in short slices so a stop request is honored promptly. False when stopping.
@@ -281,7 +275,7 @@ impl Effects for Engine {
         }
         let failed = MachineReply { status: 0, retry_after: None, revocation: false, credential: None };
         let Some(client) = self.client.as_ref() else { return failed; };
-        let Ok(reply) = self.runtime.block_on(client.request("POST", path, bearer, &headers, request.body)) else { return failed; };
+        let Ok(reply) = client.request("POST", path, bearer, &headers, request.body) else { return failed; };
         let revocation = is_revocation(&reply);
         self.issued = if request.path != ShipPath::Ingest && reply.status == 200 { parse_credential(&reply.body) } else { None };
         let credential = self.issued.as_ref().map(|i| Credential { jwt: i.jwt.as_bytes().to_vec(), expires_at: i.expires_at });

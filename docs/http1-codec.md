@@ -43,6 +43,8 @@ decides nothing about what a byte means:
   chunk coding fault, or data missing after a fixed length is an error.
 - `ChunkedWriter` writes the bytes a verified `ChunkStream` yields for each
   write and for shutdown; it never closes the stream, the caller decides that.
+- `http1::blocking` is the same `read_status_head` and `BodyReader` over
+  `std::io::Read`, for threads that run no executor.
 
 The server (`server.rs`) reads the head under a ten-second deadline and then
 asks the `Connection` machine for every byte it writes: the refusal for a head
@@ -50,7 +52,8 @@ that is too large or malformed, the `100 Continue`, the response head, the
 chunks, and the last chunk. The transport (`transport.rs`) asks the `Upstream`
 machine for the request head and the upload chunks, and classifies each
 status head it reads with `upstream_status` until a final one. The shipping
-client reuses `upstream_status` with a fixed Content-Length request.
+client reuses `upstream_status` with a fixed Content-Length request, over the
+blocking half of the adapter on its own thread.
 
 ## Trusted
 

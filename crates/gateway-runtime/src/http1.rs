@@ -4,7 +4,8 @@
 //! module only moves bytes between sockets and those functions: it reads
 //! into bounded buffers, hands the buffer to the parser, copies the body
 //! bytes the decoder names, and writes the bytes the encoders produce. It
-//! makes no decision about what a byte means.
+//! makes no decision about what a byte means. `blocking` is the same over
+//! `std::io` for threads that run no executor.
 use gateway_core::headers::{Field, MAX_BYTES, Rejection};
 use gateway_core::http1_chunked::{ChunkDecoder, Step};
 use gateway_core::http1_exchange::ChunkStream;
@@ -12,6 +13,8 @@ use gateway_core::http1_framing::Framing;
 use gateway_core::http1_head::{RequestHead, RequestProgress, StatusHead, StatusProgress, parse_request, parse_status};
 use std::{io, pin::Pin, task::{Context, Poll}};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
+
+pub(crate) mod blocking;
 
 /// One socket read, and the most body bytes buffered ahead of the copy.
 pub(crate) const READ_BYTES: usize = 32 * 1024;

@@ -220,3 +220,10 @@ startup with "Cannot start a runtime from within a runtime", because the
 subcommand built the shipper's Tokio runtime on the thread that already ran the
 executable's. It now runs on its own thread, as it does beside the gateway, and
 the executable test covers the subcommand to the end of its drain loop.
+
+On 2026-10-26 the shipping client moved off Tokio entirely: blocking sockets
+and rustls used directly on the shipper's thread, with the request deadline
+enforced by socket timeouts. `loggate ship` was run again against HypAware
+Cloud with a fresh service-account token and state directory: it enrolled,
+read the smoke log's 32 records into four exchanges, and had the one batch
+acknowledged in about two seconds.

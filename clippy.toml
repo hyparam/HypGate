@@ -6,6 +6,7 @@
 disallowed-methods = [
     { path = "tokio::net::TcpStream::connect", reason = "sockets open only under an egress permit (transport::open_socket, shipping::client::open_socket)" },
     { path = "std::net::TcpStream::connect", reason = "sockets open only under an egress permit" },
+    { path = "std::net::TcpStream::connect_timeout", reason = "sockets open only under an egress permit (shipping::client::open_socket)" },
     { path = "std::net::ToSocketAddrs::to_socket_addrs", reason = "name lookups only for a permit's host (transport::resolver, shipping::client::open_socket)" },
     { path = "tokio::net::lookup_host", reason = "name lookups only for a permit's host" },
     { path = "tokio::net::TcpListener::bind", reason = "one listening socket, in main::bind" },

@@ -65,10 +65,10 @@ are pinned the same way: the sites in `thread_runtime.rs` spend a
 
 | Effect | Production site | What must already hold when it runs |
 | --- | --- | --- |
-| Mint the main thread's context | `ThreadContext::fresh` in `main.rs::main` | Process start; the one permit is spent by the gateway runtime or by `loggate ship` |
+| Mint the main thread's context | `ThreadContext::fresh` in `main.rs::main` | Process start; the one permit is spent by the gateway runtime; `loggate ship` and `loggate scan` enter no runtime and leave it unspent |
 | Build and enter a runtime | `Builder::build` in `thread_runtime::EnteredRuntime::current_thread`; `Runtime::block_on` in `EnteredRuntime::block_on` | A `ThreadContext` was spent, so no runtime is entered on the thread; the runtime is not `Send` and stays there |
 | Block on another runtime's handle | `Handle::block_on` in `thread_runtime::block_on_handle` | The calling worker thread lends its `ThreadContext`; used by the TLS handshake pool |
-| Start a thread with a context | `ThreadContext::fresh` in `thread_runtime::spawn_fresh` | The new OS thread has entered no runtime; the shipper thread and the DNS and handshake workers start here |
+| Start a thread with a context | `ThreadContext::fresh` in `thread_runtime::spawn_fresh` | The new OS thread has entered no runtime; the DNS and handshake workers start here. The shipper thread is started without a context and so cannot enter a runtime |
 | Listen on loopback | `TcpListener::bind` in `main.rs::bind` | `run` rejects a non-loopback address before loading configuration; configuration and audit log already created |
 | Read root policy, routes, and secrets | `main.rs::bounded_file` and `std::env::var` in `main.rs::secret` | Startup only; bounded file reads, secrets from environment through `GatewayConfig::from_json` and `ShippingConfig::from_root_json` |
 | Accept inbound connection | `listener.accept()` in `server::serve` | Connection credit from `ConnectionSlots::acquire` over the verified `ResponseRegistry` |
@@ -85,7 +85,7 @@ are pinned the same way: the sites in `thread_runtime.rs` spend a
 | Read the cloud token | `main.rs::secret` through `ShippingConfig::from_root_json` in `run` and `ship` | Startup only; the value moves into the verified machine and is never held by `GatewayConfig` |
 | Open the audit log for shipping | `File::open` in `shipping::Engine::{open_session,read}` (the `Effects` implementation the verified driver calls) | Read-only handle on the operator's log path; the verified scanner never writes |
 | Write shipper state | `OpenOptions` (create-new, 0600), `write_all`, `sync_all`, `fs::rename` in `shipping::state::write_private` | Only `identity.json` and `checkpoint.json` under the configured state directory; contents are the server credential, a token fingerprint, and counters |
-| Cloud DNS, TCP, TLS, and HTTP | `to_socket_addrs` and `TcpStream::connect` in `shipping::client::open_socket` under an `Egress::cloud` permit; `TlsConnector::connect`, `handshake`, `send_request` in `shipping::client::Client::run` | Host and port come only from the `ShippingServer` the configuration parser built; the request itself was chosen by the verified machine; called only from the shipper thread with the server-issued credential, never a provider credential |
+| Cloud DNS, TCP, TLS, and HTTP | `to_socket_addrs` and `TcpStream::connect_timeout` in `shipping::client::open_socket` under an `Egress::cloud` permit; rustls `ClientConnection::complete_io`, then `write_all`, `http1::blocking::read_status_head`, and `http1::blocking::BodyReader` over the deadline-armed socket in `shipping::client::Client::request` | Blocking sockets and rustls directly, no executor; every read and write runs under the request deadline by socket timeout. Host and port come only from the `ShippingServer` the configuration parser built; the request itself was chosen by the verified machine; called only from the shipper thread with the server-issued credential, never a provider credential |
 
 No other `connect`, `send_request`, `write_all`, `sync_all`, `spawn`, or file-open
 call exists in production runtime source outside `transport.rs`, `disk_log.rs`,
