@@ -26,27 +26,36 @@ positions:
 - `elements` and `members`: whitespace, or comma-separated items with
   whitespace around each; a member is a quoted key, a colon, and a value.
 
-The theorem on `parse` is soundness: `parse(bytes) == Some(v)` implies
-`document(bytes@, v)`. So a value the reader returns is encoded by exactly
-the bytes it was handed, nothing was skipped or invented, every number
-lexeme satisfies the number grammar, and every string is the decoding of its
-escapes. `Value::get` returns the first member with the key and `None` only
-when no member has it; `as_u64` returns `n` only for the lexeme that is the
-canonical decimal of `n`; the other accessors answer only for their kind.
+`parse` is proved sound and complete against it. Soundness:
+`parse(bytes) == Some(v)` implies `document(bytes@, v)`, so a value the
+reader returns is encoded by exactly the bytes it was handed, nothing was
+skipped or invented, every number lexeme satisfies the number grammar, and
+every string is the decoding of its escapes. Completeness: for every `v`
+with `document(bytes@, v)` and `depth(v) <= MAX_DEPTH`, `parse(bytes)` is
+`Some(w)` with `same(w, v)`, structural equality of the two trees. So the
+reader accepts exactly the grammar within the depth limit, and returns its
+value; the grammar's determinism (that a document denotes one value) is a
+corollary. The proof follows the reader: every scanner carries, besides its
+soundness, a postcondition that for every encoding at its position the scan
+ends where the encoding ends with the same bytes, established through a
+loop invariant quantified over all such encodings (`string_progress`,
+`stop`, `mstop`), with `boundary` naming what may follow a value so that a
+number's maximal munch is the only reading. `Value::get` returns the first
+member with the key and `None` only when no member has it; `as_u64` returns
+`n` only for the lexeme that is the canonical decimal of `n`; the other
+accessors answer only for their kind.
 
 Executable tests pin the RFC example, every value kind, escapes and
 surrogate pairs, number forms, the depth limit, and a table of malformed
-inputs. Seven deliberate defects (a leading zero, a control byte, a lone low
-surrogate, trailing bytes, a misread literal, a dropped escape byte, a
-trailing comma) fail their proof obligations.
+inputs. Ten deliberate defects fail their proof obligations: seven in the
+reader (a leading zero, a control byte, a lone low surrogate, trailing
+bytes, a misread literal, a dropped escape byte, a trailing comma) and three
+in the specification that completeness catches (a grammar admitting control
+bytes, leading zeros, or lone low surrogates would make the reader
+incomplete).
 
 ## What is not proved, and other limits
 
-- **Completeness.** That every document of the grammar is accepted is not
-  proved; it is tested. The parser is a deterministic recursive descent over
-  an LL(1) grammar, so a refusal of a well-formed document would be a bug,
-  not a design limit. Proving it is the natural next step, as it was for the
-  chunked decoder.
 - **UTF-8.** Raw bytes in strings at or above 0x20 pass through unchecked;
   the reader does not validate that a string is UTF-8. `\u` escapes produce
   well-formed UTF-8. Consumers that need text use `String::from_utf8` or a
@@ -54,7 +63,8 @@ trailing comma) fail their proof obligations.
 - **Duplicate keys** are kept in order and `get` finds the first. The
   configuration loader refuses duplicates and unknown keys itself.
 - **Depth** is limited to `MAX_DEPTH` (64) nested arrays and objects; the
-  limit is a refusal, not part of the grammar predicate.
+  limit is a refusal, not part of the grammar predicate, and completeness
+  is stated for documents within it.
 - **Numbers** are kept as their lexeme. Only canonical `u64` decimals read as
   integers; fractions, exponents, and negatives are preserved but not
   evaluated. There is no floating-point conversion.
