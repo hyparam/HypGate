@@ -33,9 +33,9 @@ contracts also prove acceptance of a valid complete record when its ticket match
 the supplied checksum result is successful, and its end offset fits in `u64`.
 Rejection must identify a malformed header, payload-length mismatch, failed
 checksum result, wrong cursor/ticket state, or offset overflow. These are finite
-core transitions, not a promise that reads or checksum computation finish. File
-reads, checksum computation, session randomness/uniqueness, and conversion to the public runtime
-record remain trusted. The [scanner refinement](recovery-proof.md) proves
+core transitions, not a promise that reads finish. The checksum is the verified
+SHA-256 (`gateway_core::sha256`). File reads, session randomness/uniqueness, and
+conversion to the public runtime record remain trusted. The [scanner refinement](recovery-proof.md) proves
 per-step source correspondence under explicit adapter contracts; ordered
 acknowledged-prefix reconstruction is proved under its explicit read/checksum
 and preserved-byte assumptions. The named ext4 validation below covers live-OS errors and process death. Checksums defend against accidental corruption, not malicious changes.

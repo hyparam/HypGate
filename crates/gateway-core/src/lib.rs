@@ -62,6 +62,7 @@ pub mod body_reader;
 pub mod ipv6;
 pub mod sink;
 pub mod base64url;
+pub mod sha256;
 
 #[cfg(test)]
 #[path = "tests/streaming.rs"]
@@ -123,3 +124,6 @@ mod sink_tests;
 #[cfg(test)]
 #[path = "tests/base64url.rs"]
 mod base64url_tests;
+#[cfg(test)]
+#[path = "tests/sha256.rs"]
+mod sha256_tests;

@@ -122,10 +122,10 @@ impl<S: Sink> ChunkWriter<S> {
         self.note(Ghost(bytes@), written)
     }
 
-    fn note(&mut self, bytes: Ghost<Seq<u8>>, written: Written) -> (out: Result<(), WriteError>)
-        requires old(self).stream.valid(), !old(self).failed, old(self).stream.out() == old(self).sent@ + bytes@,
-            written.result is Ok ==> written.sent@ == bytes@,
-            written.result is Err ==> written.sent@.len() <= bytes@.len() && written.sent@ == bytes@.subrange(0, written.sent@.len() as int),
+    fn note(&mut self, framed: Ghost<Seq<u8>>, written: Written) -> (out: Result<(), WriteError>)
+        requires old(self).stream.valid(), !old(self).failed, old(self).stream.out() == old(self).sent@ + framed@,
+            written.result is Ok ==> written.sent@ == framed@,
+            written.result is Err ==> written.sent@.len() <= framed@.len() && written.sent@ == framed@.subrange(0, written.sent@.len() as int),
         ensures final(self).inv(), final(self).stream == old(self).stream, out == written.result,
             out is Ok ==> !final(self).failed,
             out is Err ==> final(self).failed,

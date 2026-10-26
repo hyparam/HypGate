@@ -12,7 +12,6 @@ use gateway_core::config_schema as schema;
 use gateway_core::config_values as values;
 use gateway_core::json;
 use gateway_core::policy::{Identity, Policy, Route};
-use sha2::{Digest, Sha256};
 
 const MAX_CONFIG: usize = 1024 * 1024;
 #[cfg(test)]
@@ -149,7 +148,7 @@ impl GatewayConfig {
 
     pub fn admit(&self, token: &[u8], selector: u64) -> Result<RoutedRequest<'_>, AdmissionError> {
         if token.is_empty() || token.len() > 512 { return Err(AdmissionError::Unauthorized); }
-        let digest = Sha256::digest(token);
+        let digest = gateway_core::sha256::digest(token);
         let request = self.admission.admit(&digest, selector)?;
         let resolved = gateway_core::resolved_route::ResolvedRoute::resolve(
             request.authority(), &self.destinations, &self.credentials).ok_or(AdmissionError::Unavailable)?;

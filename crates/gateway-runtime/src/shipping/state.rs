@@ -4,7 +4,6 @@
 //! gateway credential and a fingerprint of the operator token, never the token.
 use gateway_core::json::{self, Value};
 use crate::json_build::{self, object, size, write};
-use sha2::{Digest, Sha256};
 use std::{fs, io::{self, Write}, path::Path};
 
 pub const IDENTITY_FILE: &str = "identity.json";
@@ -33,7 +32,7 @@ pub struct Checkpoint {
 
 /// Lowercase hex from the verified encoder; every byte it returns is ASCII.
 pub fn hex(bytes: &[u8]) -> String { gateway_core::shipping_identity::hex(bytes).into_iter().map(char::from).collect() }
-pub fn fingerprint(token: &[u8]) -> String { hex(&Sha256::digest(token)) }
+pub fn fingerprint(token: &[u8]) -> String { hex(&gateway_core::sha256::digest(token)) }
 
 // Effect site: the shipper's two state files, under the configured state directory.
 #[allow(clippy::disallowed_methods)]

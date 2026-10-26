@@ -2,7 +2,7 @@ use super::*;
 use serde_json::{json, Value};
 
 fn root() -> Value {
-    let hash = format!("{:x}", Sha256::digest(b"test-gateway-token"));
+    let hash = crate::shipping::state::hex(&gateway_core::sha256::digest(b"test-gateway-token"));
     json!({
         "identities": [{"tenant": 1, "sha256": hash}],
         "destinations": ["https://api.openai.com/v1/responses", "https://api.anthropic.com/v1/messages"],

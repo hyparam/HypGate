@@ -677,7 +677,7 @@ The caller's borrowed payload already belongs to the request budget.
 | --- | --- | --- |
 | Canonical header scratch | One 33-byte Vec, dropped when `encode_payload` returns | `encode` now uses `Vec::with_capacity(33)`, avoiding repeated geometric growth from an empty vector. Receipt comparison uses the same encoder. |
 | Record body and sealed frame | One Vec requested at P + 65 bytes, moved from `RecordBody` into `RecordFrame` | The initial length is P + 33; 32 bytes of spare capacity are reserved for the checksum. Total pushes never exceed the initial request, under standard Vec behavior. |
-| Checksum | SHA-256 computation state and 32-byte result | Fixed-size algorithm state is separate from the frame's stored checksum; it is not another payload allocation. Library implementation and stack accounting remain trusted. |
+| Checksum | SHA-256 computation state and 32-byte result | Fixed-size algorithm state (eight words and a block buffer of at most 63 bytes, plus the 64-word schedule per block) is separate from the frame's stored checksum; it is not another payload allocation. The hasher is the verified `gateway_core::sha256`; stack accounting remains trusted. |
 
 Header scratch and body storage coexist during construction, so requested byte
 storage at that stage is P + 98, in addition to the borrowed input. After header

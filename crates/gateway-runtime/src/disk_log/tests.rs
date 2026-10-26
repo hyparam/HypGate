@@ -31,7 +31,7 @@ fn strict_transfer_and_real_disk_records_have_identical_payloads() {
 }
 fn header() -> Vec<u8> {
     let mut h = FILE_MAGIC.to_vec(); h.extend_from_slice(&[7; 16]);
-    h.extend_from_slice(&Sha256::digest(&h)); h
+    let sum = sha256::digest(&h); h.extend_from_slice(&sum); h
 }
 
 #[test]
@@ -464,7 +464,7 @@ fn done_payload() -> Vec<u8> { gateway_core::metadata::encode_completion(1_700_0
 fn resealed(mut frame: Vec<u8>, offset: usize, value: u8) -> Vec<u8> {
     frame[offset] = value;
     let body_len = frame.len() - 32;
-    let digest: [u8; 32] = Sha256::digest(&frame[..body_len]).into();
+    let digest = sha256::digest(&frame[..body_len]);
     frame[body_len..].copy_from_slice(&digest); frame
 }
 

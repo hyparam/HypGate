@@ -47,7 +47,8 @@ text, and the verified writer puts that path in the request line. No client path
 this endpoint. New API paths need explicitly granted endpoints; this initial
 interface does not support dynamic query parameters.
 
-Admission hashes the supplied raw gateway token using SHA-256, invokes the verified
+Admission hashes the supplied raw gateway token with the verified SHA-256
+(`gateway_core::sha256`, proved against its FIPS 180-4 spec), invokes the verified
 policy admission path, then resolves the authorized handles within that same
 immutable configuration. A private-constructor `RoutedRequest` owns the admitted
 request and borrows its destination and credential; callers cannot replace them.

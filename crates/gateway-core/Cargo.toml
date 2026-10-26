@@ -7,6 +7,9 @@ publish = false
 [dependencies]
 vstd = "=0.0.0-2026-10-18-0147"
 
+[dev-dependencies]
+sha2 = "0.10"
+
 [package.metadata.verus]
 verify = true
 

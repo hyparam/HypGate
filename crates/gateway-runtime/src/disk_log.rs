@@ -3,7 +3,7 @@
 use crate::transfer::{AuditLog, Direction, LogRecord, RecordKind};
 use gateway_core::{audit_journal::AuditJournal as Journal, journal::DurableFrame};
 use gateway_core::framing::{self, Header, RecordBody, RecordFrame};
-use sha2::{Digest, Sha256};
+use gateway_core::sha256;
 use std::{fs::{File, OpenOptions}, io::{self, Read, Write}, path::Path,
     sync::{Arc, Mutex, mpsc, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
 mod queue;
@@ -91,7 +91,8 @@ impl DiskLog {
         }
         let mut file = options.open(path)?;
         let mut header = framing::encode_session(&session);
-        header.extend_from_slice(&Sha256::digest(&header));
+        let checksum = sha256::digest(&header);
+        header.extend_from_slice(&checksum);
         file.write_all(&header)?;
         file.sync_all()?;
         let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
@@ -238,7 +239,8 @@ fn record_header(record: &LogRecord<'_>) -> Header {
         chunk: record.chunk, kind: record.kind.id() }
 }
 fn seal_record(body: RecordBody) -> RecordFrame {
-    let checksum: [u8; 32] = Sha256::digest(body.bytes()).into();
+    // The verified digest is 32 bytes; the fallback is unreachable.
+    let checksum: [u8; 32] = sha256::digest(body.bytes()).as_slice().try_into().unwrap_or([0; 32]);
     body.seal(&checksum)
 }
 #[cfg(test)]
@@ -299,8 +301,8 @@ impl<R: Read> gateway_core::recovery::Source for ReadSource<R> {
         Ok(bytes)
     }
     fn checksum_valid(&self, header: &[u8], payload: &[u8], checksum: &[u8]) -> bool {
-        let mut digest = Sha256::new(); digest.update(header); digest.update(payload);
-        digest.finalize()[..] == *checksum
+        let mut hasher = sha256::Hasher::new(); hasher.update(header); hasher.update(payload);
+        hasher.finish() == checksum
     }
 }
 
