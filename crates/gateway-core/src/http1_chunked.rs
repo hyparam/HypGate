@@ -6,9 +6,11 @@
 //! well-formed chunked body (`chunked_ok`) whose data is exactly the bytes it
 //! emitted: nothing is added, dropped, or reordered, and a body with a
 //! malformed size line, a bad chunk delimiter, or trailer fields is refused
-//! rather than guessed at. The encoder writes the chunk framing the
-//! specification names, and each chunk it writes is proved to be a chunk of
-//! the grammar the decoder accepts.
+//! rather than guessed at. The converse, that a well-formed body is never
+//! refused and finishes exactly at its end, is `complete::lemma_complete`,
+//! so the decoder accepts exactly the grammar. The encoder writes the chunk
+//! framing the specification names, and each chunk it writes is proved to be
+//! a chunk of that grammar.
 use vstd::prelude::*;
 use crate::http1_head::{CR, LF};
 
@@ -78,8 +80,10 @@ pub open spec fn chunked_ok(bytes: Seq<u8>, body: Seq<u8>) -> bool {
 
 // ---- decoder ---------------------------------------------------------------
 
+/// Where the decoder is in the chunk in progress. Public so the completeness
+/// theorem can name it; the fields it governs stay private.
 #[derive(PartialEq, Eq, Structural, Clone, Copy, Debug)]
-enum Phase { Size, Ext, SizeCr, Data, DataCr, DataLf, LastCr, LastLf, Done, Failed }
+pub enum Phase { Size, Ext, SizeCr, Data, DataCr, DataLf, LastCr, LastLf, Done, Failed }
 
 /// What one call consumed from the front of the input.
 #[derive(PartialEq, Eq, Structural, Clone, Copy, Debug)]
@@ -113,6 +117,29 @@ impl ChunkDecoder {
     pub closed spec fn body(&self) -> Seq<u8> { self.done_body@ + self.partial@ }
     pub closed spec fn done(&self) -> bool { self.phase == Phase::Done }
     pub closed spec fn failed(&self) -> bool { self.phase == Phase::Failed }
+    pub closed spec fn phase(&self) -> Phase { self.phase }
+    /// Data bytes still owed to the chunk in progress; meaningful in `Phase::Data`.
+    pub closed spec fn pending(&self) -> nat { self.remaining as nat }
+    /// Whether the next byte is accepted in the current phase. The decoder
+    /// rejects exactly when this is false, and the completeness theorem shows
+    /// it is true for every byte of a well-formed chunked body.
+    pub closed spec fn accepts(&self, b: u8) -> bool {
+        match self.phase {
+            Phase::Size => (is_hex(b) && self.digits < MAX_SIZE_DIGITS) || ((b == SEMICOLON || b == CR) && self.digits >= 1),
+            Phase::Ext => b == CR || crate::http1_head::is_value_byte(b),
+            Phase::SizeCr => b == LF,
+            Phase::Data => true,
+            Phase::DataCr => b == CR,
+            Phase::DataLf => b == LF,
+            Phase::LastCr => b == CR,
+            Phase::LastLf => b == LF,
+            Phase::Done | Phase::Failed => false,
+        }
+    }
+    /// How many input bytes a step consumed.
+    pub open spec fn consumed(out: Step) -> nat {
+        match out { Step::Framing(n) => n as nat, Step::Data(n) => n as nat, Step::Done(n) => n as nat, Step::Rejected => 0 }
+    }
     /// The bytes of the chunk in progress, by phase.
     spec fn tail(&self) -> Seq<u8> {
         let line = self.line@;
@@ -226,17 +253,20 @@ impl ChunkDecoder {
         }
     }
 
-    /// What one `feed` call establishes: the decoder stays valid, and the
-    /// consumed bytes and emitted body grow exactly as the step reports.
+    /// What one `feed` call establishes: the decoder stays valid, the
+    /// consumed bytes and emitted body grow exactly as the step reports, a
+    /// data step takes all it can, the body completes only from the last LF,
+    /// and a rejection happens exactly when the phase does not accept the byte.
     pub open spec fn step_ok(before: Self, after: Self, input: Seq<u8>, out: Step) -> bool {
         after.valid() && match out {
             Step::Framing(n) => n == 1 && after.fed() == before.fed() + input.subrange(0, 1) && after.body() == before.body()
-                && !after.done() && !after.failed(),
+                && !after.done() && !after.failed() && before.phase() != Phase::LastLf,
             Step::Data(n) => 1 <= n <= input.len() && after.fed() == before.fed() + input.subrange(0, n as int)
-                && after.body() == before.body() + input.subrange(0, n as int) && !after.done() && !after.failed(),
+                && after.body() == before.body() + input.subrange(0, n as int) && !after.done() && !after.failed()
+                && before.phase() == Phase::Data && n == if before.pending() < input.len() { before.pending() } else { input.len() as nat },
             Step::Done(n) => n == 1 && after.fed() == before.fed() + input.subrange(0, 1) && after.body() == before.body()
-                && after.done() && chunked_ok(after.fed(), after.body()),
-            Step::Rejected => after.failed(),
+                && after.done() && chunked_ok(after.fed(), after.body()) && before.phase() == Phase::LastLf,
+            Step::Rejected => after.failed() && !before.accepts(input[0]),
         }
     }
 
@@ -709,3 +739,5 @@ proof fn lemma_hex_digits_lower(n: nat)
     }
 }
 }
+
+mod complete;

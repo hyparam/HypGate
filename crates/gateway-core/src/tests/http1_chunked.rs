@@ -1,6 +1,6 @@
 //! Executable checks of the chunked decoder and encoder. The proofs cover
-//! every input the decoder accepts; these pin that it accepts the encodings a
-//! peer sends, at every split of the input, and refuses the malformed ones.
+//! every input, accepted or refused; these pin concrete encodings a peer
+//! sends, at every split of the input, and concrete malformed ones.
 use crate::http1_chunked::*;
 
 /// Feed `bytes` to a fresh decoder in pieces of `piece` bytes; return the body

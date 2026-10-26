@@ -213,8 +213,9 @@ an assumption we take on; the proofs that could be written have been.
   effect the machine names and reports the result. What remains trusted is
   that the reader, writer, and logger do what they report and that Tokio
   cancellation reaches the loop's drop guard. The framing the reader
-  decodes and the writer encodes is the verified chunked coding and
-  Content-Length count ([codec](docs/http1-codec.md)).
+  decodes and the writer encodes is the verified chunked coding, whose
+  decoder accepts exactly the grammar, and the Content-Length count
+  ([codec](docs/http1-codec.md)).
 - *Every admitted exchange reaches its completion record.* The lifecycle is a
   verified machine that is terminal after exactly one event, and the worker
   future must return the `Closed` token only a terminal lifecycle produces.
