@@ -32,19 +32,28 @@ cases, and chunked bodies split at every byte boundary.
 
 ## The adapter
 
-`gateway-runtime/src/http1.rs` moves bytes between sockets and the codec and
-decides nothing about what a byte means:
+The reading drivers are verified (`gateway_core::body_reader`) over a
+`Source` trait with one operation, `fill`, which appends what one socket read
+produced to the buffer it is given, or reports the close or the failure.
+`gateway-runtime/src/http1.rs` implements the source over the socket, hands
+the drivers their buffers, and copies the bytes a body read names:
 
-- `read_request_head` and `read_status_head` read into a buffer of at most
-  32 KiB and call the parser after each read; a head that has not completed
-  by the limit is too large, not incomplete.
-- `BodyReader` yields only body bytes, delimited as the selected framing
-  says; the end of the body is a clean EOF, and a body that stops early, a
-  chunk coding fault, or data missing after a fixed length is an error. Which
-  buffered bytes are body, which are chunk framing, when the body is
-  complete, and what a closed connection means are the verified
-  `http1_body::BodyDecoder`'s answers; the reader owns the socket and the
-  buffer and copies only the bytes a data step names.
+- `read_request_head` and `read_status_head` fill a buffer of at most
+  32 KiB and call the parser after each fill; a head that has not completed
+  by the limit is too large, not incomplete. Proved: the head returned is
+  parsed from exactly the bytes received (leftover first, then each fill),
+  the rest is returned as the body's leftover, and the buffer never exceeds
+  the limit.
+- `BodyReader` owns the read buffer, its cursor, and the verified
+  `http1_body::BodyDecoder`, and asks the source for more only when the
+  buffer is spent. Proved: the decoder is fed exactly the bytes received, in
+  order, nothing skipped or fed twice; the bytes each data read names are
+  exactly the decoder's body bytes, in order; a completed body's fed bytes
+  delimit exactly the delivered body (`lemma_complete`); the end of the body
+  is reported as such, and a body that stops early, a chunk coding fault, or
+  a failed read is an error, never an end. The runtime's `Read`
+  implementation copies the named bytes to the caller and maps the outcomes
+  to I/O results.
 - `ChunkedWriter` writes the bytes a verified `ChunkStream` yields for each
   write and for `finish`; it never closes the stream, the caller decides that.
 
@@ -70,13 +79,12 @@ request, over the same adapter on its own thread.
 
 ## Trusted
 
-- The adapter's byte movement: that a socket read lands in the buffer the
-  parser and the body decoder are handed, that the bytes a data step names
-  are the bytes copied to the caller, that the bytes the encoders produce
-  are the bytes written, and the plumbing of leftover bytes from the head
-  read into the body reader. The body reader's counting is no longer here:
-  the fixed-length count, the chunk framing, the room offered per read, and
-  the meaning of a close are the decoder's, and proved.
+- The adapter's byte movement: that a socket read appends to the driver's
+  buffer exactly the bytes the socket produced (the `Source` contract), that
+  the bytes a data read names are the bytes copied to the caller, and that
+  the bytes the encoders produce are the bytes written. The buffers, the
+  cursor, the leftover plumbing from head to body, and every count and
+  limit are the drivers' and the decoder's, and proved.
 - That each `Effects` method performs exactly the effect the driver named
   and reports truthfully: a head read is one head read, bytes handed to
   `write_client` reach the socket, `upload` and `download` return the chunk

@@ -63,9 +63,10 @@ Rust; every decision inside the loop is the machine's and verified.
 
 ## HTTP frame retention
 
-Body bytes come from `http1::BodyReader`, which reads at most 32 KiB from the
-socket into its own buffer and yields only body bytes, delimited as the verified
-framing selection says: a Content-Length count, the verified chunked decoder, or
+Body bytes come from `http1::BodyReader`, the verified reading driver
+(`gateway_core::body_reader`) over the socket, which reads at most 32 KiB from
+the socket into its own buffer and yields only body bytes, delimited as the
+verified framing selection says: a Content-Length count, the verified chunked decoder, or
 until the connection closes. The same constant bounds the inbound and upstream
 head buffers. The end of the body is a clean EOF; a body that stops early or a
 chunk coding fault is an error, never an EOF, and the transfer driver treats

@@ -58,6 +58,7 @@ pub mod projection;
 pub mod config_schema;
 pub mod config_values;
 pub mod calendar;
+pub mod body_reader;
 
 #[cfg(test)]
 #[path = "tests/streaming.rs"]
@@ -107,3 +108,6 @@ mod config_values_tests;
 #[cfg(test)]
 #[path = "tests/calendar.rs"]
 mod calendar_tests;
+#[cfg(test)]
+#[path = "tests/body_reader.rs"]
+mod body_reader_tests;

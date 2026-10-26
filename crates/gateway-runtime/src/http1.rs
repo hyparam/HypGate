@@ -1,111 +1,81 @@
 //! The HTTP/1.1 wire adapter over the verified codec. Heads are parsed by
 //! `gateway_core::http1_head`, framing is chosen by `http1_framing`, chunk
 //! coding is `http1_chunked`, bodies are delimited by `http1_body`, and heads
-//! are written by `http1_write`. This module only moves bytes between blocking
-//! sockets and those functions: it reads into bounded buffers, hands the
-//! buffer to the parser, copies the body bytes the decoder names, and writes
-//! the bytes the encoders produce. It
+//! are written by `http1_write`; the read buffers, their cursors, and the
+//! order bytes are fed are the verified drivers in `body_reader`. This
+//! module only moves bytes between blocking sockets and those functions: one
+//! socket read appends to the driver's buffer, one body read copies the bytes
+//! the driver names, and writes send the bytes the encoders produce. It
 //! makes no decision about what a byte means, and how long a read may take
 //! is the caller's stream's business (`net::Timed`).
 use crate::net::{read_uninterrupted, write_uninterrupted};
-use gateway_core::headers::{Field, MAX_BYTES, Rejection};
-use gateway_core::http1_body::{BodyDecoder, Step};
+use gateway_core::body_reader::{Fill, Read as BodyRead, Source};
+use gateway_core::headers::Field;
 use gateway_core::http1_exchange::ChunkStream;
 use gateway_core::http1_framing::Framing;
-use gateway_core::http1_head::{RequestHead, RequestProgress, StatusHead, StatusProgress, parse_request, parse_status};
+use gateway_core::http1_head::{RequestHead, StatusHead};
 use std::io::{self, Read, Write};
 
-/// One socket read, and the most body bytes buffered ahead of the copy.
-pub(crate) const READ_BYTES: usize = 32 * 1024;
+pub(crate) use gateway_core::body_reader::HeadError;
 
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum HeadError { TooLarge, Malformed, Closed, Io }
+/// The socket as the verified reading drivers see it: one read appends up
+/// to `max` bytes, or reports the close or the failure. The last failure is
+/// kept so the body reader can return it.
+struct Wire<R> { io: R, error: Option<io::Error> }
+impl<R: Read> Source for Wire<R> {
+    fn fill(&mut self, buffer: &mut Vec<u8>, max: usize) -> Fill {
+        let start = buffer.len();
+        buffer.resize(start.saturating_add(max), 0);
+        match read_uninterrupted(&mut self.io, &mut buffer[start..]) {
+            Err(e) => { buffer.truncate(start); self.error = Some(e); Fill::Failed }
+            Ok(0) => { buffer.truncate(start); Fill::Closed }
+            Ok(n) => { buffer.truncate(start.saturating_add(n.min(max))); Fill::Bytes }
+        }
+    }
+}
 
 /// Read from `io` until a request head parses. The bytes after the head are returned.
 pub(crate) fn read_request_head<R: Read>(io: &mut R, leftover: Vec<u8>) -> Result<(RequestHead, Vec<u8>), HeadError> {
-    let mut buffer = leftover;
-    loop {
-        match parse_request(&buffer) {
-            RequestProgress::Complete(head, len) => { let rest = buffer.split_off(len); return Ok((head, rest)); }
-            RequestProgress::Rejected(Rejection::TooLarge) => return Err(HeadError::TooLarge),
-            RequestProgress::Rejected(Rejection::BadRequest) => return Err(HeadError::Malformed),
-            RequestProgress::Incomplete => fill(io, &mut buffer)?,
-        }
-    }
+    gateway_core::body_reader::read_request_head(&mut Wire { io, error: None }, leftover).map(|r| (r.head, r.rest))
 }
 /// Read from `io` until a status head parses. The bytes after the head are
 /// returned; what the status means is the exchange machine's decision.
 pub(crate) fn read_status_head<R: Read>(io: &mut R, leftover: Vec<u8>) -> Result<(StatusHead, Vec<u8>), HeadError> {
-    let mut buffer = leftover;
-    loop {
-        match parse_status(&buffer) {
-            StatusProgress::Complete(head, len) => { let rest = buffer.split_off(len); return Ok((head, rest)); }
-            StatusProgress::Rejected(Rejection::TooLarge) => return Err(HeadError::TooLarge),
-            StatusProgress::Rejected(Rejection::BadRequest) => return Err(HeadError::Malformed),
-            StatusProgress::Incomplete => fill(io, &mut buffer)?,
-        }
-    }
-}
-/// Read more head bytes, never past the head limit.
-fn fill<R: Read>(io: &mut R, buffer: &mut Vec<u8>) -> Result<(), HeadError> {
-    if buffer.len() >= MAX_BYTES { return Err(HeadError::TooLarge); }
-    let room = MAX_BYTES - buffer.len();
-    let start = buffer.len();
-    buffer.resize(start + room.min(READ_BYTES), 0);
-    let n = read_uninterrupted(io, &mut buffer[start..]).map_err(|_| HeadError::Io)?;
-    buffer.truncate(start + n);
-    if n == 0 { return Err(HeadError::Closed); }
-    Ok(())
+    gateway_core::body_reader::read_status_head(&mut Wire { io, error: None }, leftover).map(|r| (r.head, r.rest))
 }
 
 /// The body that follows a head, read from `io` after the head's leftover
 /// bytes and delimited as `framing` says. Reads yield only body bytes; the
 /// end of the body is a clean EOF, and a body that stops early, a chunk
-/// coding fault, or data missing after a fixed length is an error. Which
-/// buffered bytes are body, which are framing, and when the body is complete
-/// are the verified `BodyDecoder`'s answers; this type owns the socket and
-/// the buffer and copies only the bytes a data step names.
-pub(crate) struct BodyReader<R> { io: R, buffer: Vec<u8>, pos: usize, decoder: BodyDecoder }
+/// coding fault, or data missing after a fixed length is an error. The
+/// buffer, its cursor, and the decoder are the verified driver's; this type
+/// owns the socket and copies the bytes a data read names.
+pub(crate) struct BodyReader<R> { wire: Wire<R>, driver: gateway_core::body_reader::BodyReader }
 
 impl<R> BodyReader<R> {
     pub(crate) fn new(io: R, leftover: Vec<u8>, framing: Framing) -> Self {
-        Self { io, buffer: leftover, pos: 0, decoder: BodyDecoder::new(framing) }
+        Self { wire: Wire { io, error: None }, driver: gateway_core::body_reader::BodyReader::new(leftover, framing) }
     }
     /// Whether the whole body was read and well framed.
-    pub(crate) fn is_complete(&self) -> bool { self.decoder.is_done() }
+    pub(crate) fn is_complete(&self) -> bool { self.driver.is_complete() }
     /// The stream, once the body is complete; bytes read ahead are none, since reads stop at the body's end.
     #[cfg(test)]
-    pub(crate) fn into_inner(self) -> R { self.io }
+    pub(crate) fn into_inner(self) -> R { self.wire.io }
 }
 
 impl<R: Read> Read for BodyReader<R> {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
         if out.is_empty() { return Ok(0); }
-        loop {
-            if self.decoder.is_done() { return Ok(0); }
-            if self.decoder.is_failed() { return Err(io::ErrorKind::InvalidData.into()); }
-            if self.pos < self.buffer.len() {
-                let available = &self.buffer[self.pos..];
-                match self.decoder.step(available, out.len()) {
-                    Step::Framing(n) => { self.pos += n; }
-                    Step::Data(n) => { out[..n].copy_from_slice(&available[..n]); self.pos += n; return Ok(n); }
-                    Step::Done(n) => { self.pos += n; return Ok(0); }
-                    Step::Rejected => return Err(io::ErrorKind::InvalidData.into()),
-                }
-                continue;
+        match self.driver.read(&mut self.wire, out.len()) {
+            BodyRead::Data(start, n) => {
+                let bytes = self.driver.buffer().get(start..start.saturating_add(n)).ok_or(io::ErrorKind::InvalidData)?;
+                out.get_mut(..n).ok_or(io::ErrorKind::InvalidData)?.copy_from_slice(bytes);
+                Ok(n)
             }
-            // The buffer is spent: read more body bytes.
-            self.buffer.clear();
-            self.pos = 0;
-            self.buffer.resize(READ_BYTES, 0);
-            match read_uninterrupted(&mut self.io, &mut self.buffer) {
-                Err(e) => { self.buffer.clear(); self.decoder.abandon(); return Err(e); }
-                Ok(0) => {
-                    self.buffer.clear();
-                    return if self.decoder.close() { Ok(0) } else { Err(io::ErrorKind::UnexpectedEof.into()) };
-                }
-                Ok(n) => self.buffer.truncate(n),
-            }
+            BodyRead::End => Ok(0),
+            BodyRead::Truncated => Err(io::ErrorKind::UnexpectedEof.into()),
+            BodyRead::Malformed => Err(io::ErrorKind::InvalidData.into()),
+            BodyRead::Failed => Err(self.wire.error.take().unwrap_or_else(|| io::ErrorKind::InvalidData.into())),
         }
     }
 }
