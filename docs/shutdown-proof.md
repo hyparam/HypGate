@@ -31,6 +31,29 @@ safety and finite-rank theorem, not an assumption that threads eventually run.
 Five deliberate defects test ignored closure, admission after closure, refusal
 of valid open admission, reopening on release, and forgotten release.
 
+## The drain sequence is verified
+
+`gateway-core/src/serve_driver.rs` sequences the accept loop and the drain.
+The runtime's `server::ServeEffects` performs each effect it names (read the
+flag, block on accept, take a connection credit, start the thread, drop the
+listener, close worker admission, wait on the registries, cancel what is
+live, close the logger) and decides nothing. The driver keeps a ghost trace;
+`run` says which traces are allowed, and the lemmas read these off any
+allowed trace:
+
+- A served connection was accepted, then found the flag clear, then got a
+  credit, in that order and immediately before (`lemma_served_sequence`).
+- Once the flag was seen set or accept failed, nothing is accepted, admitted,
+  or served (`lemma_nothing_served_after_stop`).
+- Cancellation follows a drain window that did not drain, after worker
+  admission closed, after acceptance stopped (`lemma_cancel_after_failed_drain`).
+- The logger closes after worker admission closed and after the drain
+  succeeded or, cancellation having happened, the wait that follows it
+  (`lemma_log_closes_last`); acceptance stops, admission closes, the drain
+  wait, cancellation, and the logger close each happen at most once (`lemma_once`).
+
+What stays trusted is each effect's truth and the signal that sets the flag.
+
 ## Correspondence to production workers
 
 The worker registry is private to one `Gateway`. Acquisition holds its mutex

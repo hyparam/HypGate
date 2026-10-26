@@ -248,7 +248,7 @@ truncation, disconnect, timeout, and start-record refusal.
 
 ## Shutdown
 
-`serve` after SIGINT/SIGTERM (through `signal::on_termination` and `Shutdown::trigger`) or a listener error:
+`serve` after SIGINT/SIGTERM (through `signal::on_termination` and `Shutdown::trigger`) or a listener error. The order of these steps, and that no connection is served once the flag was seen set, is the verified `serve_driver`'s; `server::ServeEffects` performs each step when asked:
 
 | Step | Code | Status | Evidence |
 | --- | --- | --- | --- |

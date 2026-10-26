@@ -17,6 +17,7 @@ use gateway_core::http1_exchange::{Refusal, refusal_status};
 use gateway_core::http1_framing::Framing;
 use gateway_core::http1_head::{RequestHead, StatusHead};
 use gateway_core::health::{GapObserver, Readiness};
+use gateway_core::serve_driver::{self, Accepted, Window};
 use std::{collections::HashMap, io::{self, Write}, net::{Shutdown as SocketShutdown, SocketAddr, TcpListener, TcpStream},
     sync::{Arc, Mutex, OnceLock, atomic::{AtomicBool, AtomicU64, Ordering}}, time::{Duration, Instant}};
 
@@ -24,7 +25,7 @@ mod workers;
 mod leased;
 use workers::{WorkerLease, WorkerSlots};
 mod connections;
-use connections::ConnectionSlots;
+use connections::{ConnectionLease, ConnectionSlots};
 
 /// How long a connection may take to send its complete request head.
 pub(crate) const HEAD_DEADLINE: Duration = Duration::from_secs(10);
@@ -336,6 +337,51 @@ impl Shutdown {
 #[allow(clippy::disallowed_methods)]
 fn wake_accept(address: SocketAddr) { let _ = TcpStream::connect_timeout(&address, Duration::from_secs(1)); }
 
+/// The accept loop and the drain, as the verified `serve_driver` asks for
+/// them: each method performs one effect and reports what happened.
+struct ServeEffects {
+    listener: Option<TcpListener>, app: Arc<Gateway>, slots: Arc<ConnectionSlots>, connection_deadline: Duration, shutdown: Shutdown,
+    accepted: Option<TcpStream>, lease: Option<ConnectionLease>, accept_error: Option<io::Error>, log_error: Option<io::Error>,
+}
+impl serve_driver::Effects for ServeEffects {
+    fn triggered(&mut self) -> bool { self.shutdown.is_triggered() }
+    fn accept(&mut self) -> Accepted {
+        let Some(listener) = self.listener.as_ref() else { return Accepted::Failed };
+        match listener.accept() {
+            Ok((socket, _)) => { self.accepted = Some(socket); Accepted::Connection }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => Accepted::Interrupted,
+            Err(e) => { self.accept_error = Some(e); Accepted::Failed }
+        }
+    }
+    fn admit_connection(&mut self) -> bool {
+        match self.slots.acquire() {
+            Some(lease) => { self.lease = Some(lease); true }
+            None => { self.accepted = None; false } // over the limit: closed unanswered
+        }
+    }
+    fn serve_connection(&mut self) {
+        let (Some(socket), Some(lease)) = (self.accepted.take(), self.lease.take()) else { return };
+        let app = self.app.clone();
+        let deadline = self.connection_deadline;
+        // A thread that cannot start drops its socket and lease here.
+        let _ = std::thread::Builder::new().name("loggate-connection".into()).stack_size(CONNECTION_STACK_BYTES).spawn(move || {
+            leased::run(lease, move || { let _ = serve_connection(socket, app, deadline); });
+        });
+    }
+    fn discard_connection(&mut self) { self.accepted = None; }
+    fn stop_accepting(&mut self) { self.listener = None; }
+    fn close_workers(&mut self) { self.app.worker_slots.close(); }
+    fn wait_drained(&mut self, _window: Window) -> bool {
+        // One shared window covers connections and workers from all listeners.
+        let end = Instant::now() + DRAIN_WINDOW;
+        self.slots.wait_drained(end) && self.app.worker_slots.wait_drained(end)
+    }
+    fn cancel_live(&mut self) { self.app.cancel_live(); }
+    fn close_log(&mut self) -> bool {
+        match self.app.log.shutdown(Duration::from_secs(2)) { Ok(()) => true, Err(e) => { self.log_error = Some(e); false } }
+    }
+}
+
 /// Admission bounds live requests; this separate limit bounds unauthenticated
 /// connections and header parsing. Excess accepted sockets are immediately
 /// closed. Trigger `shutdown` to drain and join children and close the logger:
@@ -343,7 +389,8 @@ fn wake_accept(address: SocketAddr) { let _ = TcpStream::connect_timeout(&addres
 /// cancelled and their completion records written. The first invocation fixes
 /// the connection limit for this Gateway. Later invocations must use the same
 /// limit and share credits. Graceful shutdown permanently closes shared worker
-/// admission; a graceful restart requires a fresh Gateway/logger.
+/// admission; a graceful restart requires a fresh Gateway/logger. The order of
+/// all of it is the verified `serve_driver`'s.
 pub fn serve(listener: TcpListener, app: Arc<Gateway>, connections: usize,
     connection_deadline: Duration, shutdown: &Shutdown) -> io::Result<()> {
     if connections == 0 || connections > 65536 || connection_deadline.is_zero()
@@ -351,33 +398,11 @@ pub fn serve(listener: TcpListener, app: Arc<Gateway>, connections: usize,
     let slots = app.connection_slots.get_or_init(|| ConnectionSlots::new(connections)).clone();
     if slots.limit() != connections { return Err(io::ErrorKind::InvalidInput.into()); }
     shutdown.attach(listener.local_addr()?);
-    let result = loop {
-        if shutdown.is_triggered() { break Ok(()); }
-        let (socket, _) = match listener.accept() {
-            Ok(accepted) => accepted,
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => break Err(e),
-        };
-        if shutdown.is_triggered() { break Ok(()); } // the wake-up connection, or a late client
-        let Some(lease) = slots.acquire() else { continue; }; // over the limit: closed unanswered
-        let app = app.clone();
-        // A thread that cannot start drops its socket and lease here.
-        let _ = std::thread::Builder::new().name("loggate-connection".into()).stack_size(CONNECTION_STACK_BYTES).spawn(move || {
-            leased::run(lease, move || { let _ = serve_connection(socket, app, connection_deadline); });
-        });
-    };
-    drop(listener);
-    app.worker_slots.close();
-    // One shared drain window covers connections and workers from all listeners.
-    let drain_end = Instant::now() + DRAIN_WINDOW;
-    let drained = slots.wait_drained(drain_end) && app.worker_slots.wait_drained(drain_end);
-    if !drained {
-        app.cancel_live();
-        let cancel_end = Instant::now() + DRAIN_WINDOW;
-        slots.wait_drained(cancel_end);
-        app.worker_slots.wait_drained(cancel_end);
-    }
-    let log_result = app.log.shutdown(Duration::from_secs(2));
+    let mut effects = ServeEffects { listener: Some(listener), app, slots, connection_deadline, shutdown: shutdown.clone(),
+        accepted: None, lease: None, accept_error: None, log_error: None };
+    let driven = serve_driver::serve(&mut effects);
+    let result = if driven.accept_ok { Ok(()) } else { Err(effects.accept_error.take().unwrap_or_else(|| io::ErrorKind::Other.into())) };
+    let log_result = if driven.log_ok { Ok(()) } else { Err(effects.log_error.take().unwrap_or_else(|| io::ErrorKind::Other.into())) };
     result.and(log_result)
 }
 
