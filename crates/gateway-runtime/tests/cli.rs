@@ -107,5 +107,18 @@ fn executable_starts_the_shipper_from_the_root_policy_and_reports_it_in_metrics(
     let result = Command::new(env!("CARGO_BIN_EXE_loggate")).arg("ship").arg(&root).arg(&log).output().unwrap();
     assert!(!result.status.success());
     assert!(String::from_utf8_lossy(&result.stderr).contains("no shipping section"));
+    // With the section, the subcommand runs the drain loop to its end. The log
+    // holds only its header, so nothing is sent and the unreachable server is
+    // never contacted; the run must still finish cleanly and print its metrics.
+    fs::write(&root, format!(r#"{{"identities":[],"destinations":[],"credentials":[],"grants":[],"limits":{{"requests":1,"chunk_bytes":4}},"logging":"strict",
+        "shipping":{{"server":"https://localhost:1/","token_env":"LOGGATE_TEST_HYP_TOKEN","state_dir":"{}","poll_ms":100}}}}"#, state.display())).unwrap();
+    let shipped = Command::new(env!("CARGO_BIN_EXE_loggate")).arg("ship").arg(&root).arg(&log)
+        .env("LOGGATE_TEST_HYP_TOKEN", "hsa_0123456789abcdef_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq").output().unwrap();
+    let stderr = String::from_utf8_lossy(&shipped.stderr);
+    assert!(shipped.status.success(), "{stderr}");
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    let stdout = String::from_utf8_lossy(&shipped.stdout);
+    assert!(stdout.contains("loggate_shipping_enrolled 0\n"), "{stdout}");
+    assert!(stdout.contains("loggate_shipping_exchanges_emitted_total 0\n"), "{stdout}");
     fs::remove_dir_all(&dir.0).unwrap();
 }

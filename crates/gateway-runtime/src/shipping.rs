@@ -28,7 +28,8 @@ const INGEST_PATH: &str = "/v1/ingest/proxy";
 const BOOTSTRAP_PATH: &str = "/v1/identity/bootstrap";
 const REFRESH_PATH: &str = "/v1/identity/refresh";
 const REQUEST_DEADLINE: Duration = Duration::from_secs(30);
-const STACK_BYTES: usize = 2 * 1024 * 1024;
+/// Stack of the shipper thread; `loggate ship` uses the same size.
+pub const STACK_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Default)]
 pub struct Metrics {

@@ -91,7 +91,12 @@ fn ship(root_path: &str, log_path: &str) -> Result<(), &'static str> {
     let root = bounded_file(root_path).map_err(|_| "cannot read root policy")?;
     let config = ShippingConfig::from_root_json(&root, secret)
         .map_err(|_| "invalid shipping configuration or missing token")?.ok_or("root policy has no shipping section")?;
-    let metrics = shipping::ship_to_end(config, Path::new(log_path).to_path_buf())?;
+    // `main` already runs inside a Tokio runtime and the shipper builds its own,
+    // so the loop runs on a plain thread, as it does beside the gateway.
+    let log = Path::new(log_path).to_path_buf();
+    let metrics = std::thread::Builder::new().name("loggate-shipping".into()).stack_size(shipping::STACK_BYTES)
+        .spawn(move || shipping::ship_to_end(config, log)).map_err(|_| "cannot start shipping thread")?
+        .join().map_err(|_| "shipper panicked")??;
     let mut text = String::new(); metrics.render(&mut text);
     print!("{text}");
     Ok(())
