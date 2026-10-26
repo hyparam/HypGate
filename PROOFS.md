@@ -207,26 +207,40 @@ scanner reads the same file on restart (the checkpoint names the session).
 **Gaps.** What stands between the theorems above and the statement. Each is
 an assumption we take on; the proofs that could be written have been.
 
-- *The effects are trusted; their sequencing is not.* Both body directions run
-  under the verified `BodyCopy` machine, so what is read, logged, released,
-  and counted, and in what order, is proved. The loop performs the effect the
-  machine names on the calling thread and reports the result. What remains
-  trusted is that the reader, writer, and logger do what they report and that
-  a shut-down or timed-out socket makes the blocked read or write return, so
-  the loop's guard runs. The framing the reader
-  decodes and the writer encodes is the verified chunked coding, whose
-  decoder accepts exactly the grammar, and the Content-Length count
-  ([codec](docs/http1-codec.md)).
+- *The effects are trusted; their sequencing is not.* The whole connection
+  runs under the verified exchange driver (`exchange_driver::drive`): which
+  effect comes next, from the head read through admission, the request-start
+  record, the provider session, both body copies, the response-head record,
+  the head, the last chunk, and the completion record, is the driver's
+  decision, and the runtime's `Effects` implementation only performs the
+  effect named and reports the result. Both body directions run under the
+  verified `BodyCopy` machine inside that, so what is read, logged, released,
+  and counted, and in what order, is proved too. Proved of the driver: its
+  trace is one the step relation allows (no connect before the request-start
+  record, no upstream head to the client before its response-head record,
+  with the availability-mode exceptions stated in the relation), the bytes
+  handed to the client are exactly the connection machine's output plus an
+  unfinished stream's frames, in order, and every machine precondition is
+  discharged, so a second head, bytes after an abort, or a last chunk on an
+  incomplete body cannot be written by construction. What remains trusted is
+  that each effect does what it reports: a read is a read, bytes handed over
+  reach the socket, the stream given to an upload or download comes back
+  having only been framed through, and a shut-down or timed-out socket makes
+  the blocked call return. The framing the reader decodes and the writer
+  encodes is the verified chunked coding, whose decoder accepts exactly the
+  grammar, and the Content-Length count ([codec](docs/http1-codec.md)).
 - *Every admitted exchange reaches its completion record.* The lifecycle is a
-  verified machine that is terminal after exactly one event, and the exchange
-  must return the `Closed` token only a terminal lifecycle produces.
-  The one escape, for a request refused before admission, is a single
-  lint-pinned call site (`HttpError::close`); clippy denies the constructor
-  everywhere else and `scripts/check_effect_sites.sh` fails if the site
-  moves. Shutdown cancels exchanges by shutting their sockets and waits for
-  them, so the only ways an admitted exchange ends without a record are
-  a logger that is already unhealthy and process death, both reported by
-  the record's absence.
+  verified machine that is terminal after exactly one event, and the driver
+  returns the `Closed` token only a terminal lifecycle produces, with its
+  `recorded` flag proved equal to the truth of the completion append. The
+  driver is proved to end every admitted exchange with exactly one
+  completion step: the record, or an explicit skip taken only while the
+  logger is unhealthy. The one `Closed` outside a lifecycle, for a
+  connection that never reached admission, is constructed only by the
+  driver; clippy denies the constructor throughout the runtime. Shutdown
+  cancels exchanges by shutting their sockets and waits for them, so the
+  only ways an admitted exchange ends without a record are a logger that is
+  already unhealthy and process death, both reported by the record's absence.
 - *Durability stops at the storage contract.* Acknowledged records survive
   every crash in the model; the model assumes the filesystem honors sync.
   Tested on ext4 with process kills and full or read-only disks, never with
@@ -315,6 +329,11 @@ documented rather than mechanized; the table below records where.
 - `crates/gateway-core/src/exchange_lifecycle.rs`: the exchange lifecycle
   that maps the terminal event to the outcome code, builds the completion
   payload, and issues the `Closed` token a worker must return.
+- `crates/gateway-core/src/exchange_driver.rs`: the driver that sequences one
+  connection over an effect trait with no decisions in the runtime side,
+  owns the connection, upstream, and lifecycle machines, and keeps a ghost
+  trace whose step relation is the audit order; lemmas read the ordering
+  properties off any allowed trace.
 - `crates/gateway-core/src/headers.rs`: the header projection for both
   directions, with the allowlists, Connection handling, limits, and the three
   fields the gateway adds to a request.

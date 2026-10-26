@@ -66,6 +66,7 @@ fn exercise(availability: bool, duration: Duration) {
     while rounds < ROUNDS || started.elapsed() < duration {
         let round_started = Instant::now();
         assert_eq!(app.config.usage(), Some((SLOTS, SLOTS)));
+        super::wait_connections_at_most(&app, SLOTS); // the last wave's connection credits are back
         let excess: Vec<_> = (0..BURST).map(|_| std::thread::spawn(move || {
             let response = send(port, "/routes/7", "gateway", "POST");
             assert_eq!(response.status, 503);
@@ -98,6 +99,7 @@ fn exercise(availability: bool, duration: Duration) {
         assert_eq!(bytes, b"helddone");
     }
     wait_workers_idle(&app);
+    super::wait_connections_at_most(&app, 0);
     assert_eq!(app.config.usage(), Some((0, SLOTS)));
     // A fresh generation must succeed after all overloaded waves drain.
     let response = send(port, "/routes/7", "gateway", "POST");

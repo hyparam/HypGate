@@ -10,7 +10,6 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 expected='crates/gateway-runtime/src/disk_log.rs:create_with_payload_limit
-crates/gateway-runtime/src/http_boundary.rs:close
 crates/gateway-runtime/src/main.rs:bind
 crates/gateway-runtime/src/main.rs:secret
 crates/gateway-runtime/src/server.rs:wake_accept
@@ -31,8 +30,7 @@ if [ "$actual" != "$expected" ]; then
   exit 1
 fi
 
-# Every marked site must say what it is for, within the three lines above it:
-# an effect site, or the one escape hatch that closes a worker without a lifecycle.
+# Every marked site must say what it is for, within the three lines above it.
 if ! grep -rn --include='*.rs' -B3 '#\[allow(clippy::disallowed_methods)\]' crates/gateway-runtime/src \
   | awk 'BEGIN { ok = 1; seen = 0 } /^--$/ { if (!seen) ok = 0; seen = 0; next } /Effect site|Escape hatch/ { seen = 1 } END { if (!seen) ok = 0; exit !ok }'; then
   echo "every disallowed-methods allowance needs an 'Effect site' or 'Escape hatch' comment just above it" >&2

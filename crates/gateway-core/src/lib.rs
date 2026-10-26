@@ -49,6 +49,7 @@ pub mod upload_cursor;
 pub mod enrollment;
 pub mod shipper;
 pub mod shipping_driver;
+pub mod exchange_driver;
 
 #[cfg(test)]
 #[path = "tests/streaming.rs"]
@@ -74,3 +75,6 @@ mod http1_chunked_tests;
 #[cfg(test)]
 #[path = "tests/http1_exchange.rs"]
 mod http1_exchange_tests;
+#[cfg(test)]
+#[path = "tests/exchange_driver.rs"]
+mod exchange_driver_tests;

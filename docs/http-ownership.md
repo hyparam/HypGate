@@ -9,10 +9,10 @@ these counts to request, disk, DNS, and TLS ownership.
 
 | Payload owner | Checked issuance | Runtime retention and cleanup |
 | --- | --- | --- |
-| Inbound body reader and its 32 KiB read buffer | `WorkerRegistry::issue(INPUT_READER)` | `Gateway::run_exchange` calls `WorkerHttp::input`. `Reader::drop` destroys the body reader before completing its permit. |
-| Upstream body reader and its 32 KiB read buffer | `WorkerRegistry::issue(OUTPUT_READER)` | `HttpsTransport::run` calls `WorkerHttp::output`. The same explicit reader cleanup retains the charge through partial reads and cancellation. |
-| Upload writer, one framed chunk of at most 16 KiB plus framing | `WorkerRegistry::issue(UPLOAD_CHANNEL)` | `HttpsTransport::run` calls `WorkerHttp::upload_writer` around the chunked writer on the TLS stream. `Charged::drop` or `into_inner` destroys the writer before completing its permit. |
-| Client-response writer, one framed chunk of at most 16 KiB plus framing | `WorkerRegistry::issue(RESPONSE_WRITER)` | `serve_connection` calls `WorkerHttp::response_writer` around the server's `Output` before the exchange. `Charged::drop` destroys the output before completing its permit. |
+| Inbound body reader and its 32 KiB read buffer | `WorkerRegistry::issue(INPUT_READER)` | `ConnectionEffects::bind_input`, asked by the verified driver, calls `WorkerHttp::input`. `Reader::drop` destroys the body reader before completing its permit. |
+| Upstream body reader and its 32 KiB read buffer | `WorkerRegistry::issue(OUTPUT_READER)` | `Session::download`, asked by the driver, calls `WorkerHttp::output`. The same explicit reader cleanup retains the charge through partial reads and cancellation. |
+| Upload writer, one framed chunk of at most 16 KiB plus framing | `WorkerRegistry::issue(UPLOAD_CHANNEL)` | `Session::upload`, asked by the driver, calls `WorkerHttp::upload_writer` around the chunked writer on the TLS stream. `Charged::drop` or `into_inner` destroys the writer before completing its permit. |
+| Client-response writer, one framed chunk of at most 16 KiB plus framing | `WorkerRegistry::issue(RESPONSE_WRITER)` | `ConnectionEffects::download` calls `WorkerHttp::response_writer` around the chunked writer on the client socket for the duration of the download. `Charged::into_inner` or `drop` destroys the writer before completing its permit. |
 | Connection credit | `ResourceAdmission::acquire` with a `TaskCredit` | `ConnectionSlots::acquire` in the accept loop; the credit is spent by `leased::run` on the connection thread and released when the thread's work returns. There is no separate response permit: the response is written by the same thread. |
 
 `ReadBuffer` proves bounded loading and preserves the full detached backing charge
@@ -72,10 +72,11 @@ Arc lifetime, mutex, and truthful destruction joins remain trusted. The upload
 panic flag prevents a later normal endpoint destructor from hiding an earlier
 cleanup panic. Poisoned registries are never recovered to return capacity.
 
-The gateway always calls `exchange_with_http` with its worker's context. The
-public embedding API `HttpsTransport::exchange` still accepts arbitrary byte
-readers/sinks and has no gateway worker context; embedders must supply their own
-lifetime/count correspondence. It is outside this gateway-wide bound. The fixed
+The gateway's only exchange path is the verified driver over
+`ConnectionEffects`, which issues every role from the connection's own worker.
+There is no public exchange API that bypasses the worker context; the
+test-only `transport::exchange` module recomposes the provider side for the
+transport tests with a worker it constructs. The fixed
 runtime reader capacity and output-frame limits are part of the reviewed adapter
 mapping. TLS internals, allocator capacity, thread stacks, and total process
 RSS remain governed by their separate assumptions and accounting.

@@ -152,6 +152,7 @@ impl<'a> Request<'a> {
     pub fn tenant_id(&self) -> u64 { self.authorized.tenant_id() }
     pub(crate) fn is_closed(&self) -> bool { self.stream().is_closed() }
     pub(crate) fn log_failed(&self) -> bool { self.stream().is_failed() }
+    #[cfg(test)]
     pub(crate) fn strict(&self) -> bool { self.lease.admission.strict }
 
     pub fn advance(&mut self, bytes: Vec<u8>) -> Option<u64> {

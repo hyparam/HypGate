@@ -1,4 +1,7 @@
 use super::*;
+use super::exchange::{ExchangeStats, ResponseSink};
+use gateway_core::exchange_lifecycle::Fault as TransportError;
+use gateway_core::headers::Field;
 use crate::{config::GatewayConfig, http_boundary, net::Cancel, test_support::{accept_tls, tls, http::{field, has, read_request, write_response}}, transfer::LogRecord};
 use gateway_core::http1_head::RequestHead;
 use rcgen::generate_simple_self_signed;

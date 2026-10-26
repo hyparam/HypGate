@@ -76,12 +76,12 @@ overhead is outside this payload budget.
 
 ## Responses without HTTP bodies
 
-HTTP 204 and 304 carry no body. The transport reads them with an empty framing,
-and the server's `Output::start` writes the fixed head with `Content-Length: 0`
-through the verified `Connection` machine, which refuses a body for those
-statuses; the transport's download copy then reads nothing and `finish` closes
-the connection. This is trusted adapter behavior around the verified machine,
-not a proof of the adapter.
+HTTP 204 and 304 carry no body. The verified exchange driver writes the fixed
+head with `Content-Length: 0` through the `Connection` machine, which refuses
+a body for those statuses, and asks the download effect to read a zero-length
+body into a sink that refuses bytes; the connection is then closed. That the
+driver takes this path for exactly these statuses is proved; that the effect
+reads nothing is the adapter's framing, trusted.
 
 The machine reads through the verified owner's pending buffer (`begin_read`,
 `read_buffer`, `finish_read`); no independent chunk is allocated. See the

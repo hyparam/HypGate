@@ -100,7 +100,7 @@ impl Lifecycle {
     /// upload count.
     pub fn upload_finished(&mut self, copy: &BodyCopy)
         requires old(self).valid(), old(self).open(), !old(self).uploaded(), copy.is_done(),
-        ensures final(self).valid(), final(self).uploaded(), final(self).upload() == copy.accepted(),
+        ensures final(self).valid(), final(self).open(), final(self).uploaded(), final(self).upload() == copy.accepted(),
     {
         self.upload = copy.accepted_bytes();
         self.state = State::Uploaded;

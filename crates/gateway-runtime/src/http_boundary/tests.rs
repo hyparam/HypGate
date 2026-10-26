@@ -1,7 +1,6 @@
 use super::*;
 use crate::config::{MAX_CREDENTIAL_BYTES, MAX_DESTINATION_BYTES};
 use crate::test_support::http::{field, has, value_of};
-use gateway_core::http1_head::StatusHead;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
@@ -165,12 +164,11 @@ fn prepared_response_keeps_status_and_repeated_fields_in_order() {
         Field { name: b"request-id".to_vec(), value: b"opaque-\xff-id".to_vec(), sensitive: true },
         field("request-id", "second"),
     ];
-    let (status, output) = prepare_response_head(StatusHead { status: 429, fields }).unwrap();
-    assert_eq!(status, 429);
+    // The status is the driver's to keep; the fields pass through the verified projection.
+    let output = response_fields(&fields).unwrap();
     let values: Vec<_> = output.iter().filter(|f| f.name == b"request-id").collect();
     assert_eq!(values[0].value, b"opaque-\xff-id"); assert!(values[0].sensitive);
     assert_eq!(values[1].value, b"second"); assert!(!values[1].sensitive);
-    assert!(prepare_response_head(StatusHead { status: 101, fields: Vec::new() }).is_err());
 }
 
 #[test]

@@ -339,6 +339,8 @@ impl Connection {
             status: Ghost(0), reason: Ghost(Seq::empty()), fields: Ghost(Seq::empty()) }
     }
     pub fn is_open(&self) -> (out: bool) ensures out == self.open() { self.phase == Phase::Open }
+    pub fn is_streaming(&self) -> (out: bool) ensures out == self.streaming() { self.phase == Phase::Streaming }
+    pub fn is_done(&self) -> (out: bool) ensures out == self.done() { self.phase == Phase::Done }
 
     /// `HTTP/1.1 100 Continue`, once, before any response head.
     pub fn interim_continue(&mut self) -> (out: Option<Vec<u8>>)
@@ -368,7 +370,7 @@ impl Connection {
     pub fn respond_fixed(&mut self, status: u16, reason: &[u8], fields: Vec<Field>, body: &[u8]) -> (out: Option<Vec<u8>>)
         requires old(self).valid(),
         ensures final(self).valid(), match out {
-            Some(bytes) => old(self).open() && final(self).done() && 200 <= status <= 599
+            Some(bytes) => old(self).open() && final(self).done() && !final(self).open() && !final(self).streaming() && 200 <= status <= 599
                 && ((status == 204 || status == 304) ==> body@.len() == 0)
                 && final(self).status() == status && head_fields_ok(final(self).head_fields(), fields@, false, body@.len())
                 && final(self).head() == crate::http1_write::status_head_bytes(status, reason@, final(self).head_fields())
@@ -415,7 +417,7 @@ impl Connection {
     pub fn respond_stream(&mut self, status: u16, reason: &[u8], fields: Vec<Field>) -> (out: Option<(Vec<u8>, ChunkStream)>)
         requires old(self).valid(),
         ensures final(self).valid(), match out {
-            Some(pair) => old(self).open() && final(self).streaming() && 200 <= status <= 599 && status != 204 && status != 304
+            Some(pair) => old(self).open() && final(self).streaming() && !final(self).open() && !final(self).done() && 200 <= status <= 599 && status != 204 && status != 304
                 && final(self).status() == status && head_fields_ok(final(self).head_fields(), fields@, true, 0)
                 && final(self).head() == crate::http1_write::status_head_bytes(status, reason@, final(self).head_fields())
                 && pair.0@ == final(self).head() && final(self).out() == old(self).out() + pair.0@
@@ -446,7 +448,7 @@ impl Connection {
     /// The stream ended cleanly: the connection is done.
     pub fn finish(&mut self, _stream: ChunkStream)
         requires old(self).valid(), old(self).streaming(), _stream.valid(), _stream.ended(),
-        ensures final(self).valid(), final(self).done(), final(self).out() == old(self).out() + _stream.out(),
+        ensures final(self).valid(), final(self).done(), !final(self).open(), !final(self).streaming(), final(self).out() == old(self).out() + _stream.out(),
             final(self).head() == old(self).head(), final(self).status() == old(self).status(), final(self).head_fields() == old(self).head_fields(),
             crate::http1_chunked::chunked_ok(_stream.out(), _stream.body()),
     {
@@ -459,7 +461,7 @@ impl Connection {
     /// clean end.
     pub fn abort(&mut self)
         requires old(self).valid(),
-        ensures final(self).valid(), final(self).aborted(), final(self).out() == old(self).out(),
+        ensures final(self).valid(), final(self).aborted(), !final(self).open(), !final(self).streaming(), final(self).out() == old(self).out(),
     {
         self.phase = Phase::Aborted;
     }

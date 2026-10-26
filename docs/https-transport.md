@@ -45,16 +45,19 @@ supplied logger. The chunked decoder refuses trailers at their first byte.
 Truncated bodies remain errors, not successful EOF. No JSON/SSE parsing or
 compression/decompression is performed.
 
-Status and filtered response headers reach a `ResponseSink` before body bytes.
-Redirects are returned as status/body without following Location. Unsolicited 101
-protocol switches are rejected before calling the client response sink; no upgraded
-protocol bytes are forwarded or logged as a response body. The adapter skips ordinary
-interim responses such as 103 and continues to the final response. Local TLS tests
-cover rejection without replay, slot release, and a 103 followed by a normal 200. After a response
-starts, any later error makes the server abort framing, never emit a successful
-final chunk. After successful body transfer, the transport invokes the sink
-completion hook while it still owns admission; the server hook writes the last
-chunk through the verified `Connection` machine. Errors do not invoke that hook.
+The transport is a set of effects the verified exchange driver asks for:
+`HttpsTransport::connect` opens the session, and `Session::write`, `upload`,
+`read_status_head`, and `download` move bytes. The driver reads status heads
+until `upstream_status` names a final one, so ordinary interim responses such
+as 103 are skipped and an unsolicited 101 is refused before any client header
+is written; no upgraded protocol bytes are forwarded or logged as a response
+body. Redirects are returned as status/body without following Location. The
+status and filtered headers reach the client, through the driver's
+`Connection` machine, before any body byte. Local TLS tests cover rejection
+without replay, slot release, and a 103 followed by a normal 200. After a
+response starts, any later error makes the driver abort framing, never emit a
+last chunk; only a download the effect reports complete lets the driver end
+the stream and write the last chunk.
 
 The upload is written to completion before the response head is read, so a
 provider that rejects an upload early may cause an upload error or total timeout

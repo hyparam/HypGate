@@ -18,5 +18,5 @@ disallowed-methods = [
     { path = "std::env::var", reason = "secrets are read once at startup, in main::secret" },
     { path = "std::env::var_os", reason = "secrets are read once at startup, in main::secret" },
     { path = "std::process::Command::new", reason = "the runtime starts no processes" },
-    { path = "gateway_core::exchange_lifecycle::Closed::without_request", reason = "a worker closes without a lifecycle only for a request refused before admission, in http_boundary::HttpError::close" },
+    { path = "gateway_core::exchange_lifecycle::Closed::without_request", reason = "only the verified exchange driver closes a connection without a lifecycle; the runtime never does" },
 ]

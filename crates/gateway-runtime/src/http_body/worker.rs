@@ -28,15 +28,20 @@ impl WorkerHttp {
         reader.charge = Some(charge);
         Some(reader)
     }
-    /// The writer that frames the request body onto the upstream connection.
-    pub(crate) fn upload_writer<W>(&self, writer: W) -> Option<Charged<W>> {
-        let charge = self.issue(gateway_core::http_worker::UPLOAD_CHANNEL)?;
-        Some(Charged { inner: Some(writer), charge: Some(charge) })
+    /// The writer that frames the request body onto the upstream connection;
+    /// the writer comes back when the role is unavailable.
+    pub(crate) fn upload_writer<W>(&self, writer: W) -> Result<Charged<W>, W> {
+        match self.issue(gateway_core::http_worker::UPLOAD_CHANNEL) {
+            Some(charge) => Ok(Charged { inner: Some(writer), charge: Some(charge) }),
+            None => Err(writer),
+        }
     }
     /// The writer that frames the response body onto the client connection.
-    pub(crate) fn response_writer<W>(&self, writer: W) -> Option<Charged<W>> {
-        let charge = self.issue(gateway_core::http_worker::RESPONSE_WRITER)?;
-        Some(Charged { inner: Some(writer), charge: Some(charge) })
+    pub(crate) fn response_writer<W>(&self, writer: W) -> Result<Charged<W>, W> {
+        match self.issue(gateway_core::http_worker::RESPONSE_WRITER) {
+            Some(charge) => Ok(Charged { inner: Some(writer), charge: Some(charge) }),
+            None => Err(writer),
+        }
     }
 }
 /// A writer holding one worker HTTP role for its lifetime.
@@ -47,7 +52,6 @@ impl<W> Charged<W> {
         if let Some(charge) = self.charge.take() { charge.finish(); }
         self.inner.take().expect("live charged writer")
     }
-    pub(crate) fn get_mut(&mut self) -> &mut W { self.inner.as_mut().expect("live charged writer") }
 }
 impl<W> Drop for Charged<W> {
     fn drop(&mut self) {
@@ -100,9 +104,9 @@ mod tests {
     #[test]
     fn writer_roles_are_issued_once_and_released_on_drop_or_into_inner() {
         let (registry, task, http) = worker();
-        let upload = http.upload_writer(Vec::<u8>::new()).unwrap();
-        assert!(http.upload_writer(Vec::<u8>::new()).is_none(), "one upload writer per worker");
-        let mut response = http.response_writer(Vec::<u8>::new()).unwrap();
+        let upload = http.upload_writer(Vec::<u8>::new()).ok().unwrap();
+        assert!(http.upload_writer(Vec::<u8>::new()).is_err(), "one upload writer per worker");
+        let mut response = http.response_writer(Vec::<u8>::new()).ok().unwrap();
         assert_eq!(registry.lock().unwrap().role_usage(UPLOAD_CHANNEL), 1);
         assert_eq!(registry.lock().unwrap().role_usage(RESPONSE_WRITER), 1);
         response.write_all(b"data").unwrap();

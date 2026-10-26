@@ -1,23 +1,28 @@
-//! Inbound HTTP/1 server over the verified codec. Deploy behind a trusted TLS
-//! terminator; the executable binds loopback only. One thread accepts; each
-//! accepted connection gets its own thread, which reads the head and body
-//! with the verified parsers, runs the exchange, and writes the response with
-//! the verified writers, then closes. Blocking sockets throughout; deadlines
-//! are socket timeouts (`net::Timed`), and a client that leaves is noticed by
-//! a small watcher thread that cancels the exchange.
+//! Inbound HTTP/1 server. Deploy behind a trusted TLS terminator; the
+//! executable binds loopback only. One thread accepts; each accepted
+//! connection gets its own thread, which hands the connection to the verified
+//! exchange driver (`gateway_core::exchange_driver`) and performs the effects
+//! it asks for: read the head, move bytes, admit, open the provider session,
+//! run the body copies, append records. Nothing here decides the order of
+//! those effects or what is written; the driver does, and the connection and
+//! chunk-stream machines produce every byte. Blocking sockets throughout;
+//! deadlines are socket timeouts (`net::Timed`), and a client that leaves is
+//! noticed by a small watcher thread that cancels the exchange.
 use crate::{config::GatewayConfig, disk_log::DiskLog, http1, http_body, http_boundary, net::{Cancel, Deadline, Timed},
-    transport::{HttpsTransport, ResponseSink}, transfer::{AuditLog, LogRecord}};
+    transport::{HttpsTransport, Session}, transfer::{AuditLog, LogRecord, TransferError}};
+use gateway_core::body_copy::BodyCopy;
+use gateway_core::exchange_driver::{self, Admit, Body, ConnectFailure, Effects, Event, Failure, FixedResponse, HeadRead};
 use gateway_core::headers::Field;
-use gateway_core::http1_exchange::{Connection, Refusal, failure_status, refusal_status, wants_continue};
-use gateway_core::http1_framing::framing;
-use gateway_core::http1_head::RequestHead;
-use gateway_core::{exchange_lifecycle::{Closed, Fault, Lifecycle}, health::{GapObserver, Readiness}};
+use gateway_core::http1_exchange::{Refusal, refusal_status};
+use gateway_core::http1_framing::Framing;
+use gateway_core::http1_head::{RequestHead, StatusHead};
+use gateway_core::health::{GapObserver, Readiness};
 use std::{collections::HashMap, io::{self, Write}, net::{Shutdown as SocketShutdown, SocketAddr, TcpListener, TcpStream},
     sync::{Arc, Mutex, OnceLock, atomic::{AtomicBool, AtomicU64, Ordering}}, time::{Duration, Instant}};
 
 mod workers;
 mod leased;
-use workers::WorkerSlots;
+use workers::{WorkerLease, WorkerSlots};
 mod connections;
 use connections::ConnectionSlots;
 
@@ -69,7 +74,7 @@ impl Gateway {
     }
 
     /// The operator endpoints, answered without a worker.
-    fn endpoint(&self, target: &[u8]) -> Option<Response> {
+    fn endpoint(&self, target: &[u8]) -> Option<FixedResponse> {
         match target {
             b"/metrics" => {
                 use std::fmt::Write as _;
@@ -80,9 +85,7 @@ impl Gateway {
                     None => text.push_str("loggate_admission_healthy 0\n"),
                 }
                 match &self.shipping { Some(metrics) => metrics.render(&mut text), None => text.push_str("loggate_shipping_enabled 0\n") }
-                let mut response = fixed(200, text.into_bytes());
-                response.fields.push(http1::field(b"content-type", b"text/plain; version=0.0.4".to_vec()));
-                Some(response)
+                Some(FixedResponse { status: 200, fields: vec![http1::field(b"content-type", b"text/plain; version=0.0.4".to_vec())], body: text.into_bytes() })
             }
             b"/healthz" => Some(fixed(200, b"ok\n".to_vec())),
             b"/readyz" => {
@@ -97,73 +100,8 @@ impl Gateway {
             _ => None,
         }
     }
-
-    /// Every admitted exchange ends in the verified lifecycle's terminal state
-    /// and returns its `Closed` token, so the worker cannot finish without the
-    /// completion record having been attempted. Only a request refused before
-    /// admission closes without one: it has no records anywhere.
-    fn run_exchange(&self, http: http_body::WorkerHttp, head: RequestHead, input: http1::BodyReader<Timed<TcpStream>>,
-        output: &mut http_body::Charged<Output>, cancel: &Cancel) -> Closed
-    {
-        let mut prepared = match http_boundary::prepare(&self.config, &head) {
-            Ok(p) => p,
-            Err(e) => { let _ = output.get_mut().refuse(e.status()); return e.close(); }
-        };
-        drop(head);
-        let mut life = Lifecycle::begin();
-        let mut log = ObservedLog { log: self.log.clone(), gaps: &self.audit_gaps,
-            observer: GapObserver::new(!self.config.requires_audit()) };
-        // If strict logging is already unavailable, do not even open an
-        // upstream connection. Later failures still use the stream gate.
-        if self.config.requires_audit() && !self.log.healthy() {
-            let _ = output.get_mut().refuse(refusal_status(Refusal::Unavailable));
-            life.failed(Fault::Log);
-            return self.audit_completion(&mut prepared, &mut log, life);
-        }
-        // Kind 2 before any DNS, TCP, or TLS effect. Strict mode needs the
-        // acknowledgment before dispatch; availability mode marks the request
-        // log-failed (the gap counter already incremented) and forwards.
-        if prepared.audit_request_start(&mut log).is_err() && self.config.requires_audit() {
-            let _ = output.get_mut().refuse(refusal_status(Refusal::Unavailable));
-            life.failed(Fault::StartRefused);
-            return self.audit_completion(&mut prepared, &mut log, life);
-        }
-        let Some(mut input) = http.input(input) else {
-            life.failed(Fault::InputUnavailable);
-            return self.audit_completion(&mut prepared, &mut log, life);
-        };
-        // Cancellation shuts the exchange's sockets, so the transport returns
-        // promptly with `Fault::Cancelled`; the completion record follows.
-        let result = self.transport.exchange(&mut prepared, &mut input, output, &mut log, &http, cancel);
-        drop(input);
-        match result {
-            Ok(stats) => {
-                life.upload_finished(&stats.upload);
-                life.succeeded(&stats.download); // the transport's finish wrote the last chunk
-            }
-            Err(e) => {
-                life.failed(e);
-                self.failed_exchanges.fetch_add(1, Ordering::Relaxed);
-                let output = output.get_mut();
-                if output.head_sent() { output.abort(); } else { let _ = output.refuse(failure_status(e)); }
-                // After the head, closing without the last chunk tells the
-                // client the body is truncated; it is never a clean end.
-            }
-        }
-        self.audit_completion(&mut prepared, &mut log, life)
-    }
-
-    // Kind 4 is best effort in both modes: the client-visible result is already
-    // fixed, so its failure changes nothing for the client. It is written
-    // before the worker releases its slot, and skipped when the logger is
-    // already unhealthy.
-    fn audit_completion(&self, prepared: &mut http_boundary::PreparedRequest<'_>, log: &mut ObservedLog<'_>, life: Lifecycle) -> Closed {
-        if !self.log.healthy() { return life.close(false); }
-        let payload = life.completion(http_boundary::unix_ms());
-        let recorded = prepared.audit_completion(log, &payload).is_ok();
-        life.close(recorded)
-    }
 }
+fn fixed(status: u16, text: Vec<u8>) -> FixedResponse { FixedResponse { status, fields: Vec::new(), body: text } }
 
 // Report potential audit loss at the first failed append, not only after a
 // successful response: cancellation and provider failures must not hide it.
@@ -178,95 +116,148 @@ impl AuditLog for ObservedLog<'_> {
     }
 }
 
-/// A response the connection writes without a worker: the head fields without
-/// framing or Connection, which the machine adds, and a fixed body.
-struct Response { status: u16, fields: Vec<Field>, body: Vec<u8> }
-fn fixed(status: u16, text: Vec<u8>) -> Response { Response { status, fields: Vec::new(), body: text } }
-
-/// The client's side of the response. Every byte it writes comes from the
-/// verified `Connection` machine: one head, framing that matches the body,
-/// and a last chunk only through `finish`.
-struct Output { io: Option<Timed<TcpStream>>, connection: Connection, body: Option<http1::ChunkedWriter<Timed<TcpStream>>>, head_sent: bool }
-impl Output {
-    fn new(io: Timed<TcpStream>, connection: Connection) -> Self { Self { io: Some(io), connection, body: None, head_sent: false } }
-    fn head_sent(&self) -> bool { self.head_sent }
-    /// A complete response with a fixed body, then the write side is closed.
-    fn respond_fixed(&mut self, status: u16, fields: Vec<Field>, text: &[u8]) -> io::Result<()> {
-        let bytes = self.connection.respond_fixed(status, http1::reason(status), fields, text).ok_or(io::ErrorKind::InvalidData)?;
-        self.head_sent = true;
-        let io = self.io.as_mut().ok_or(io::ErrorKind::BrokenPipe)?;
-        http1::write_fully(io, &bytes)?;
-        io.flush()?;
-        self.close_write();
-        Ok(())
-    }
-    /// A refusal or failure: the machine's status, no body.
-    fn refuse(&mut self, status: u16) -> io::Result<()> { self.respond_fixed(status, Vec::new(), b"") }
-    /// Stop without the last chunk: a truncated stream is never a clean end.
-    fn abort(&mut self) {
-        self.connection.abort();
-        if let Some(body) = self.body.take() { let (io, _) = body.into_parts(); self.io = Some(io); }
-        self.close_write();
-    }
-    fn close_write(&mut self) {
-        if let Some(io) = &self.io { let _ = io.inner().shutdown(SocketShutdown::Write); }
-    }
-}
-impl Drop for Output {
-    fn drop(&mut self) {
-        // Leaving with a stream open is an abort: the client never sees a last chunk.
-        if self.body.is_some() { self.abort(); } else { self.close_write(); }
-    }
-}
-impl ResponseSink for Output {
-    fn start(&mut self, status: u16, fields: Vec<Field>) -> io::Result<()> {
-        if self.head_sent { return Err(io::ErrorKind::InvalidInput.into()); }
-        if status == 204 || status == 304 {
-            // No body may follow these statuses; the machine writes the fixed head.
-            let bytes = self.connection.respond_fixed(status, http1::reason(status), fields, b"").ok_or(io::ErrorKind::InvalidData)?;
-            self.head_sent = true;
-            let io = self.io.as_mut().ok_or(io::ErrorKind::BrokenPipe)?;
-            http1::write_fully(io, &bytes)?;
-            return io.flush();
-        }
-        let (head, stream) = self.connection.respond_stream(status, http1::reason(status), fields).ok_or(io::ErrorKind::InvalidData)?;
-        self.head_sent = true;
-        let mut io = self.io.take().ok_or(io::ErrorKind::BrokenPipe)?;
-        http1::write_fully(&mut io, &head)?;
-        io.flush()?;
-        self.body = Some(http1::ChunkedWriter::new(io, stream));
-        Ok(())
-    }
-    fn finish(&mut self) -> io::Result<()> {
-        if !self.head_sent { return Err(io::ErrorKind::InvalidInput.into()); }
-        if let Some(mut body) = self.body.take() {
-            let finished = body.finish();
-            let (io, stream) = body.into_parts();
-            self.io = Some(io);
-            finished?;
-            self.connection.finish(stream);
-        }
-        self.close_write();
-        Ok(())
-    }
-}
-impl Write for Output {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        let body = self.body.as_mut().ok_or(io::ErrorKind::BrokenPipe)?;
-        let n = body.write(bytes)?;
-        body.flush()?; // each frame reaches the client as soon as it is copied
-        Ok(n)
-    }
-    fn flush(&mut self) -> io::Result<()> { self.body.as_mut().ok_or(io::ErrorKind::BrokenPipe)?.flush() }
+/// A sink for a body that must be empty: the fixed head said so.
+struct NoBody;
+impl Write for NoBody {
+    fn write(&mut self, _: &[u8]) -> io::Result<usize> { Err(io::ErrorKind::InvalidData.into()) }
+    fn flush(&mut self) -> io::Result<()> { Ok(()) }
 }
 
-/// Answer a refusal with the verified machine's status and no body, then close.
-fn refuse(io: &mut Timed<TcpStream>, connection: &mut Connection, refusal: Refusal) -> io::Result<()> {
-    let status = refusal_status(refusal);
-    let bytes = connection.respond_fixed(status, http1::reason(status), Vec::new(), b"").ok_or(io::ErrorKind::InvalidData)?;
-    http1::write_fully(io, &bytes)?;
-    io.flush()?;
-    io.inner().shutdown(SocketShutdown::Write)
+/// The runtime's side of one connection: the effects the verified driver
+/// asks for, performed against this connection's sockets, the worker it
+/// holds, its admitted request, and the audit log. No decisions live here.
+struct ConnectionEffects<'a> {
+    app: &'a Gateway,
+    deadline: Deadline,
+    reader: Option<Timed<TcpStream>>,
+    writer: Timed<TcpStream>,
+    leftover: Vec<u8>,
+    lease: Option<leased::Started<WorkerLease>>,
+    http: Option<http_body::WorkerHttp>,
+    prepared: Option<http_boundary::PreparedRequest<'a>>,
+    input: Option<http_body::Reader<http1::BodyReader<Timed<TcpStream>>>>,
+    session: Option<Session>,
+    log: ObservedLog<'a>,
+    cancel: Cancel,
+    // The client watcher starts with the worker: only an exchange in flight
+    // has anything to cancel, and a refused connection returns its credit at once.
+    probe: Option<TcpStream>,
+    watcher: Option<ClientWatch>,
+}
+impl<'a> ConnectionEffects<'a> {
+    fn new(app: &'a Gateway, socket: TcpStream, deadline: Deadline, cancel: Cancel) -> io::Result<Self> {
+        let write_half = socket.try_clone()?;
+        let probe = socket.try_clone()?;
+        Ok(Self {
+            app, deadline, reader: Some(Timed::new(socket, Deadline::start(HEAD_DEADLINE)?.min(deadline))), writer: Timed::new(write_half, deadline),
+            leftover: Vec::new(), lease: None, http: None, prepared: None, input: None, session: None,
+            log: ObservedLog { log: app.log.clone(), gaps: &app.audit_gaps, observer: GapObserver::new(!app.config.requires_audit()) }, cancel,
+            probe: Some(probe), watcher: None,
+        })
+    }
+}
+impl Effects for ConnectionEffects<'_> {
+    fn read_head(&mut self) -> HeadRead {
+        let Some(mut reader) = self.reader.take() else { return HeadRead::Closed; };
+        let outcome = http1::read_request_head(&mut reader, Vec::new());
+        // The head's own deadline is spent; the rest of the connection runs under the connection deadline.
+        self.reader = Some(Timed::new(reader.into_inner(), self.deadline));
+        match outcome {
+            Ok((head, leftover)) => { self.leftover = leftover; HeadRead::Head(head) }
+            Err(http1::HeadError::TooLarge) => HeadRead::TooLarge,
+            Err(http1::HeadError::Malformed) => HeadRead::Malformed,
+            Err(_) => HeadRead::Closed, // closed or silent before a complete head
+        }
+    }
+    fn write_client(&mut self, bytes: &Vec<u8>) -> bool {
+        http1::write_fully(&mut self.writer, bytes).and_then(|()| self.writer.flush()).is_ok()
+    }
+    fn close_client(&mut self) { let _ = self.writer.inner().shutdown(SocketShutdown::Write); }
+    fn endpoint(&mut self, target: &Vec<u8>) -> Option<FixedResponse> { self.app.endpoint(target) }
+    fn acquire_worker(&mut self) -> bool {
+        let Some(lease) = self.app.worker_slots.acquire() else { return false; };
+        match self.probe.take().and_then(|probe| ClientWatch::start(probe, self.cancel.clone()).ok()) {
+            Some(watcher) => self.watcher = Some(watcher),
+            None => return false, // no watcher, no exchange: the lease returns unstarted
+        }
+        self.http = Some(lease.http());
+        self.lease = Some(leased::start(lease));
+        true
+    }
+    fn admit(&mut self, head: &RequestHead) -> Admit {
+        match http_boundary::prepare(&self.app.config, head) {
+            Ok(prepared) => { self.prepared = Some(prepared); Admit::Admitted }
+            Err(error) => Admit::Refused(error.refusal()),
+        }
+    }
+    fn strict(&mut self) -> bool { self.app.config.requires_audit() }
+    fn log_healthy(&mut self) -> bool { self.app.log.healthy() }
+    fn now_ms(&mut self) -> u64 { http_boundary::unix_ms() }
+    fn audit_request_start(&mut self) -> bool {
+        let Some(prepared) = self.prepared.as_mut() else { return false; };
+        prepared.audit_request_start(&mut self.log).is_ok()
+    }
+    fn bind_input(&mut self, framing: Framing) -> bool {
+        let (Some(reader), Some(http)) = (self.reader.take(), self.http.as_ref()) else { return false; };
+        let body = http1::BodyReader::new(reader, std::mem::take(&mut self.leftover), framing);
+        match http.input(body) { Some(input) => { self.input = Some(input); true } None => false }
+    }
+    fn upstream_head(&mut self) -> Option<(Vec<u8>, Vec<Field>)> {
+        let head = self.prepared.as_mut()?.take_upstream().ok()?;
+        Some((head.path, head.fields))
+    }
+    fn connect(&mut self) -> Result<(), ConnectFailure> {
+        let Some(prepared) = self.prepared.as_mut() else { return Err(ConnectFailure::Resolve); };
+        self.session = Some(self.app.transport.connect(prepared, &self.cancel)?);
+        Ok(())
+    }
+    fn write_upstream(&mut self, bytes: &Vec<u8>) -> bool {
+        self.session.as_mut().is_some_and(|session| session.write(bytes))
+    }
+    fn upload(&mut self, stream: gateway_core::http1_exchange::ChunkStream) -> (Result<BodyCopy, Failure>, gateway_core::http1_exchange::ChunkStream) {
+        let Self { session, prepared, input, log, http, .. } = self;
+        let (Some(session), Some(prepared), Some(input), Some(http)) = (session.as_mut(), prepared.as_mut(), input.as_mut(), http.as_ref()) else {
+            return (Err(Failure::Io), stream);
+        };
+        session.upload(prepared, input, log, http, stream)
+    }
+    fn read_status_head(&mut self) -> Result<StatusHead, Failure> {
+        match self.session.as_mut() { Some(session) => session.read_status_head(), None => Err(Failure::Io) }
+    }
+    fn audit_response_head(&mut self, status: u16) -> bool {
+        let Some(prepared) = self.prepared.as_mut() else { return false; };
+        match prepared.audit_response_head(&mut self.log, status) {
+            Ok(()) => true,
+            Err(TransferError::Log) => false,
+            Err(_) => false,
+        }
+    }
+    fn download(&mut self, framing: Framing, body: Body) -> (Result<BodyCopy, Failure>, Body) {
+        let Self { session, prepared, log, http, writer, .. } = self;
+        let (Some(session), Some(prepared), Some(http)) = (session.as_mut(), prepared.as_mut(), http.as_ref()) else {
+            return (Err(Failure::Io), body);
+        };
+        match body {
+            Body::Fixed => (session.download(prepared, log, http, framing, &mut NoBody), Body::Fixed),
+            Body::Stream(stream) => {
+                // The chunks go to the client through the worker's response role.
+                let mut sink = match http.response_writer(http1::ChunkedWriter::new(&mut *writer, stream)) {
+                    Ok(sink) => sink,
+                    Err(sink) => { let (_, stream) = sink.into_parts(); return (Err(Failure::Io), Body::Stream(stream)); }
+                };
+                let copied = session.download(prepared, log, http, framing, &mut sink);
+                let (_, stream) = sink.into_inner().into_parts();
+                (copied, Body::Stream(stream))
+            }
+        }
+    }
+    fn audit_completion(&mut self, payload: &Vec<u8>) -> bool {
+        let Some(prepared) = self.prepared.as_mut() else { return false; };
+        prepared.audit_completion(&mut self.log, payload).is_ok()
+    }
+    fn observe(&mut self, event: Event) {
+        match event { Event::Failed(_) => { self.app.failed_exchanges.fetch_add(1, Ordering::Relaxed); } }
+    }
 }
 
 /// Watches the client socket while the exchange runs and cancels the exchange
@@ -305,56 +296,24 @@ impl ClientWatch {
     }
 }
 
-/// Serve one connection: one request, one response, then close. A head that
-/// does not arrive in time or does not parse gets no worker and no record.
+/// Serve one connection: hand it to the verified driver and perform what it
+/// asks. The worker lease, if one was taken, returns its credit only after
+/// every stream the worker issued is gone.
 fn serve_connection(socket: TcpStream, app: Arc<Gateway>, connection_deadline: Duration) -> io::Result<()> {
     let deadline = Deadline::start(connection_deadline)?;
-    let write_half = socket.try_clone()?;
-    // Every byte this connection writes is produced by the verified machine.
-    let mut connection = Connection::new();
-    let mut writer = Timed::new(write_half, deadline);
-    let mut reader = Timed::new(socket, Deadline::start(HEAD_DEADLINE)?.min(deadline));
-    let (head, leftover) = match http1::read_request_head(&mut reader, Vec::new()) {
-        Ok(parsed) => parsed,
-        Err(http1::HeadError::TooLarge) => return refuse(&mut writer, &mut connection, Refusal::HeadTooLarge),
-        Err(http1::HeadError::Malformed) => return refuse(&mut writer, &mut connection, Refusal::Malformed),
-        Err(_) => return Ok(()), // closed or silent before a complete head
-    };
-    let reader = Timed::new(reader.into_inner(), deadline);
-    let body_framing = match framing(&head.fields, true) {
-        Ok(f) => f,
-        Err(_) => return refuse(&mut writer, &mut connection, Refusal::Malformed),
-    };
-    // A client waiting for permission to send its body gets it; the body is
-    // read whether or not the request is then admitted.
-    if wants_continue(&head.fields) {
-        if let Some(bytes) = connection.interim_continue() { http1::write_fully(&mut writer, &bytes)?; writer.flush()?; }
-    }
-    let mut output = Output::new(writer, connection);
-    if head.method == b"GET" {
-        if let Some(response) = app.endpoint(&head.target) { return output.respond_fixed(response.status, response.fields, &response.body); }
-    }
-    let Some(lease) = app.worker_slots.acquire() else {
-        return output.respond_fixed(refusal_status(Refusal::Unavailable), Vec::new(), b"workers unavailable\n");
-    };
-    let http = lease.http();
-    let Some(mut output) = http.response_writer(output) else {
-        return Err(io::ErrorKind::Other.into()); // a fresh worker issues every role once
-    };
     let cancel = Cancel::new();
-    cancel.watch_socket(reader.inner())?; // gateway shutdown closes the client too
-    let watcher = ClientWatch::start(reader.inner().try_clone()?, cancel.clone())?;
+    cancel.watch_socket(&socket)?; // gateway shutdown closes the client too
     let id = app.track(&cancel);
-    let body = http1::BodyReader::new(reader, leftover, body_framing);
-    let exchange_cancel = cancel.clone();
-    let worker_app = app.clone();
-    leased::run(lease, move || {
-        let _closed = worker_app.run_exchange(http, head, body, &mut output, &exchange_cancel);
-        drop(output); // every stream the worker issued is gone before its credit returns
-    });
+    let mut effects = ConnectionEffects::new(&app, socket, deadline, cancel.clone())?;
+    let driven = exchange_driver::drive(&mut effects);
+    let lease = effects.lease.take();
+    let watcher = effects.watcher.take();
+    drop(effects); // every stream the worker issued is gone before its credit returns
+    if let Some(lease) = lease { lease.finish(); }
+    let _closed = driven.closed;
     app.untrack(id);
     cancel.release_sockets();
-    watcher.finish();
+    if let Some(watcher) = watcher { watcher.finish(); }
     Ok(())
 }
 

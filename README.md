@@ -60,9 +60,12 @@ requests.
 
 These are theorems about the verified core, plus a short list of things we
 trust and do not prove: rustls, the OS, DNS, TLS certificates, the
-filesystem under power loss, the HypAware server, and provider JSON parsing.
-The HTTP/1.1 parser and writer are verified core code; no HTTP library is
-linked ([codec](docs/http1-codec.md)). [PROOFS.md](PROOFS.md) states each guarantee exactly and lists every
+filesystem under power loss, the HypAware server, provider JSON parsing, and
+that each socket, file, and log effect the core asks for is performed as
+asked. The HTTP/1.1 parser and writer are verified core code; no HTTP library
+is linked ([codec](docs/http1-codec.md)), and the order of every connection,
+from the head read to the completion record, is a verified driver's
+([proof index](docs/proof-index.md)). [PROOFS.md](PROOFS.md) states each guarantee exactly and lists every
 assumption.
 
 ## Why verify an AI gateway?
@@ -87,8 +90,8 @@ a compromised release pipeline from shipping different code.
 ## Status
 
 A runnable prototype. The core's authorization, configuration, streaming,
-shipping, HTTP/1.1 codec, and resource invariants are Verus-checked. The
-network and disk adapters are tested, and live exchanges with Anthropic and
+shipping, HTTP/1.1 codec, exchange sequencing, and resource invariants are
+Verus-checked. The network and disk adapters are tested, and live exchanges with Anthropic and
 OpenAI, streamed and not, have been run through the gateway and shipped to
 HypAware Cloud ([smoke record](docs/hypaware.md#smoke-test-record)).
 Production hardening remains incomplete.
@@ -197,7 +200,7 @@ cargo test -p gateway-runtime --release --locked server::tests::benchmark -- --i
 LOGGATE_HAPROXY=/path/to/haproxy cargo test -p gateway-runtime --locked proxy_gateway_process_failover -- --ignored --nocapture
 ```
 
-Validation on 2026-10-26: 788 core verification checks passed, 288 workspace tests passed, all 449
+Validation on 2026-10-26: 820 core verification checks passed, 298 workspace tests passed, all 455
 deliberate mutations failed their proof obligations, and the runtime passed its panic and effect-site
 lints with no async executor linked. The opt-in TLS proxy/gateway
 process-failover test and six load/fault workloads passed on 2026-10-23.

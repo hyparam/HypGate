@@ -141,7 +141,7 @@ handshake payloads copied into owned messages are additional allocations.
 larger than 65,535 before needing their full contents. The raw-peer regression
 `oversized_handshake_is_rejected_from_its_length_before_upload` sends only the
 four-byte ServerHello handshake header and keeps the socket open. A declared
-65,536-byte payload yields `TransportError::Tls`; the 65,535-byte incomplete
+65,536-byte payload yields `Fault::Tls`; the 65,535-byte incomplete
 control instead waits until the configured exchange timeout. Both leave the
 request body unread, produce no audit/body/status output, and release admission.
 This tests the real connector's early rejection and cleanup, not heap capacity.
@@ -198,7 +198,7 @@ The release branch was validated locally with `cargo test --release` on
 `retry_cookie_is_echoed_above_the_buffer_limit_and_closure_fails_before_upload`
 drives the production connector with a raw peer: the peer receives the echoed
 cookie in a hello above 64 KiB, then closes without a ServerHello. The exchange
-returns `TransportError::Tls`, leaves the request body unread, produces no
+returns `Fault::Tls`, leaves the request body unread, produces no
 output or audit bytes, and releases admission. Key-share changes with a new key
 exchange, ECH, PSK binders, and the transcript Vec capacity are not measured by
 these tests.
@@ -285,7 +285,7 @@ the built-in roots and supported signature-algorithm list are configuration data
 Failure diagnostics allocate too. With the enabled alloc feature,
 `KeyUsage::validate` accumulates presented, nonmatching EKU OIDs in a
 `Vec<Vec<usize>>`; rustls maps that error to `InvalidPurposeContext`, retaining
-the presented purposes. The transport eventually maps it to `TransportError::Tls`
+the presented purposes. The connect effect eventually reports `ConnectFailure::Tls`, which the driver names `Fault::Tls`,
 and drops the detailed error, but its transient allocations still count.
 For a certificate with at most D = 65,536 DER bytes, each parsed OID consumes at
 least two tag/length bytes (do not assume its content is nonempty), so there can

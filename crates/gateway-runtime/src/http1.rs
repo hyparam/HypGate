@@ -151,7 +151,10 @@ impl<W> ChunkedWriter<W> {
     pub(crate) fn into_parts(self) -> (W, ChunkStream) { (self.io, self.stream) }
 }
 impl<W: Write> ChunkedWriter<W> {
-    /// The last chunk, then a flush. The stream is ended afterwards.
+    /// The last chunk, then a flush. The stream is ended afterwards. The
+    /// production driver ends the stream itself and writes the last chunk
+    /// through its own client write; the test fixtures use this.
+    #[cfg(test)]
     pub(crate) fn finish(&mut self) -> io::Result<()> {
         if self.stream.is_ended() { return Err(io::ErrorKind::BrokenPipe.into()); }
         let bytes = self.stream.end();
@@ -184,7 +187,9 @@ pub(crate) fn write_fully<W: Write + ?Sized>(io: &mut W, mut bytes: &[u8]) -> io
 
 /// A field for the writers.
 pub(crate) fn field(name: &'static [u8], value: Vec<u8>) -> Field { Field { name: name.to_vec(), value, sensitive: false } }
-/// The reason phrase written for a status the gateway produces itself.
+/// The reason phrase for a status a test fixture writes; the production
+/// driver's phrases live in `gateway_core::exchange_driver`.
+#[cfg(test)]
 pub(crate) fn reason(status: u16) -> &'static [u8] {
     match status {
         100 => b"Continue", 200 => b"OK", 400 => b"Bad Request", 401 => b"Unauthorized", 405 => b"Method Not Allowed",

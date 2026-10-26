@@ -236,3 +236,11 @@ and OpenAI, JSON and SSE, all returned 200 with the providers' bytes intact; a
 bad token got 401; a request with `Expect: 100-continue` got its 100 and then
 200; `/metrics` showed no failed exchanges and a healthy log; and the log
 scanned complete with 37 records.
+
+Also on 2026-10-26 the sequencing of each connection moved into the verified
+exchange driver (`gateway_core::exchange_driver`), with the server reduced to
+performing the effects it names. The same smoke was run through the driver:
+Anthropic and OpenAI, JSON and SSE, all 200 with the providers' bytes intact;
+a bad token got 401; `Expect: 100-continue` got its 100 and then 200;
+`/metrics` showed no failed exchanges and a healthy log; the log scanned
+complete.

@@ -63,9 +63,10 @@ smoke test. Network dispatch, body forwarding, and logging are covered by the
 
 ## Metadata ownership and allocation
 
-The server passes the parsed `RequestHead` to `prepare` and drops it as soon as
-the prepared request exists, before any network effect; the transport passes the parsed
-`StatusHead` to `prepare_response_head`, which consumes it. The parser already
+The driver passes the parsed `RequestHead` to `prepare` (the `admit` effect)
+and drops it as soon as the prepared request exists, before any network
+effect; it passes the final `StatusHead`'s fields to the verified
+`headers::forward_response` and keeps only the projection. The parser already
 made every field its own vector copy, so no field shares storage with the read
 buffer or with other fields, and dropping the head frees everything the
 projection did not copy.

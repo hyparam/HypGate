@@ -26,8 +26,8 @@ acquire/release occupancy changes, and refusal to release running/cleaning credi
 Mutex serialization, private key ownership, Rust destruction, and channel behavior
 are trusted runtime bindings. The resolver wrapper itself is not Verus-verified.
 
-`HttpsTransport::run` adopts a successful reply while exclusively borrowing its
-admitted request. `Request::adopt_background` locks that request's own registry
+`HttpsTransport::connect`, the driver's `connect` effect, adopts a successful
+reply while exclusively borrowing its admitted request. `Request::adopt_background` locks that request's own registry
 and calls `TaskCredit::handoff_to` with its actual `OwnedStream`. The checked
 transition requires a completed-work reply credit and a live, non-closed admitted
 owner, records its exact ID, and only then permits background release. The adapter

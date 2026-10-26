@@ -97,5 +97,8 @@ the joins specific to this composition are:
   and finish consuming delivery before returning. Logger/file identity, physical
   durability, secret provisioning, and actual `Write` target correspondence
   remain explicit trusted boundaries.
-- The public embedding transport API has no gateway worker context. Its caller
-  supplies its own lifetime mapping; the gateway always uses `exchange_with_http`.
+- There is no public exchange API outside the worker context: every exchange
+  runs through the verified `exchange_driver` over `server::ConnectionEffects`,
+  which issues all four HTTP roles from the connection's own worker. The
+  test-only `transport::exchange` module recomposes the provider side for the
+  transport tests with a worker it constructs.

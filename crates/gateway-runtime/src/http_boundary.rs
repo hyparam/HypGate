@@ -7,7 +7,7 @@ use crate::admission::AdmissionError;
 use crate::config::{GatewayConfig, RoutedRequest};
 use gateway_core::headers::{self, Field, Rejection};
 use gateway_core::http1_exchange::{Refusal, refusal_status};
-use gateway_core::http1_head::{RequestHead, StatusHead};
+use gateway_core::http1_head::RequestHead;
 
 #[cfg(test)]
 pub(crate) const MAX_HEADER_BYTES: usize = headers::MAX_BYTES;
@@ -17,16 +17,6 @@ pub(crate) const MAX_HEADER_VALUES: usize = headers::MAX_FIELDS;
 #[derive(Debug, PartialEq, Eq)]
 pub enum HttpError { BadRequest, Unauthorized, MethodNotAllowed, HeadersTooLarge, Unavailable }
 impl HttpError {
-    /// Close the worker for a request refused before admission. No exchange
-    /// and no record exist for it anywhere, so there is no lifecycle to
-    /// finish. This is the only call to `Closed::without_request` in the
-    /// runtime; clippy denies it everywhere else and
-    /// `scripts/check_effect_sites.sh` pins this site.
-    // Escape hatch: the one worker exit without a lifecycle.
-    #[allow(clippy::disallowed_methods)]
-    pub(crate) fn close(self) -> gateway_core::exchange_lifecycle::Closed {
-        gateway_core::exchange_lifecycle::Closed::without_request()
-    }
     /// The refusal the verified exchange machine answers for this error.
     pub fn refusal(&self) -> Refusal {
         match self {
@@ -147,14 +137,6 @@ pub fn prepare<'a>(config: &'a GatewayConfig, head: &RequestHead) -> Result<Prep
     let outgoing = headers::forward_request(fields, &routed.destination().authority, name, value).map_err(rejected)?;
     let path = routed.destination().path.clone();
     Ok(PreparedRequest { routed, upstream: Some(UpstreamHead { path, fields: outgoing }) })
-}
-
-/// Consume an upstream status head: the status to preserve and the filtered
-/// fields to forward. A 1xx never reaches here; the adapter skips them and
-/// refuses 101, since this gateway has no tunnel path.
-pub(crate) fn prepare_response_head(head: StatusHead) -> Result<(u16, Vec<Field>), HttpError> {
-    if head.status < 200 { return Err(HttpError::BadRequest); }
-    Ok((head.status, response_fields(&head.fields)?))
 }
 
 /// Preserve upstream status separately. A 3xx is returned to the client, never

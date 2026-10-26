@@ -49,14 +49,20 @@ write may take is the business of the `net::Timed` stream the adapter is
 handed, which re-arms the socket timeout from the exchange deadline before
 each operation.
 
-The server (`server.rs`) reads the head under a ten-second deadline and then
-asks the `Connection` machine for every byte it writes: the refusal for a head
-that is too large or malformed, the `100 Continue`, the response head, the
-chunks, and the last chunk. The transport (`transport.rs`) asks the `Upstream`
-machine for the request head and the upload chunks, and classifies each
-status head it reads with `upstream_status` until a final one. The shipping
-client reuses `upstream_status` with a fixed Content-Length request, over the
-same adapter on its own thread.
+The sequence itself is verified: `gateway_core::exchange_driver::drive` owns
+the `Connection` and `Upstream` machines and asks the runtime, through an
+`Effects` trait with no decisions in it, to read the head, hand bytes to the
+client, open the provider session, run the two body copies, and append
+records. The driver asks the `Connection` machine for every byte the client
+gets: the refusal for a head that is too large or malformed, the
+`100 Continue`, the response head, and the last chunk; the download effect
+writes the chunks a `ChunkStream` frames. It asks the `Upstream` machine for
+the request head and ends the upload stream itself, and classifies each
+status head with `upstream_status` until a final one. The server
+(`server.rs`, `ConnectionEffects`) and transport (`transport.rs`,
+`HttpsTransport::connect`, `Session`) only perform what is asked. The
+shipping client reuses `upstream_status` with a fixed Content-Length
+request, over the same adapter on its own thread.
 
 ## Trusted
 
@@ -64,10 +70,13 @@ same adapter on its own thread.
   parser is handed, that the bytes the encoders produce are the bytes
   written, and the plumbing of leftover bytes from the head read into the
   body reader.
-- That the server and transport call the machines at the moments they do
-  (after the head read, before the body, on a fault), and the reason phrases
-  the server passes, which the machine checks for value bytes but does not
-  choose.
+- That each `Effects` method performs exactly the effect the driver named
+  and reports truthfully: a head read is one head read, bytes handed to
+  `write_client` reach the socket, `upload` and `download` return the chunk
+  stream they were given having only framed through it (an `ensures` on the
+  trait), and the chunk bytes the download effect writes are that stream's
+  frames. The moments at which the machines are called are the driver's,
+  and proved ([proof index](proof-index.md)).
 - rustls, the OS, DNS, and TLS certificates, as before. Hyper, hyper-util,
   http, http-body, http-body-util, bytes, Tokio, tokio-util, and tokio-rustls
   are no longer dependencies.

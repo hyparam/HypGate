@@ -1,44 +1,19 @@
-//! One HTTPS HTTP/1.1 exchange over the verified codec, on the calling thread
-//! with blocking sockets and rustls used directly. No redirects, ambient
-//! proxies, pooling, or replay. One deadline covers resolution, connect,
-//! handshake, upload, and download; it is enforced by the socket timeouts the
-//! `net::Timed` stream re-arms before every read and write.
-use crate::{http1, http_body, http_boundary::{PreparedRequest, prepare_response_head}, net::{Cancel, Deadline, Timed},
+//! The provider side of one exchange over the verified codec, on the calling
+//! thread with blocking sockets and rustls used directly. No redirects,
+//! ambient proxies, pooling, or replay. These are the effects the verified
+//! exchange driver asks for, in the order it asks: connect, write, upload,
+//! read a status head, download. One deadline covers them all; it is
+//! enforced by the socket timeouts the `net::Timed` stream re-arms before
+//! every read and write. Nothing here decides what happens next.
+use crate::{http1, http_body, http_boundary::PreparedRequest, net::{Cancel, Deadline, Timed},
     transfer::{AuditLog, Direction, TransferError}};
-use gateway_core::headers::Field;
-use gateway_core::{body_copy::BodyCopy, exchange_lifecycle::Fault};
-use gateway_core::http1_exchange::{Upstream, UpstreamStatus, upstream_status};
+use gateway_core::body_copy::BodyCopy;
+use gateway_core::exchange_driver::{ConnectFailure, Failure};
+use gateway_core::http1_exchange::ChunkStream;
 use gateway_core::http1_framing::Framing;
+use gateway_core::http1_head::StatusHead;
 use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned, pki_types::ServerName};
 use std::{io::{self, Read, Write}, net::{SocketAddr, TcpStream}, sync::Arc, time::Duration};
-
-pub trait ResponseSink: Write {
-    /// Called once before response body bytes. This must preserve status and the
-    /// supplied filtered fields. A body error afterward must abort HTTP framing.
-    fn start(&mut self, status: u16, fields: Vec<Field>) -> io::Result<()>;
-    /// Complete a successful body.
-    fn finish(&mut self) -> io::Result<()> { Ok(()) }
-}
-impl<W: ResponseSink> ResponseSink for http_body::Charged<W> {
-    fn start(&mut self, status: u16, fields: Vec<Field>) -> io::Result<()> { self.get_mut().start(status, fields) }
-    fn finish(&mut self) -> io::Result<()> { self.get_mut().finish() }
-}
-
-/// A failed exchange names the verified lifecycle's fault directly, so the
-/// completion record's outcome code is a checked function of what happened
-/// with no mapping in between. `Log` is a strict-mode refusal: a body or
-/// response-head append failed, so no further bytes were forwarded.
-/// Availability mode never returns it.
-pub type TransportError = Fault;
-
-// A strict-mode logging refusal during a body copy keeps its own code; other
-// transfer failures are attributed to the direction being copied.
-fn body_error(error: TransferError, direction: TransportError) -> TransportError {
-    if error == TransferError::Log { TransportError::Log } else { direction }
-}
-
-/// The two finished body-copy machines, with their proved byte counts.
-pub struct ExchangeStats { pub upload: BodyCopy, pub download: BodyCopy }
 
 // Application-data buffering only; handshake/control traffic and record overhead
 // have separate rustls limits. See docs/dependency-resources.md.
@@ -68,11 +43,7 @@ fn open_socket(_permit: &gateway_core::egress::Egress<'_, gateway_core::destinat
     Err(failure)
 }
 
-/// The deadline if the stream saw it pass, else the phase's own fault.
-fn fault_of(tls: &Tls, fallback: Fault) -> Fault { if tls.expired() { Fault::Timeout } else { fallback } }
-fn timeout_or(error: &io::Error, fallback: Fault) -> Fault {
-    if matches!(error.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock) { Fault::Timeout } else { fallback }
-}
+fn timed_out(error: &io::Error) -> bool { matches!(error.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock) }
 
 pub struct HttpsTransport { config: Arc<ClientConfig>, deadline: Duration, resolver: resolver::Resolver }
 impl HttpsTransport {
@@ -91,100 +62,146 @@ impl HttpsTransport {
         Ok(Self { config: Arc::new(config), deadline, resolver: resolver::Resolver::new()? })
     }
 
-    /// Borrows the authority for the whole exchange; the caller keeps its lease
-    /// afterwards to record the completion and then release the slot. The
-    /// exchange runs on the calling thread, never spawned or transparently
-    /// retried. `cancel` ends it early from another thread: its sockets are
-    /// shut down and the failure is reported as `Fault::Cancelled`.
-    pub(crate) fn exchange<R: Read, W: ResponseSink, L: AuditLog>(
-        &self, prepared: &mut PreparedRequest<'_>, input: &mut R, output: &mut W, log: &mut L,
-        http: &http_body::WorkerHttp, cancel: &Cancel,
-    ) -> Result<ExchangeStats, TransportError> {
-        let deadline = Deadline::start(self.deadline).map_err(|_| Fault::Timeout)?;
-        self.run(prepared, input, output, log, http, cancel, deadline)
-            .map_err(|fault| if cancel.is_cancelled() { Fault::Cancelled } else { fault })
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn run<R: Read, W: ResponseSink, L: AuditLog>(
-        &self, prepared: &mut PreparedRequest<'_>, input: &mut R, output: &mut W, log: &mut L,
-        http: &http_body::WorkerHttp, cancel: &Cancel, deadline: Deadline,
-    ) -> Result<ExchangeStats, Fault> {
-        let upstream = prepared.take_upstream().map_err(|_| Fault::Metadata)?;
-        // The host and port come from the verified destination parts of the
-        // permit's target, never from the request.
+    /// Resolve, connect, and complete the TLS handshake for the request's
+    /// resolved destination, under a fresh exchange deadline. The host and
+    /// port come from the verified destination parts of the permit's target,
+    /// never from the request. `cancel` can end the session from another thread.
+    pub(crate) fn connect(&self, prepared: &mut PreparedRequest<'_>, cancel: &Cancel) -> Result<Session, ConnectFailure> {
+        let deadline = Deadline::start(self.deadline).map_err(|_| ConnectFailure::Timeout)?;
         let (host, port) = {
             let permit = prepared.egress();
             let target = permit.target();
-            (std::str::from_utf8(&target.host).map_err(|_| Fault::Metadata)?.to_owned(), target.port)
+            (std::str::from_utf8(&target.host).map_err(|_| ConnectFailure::Resolve)?.to_owned(), target.port)
         };
-        let server = ServerName::try_from(host.clone()).map_err(|_| Fault::Metadata)?;
+        let server = ServerName::try_from(host.clone()).map_err(|_| ConnectFailure::Resolve)?;
         let tcp = {
-            let pending = self.resolver.resolve(host, port).map_err(|_| Fault::Connect)?;
-            let reply = pending.wait(deadline.remaining().map_err(|_| Fault::Timeout)?).map_err(|e| timeout_or(&e, Fault::Connect))?;
-            let addresses = reply.adopt(prepared.stream()).map_err(|_| Fault::Connect)?;
-            open_socket(&prepared.egress(), addresses.as_slice(), &deadline).map_err(|e| timeout_or(&e, Fault::Connect))?
+            let pending = self.resolver.resolve(host, port).map_err(|_| ConnectFailure::Resolve)?;
+            let reply = pending.wait(deadline.remaining().map_err(|_| ConnectFailure::Timeout)?)
+                .map_err(|e| if timed_out(&e) { ConnectFailure::Timeout } else { ConnectFailure::Resolve })?;
+            let addresses = reply.adopt(prepared.stream()).map_err(|_| ConnectFailure::Resolve)?;
+            open_socket(&prepared.egress(), addresses.as_slice(), &deadline)
+                .map_err(|e| if timed_out(&e) { ConnectFailure::Timeout } else { ConnectFailure::Tcp })?
         };
         // Cancellation shuts this socket down; the blocked operation then fails.
-        cancel.watch_socket(&tcp).map_err(|_| Fault::Connect)?;
-        let mut connection = ClientConnection::new(self.config.clone(), server).map_err(|_| Fault::Tls)?;
+        cancel.watch_socket(&tcp).map_err(|_| ConnectFailure::Tcp)?;
+        let mut connection = ClientConnection::new(self.config.clone(), server).map_err(|_| ConnectFailure::Tls)?;
         connection.set_buffer_limit(Some(TLS_APPLICATION_BUFFER));
         let mut tls: Tls = Timed::new(StreamOwned::new(connection, tcp), deadline);
-        let shaken = tls.handshake();
-        shaken.map_err(|_| fault_of(&tls, Fault::Tls))?;
-
-        // The head and its framing are the verified machine's: the projection's
-        // fields plus chunked framing and `Connection: close`. Nothing in the
-        // head came from the client unfiltered.
-        let mut machine = Upstream::new();
-        let (head, stream) = machine.request(&upstream.path, upstream.fields).ok_or(Fault::Metadata)?;
-        let written = http1::write_fully(&mut tls, &head);
-        written.map_err(|_| fault_of(&tls, Fault::Http))?;
-
-        // Upload: the body copy writes chunks straight to the connection.
-        let upload = {
-            let mut body_writer = http.upload_writer(http1::ChunkedWriter::new(&mut tls, stream)).ok_or(Fault::Http)?;
-            let copied = prepared.copy_body(input, &mut body_writer, log, Direction::Upload);
-            let finished = copied.and_then(|copy| body_writer.get_mut().finish().map(|()| copy).map_err(|_| TransferError::Write));
-            let (_, stream) = body_writer.into_inner().into_parts();
-            machine.finish(stream);
-            finished
-        };
-        let upload = upload.map_err(|error| body_error(error, fault_of(&tls, Fault::Upload)))?;
-
-        // Response heads until a final one; the machine classifies each.
-        let mut leftover = Vec::new();
-        let (status_head, leftover, response_framing) = loop {
-            let read = http1::read_status_head(&mut tls, leftover);
-            let (status_head, rest) = read.map_err(|_| fault_of(&tls, Fault::Http))?;
-            match upstream_status(status_head.status, &status_head.fields) {
-                UpstreamStatus::Interim => { leftover = rest; }
-                UpstreamStatus::Refused => return Err(Fault::Metadata),
-                UpstreamStatus::Bodiless => break (status_head, rest, Framing::Length(0)),
-                UpstreamStatus::Framed(framing) => break (status_head, rest, framing),
-            }
-        };
-        let (status, fields) = prepare_response_head(status_head).map_err(|_| Fault::Metadata)?;
-        // Kind 3 before the head reaches the client. Strict mode stops here
-        // on a failed append; availability mode continues with a gap.
-        match prepared.audit_response_head(log, status) {
-            Ok(()) => {},
-            Err(TransferError::Log) if !prepared.stream().strict() => {},
-            Err(TransferError::Log) => return Err(Fault::Log),
-            Err(_) => return Err(Fault::Metadata),
+        if tls.handshake().is_err() {
+            return Err(if cancel.is_cancelled() { ConnectFailure::Cancelled } else if tls.expired() { ConnectFailure::Timeout } else { ConnectFailure::Tls });
         }
-        output.start(status, fields).map_err(|_| Fault::Client)?;
-        let (copied, complete) = {
-            let body = http1::BodyReader::new(&mut tls, leftover, response_framing);
-            let mut reader = http.output(body).ok_or(Fault::Http)?;
-            let copied = prepared.copy_body(&mut reader, output, log, Direction::Download);
-            (copied, reader.body().is_complete())
+        Ok(Session { tls, leftover: Vec::new(), cancel: cancel.clone() })
+    }
+}
+
+/// One connected provider session. Every method performs one effect the
+/// driver named and reports what happened.
+pub(crate) struct Session { tls: Tls, leftover: Vec<u8>, cancel: Cancel }
+impl Session {
+    /// How the last failed operation should be read: cancellation and the
+    /// deadline take precedence over the phase's own fault.
+    fn failure(&self) -> Failure {
+        if self.cancel.is_cancelled() { Failure::Cancelled } else if self.tls.expired() { Failure::Timeout } else { Failure::Io }
+    }
+    fn transfer_failure(&self, error: TransferError) -> Failure {
+        if error == TransferError::Log { Failure::Log } else { self.failure() }
+    }
+    pub(crate) fn write(&mut self, bytes: &[u8]) -> bool {
+        http1::write_fully(&mut self.tls, bytes).and_then(|()| self.tls.flush()).is_ok()
+    }
+    /// The request body as chunks of `stream`, through the worker's upload role.
+    pub(crate) fn upload<R: Read, L: AuditLog>(&mut self, prepared: &mut PreparedRequest<'_>, input: &mut R, log: &mut L,
+        http: &http_body::WorkerHttp, stream: ChunkStream) -> (Result<BodyCopy, Failure>, ChunkStream)
+    {
+        let mut writer = match http.upload_writer(http1::ChunkedWriter::new(&mut self.tls, stream)) {
+            Ok(writer) => writer,
+            Err(writer) => { let (_, stream) = writer.into_parts(); return (Err(Failure::Io), stream); }
         };
-        let download = copied.map_err(|error| body_error(error, fault_of(&tls, Fault::Download)))?;
+        let copied = prepared.copy_body(input, &mut writer, log, Direction::Upload);
+        let (_, stream) = writer.into_inner().into_parts();
+        (copied.map_err(|error| self.transfer_failure(error)), stream)
+    }
+    pub(crate) fn read_status_head(&mut self) -> Result<StatusHead, Failure> {
+        let leftover = std::mem::take(&mut self.leftover);
+        match http1::read_status_head(&mut self.tls, leftover) {
+            Ok((head, rest)) => { self.leftover = rest; Ok(head) }
+            Err(_) => Err(self.failure()),
+        }
+    }
+    /// The response body, framed as given, copied to `sink` through the
+    /// worker's output role. `Ok` only when the body was complete as framed.
+    pub(crate) fn download<W: Write, L: AuditLog>(&mut self, prepared: &mut PreparedRequest<'_>, log: &mut L,
+        http: &http_body::WorkerHttp, framing: Framing, sink: &mut W) -> Result<BodyCopy, Failure>
+    {
+        let leftover = std::mem::take(&mut self.leftover);
+        let body = http1::BodyReader::new(&mut self.tls, leftover, framing);
+        let Some(mut reader) = http.output(body) else { return Err(Failure::Io); };
+        let copied = prepared.copy_body(&mut reader, sink, log, Direction::Download);
+        let complete = reader.body().is_complete();
+        drop(reader);
+        let copy = copied.map_err(|error| self.transfer_failure(error))?;
         // A body that stopped before its framing said so is a failure, never a clean end.
-        if !complete { return Err(fault_of(&tls, Fault::Download)); }
-        output.finish().map_err(|_| Fault::Client)?;
-        Ok(ExchangeStats { upload, download })
+        if !complete { return Err(self.failure()); }
+        Ok(copy)
+    }
+}
+
+/// Test-only: the exchange composed from the session effects in the order the
+/// verified driver takes them, so the transport tests can exercise the
+/// provider side without a client connection. Production never calls this;
+/// the driver sequences the real exchange.
+#[cfg(test)]
+pub(crate) mod exchange {
+    use super::*;
+    use gateway_core::headers::Field;
+    use gateway_core::exchange_lifecycle::Fault;
+    use gateway_core::http1_exchange::{Upstream, UpstreamStatus, upstream_status};
+
+    pub(crate) trait ResponseSink: Write {
+        fn start(&mut self, status: u16, fields: Vec<Field>) -> io::Result<()>;
+        fn finish(&mut self) -> io::Result<()> { Ok(()) }
+    }
+    pub(crate) struct ExchangeStats { pub upload: BodyCopy, pub download: BodyCopy }
+    fn fault(failure: Failure, phase: Fault) -> Fault {
+        match failure { Failure::Cancelled => Fault::Cancelled, Failure::Timeout => Fault::Timeout, Failure::Log => Fault::Log, Failure::Io => phase }
+    }
+    impl HttpsTransport {
+        pub(crate) fn exchange<R: Read, W: ResponseSink, L: AuditLog>(&self, prepared: &mut PreparedRequest<'_>, input: &mut R, output: &mut W,
+            log: &mut L, http: &http_body::WorkerHttp, cancel: &Cancel) -> Result<ExchangeStats, Fault>
+        {
+            let upstream = prepared.take_upstream().map_err(|_| Fault::Metadata)?;
+            let mut session = self.connect(prepared, cancel).map_err(|failure| match failure {
+                ConnectFailure::Resolve | ConnectFailure::Tcp => Fault::Connect, ConnectFailure::Tls => Fault::Tls,
+                ConnectFailure::Timeout => Fault::Timeout, ConnectFailure::Cancelled => Fault::Cancelled })?;
+            let mut machine = Upstream::new();
+            let (head, stream) = machine.request(&upstream.path, upstream.fields).ok_or(Fault::Metadata)?;
+            if !session.write(&head) { return Err(fault(session.failure(), Fault::Http)); }
+            let (uploaded, mut stream) = session.upload(prepared, input, log, http, stream);
+            let upload = uploaded.map_err(|failure| fault(failure, Fault::Upload))?;
+            let last = stream.end();
+            if !session.write(&last) { return Err(fault(session.failure(), Fault::Upload)); }
+            machine.finish(stream);
+            let (status, fields, framing) = loop {
+                let head = session.read_status_head().map_err(|failure| fault(failure, Fault::Http))?;
+                match upstream_status(head.status, &head.fields) {
+                    UpstreamStatus::Interim => {}
+                    UpstreamStatus::Refused => return Err(Fault::Metadata),
+                    UpstreamStatus::Bodiless => break (head.status, head.fields, Framing::Length(0)),
+                    UpstreamStatus::Framed(framing) => break (head.status, head.fields, framing),
+                }
+            };
+            let fields = gateway_core::headers::forward_response(&fields).map_err(|_| Fault::Metadata)?;
+            match prepared.audit_response_head(log, status) {
+                Ok(()) => {},
+                Err(TransferError::Log) if !prepared.stream().strict() => {},
+                Err(TransferError::Log) => return Err(Fault::Log),
+                Err(_) => return Err(Fault::Metadata),
+            }
+            output.start(status, fields).map_err(|_| Fault::Client)?;
+            let download = session.download(prepared, log, http, framing, output).map_err(|failure| fault(failure, Fault::Download))?;
+            output.finish().map_err(|_| Fault::Client)?;
+            Ok(ExchangeStats { upload, download })
+        }
     }
 }
 

@@ -5,7 +5,7 @@
 //! credit cannot return while one of its streams is still alive.
 use std::io::{self, Read};
 mod worker;
-pub(crate) use worker::{Charged, WorkerHttp};
+pub(crate) use worker::WorkerHttp;
 
 /// A body source bound to a worker's reader role. Reads pass straight through
 /// to the framed body; the role is released when the reader is dropped.

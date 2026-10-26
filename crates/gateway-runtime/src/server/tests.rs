@@ -41,7 +41,8 @@ fn send(port: u16, path: &str, token: &str, method: &str) -> Client {
 }
 fn send_body(port: u16, path: &str, token: &str, method: &str, body: &[u8]) -> Client {
     let token = format!("Bearer {token}");
-    send_request(connect(port), method, path, &[("host", "attacker.example"), ("authorization", &token), ("x-api-key", "caller-secret")], body).unwrap()
+    send_request(connect(port), method, path, &[("host", "attacker.example"), ("authorization", &token), ("x-api-key", "caller-secret")], body)
+        .unwrap_or_else(|e| panic!("{method} {path}: {e}"))
 }
 /// A running `serve` on its own thread.
 struct Served { port: u16, shutdown: Shutdown, thread: Option<JoinHandle<io::Result<()>>> }
@@ -62,6 +63,16 @@ impl Served {
 /// Serve `app` on a fresh loopback port.
 fn spawn_gateway(app: &Arc<Gateway>, connections: usize, deadline: Duration) -> Served {
     Served::start(StdListener::bind("127.0.0.1:0").unwrap(), app, connections, deadline)
+}
+/// Connections holding credit. A connection thread returns its credit only
+/// after its watcher thread is joined, which can lag the client's view of the
+/// response by a watcher poll (about 20 ms); tests that burst connections
+/// wait for the credits rather than racing them.
+fn connections_in_use(app: &Gateway) -> usize {
+    app.connection_slots.get().and_then(|slots| slots.usage()).map(|(active, _)| active).unwrap_or(0)
+}
+fn wait_connections_at_most(app: &Gateway, n: usize) {
+    assert!(wait_until(Duration::from_secs(3), || connections_in_use(app) <= n), "connection credits did not return");
 }
 /// No worker holds credit.
 fn workers_idle(app: &Gateway) -> bool { app.worker_slots.usage().is_some_and(|(active, _)| active == 0) }
@@ -188,6 +199,7 @@ fn exercise(availability: bool, failed_log: bool, truncated: bool, stop: Stop) {
     }
     // Rejected requests must not have connected to the provider.
     assert!(no_connection(&upstream, Duration::from_millis(20)));
+    wait_connections_at_most(&app, 0);
     if failed_log && !availability {
         let r = send(port, "/routes/7", "gateway", "POST");
         assert_eq!(r.status, 503);
@@ -210,7 +222,9 @@ fn exercise(availability: bool, failed_log: bool, truncated: bool, stop: Stop) {
     let busy = send(port, "/routes/7", "gateway", "POST");
     assert_eq!(busy.status, 503);
     busy.collect().unwrap();
+    wait_connections_at_most(&app, 1);
     let metrics = send(port, "/metrics", "", "GET").collect().unwrap();
+    wait_connections_at_most(&app, 1);
     let metrics = std::str::from_utf8(&metrics).unwrap();
     assert!(metrics.contains("loggate_admission_healthy 1\n"));
     assert!(metrics.contains("loggate_requests_active 1\n"));
@@ -599,58 +613,50 @@ fn poisoned_admission_is_unready_and_fail_closed_in_both_logging_modes() {
     }
 }
 
-/// An `Output` over a loopback socket, with the peer's end to read from.
-fn output_pair() -> (Output, TcpStream) {
-    let listener = StdListener::bind("127.0.0.1:0").unwrap();
-    let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-    client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    let (server, _) = listener.accept().unwrap();
-    let io = Timed::new(server, Deadline::start(Duration::from_secs(5)).unwrap());
-    (Output::new(io, Connection::new()), client)
-}
-
-#[test]
-fn bodyless_http_statuses_are_complete_at_the_head_and_finish_cleanly() {
-    for status in [204u16, 304, 200] {
-        let (mut output, mut client) = output_pair();
-        output.start(status, Vec::new()).unwrap();
-        output.finish().unwrap();
-        drop(output);
-        let mut bytes = Vec::new();
-        client.read_to_end(&mut bytes).unwrap();
-        let text = std::str::from_utf8(&bytes).unwrap();
-        assert!(text.starts_with(&format!("HTTP/1.1 {status} ")), "{text}");
-        if status == 200 {
-            // A streamed body ends with the last chunk.
-            assert!(text.contains("transfer-encoding: chunked\r\n") && text.ends_with("\r\n\r\n0\r\n\r\n"), "{text}");
-        } else {
-            // No body may follow these statuses: the head is the whole response.
-            assert!(text.contains("content-length: 0\r\n") && text.ends_with("\r\n\r\n"), "{text}");
-            assert!(!text.contains("chunked"));
-        }
-    }
-}
-
-#[test]
-fn bodyless_status_refuses_payload_and_an_unfinished_stream_is_truncated() {
-    for status in [204u16, 304] {
-        let (mut output, _client) = output_pair();
-        output.start(status, Vec::new()).unwrap();
-        assert!(output.write_all(b"unexpected").is_err(), "no body after {status}");
-    }
-    // A stream that is dropped without `finish` never shows the client a last chunk.
-    let (mut output, mut client) = output_pair();
-    output.start(200, Vec::new()).unwrap();
-    output.write_all(b"partial").unwrap();
-    drop(output);
+/// Raw bytes of one POST to the gateway and everything it answers until it closes.
+fn raw_post(port: u16, body: &[u8]) -> Vec<u8> {
+    use crate::test_support::http::field;
+    let fields = vec![field("host", "attacker.example"), field("authorization", "Bearer gateway"), field("x-api-key", "caller-secret"),
+        field("content-length", &body.len().to_string())];
     let mut bytes = Vec::new();
-    client.read_to_end(&mut bytes).unwrap();
-    let text = std::str::from_utf8(&bytes).unwrap();
-    assert!(text.contains("\r\n\r\n7\r\npartial\r\n") && !text.ends_with("0\r\n\r\n"), "{text}");
-    // A second head is refused once one was sent.
-    let (mut output, _client) = output_pair();
-    output.start(200, Vec::new()).unwrap();
-    assert!(output.start(200, Vec::new()).is_err());
+    gateway_core::http1_write::write_request_head(b"POST", b"/routes/7", &fields, &mut bytes);
+    bytes.extend_from_slice(body);
+    let mut socket = connect(port);
+    crate::test_support::http::raw_exchange(&mut socket, &bytes).unwrap()
+}
+
+#[test]
+fn bodyless_upstream_statuses_reach_the_client_as_a_complete_fixed_head() {
+    for status in [204u16, 304] {
+        let (upstream, acceptor, roots) = tls();
+        let port = upstream.local_addr().unwrap().port();
+        let destination = format!("https://localhost:{port}/v1/messages");
+        let dir = TempDir::new(); let path = dir.0.join("audit.log");
+        let app = Gateway::new(config(port, false), HttpsTransport::with_roots(roots, Duration::from_secs(5)).unwrap(),
+            DiskLog::create(&path, 4, Duration::from_secs(2)).unwrap());
+        let gateway = spawn_gateway(&app, 4, Duration::from_secs(8));
+        let provider = std::thread::spawn(move || {
+            let mut socket = accept_tls(&upstream, &acceptor).unwrap();
+            let request = read_request(&mut socket).unwrap();
+            assert_eq!(request.body, b"{}");
+            // No body may follow these statuses; the provider sends the head alone.
+            write_response(&mut socket, status, &[("x-upstream", "kept"), ("set-cookie", "dropped")], b"").unwrap();
+            let _ = socket.conn.send_close_notify();
+            let _ = socket.flush();
+        });
+        let answer = raw_post(gateway.port, b"{}");
+        provider.join().unwrap();
+        let text = std::str::from_utf8(&answer).unwrap();
+        let phrase = if status == 204 { "No Content" } else { "Not Modified" };
+        assert!(text.starts_with(&format!("HTTP/1.1 {status} {phrase}\r\n")), "{text}");
+        assert!(text.ends_with("connection: close\r\ncontent-length: 0\r\n\r\n"), "the head is the whole response: {text}");
+        assert!(!text.contains("chunked") && !text.contains("set-cookie"), "{text}");
+        wait_workers_idle(&app);
+        gateway.stop().unwrap();
+        assert_eq!(app.failed_exchanges(), 0);
+        let (upload, download) = assert_trace(&audit_records(&path), &destination, Some(status), 0);
+        assert_eq!((upload.as_slice(), download.len()), (&b"{}"[..], 0));
+    }
 }
 
 #[test]
