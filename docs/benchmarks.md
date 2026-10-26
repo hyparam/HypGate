@@ -252,6 +252,52 @@ that resembles real token generation, hostile inputs at the header and handshake
 limits, and any machine other than this laptop and the Ubuntu CI runner. No
 release performance threshold has been set.
 
+## The same workloads on blocking threads, 2026-10-26
+
+The runtime no longer links an async executor: each connection runs on its own
+thread with blocking sockets, rustls is driven directly, and the disk logger
+appends synchronously behind a mutex and condition variable. The fourteen opt-in
+workloads above were rerun unchanged on the same laptop (Apple M3 Max, macOS
+27.0.1, release build, local temporary storage, other processes idle) through the
+verified exchange driver. Every run completed every request with exact payloads,
+zero failed exchanges, no audit gap except the 24 expected in the availability
+log-failure run, a sampled peak equal to the configured concurrency, and zero
+active requests and workers afterwards. These are single observations, not a
+controlled comparison with the Tokio rows above.
+
+| Workload | Mode | Completed / failed | Elapsed s | Payload MiB/s | First byte p95 ms | Completion p50 / p95 ms | Frame gap p50 / p99 / max ms |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Healthy 64 KiB (eight concurrent) | Strict | 32 / 0 | 1.278 | 1.76 | 139 | 229 / 248 | 36.0 / 39.1 / 39 |
+| Healthy 64 KiB (eight concurrent) | Availability | 32 / 0 | 1.205 | 1.87 | 153 | 247 / 273 | 37.4 / 44.1 / 44 |
+| 1 MiB uploads, 16 KiB responses (eight concurrent) | Strict | 32 / 0 | 9.994 | 3.25 | 2,903 | 2,323 / 2,903 | n/a |
+| 1 MiB uploads, 16 KiB responses (eight concurrent) | Availability | 32 / 0 | 10.111 | 3.21 | 2,917 | 2,334 / 2,917 | n/a |
+| Paced 4 MiB responses (eight concurrent) | Strict | 32 / 0 | 41.511 | 3.09 | 560 | 10,120 / 11,612 | 35.0 / 142.7 / 771 |
+| Paced 4 MiB responses (eight concurrent) | Availability | 32 / 0 | 37.161 | 3.45 | 149 | 9,303 / 9,612 | 34.0 / 51.0 / 682 |
+| Eight 32 MiB streams, 16 KiB per 15 ms | Strict | 8 / 0 | 73.973 | 3.46 | 136 | 73,914 / 73,932 | 34.0 / 49.4 / 646 |
+| Eight 32 MiB streams, 16 KiB per 15 ms | Availability | 8 / 0 | 77.440 | 3.31 | 168 | 77,387 / 77,404 | 34.1 / 139.6 / 745 |
+| 32 concurrent requests, 128 total | Strict | 128 / 0 | 4.970 | 1.81 | 616 | 1,009 / 1,096 | 153.7 / 244.0 / 250 |
+| 32 concurrent requests, 128 total | Availability | 128 / 0 | 5.224 | 1.72 | 1,161 | 957 / 1,581 | 142.0 / 157.8 / 161 |
+| Log fails after batch one | Strict | 8 / 0 (24 rejected) | 0.278 | 2.03 | 134 | 222 / 240 | 35.0 / 37.0 / 37 |
+| Log fails after batch one | Availability | 32 / 0 (24 gaps) | 0.286 | 7.87 | 132 | 3 / 232 | 0.0 / 35.0 / 35 |
+
+The concurrency sweep (three runs per level and mode) stayed at 24 to 30 requests
+per second at every level, with completion p95 of roughly 35, 65, 135, 250, 500,
+and 1,000 ms at one through 32 concurrent and frame-gap p99 of roughly 5, 10, 20,
+40, 80, and 155 ms. Two of the 36 rows stalled: strict at sixteen once ran at 10.4
+requests per second with a 2.3 s completion p95, and strict at one once ran at 4.9
+requests per second with a 635 ms completion p95; the other runs at those levels
+matched their neighbours. The paced 4 MiB and 32 MiB stream runs finished in 37 to
+77 s against 55 to 109 s on the executor, most plausibly because the synchronous logger no longer
+pays a queue hand-off per 16 KiB record: logged payload reached 3.1 to 3.5 MiB/s
+against 2.2 to 2.4. The 1 MiB uploads were about ten percent slower and first-byte
+latency at eight concurrent about 30 ms higher, both within the run-to-run
+variation already visible in the earlier tables. Peak RSS for the two baseline
+processes under `/usr/bin/time -l` was 9,879,552 bytes in strict mode and
+9,846,784 in availability mode, against about 11 MB with the executor; each
+connection thread reserves a 512 KiB stack that is committed only as touched.
+The same disk-sync bound applies: throughput is still set by synced records per
+second times the chunk size, not by the threading model.
+
 ## Repeated admission overload
 
 The ordinary CI test in `server/tests/overload.rs` holds eight real TLS exchanges
