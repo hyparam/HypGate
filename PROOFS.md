@@ -85,12 +85,13 @@ destination.
   fails if the set of allowed sites changes.
 
 **Premises.** DNS, TLS, and the system resolver behave as specified (no
-IP-range policy, so not an SSRF theorem); the adapter hands the verified
-parser the bytes it read from the socket and writes the bytes the verified
-writer produced; the runtime passes the gate's bytes to the socket it opened
-under the permit and the machine's requests to the client it built from the
-configured server; `write_all` sites are still enumerated by review rather
-than lint.
+IP-range policy, so not an SSRF theorem); the adapter's one socket read
+appends exactly what the socket produced and its one socket write reports
+exactly the prefix the socket accepted (the drivers that feed the parsers and
+hand the writers' bytes over are verified, `body_reader` and `sink`); the
+runtime passes the gate's bytes to the socket it opened under the permit and
+the machine's requests to the client it built from the configured server;
+`write_all` sites are still enumerated by review rather than lint.
 
 ## Guarantee 2: correctness
 
@@ -223,11 +224,13 @@ an assumption we take on; the proofs that could be written have been.
   handed to the client are exactly the connection machine's output plus an
   unfinished stream's frames, in order, and every machine precondition is
   discharged, so a second head, bytes after an abort, or a last chunk on an
-  incomplete body cannot be written by construction. What remains trusted is
-  that each effect does what it reports: a read is a read, bytes handed over
-  reach the socket, the stream given to an upload or download comes back
-  having only been framed through, and a shut-down or timed-out socket makes
-  the blocked call return. The framing the reader decodes and the writer
+  incomplete body cannot be written by construction. The loops that feed the
+  parsers from socket reads and hand the writers' bytes to socket writes are
+  verified too (`body_reader`, `sink`): nothing skipped, nothing read or
+  offered twice, a stream framed through only by the verified chunk coding.
+  What remains trusted is that one socket read appends what the socket
+  produced, one socket write accepts what it reports, and a shut-down or
+  timed-out socket makes the blocked call return. The framing the reader decodes and the writer
   encodes is the verified chunked coding, whose decoder accepts exactly the
   grammar, and the Content-Length count; which buffered bytes are body,
   when the body is complete, and what a close means are the verified body
@@ -366,7 +369,7 @@ checked definitions for each row.
 | Cancellation and no replay | Cancellation prevents new submissions; uncertain effects, crashes, or failover never trigger automatic replay of a possibly executed generation. | Core cancellation/stale-event checks proved; transport has no replay path. Socket cancellation and recovery composition remain unproved. |
 | Resource bounds and safe release | Slots, buffers, queues, and outstanding operations stay within explicit budgets; capacity cannot be reused while work retaining it remains alive. | Logical slot limits, ID isolation, and combined payload bound under an explicit stream-to-slot mapping proved; fixed disk-FIFO order, slot capacity, permanent closure, and actual queued-frame byte bound proved; HTTP role occupancy proved; ownership and deadlines tested. Conditional allocation composition is documented and the accept loop and drain order are a verified driver (`serve_driver`); a mechanized refinement of the threaded runtime remains open. |
 | Logging-mode separation | Availability mode may lose audit coverage but cannot relax authorization, routing, or tenant isolation; logging failure cannot create unbounded replacement work. | Core logging-mode transitions proved; bounded logger and failure handling tested. Submission and lifecycle composition are checked under the documented adapter assumptions. |
-| Cloud shipping | The optional HypAware shipper cannot affect authorization, forwarding, or readiness; it never modifies the log; every request it sends is chosen by a verified machine and names no host; no exchange is dropped between the log and the acknowledged batch; delivery is at least once with idempotent batch and row identities, so the server stores each exchange once. | Isolation is structural and tested; tailing, exchange assembly bounds, batch limits, upload progress, identity injectivity, enrollment transitions, and the machine's conservation, request shape, and bounded waiting are core proved; HTTPS, parsing, projection, and the server's ledger/dedup are trusted and tested. See [cloud shipping](docs/cloud-shipping.md). |
+| Cloud shipping | The optional HypAware shipper cannot affect authorization, forwarding, or readiness; it never modifies the log; every request it sends is chosen by a verified machine and names no host; no exchange is dropped between the log and the acknowledged batch; delivery is at least once with idempotent batch and row identities, so the server stores each exchange once. | Isolation is structural and tested; tailing, exchange assembly bounds, batch limits, upload progress, identity injectivity, enrollment transitions, and the machine's conservation, request shape, and bounded waiting are core proved; the projection, the credential's claim decoding, and the response parsing are core proved; HTTPS and the server's ledger/dedup are trusted and tested. See [cloud shipping](docs/cloud-shipping.md). |
 | Honest completion and conditional progress | Failed/truncated streams cannot masquerade as successful completion; under stated scheduler and I/O assumptions, admitted work terminates or times out and releases resources. | Core admission/release and conditional streaming progress proved; EOF/error behavior and deadlines tested. Permanent worker closure, drain rank, and the drain sequence are proved; the conditional resource argument is documented. Mechanized liveness verification remains open. |
 
 Verus does not verify rustls, the OS, DNS/PKI, or the filesystem for us; the

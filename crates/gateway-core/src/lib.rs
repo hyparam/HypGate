@@ -60,6 +60,8 @@ pub mod config_values;
 pub mod calendar;
 pub mod body_reader;
 pub mod ipv6;
+pub mod sink;
+pub mod base64url;
 
 #[cfg(test)]
 #[path = "tests/streaming.rs"]
@@ -115,3 +117,9 @@ mod body_reader_tests;
 #[cfg(test)]
 #[path = "tests/ipv6.rs"]
 mod ipv6_tests;
+#[cfg(test)]
+#[path = "tests/sink.rs"]
+mod sink_tests;
+#[cfg(test)]
+#[path = "tests/base64url.rs"]
+mod base64url_tests;

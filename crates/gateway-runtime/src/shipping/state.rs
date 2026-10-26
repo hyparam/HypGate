@@ -96,34 +96,14 @@ pub fn jwt_claims(jwt: &str) -> Option<(String, u64)> {
     Some((sub, number(&claims, "exp")?))
 }
 
-fn base64url_decode(text: &str) -> Option<Vec<u8>> {
-    let mut out = Vec::with_capacity(text.len().saturating_mul(3) / 4);
-    let (mut buffer, mut bits) = (0u32, 0u32);
-    for byte in text.bytes() {
-        let value = match byte {
-            b'A'..=b'Z' => byte.wrapping_sub(b'A'),
-            b'a'..=b'z' => byte.wrapping_sub(b'a').wrapping_add(26),
-            b'0'..=b'9' => byte.wrapping_sub(b'0').wrapping_add(52),
-            b'-' => 62, b'_' => 63, b'=' => continue, _ => return None,
-        } as u32;
-        buffer = (buffer << 6) | value; bits = bits.wrapping_add(6);
-        if bits >= 8 { bits = bits.wrapping_sub(8); out.push((buffer >> bits) as u8); buffer &= (1u32 << bits).wrapping_sub(1); }
-    }
-    Some(out)
-}
+/// The verified decoder: the bytes whose base64url encoding this is, or
+/// nothing for a text that encodes nothing.
+fn base64url_decode(text: &str) -> Option<Vec<u8>> { gateway_core::base64url::decode(text.as_bytes()) }
 
 #[cfg(test)]
 pub(crate) fn base64url_decode_for_test(text: &str) -> Option<Vec<u8>> { base64url_decode(text) }
 
-pub fn base64url_encode(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut out = String::new();
-    for chunk in bytes.chunks(3) {
-        let mut word = 0u32;
-        for (b, shift) in chunk.iter().zip([16u32, 8, 0]) { word |= (*b as u32) << shift; }
-        for shift in [18u32, 12, 6, 0].into_iter().take(chunk.len().saturating_add(1)) {
-            out.push(TABLE.get(((word >> shift) & 63) as usize).copied().unwrap_or(b'A') as char);
-        }
-    }
-    out
+#[cfg(test)]
+pub(crate) fn base64url_encode(bytes: &[u8]) -> String {
+    String::from_utf8(gateway_core::base64url::encode(bytes)).unwrap_or_default()
 }

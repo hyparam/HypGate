@@ -34,9 +34,12 @@ cases, and chunked bodies split at every byte boundary.
 
 The reading drivers are verified (`gateway_core::body_reader`) over a
 `Source` trait with one operation, `fill`, which appends what one socket read
-produced to the buffer it is given, or reports the close or the failure.
-`gateway-runtime/src/http1.rs` implements the source over the socket, hands
-the drivers their buffers, and copies the bytes a body read names:
+produced to the buffer it is given, or reports the close or the failure; the
+writing drivers are verified (`gateway_core::sink`) over a `Sink` trait with
+one operation, `put`, which takes a non-empty prefix of the bytes offered and
+says how long it is, or reports the close or the failure.
+`gateway-runtime/src/http1.rs` implements both over the socket, hands the
+drivers their buffers, and copies the bytes a body read names:
 
 - `read_request_head` and `read_status_head` fill a buffer of at most
   32 KiB and call the parser after each fill; a head that has not completed
@@ -54,8 +57,16 @@ the drivers their buffers, and copies the bytes a body read names:
   a failed read is an error, never an end. The runtime's `Read`
   implementation copies the named bytes to the caller and maps the outcomes
   to I/O results.
-- `ChunkedWriter` writes the bytes a verified `ChunkStream` yields for each
-  write and for `finish`; it never closes the stream, the caller decides that.
+- `write_fully` is the verified `sink::write_all`: it offers the bytes not
+  yet accepted until all are. Proved: the accepted prefixes, concatenated,
+  are exactly the bytes given, in order, nothing skipped or offered twice,
+  and a close or failure leaves a proper prefix handed over.
+- `ChunkedWriter` is the verified `sink::ChunkWriter`: each write is framed
+  by the `ChunkStream` and handed over whole through `write_all`, `finish`
+  hands over the last chunk. Proved: the bytes the sink accepted are the
+  stream's output while no write has failed, and a prefix of it afterwards;
+  a failed write marks the writer failed and nothing more is offered. It
+  never closes the stream, the caller decides that.
 
 All of it is blocking `std::io`; no executor is linked. How long a read or
 write may take is the business of the `net::Timed` stream the adapter is

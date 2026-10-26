@@ -92,7 +92,9 @@ after five idle polls are flushed as `incomplete`.
 Enrollment: `POST /v1/identity/bootstrap` with `{"bootstrap_token": ...}`
 returns `{jwt, expires_at, org}`. The gateway id is the credential's `sub`
 claim; the shipper reads `sub` and `exp` without verifying the signature, which
-the server does on every request. `POST /v1/identity/refresh` with the current
+the server does on every request. The payload segment is decoded by the
+verified base64url codec (`gateway_core::base64url`), which accepts exactly
+the encodings of some bytes, and parsed by the verified JSON reader. `POST /v1/identity/refresh` with the current
 credential renews it; the shipper refreshes when less than 24 hours remain or
 once after a rejected upload, and re-enrolls when a refresh is rejected.
 `service_token_revoked` and `service_account_disabled` stop the shipper
