@@ -122,6 +122,7 @@ impl<S: Sink> ChunkWriter<S> {
         self.note(Ghost(bytes@), written)
     }
 
+    #[allow(unused_variables)]
     fn note(&mut self, framed: Ghost<Seq<u8>>, written: Written) -> (out: Result<(), WriteError>)
         requires old(self).stream.valid(), !old(self).failed, old(self).stream.out() == old(self).sent@ + framed@,
             written.result is Ok ==> written.sent@ == framed@,
