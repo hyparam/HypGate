@@ -5,7 +5,7 @@ authorization, normalized configuration, streaming, resource, and upstream-media
 properties are checked by Verus. Production body writes pass the checked
 `ResolvedRoute::write_bytes` gate ([ownership composition](ownership-composition.md)),
 and the [end-to-end audit](end-to-end-audit.md) traces that mediation through every
-effect site and failure exit. Hyper, TLS, DNS, and the OS remain trusted adapters,
+effect site and failure exit. The socket adapter, TLS, DNS, and the OS remain trusted,
 and there is no single mechanized theorem over the async runtime. The
 [authorization notes](authorization-core.md) give the exact boundary.
 
@@ -28,9 +28,9 @@ and credential ownership mechanism must be settled before exposing an endpoint.
 
 | Property | Obligation | Current status |
 | --- | --- | --- |
-| Authorization | Every upstream dispatch is justified by an authenticated principal's grant for that route and policy snapshot. Unknown identities, missing grants, and validation errors produce no dispatch. | Digest identity and tenant-scoped token issuance proved; HTTP authentication is tested; production dispatch is bound through the checked `ResolvedRoute::write_bytes` gate, with Hyper/TLS/DNS delivery trusted. |
+| Authorization | Every upstream dispatch is justified by an authenticated principal's grant for that route and policy snapshot. Unknown identities, missing grants, and validation errors produce no dispatch. | Digest identity and tenant-scoped token issuance proved; HTTP authentication is tested; production dispatch is bound through the checked `ResolvedRoute::write_bytes` gate, with TLS/DNS delivery trusted. |
 | Tenant isolation | A principal cannot select another tenant's credential, route grant, request state, or private audit destination. Async completion cannot attach to another live request. | Local owner/ticket checks and authenticated token tenant binding proved; cross-owner lifecycle composition is checked (`cleanup_before_reuse`); audit-file access control remains an operator obligation. |
-| Credential confinement | Only the credential handle authorized for the tenant and exact origin may reach the secret-bearing transport operation. Gateway authentication material is never forwarded upstream; credential headers are excluded from client-visible metadata, audit metadata, and diagnostics. | Authorized handles satisfy tenant ownership and exact root grants; the header projection that injects the credential and drops the client's is proved (`headers::forward_request`); secret loading is tested; the transport consumes only the resolved route's credential, with header serialization trusted to Hyper. |
+| Credential confinement | Only the credential handle authorized for the tenant and exact origin may reach the secret-bearing transport operation. Gateway authentication material is never forwarded upstream; credential headers are excluded from client-visible metadata, audit metadata, and diagnostics. | Authorized handles satisfy tenant ownership and exact root grants; the header projection that injects the credential and drops the client's is proved (`headers::forward_request`); secret loading is tested; the transport consumes only the resolved route's credential, with head serialization proved (`http1_write`) and TLS delivery trusted. |
 | Routing integrity | Effective scheme, host, port, and route template come from validated policy, not arbitrary request fields, provider response headers, ambient proxy settings, or unvalidated configuration. | Normalized origin handles confined to root grants; the destination grammar and the host, port, and path it yields are proved (`destination::parse`); socket/TLS naming derives from those verified parts, with DNS and TLS name checks trusted. |
 | Security failure is closed | Authentication, authorization, destination validation, and credential selection failures never permit upstream dispatch. | Invalid core authentication/configuration cannot yield authority; dispatch mediation is audited at the source level in the end-to-end audit. Distinct from logging policy. |
 | Logging policy | Strict mode gates write ranges on durable acknowledgments. Availability-first mode may forward without complete audit coverage but still requires all security checks. | Exact durable receipts gate stream bytes; ordered recovery is proved under explicit storage/read/checksum assumptions. Linux ext4 failure/process-death tests passed; physical persistence remains trusted. |
@@ -110,7 +110,7 @@ assumptions and tests; state-machine safety does not imply availability.
 For each theorem, publish its exact scope and preconditions. The current trust
 boundary includes Verus and its translation/solver, vstd specifications, rustc/LLVM,
 standard-library implementations, allocation behavior, and platform execution.
-Runtime dependencies include the adapter, Tokio, Hyper, rustls, OS sockets/filesystem,
+Runtime dependencies include the adapter, Tokio, rustls, OS sockets/filesystem,
 DNS/PKI, secret provisioning, and authentication bindings. None is automatically
 verified by adding Verus contracts to the core.
 

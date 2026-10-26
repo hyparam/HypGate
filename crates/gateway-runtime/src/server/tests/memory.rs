@@ -105,22 +105,16 @@ async fn workload(availability: bool, waves: usize) {
         for _ in 0..waves * CLIENTS {
             let (socket, _) = upstream.accept().await.unwrap(); let acceptor = acceptor.clone();
             connections.spawn(async move {
-                let socket = acceptor.accept(socket).await.unwrap();
-                let service = service_fn(|request: Request<Incoming>| async {
-                    assert_eq!(request.headers()["x-api-key"], "provider-secret");
-                    assert_eq!(request.collect().await.unwrap().to_bytes(), b"{\"stream\":true}".as_slice());
-                    let (mut writer, body) = http_body::channel(16384);
-                    tokio::spawn(async move {
-                        for _ in 0..RESPONSE / 16384 {
-                            writer.write_all(&[29; 16384]).await.unwrap();
-                            tokio::time::sleep(Duration::from_millis(2)).await;
-                        }
-                        writer.shutdown().await.unwrap();
-                    });
-                    Ok::<_, Infallible>(Response::new(body))
-                });
-                hyper::server::conn::http1::Builder::new().keep_alive(false)
-                    .serve_connection(TokioIo::new(socket), service).await.unwrap();
+                let mut socket = acceptor.accept(socket).await.unwrap();
+                let request = read_request(&mut socket).await.unwrap();
+                assert_eq!(request.header("x-api-key"), Some("provider-secret"));
+                assert_eq!(request.body, b"{\"stream\":true}");
+                let mut stream = start_streaming(socket, 200, &[]).await.unwrap();
+                for _ in 0..RESPONSE / 16384 {
+                    stream.send(&[29; 16384]).await.unwrap();
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                }
+                stream.finish().await.unwrap();
             });
         }
         while let Some(result) = connections.join_next().await { result.unwrap(); }
@@ -131,10 +125,9 @@ async fn workload(availability: bool, waves: usize) {
         for _ in 0..CLIENTS {
             clients.spawn(async move {
                 let (mut response, connection) = send(port, "/routes/7", "gateway", "POST").await;
-                assert_eq!(response.status(), StatusCode::OK);
+                assert_eq!(response.status, 200);
                 let mut received = 0;
-                while let Some(frame) = response.body_mut().frame().await {
-                    let data = frame.unwrap().into_data().unwrap();
+                while let Some(data) = response.chunk().await.unwrap() {
                     assert!(data.iter().all(|b| *b == 29)); received += data.len();
                     tokio::time::sleep(Duration::from_millis(3)).await;
                 }

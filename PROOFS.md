@@ -63,8 +63,9 @@ destination.
   over 100 fields or 32 KiB are refused before a slot is taken. The response
   head (`headers::forward_response`) keeps only allowlisted provider headers
   that no Connection header nominates and refuses a response that nominates
-  its own Content-Encoding. The runtime converts Hyper's map to byte fields
-  and back, and nothing else.
+  its own Content-Encoding. The fields themselves come from the verified
+  HTTP/1.1 head parser and go out through the verified head writer
+  ([codec](docs/http1-codec.md)); the runtime moves bytes and nothing else.
 - The shipper's enrollment machine refuses to upload without an unexpired
   server-issued credential; a revoked service account stops it for good.
 - Every outgoing shipper request is chosen by the verified machine
@@ -83,13 +84,13 @@ destination.
   a secret is denied by `clippy.toml`, and `scripts/check_effect_sites.sh`
   fails if the set of allowed sites changes.
 
-**Premises.** HTTP serialization, DNS, TLS, and the system resolver behave as
-specified (no IP-range policy, so not an SSRF theorem); Hyper hands the
-runtime every header field with its lowercase name and serializes the
-projected fields faithfully; the runtime passes
-the gate's bytes to the socket it opened under the permit and the machine's
-requests to the client it built from the configured server; `send_request`
-and `write_all` sites are still enumerated by review rather than lint.
+**Premises.** DNS, TLS, and the system resolver behave as specified (no
+IP-range policy, so not an SSRF theorem); the adapter hands the verified
+parser the bytes it read from the socket and writes the bytes the verified
+writer produced; the runtime passes the gate's bytes to the socket it opened
+under the permit and the machine's requests to the client it built from the
+configured server; `write_all` sites are still enumerated by review rather
+than lint.
 
 ## Guarantee 2: correctness
 
@@ -210,8 +211,10 @@ an assumption we take on; the proofs that could be written have been.
   under the verified `BodyCopy` machine, so what is read, logged, released,
   and counted, and in what order, is proved. The async loop performs the
   effect the machine names and reports the result. What remains trusted is
-  that the reader, writer, and logger do what they report, that Tokio
-  cancellation reaches the loop's drop guard, and Hyper's framing.
+  that the reader, writer, and logger do what they report and that Tokio
+  cancellation reaches the loop's drop guard. The framing the reader
+  decodes and the writer encodes is the verified chunked coding and
+  Content-Length count ([codec](docs/http1-codec.md)).
 - *Every admitted exchange reaches its completion record.* The lifecycle is a
   verified machine that is terminal after exactly one event, and the worker
   future must return the `Closed` token only a terminal lifecycle produces.
@@ -232,8 +235,9 @@ an assumption we take on; the proofs that could be written have been.
   and destination text come from the verified authority and resolved
   destination (`exchange_lifecycle::start_record`), and the completion
   record's outcome and byte counts from the verified lifecycle and body-copy
-  machines. The clock, the HTTP status from Hyper, session uniqueness, and the
-  one-registry-per-log mapping remain trusted.
+  machines. The HTTP status comes from the verified status-line parser. The
+  clock, session uniqueness, and the one-registry-per-log mapping remain
+  trusted.
 - *Shipping trusts its edges.* The machine and driver are proved; the HTTPS
   client, JSON and SSE parsing, the projection into HypAware rows, and the
   server's dedup ledger are not, and the projection is lossy by design.
@@ -341,8 +345,9 @@ checked definitions for each row.
 | Cloud shipping | The optional HypAware shipper cannot affect authorization, forwarding, or readiness; it never modifies the log; every request it sends is chosen by a verified machine and names no host; no exchange is dropped between the log and the acknowledged batch; delivery is at least once with idempotent batch and row identities, so the server stores each exchange once. | Isolation is structural and tested; tailing, exchange assembly bounds, batch limits, upload progress, identity injectivity, enrollment transitions, and the machine's conservation, request shape, and bounded waiting are core proved; HTTPS, parsing, projection, and the server's ledger/dedup are trusted and tested. See [cloud shipping](docs/cloud-shipping.md). |
 | Honest completion and conditional progress | Failed/truncated streams cannot masquerade as successful completion; under stated scheduler and I/O assumptions, admitted work terminates or times out and releases resources. | Core admission/release and conditional streaming progress proved; EOF/error behavior and deadlines tested. Permanent worker closure and drain rank are proved; the conditional shutdown/resource argument is documented. Mechanized async liveness verification remains open. |
 
-Verus does not verify Tokio, Hyper, rustls, the OS, DNS/PKI, or the filesystem
-for us. Availability also depends on deployment: an external load balancer
+Verus does not verify Tokio, rustls, the OS, DNS/PKI, or the filesystem for
+us; the gateway links no HTTP library, its HTTP/1.1 codec is verified core
+code ([codec](docs/http1-codec.md)). Availability also depends on deployment: an external load balancer
 must route around a failed gateway instance, and interrupted generations are
 not transparently replayed. The [security contract](docs/security-contract.md)
 specifies the assumptions and limits; these targets do not promise secrecy of

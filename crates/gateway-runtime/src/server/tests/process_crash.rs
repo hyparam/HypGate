@@ -56,27 +56,18 @@ async fn exercise(with_proxy: bool) {
         let upstream = Arc::new(TcpListener::bind("127.0.0.1:0").await.unwrap());
         let upstream_port = upstream.local_addr().unwrap().port();
         let (release, waiting) = oneshot::channel::<()>();
-        let waiting = Arc::new(Mutex::new(Some(waiting)));
         let provider_listener = upstream.clone();
         let first_acceptor = acceptor.clone();
         let provider = tokio::spawn(async move {
             let (socket, _) = provider_listener.accept().await.unwrap();
-            let socket = first_acceptor.accept(socket).await.unwrap();
-            let service = service_fn(move |request: Request<Incoming>| {
-                let waiting = waiting.lock().unwrap().take().unwrap();
-                async move {
-                    assert_eq!(request.headers()["x-api-key"], "provider-secret");
-                    assert_eq!(request.collect().await.unwrap().to_bytes(), "{\"stream\":true}");
-                    let (mut writer, body) = http_body::channel(16);
-                    tokio::spawn(async move {
-                        writer.write_all(b"prefix").await.unwrap();
-                        let _ = waiting.await;
-                        // Never send a clean EOF: the gateway dies mid-generation.
-                    });
-                    Ok::<_, Infallible>(Response::new(body))
-                }
-            });
-            let _ = hyper::server::conn::http1::Builder::new().serve_connection(TokioIo::new(socket), service).await;
+            let mut socket = first_acceptor.accept(socket).await.unwrap();
+            let request = read_request(&mut socket).await.unwrap();
+            assert_eq!(request.header("x-api-key"), Some("provider-secret"));
+            assert_eq!(request.body, b"{\"stream\":true}");
+            let mut stream = start_streaming(socket, 200, &[]).await.unwrap();
+            stream.send(b"prefix").await.unwrap();
+            let _ = waiting.await;
+            // Never send a clean end: the gateway dies mid-generation.
         });
         let dir = TempDir::new();
         let (mut child, port) = start(&dir, cert.cert.der(), upstream_port).await;
@@ -89,11 +80,11 @@ async fn exercise(with_proxy: bool) {
         } else { None };
         let (mut response, connection) = if let Some((_, proxy_port)) = &proxy {
             send_proxy(*proxy_port, cert.cert.der(), b"{\"stream\":true}").await
-        } else { send(port, "/routes/7", "gateway", "POST").await };
-        assert_eq!(response.status(), StatusCode::OK);
+        } else { send_plain(port, b"{\"stream\":true}").await };
+        assert_eq!(response.status, 200);
         let mut visible = Vec::new();
         while visible.len() < 6 {
-            visible.extend_from_slice(&response.body_mut().frame().await.unwrap().unwrap().into_data().unwrap());
+            visible.extend_from_slice(&response.chunk().await.unwrap().unwrap());
         }
         assert_eq!(visible, b"prefix");
         child.0.kill().unwrap(); assert!(!child.0.wait().unwrap().success());
@@ -120,17 +111,15 @@ async fn exercise(with_proxy: bool) {
             let provider_listener = upstream.clone();
             let second = tokio::spawn(async move {
                 let (socket, _) = provider_listener.accept().await.unwrap();
-                let socket = acceptor.accept(socket).await.unwrap();
-                let service = service_fn(|request: Request<Incoming>| async move {
-                    assert_eq!(request.headers()["x-api-key"], "provider-secret");
-                    assert_eq!(request.collect().await.unwrap().to_bytes(), b"second-request"[..]);
-                    Ok::<_, Infallible>(Response::new(Full::new(Bytes::from_static(b"standby-response"))))
-                });
-                let _ = hyper::server::conn::http1::Builder::new().serve_connection(TokioIo::new(socket), service).await;
+                let mut socket = acceptor.accept(socket).await.unwrap();
+                let request = read_request(&mut socket).await.unwrap();
+                assert_eq!(request.header("x-api-key"), Some("provider-secret"));
+                assert_eq!(request.body, b"second-request");
+                write_response(&mut socket, 200, &[], b"standby-response").await.unwrap();
             });
             let (response, connection) = send_proxy(*proxy_port, cert.cert.der(), b"second-request").await;
-            assert_eq!(response.status(), StatusCode::OK);
-            assert_eq!(response.collect().await.unwrap().to_bytes(), b"standby-response"[..]);
+            assert_eq!(response.status, 200);
+            assert_eq!(response.collect().await.unwrap(), b"standby-response"[..]);
             connection.await.unwrap(); second.await.unwrap();
             let mut recovered = LogReader::new(File::open(standby_dir.0.join("audit.log")).unwrap()).unwrap();
             assert_ne!(recovered.session(), session);
@@ -150,7 +139,7 @@ async fn exercise(with_proxy: bool) {
         let restart_dir = TempDir::new();
         let (_restart, restarted_port) = start(&restart_dir, cert.cert.der(), upstream_port).await;
         let (health, connection) = send(restarted_port, "/healthz", "", "GET").await;
-        assert_eq!(health.status(), StatusCode::OK); health.collect().await.unwrap(); connection.await.unwrap();
+        assert_eq!(health.status, 200); health.collect().await.unwrap(); connection.await.unwrap();
         assert!(tokio::time::timeout(Duration::from_millis(100), upstream.accept()).await.is_err());
         let restarted = LogReader::new(File::open(restart_dir.0.join("audit.log")).unwrap()).unwrap();
         assert_ne!(session, restarted.session());
@@ -183,14 +172,21 @@ async fn start_proxy(directory: &TempDir, primary: u16, standby: u16, pem: &str)
     (process, port)
 }
 
-async fn send_proxy(port: u16, root: &[u8], payload: &'static [u8]) -> (Response<Incoming>, JoinHandle<()>) {
+trait Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> Io for T {}
+type BoxIo = Box<dyn Io>;
+async fn send_proxy(port: u16, root: &[u8], payload: &'static [u8]) -> (Answer<BoxIo>, JoinHandle<()>) {
     let mut roots = RootCertStore::empty(); roots.add(CertificateDer::from(root.to_vec())).unwrap();
     let connector = TlsConnector::from(Arc::new(ClientConfig::builder().with_root_certificates(roots).with_no_client_auth()));
     let socket = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
     let socket = connector.connect(ServerName::try_from("localhost").unwrap(), socket).await.unwrap();
-    let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(socket)).await.unwrap();
-    let connection = tokio::spawn(async move { let _ = conn.await; });
-    let request = Request::builder().method("POST").uri("/routes/7").header("host", "localhost")
-        .header("authorization", "Bearer gateway").body(Full::new(Bytes::from_static(payload))).unwrap();
-    (sender.send_request(request).await.unwrap(), connection)
+    let io: BoxIo = Box::new(socket);
+    let answer = send_request(io, "POST", "/routes/7", &[("host", "localhost"), ("authorization", "Bearer gateway")], payload).await.unwrap();
+    (answer, tokio::spawn(async {}))
+}
+/// Like `send`, but boxed so it has the same type as `send_proxy`'s answer.
+async fn send_plain(port: u16, payload: &'static [u8]) -> (Answer<BoxIo>, JoinHandle<()>) {
+    let io: BoxIo = Box::new(TcpStream::connect(("127.0.0.1", port)).await.unwrap());
+    let answer = send_request(io, "POST", "/routes/7", &[("host", "localhost"), ("authorization", "Bearer gateway")], payload).await.unwrap();
+    (answer, tokio::spawn(async {}))
 }

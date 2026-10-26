@@ -1,7 +1,6 @@
 //! The optional `shipping` section of the root policy. Parsed on its own so the
 //! gateway configuration never carries the cloud server or its token.
-use crate::config::{destination_uri as destination, ConfigError, MAX_CREDENTIAL_BYTES};
-use http::Uri;
+use crate::config::{destination, ConfigError, MAX_CREDENTIAL_BYTES};
 use serde::Deserialize;
 use std::path::PathBuf;
 
@@ -33,9 +32,12 @@ fn default_poll() -> u64 { 1000 }
 /// makes one, so a cloud egress permit exists only when the root policy has a
 /// `shipping` section.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ShippingServer { uri: Uri, host: String, port: u16 }
+pub struct ShippingServer { url: String, authority: String, host: String, port: u16 }
 impl ShippingServer {
-    pub fn uri(&self) -> &Uri { &self.uri }
+    /// The server as `https://authority/path`, the name the identity file records.
+    pub fn url(&self) -> &str { &self.url }
+    /// The authority exactly as configured, for the Host header.
+    pub fn authority(&self) -> &str { &self.authority }
     /// The host for name resolution and TLS, from the verified destination parts.
     pub fn host(&self) -> &str { &self.host }
     pub fn port(&self) -> u16 { self.port }
@@ -60,9 +62,12 @@ impl ShippingConfig {
         if root.len() > MAX_CONFIG { return Err(ConfigError::Limits); }
         let root: Root = serde_json::from_slice(root).map_err(|_| ConfigError::Syntax)?;
         let Some(section) = root.shipping else { return Ok(None); };
-        let (uri, parts) = destination(&section.server)?;
+        let parts = destination(&section.server)?;
         let host = String::from_utf8(parts.host).map_err(|_| ConfigError::Destination)?;
-        let server = ShippingServer { uri, host, port: parts.port };
+        let authority = String::from_utf8(parts.authority).map_err(|_| ConfigError::Destination)?;
+        let path = String::from_utf8(parts.path).map_err(|_| ConfigError::Destination)?;
+        let url = format!("https://{authority}{path}");
+        let server = ShippingServer { url, authority, host, port: parts.port };
         if section.max_open_exchanges == 0 || section.max_open_exchanges > MAX_OPEN_EXCHANGES
             || section.max_exchange_bytes < MIN_EXCHANGE_BYTES || section.max_exchange_bytes > MAX_EXCHANGE_BYTES
             || section.poll_ms < MIN_POLL_MS || section.poll_ms > MAX_POLL_MS {

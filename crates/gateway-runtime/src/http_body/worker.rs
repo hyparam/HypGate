@@ -51,6 +51,7 @@ impl WorkerHttp {
         writer.charge = Some(self.issue(gateway_core::http_worker::RESPONSE_WRITER)?);
         Some(writer)
     }
+    #[cfg(test)]
     pub(crate) fn upload(&self, max_frame: usize) -> Option<(super::Writer, super::ChannelBody)> {
         let charge = self.issue(gateway_core::http_worker::UPLOAD_CHANNEL)?;
         let charge = Arc::new(UploadCharge { charge: Some(charge), failed: AtomicBool::new(false) });
@@ -58,6 +59,28 @@ impl WorkerHttp {
         writer.upload = Some(charge.clone());
         body.upload = Some(charge);
         Some((writer, body))
+    }
+    /// The upload channel role bound to the writer that frames the request body
+    /// onto the upstream connection.
+    pub(crate) fn upload_writer<W>(&self, writer: W) -> Option<Charged<W>> {
+        let charge = self.issue(gateway_core::http_worker::UPLOAD_CHANNEL)?;
+        Some(Charged { inner: writer, charge: Some(charge) })
+    }
+}
+/// A writer holding one worker HTTP role for its lifetime.
+pub(crate) struct Charged<W> { inner: W, charge: Option<Charge> }
+impl<W> Drop for Charged<W> {
+    fn drop(&mut self) { if let Some(charge) = self.charge.take() { charge.finish(); } }
+}
+impl<W: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for Charged<W> {
+    fn poll_write(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>, bytes: &[u8]) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_write(cx, bytes)
+    }
+    fn poll_flush(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+    fn poll_shutdown(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
     }
 }
 impl Charge {
@@ -73,9 +96,8 @@ impl Charge {
 mod tests {
     use super::*;
     use gateway_core::http_worker::{INPUT_READER, OUTPUT_READER, UPLOAD_CHANNEL};
-    use bytes::Bytes;
+    use gateway_core::output_frame::OutputFrame;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use http_body_util::{Full, BodyExt};
     fn worker() -> (Arc<Mutex<WorkerRegistry>>, gateway_core::task_credit::TaskCredit, WorkerHttp) {
         let registry = Arc::new(Mutex::new(WorkerRegistry::new(1)));
         let (task, issuer) = registry.lock().unwrap().acquire().unwrap();
@@ -83,15 +105,13 @@ mod tests {
         (registry, task, http)
     }
     #[tokio::test]
-    async fn both_reader_roles_retain_partial_frames_until_destruction() {
+    async fn both_reader_roles_hold_their_role_until_destruction() {
         for role in [INPUT_READER, OUTPUT_READER] {
             let (registry, task, http) = worker();
-            let body = Full::new(Bytes::from_static(b"data"));
+            let body = &b"data"[..];
             let mut reader = if role == INPUT_READER { http.input(body) } else { http.output(body) }.unwrap();
             let mut byte = [0];
             reader.read_exact(&mut byte).await.unwrap();
-            assert_eq!(reader.buffered.retained_bytes(), 4);
-            assert_eq!(reader.buffered.len(), 3);
             assert_eq!(registry.lock().unwrap().role_usage(role), 1);
             drop(reader);
             assert_eq!(registry.lock().unwrap().role_usage(role), 0);
@@ -100,23 +120,19 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn upload_charge_survives_either_endpoint_and_covers_payload_destruction() {
-        struct Payload(Arc<Mutex<WorkerRegistry>>);
-        impl AsRef<[u8]> for Payload { fn as_ref(&self) -> &[u8] { b"data" } }
-        impl Drop for Payload {
-            fn drop(&mut self) { assert_eq!(self.0.lock().unwrap().role_usage(UPLOAD_CHANNEL), 1); }
-        }
+    async fn upload_charge_survives_either_endpoint() {
         for sender_first in [false, true] {
             let (registry, task, http) = worker();
             let (mut writer, mut body) = http.upload(4).unwrap();
             let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
             assert!(writer.sender.as_mut().unwrap().poll_send_with(&mut cx,
-                || super::super::Message::Probe(Bytes::from_owner(Payload(registry.clone())))).is_ready());
+                || super::super::Message::Data(OutputFrame::copy_prefix(b"data", 4))).is_ready());
             assert!(http.upload(4).is_none());
             if sender_first {
                 drop(writer);
                 assert_eq!(registry.lock().unwrap().role_usage(UPLOAD_CHANNEL), 1);
-                drop(body.frame().await.unwrap().unwrap());
+                assert_eq!(body.next_frame().await.unwrap().unwrap(), b"data");
+                assert_eq!(registry.lock().unwrap().role_usage(UPLOAD_CHANNEL), 1);
                 drop(body);
             } else {
                 drop(body);
@@ -130,15 +146,18 @@ mod tests {
     }
     #[test]
     fn upload_cleanup_panic_cannot_be_hidden_by_later_sender_destruction() {
+        // The body is destroyed while a sibling's cleanup panics, so its own
+        // cleanup runs during unwinding and must not report completion.
         struct Panics;
-        impl AsRef<[u8]> for Panics { fn as_ref(&self) -> &[u8] { b"data" } }
         impl Drop for Panics { fn drop(&mut self) { panic!("injected upload cleanup panic"); } }
+        struct Holder { _panics: Panics, _body: super::super::ChannelBody }
         let (registry, task, http) = worker();
         let (mut writer, body) = http.upload(4).unwrap();
         let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
         assert!(writer.sender.as_mut().unwrap().poll_send_with(&mut cx,
-            || super::super::Message::Probe(Bytes::from_owner(Panics))).is_ready());
-        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(body))).is_err());
+            || super::super::Message::Data(OutputFrame::copy_prefix(b"data", 4))).is_ready());
+        let holder = Holder { _panics: Panics, _body: body };
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(holder))).is_err());
         drop(writer);
         assert_eq!(registry.lock().unwrap().role_usage(UPLOAD_CHANNEL), 1);
         assert!(!registry.lock().unwrap().release_task(task));

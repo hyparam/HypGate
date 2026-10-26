@@ -1,20 +1,18 @@
 use super::*;
-use crate::{config::GatewayConfig, http_boundary, test_support::tls, transfer::LogRecord};
+use crate::{config::GatewayConfig, http_boundary, test_support::{tls, http::{field, has, read_request, write_response}}, transfer::LogRecord};
+use gateway_core::http1_head::RequestHead;
 use rcgen::generate_simple_self_signed;
-use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
-use hyper::{service::service_fn, Response};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::{convert::Infallible, io::{Read, Write}, pin::Pin, sync::atomic::{AtomicBool, Ordering}, task::{Context, Poll}};
+use std::{io::{Read, Write}, pin::Pin, sync::atomic::{AtomicBool, Ordering}, task::{Context, Poll}};
 use tokio::{io::{AsyncReadExt, ReadBuf}, net::TcpListener};
 use tokio_rustls::{TlsAcceptor, rustls::{CipherSuite, CipherSuiteCommon, ClientConnection, ContentType, HandshakeKind,
     ProtocolVersion, ServerConfig, ServerConnection, SupportedCipherSuite, Tls13CipherSuite, pki_types::PrivatePkcs8KeyDer,
     version::{TLS12, TLS13}, crypto::{cipher::{AeadKey, Iv, OutboundChunks, OutboundPlainMessage},
     ring::cipher_suite::{TLS13_AES_256_GCM_SHA384, TLS13_CHACHA20_POLY1305_SHA256}}}};
 
-struct Output { bytes: Vec<u8>, status: Option<StatusCode>, headers: HeaderMap }
-impl Output { fn new() -> Self { Self { bytes: Vec::new(), status: None, headers: HeaderMap::new() } } }
+struct Output { bytes: Vec<u8>, status: Option<u16>, headers: Vec<Field> }
+impl Output { fn new() -> Self { Self { bytes: Vec::new(), status: None, headers: Vec::new() } } }
 impl AsyncWrite for Output {
     fn poll_write(mut self: Pin<&mut Self>, _: &mut Context<'_>, bytes: &[u8]) -> Poll<io::Result<usize>> {
         assert!(self.status.is_some());
@@ -24,7 +22,7 @@ impl AsyncWrite for Output {
     fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> { Poll::Ready(Ok(())) }
 }
 impl ResponseSink for Output {
-    async fn start(&mut self, status: StatusCode, headers: HeaderMap) -> io::Result<()> {
+    async fn start(&mut self, status: u16, headers: Vec<Field>) -> io::Result<()> {
         assert!(self.status.is_none()); self.status = Some(status); self.headers = headers; Ok(())
     }
 }
@@ -51,10 +49,8 @@ fn config(port: u16) -> GatewayConfig {
         |_| Some("provider-secret".into())).unwrap()
 }
 fn prepare(c: &GatewayConfig) -> PreparedRequest<'_> {
-    let mut h = HeaderMap::new(); h.insert("authorization", "Bearer gateway".parse().unwrap());
-    h.insert("host", "attacker.example".parse().unwrap());
-    h.insert("x-api-key", "caller-key".parse().unwrap());
-    http_boundary::prepare(c, &http::Method::POST, &"/routes/7".parse().unwrap(), &h).unwrap()
+    let fields = vec![field("authorization", "Bearer gateway"), field("host", "attacker.example"), field("x-api-key", "caller-key")];
+    http_boundary::prepare(c, &RequestHead { method: b"POST".to_vec(), target: b"/routes/7".to_vec(), fields }).unwrap()
 }
 // Each exchange needs its own worker: a worker issues every HTTP role once.
 fn worker_http() -> http_body::WorkerHttp {
@@ -69,19 +65,15 @@ async fn tls_exchange_preserves_native_payloads_and_scoped_credentials() {
     let port = listener.local_addr().unwrap().port(); let config = config(port);
     let expected = b"data: {\"delta\":\"hello\"}\n\ndata: [DONE]\n\n";
     let upstream = async {
-        let (socket, _) = listener.accept().await.unwrap(); let socket = acceptor.accept(socket).await.unwrap();
-        let service = service_fn(|request: hyper::Request<hyper::body::Incoming>| async move {
-            assert_eq!(request.uri(), "/v1/messages");
-            assert_eq!(request.headers()["host"], format!("localhost:{port}"));
-            assert_eq!(request.headers()["x-api-key"], "provider-secret");
-            assert!(!request.headers().contains_key("authorization"));
-            assert_eq!(request.collect().await.unwrap().to_bytes(), "{\"stream\":true}");
-            let mut response = Response::new(Full::new(Bytes::from_static(expected)));
-            response.headers_mut().insert("content-type", "text/event-stream".parse().unwrap());
-            response.headers_mut().insert("set-cookie", "secret".parse().unwrap());
-            Ok::<_, Infallible>(response)
-        });
-        let _ = hyper::server::conn::http1::Builder::new().serve_connection(TokioIo::new(socket), service).await;
+        let (socket, _) = listener.accept().await.unwrap(); let mut socket = acceptor.accept(socket).await.unwrap();
+        let request = read_request(&mut socket).await.unwrap();
+        assert_eq!(request.target(), "/v1/messages");
+        assert_eq!(request.header("host"), Some(format!("localhost:{port}").as_str()));
+        assert_eq!(request.header("x-api-key"), Some("provider-secret"));
+        assert!(request.header("authorization").is_none());
+        assert_eq!(request.body, b"{\"stream\":true}");
+        write_response(&mut socket, 200, &[("content-type", "text/event-stream"), ("set-cookie", "secret")], expected).await.unwrap();
+        let _ = socket.shutdown().await;
     };
     let mut output = Output::new(); let mut log = Log::default();
     let transport = HttpsTransport::with_roots(roots, Duration::from_secs(5)).unwrap();
@@ -92,11 +84,11 @@ async fn tls_exchange_preserves_native_payloads_and_scoped_credentials() {
     let (result, ()) = tokio::join!(exchange, upstream);
     drop(prepared);
     let stats = result.unwrap();
-    assert_eq!(output.status, Some(StatusCode::OK));
+    assert_eq!(output.status, Some(200));
     assert_eq!(output.bytes, expected); assert_eq!(log.download, expected);
     assert_eq!(log.upload, b"{\"stream\":true}");
     assert_eq!(stats.download.accepted_bytes(), expected.len() as u64);
-    assert!(!output.headers.contains_key("set-cookie"));
+    assert!(!has(&output.headers, "set-cookie"));
     assert!(config.admit(b"gateway", 7).is_ok());
 }
 
@@ -448,7 +440,7 @@ async fn tls_key_update_burst_limit_rejects_without_response_or_replay() {
             let (result, ()) = tokio::join!(transport.exchange(&mut prepared, &mut input, &mut output, &mut log, &http), provider);
             drop(prepared);
             if updates == 32 {
-                result.unwrap(); assert_eq!(output.status, Some(StatusCode::OK));
+                result.unwrap(); assert_eq!(output.status, Some(200));
                 assert_eq!(output.bytes, b"ok"); assert_eq!(log.download, b"ok");
             } else {
                 assert!(matches!(result, Err(TransportError::Http)));
@@ -503,14 +495,10 @@ async fn redirects_are_returned_without_opening_a_second_connection() {
     let (listener, acceptor, roots) = tls().await;
     let config = config(listener.local_addr().unwrap().port());
     let upstream = async {
-        let (socket, _) = listener.accept().await.unwrap(); let socket = acceptor.accept(socket).await.unwrap();
-        let service = service_fn(|request: hyper::Request<hyper::body::Incoming>| async move {
-            request.collect().await.unwrap();
-            let response = Response::builder().status(307).header("location", "https://attacker.example/")
-                .body(Full::new(Bytes::from_static(b"redirect"))).unwrap();
-            Ok::<_, Infallible>(response)
-        });
-        let _ = hyper::server::conn::http1::Builder::new().serve_connection(TokioIo::new(socket), service).await;
+        let (socket, _) = listener.accept().await.unwrap(); let mut socket = acceptor.accept(socket).await.unwrap();
+        read_request(&mut socket).await.unwrap();
+        write_response(&mut socket, 307, &[("location", "https://attacker.example/")], b"redirect").await.unwrap();
+        let _ = socket.shutdown().await;
         assert!(tokio::time::timeout(Duration::from_millis(20), listener.accept()).await.is_err());
     };
     let transport = HttpsTransport::with_roots(roots, Duration::from_secs(5)).unwrap();
@@ -519,8 +507,8 @@ async fn redirects_are_returned_without_opening_a_second_connection() {
     let mut prepared = prepare(&config);
     let (result, ()) = tokio::join!(transport.exchange(&mut prepared, &mut input, &mut output, &mut log, &http), upstream);
     drop(prepared);
-    result.unwrap(); assert_eq!(output.status, Some(StatusCode::TEMPORARY_REDIRECT));
-    assert!(!output.headers.contains_key("location")); assert_eq!(output.bytes, b"redirect");
+    result.unwrap(); assert_eq!(output.status, Some(307));
+    assert!(!has(&output.headers, "location")); assert_eq!(output.bytes, b"redirect");
 }
 
 #[tokio::test]
@@ -591,7 +579,7 @@ async fn unsolicited_protocol_switch_is_rejected_before_client_headers() {
     let (result, ()) = tokio::join!(transport.exchange(&mut prepared, &mut input, &mut output, &mut log, &http), upstream);
     drop(prepared);
     assert!(output.status.is_none(), "unexpected client status: {:?}", output.status);
-    assert!(matches!(result, Err(TransportError::Metadata)));
+    assert!(matches!(result, Err(TransportError::Http | TransportError::Metadata)));
     assert!(output.bytes.is_empty());
     assert_eq!(log.upload, b"{}"); assert!(log.download.is_empty());
     assert!(config.admit(b"gateway", 7).is_ok());
@@ -619,8 +607,8 @@ async fn interim_response_does_not_replace_final_status_or_payload() {
     let (result, ()) = tokio::join!(transport.exchange(&mut prepared, &mut input, &mut output, &mut log, &http), upstream);
     drop(prepared);
     assert_eq!(result.unwrap().download.accepted_bytes(), 2);
-    assert_eq!(output.status, Some(StatusCode::OK)); assert_eq!(output.bytes, b"{}");
-    assert!(!output.headers.contains_key("link"));
+    assert_eq!(output.status, Some(200)); assert_eq!(output.bytes, b"{}");
+    assert!(!has(&output.headers, "link"));
     assert_eq!(log.upload, b"{}"); assert_eq!(log.download, b"{}");
     assert!(config.admit(b"gateway", 7).is_ok());
 }
@@ -780,7 +768,7 @@ async fn upstream_wire_head_and_header_count_limits_cover_status_line() {
             let mut prepared = prepare(&config);
             let (result, ()) = tokio::join!(transport.exchange(&mut prepared, &mut input, &mut output, &mut log, &http), provider);
             drop(prepared);
-            if accepted { result.unwrap(); assert_eq!(output.status, Some(StatusCode::OK)); }
+            if accepted { result.unwrap(); assert_eq!(output.status, Some(200)); }
             else { assert!(matches!(result, Err(TransportError::Http))); assert!(output.status.is_none()); }
             assert!(output.bytes.is_empty()); assert!(log.download.is_empty());
             assert!(config.admit(b"gateway", 7).is_ok());

@@ -44,7 +44,8 @@ Clients send `POST /routes/7` with `Authorization: Bearer <gateway-token>`, the
 provider's native headers such as Content-Type and Anthropic-Version, and the
 unmodified native JSON body. The gateway forwards to the fixed configured path. For
 an OpenAI-native endpoint, use its HTTPS URL and credential kind `bearer`. There is
-no provider-body translation, and live-provider compatibility has not been tested.
+no provider-body translation. Anthropic Messages and OpenAI Responses, JSON and
+SSE, were exercised live on 2026-10-25 ([smoke record](hypaware.md#smoke-test-record)).
 Upload compression, trailers, query parameters, HTTP/2, and full duplex are not
 supported.
 

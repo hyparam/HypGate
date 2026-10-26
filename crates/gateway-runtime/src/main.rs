@@ -41,7 +41,7 @@ fn run(context: ThreadContext) -> Result<(), &'static str> {
     // The gateway's runtime is the only one on this thread; the permit says so.
     let runtime = EnteredRuntime::current_thread(context).map_err(|_| "cannot start runtime")?;
     let served = runtime.block_on(serve(&args, address));
-    drop(runtime.leave());
+    let _context = runtime.leave();
     served
 }
 async fn serve(args: &[String], address: SocketAddr) -> Result<(), &'static str> {

@@ -405,8 +405,8 @@ The strict memory run overlapped the load workload, so these timings are not a
 controlled performance comparison. The queue's fixed slot-count claim comes from
 its source and checked contracts, not these RSS samples.
 
-After the fixed HTTP mailbox, queued Hyper output, configured destination cap,
-and parser-owner audit, the Ubuntu 24.04 100-wave soak at `b72c839` passed in
+After the fixed HTTP mailbox, queued HTTP output, configured destination cap,
+and parser-owner audit of the then-linked HTTP library, the Ubuntu 24.04 100-wave soak at `b72c839` passed in
 [run 40061075707](https://github.com/hyparam/LogGate/actions/runs/40061075707)
 on 2026-10-24 UTC. Each mode completed 800 requests, exact response/audit checks,
 and clean shutdown. The gateway alone was sampled; these are debug-profile

@@ -29,7 +29,7 @@ of each; library callers that construct more instances multiply the budgets.
 | `HttpsTransport` | Until dropped | TLS client config and root store, session cache (32 servers, 33 during insertion), DNS pool (4 threads, 32 credits), handshake pool (4 threads, 32 credits) | DNS/handshake jobs and unread replies keep verified credit until cleanup or checked adoption by a live request; the cache survives when no request is live |
 | `DiskLog` | Until the last clone drops and the worker exits | Q fixed frame slots, one encoding reservation, one active frame, one worker thread stack | The active frame stays owned through a stuck syscall; queued jobs survive caller cancellation; poisoned storage stays charged until destruction |
 | Admitted exchange (`PreparedRequest` → `HttpsTransport::exchange`) | From admission to retirement of the owned stream | One K chunk/read owner, one upstream connection, one upload channel, reader copies, one receipt | HTTP cleanup precedes request credit return; dispatched TLS handshake work retains separate pool credit through cancellation |
-| Inbound connection task | From accept to connection-task destruction | Hyper server state, one response mailbox, one worker abort guard | A client disconnect leaves the worker running until it observes the dropped receiver |
+| Inbound connection task | From accept to connection-task destruction | One 32 KiB head buffer, one 32 KiB body read buffer, one chunked writer, one response mailbox, one worker abort guard | A client disconnect leaves the worker running until it observes the dropped receiver |
 
 Instances compose additively. A second `serve` on the same `Gateway` shares C
 but adds its own listener and JoinSet; a second `Gateway` or `HttpsTransport`
@@ -99,21 +99,21 @@ are private ABI facts are listed with counts in the assumptions, not here.
 
 | Allocation | Bytes | Source |
 | --- | ---: | --- |
-| Hyper server parser backing, four owners, during replacement | 589,824 | [Live parser backing owners](dependency-resources.md#live-parser-backing-owners) |
-| Server header vector, during replacement | 196,608 | [Header-vector backing capacity](dependency-resources.md#header-vector-backing-capacity) |
-| Queued output original payload owners | 65,549 | [Output backpressure](dependency-resources.md#output-backpressure-and-retained-capacity) |
-| Request trailer assembly, during replacement | 49,152 | [Rejected trailer storage](dependency-resources.md#rejected-trailer-storage) |
+| Request head buffer, with its leftover split off during the return | 65,536 | [Head buffers](dependency-resources.md#head-buffers) |
+| Body read buffer | 32,768 | [Body read buffer](dependency-resources.md#body-read-buffer) |
+| Chunked writer pending frame, with doubling | 32,808 | [Chunk framing buffers](dependency-resources.md#chunk-framing-buffers) |
+| Serialized response head, with doubling | 65,536 | [Written head lengths](dependency-resources.md#written-head-lengths) |
 | Filtered response head copied for the client | 32,768 | [Metadata ownership](http-boundary.md#metadata-ownership-and-allocation) |
-| Total | 933,901 | |
+| Total | 229,416 | |
 
 ### Per admitted exchange (multiply by R)
 
 | Allocation | Bytes | Source |
 | --- | ---: | --- |
-| Hyper client parser backing, four owners, during replacement | 589,824 | Live parser backing owners |
-| Client header vector, during replacement | 196,608 | Header-vector backing capacity |
-| Queued upload payload owners | 65,549 | Output backpressure |
-| Response trailer assembly, during replacement | 49,152 | Rejected trailer storage |
+| Status head buffer, with its leftover split off during the return | 65,536 | Head buffers |
+| Body read buffer | 32,768 | Body read buffer |
+| Chunked writer pending frame, with doubling | 32,808 | Chunk framing buffers |
+| Serialized request head, with doubling | 65,536 | Written head lengths |
 | Filtered request values with Host/credential, plus filtered response values | 81,967 | Metadata ownership: 41,007 + 8,192 + 32,768 |
 | TLS deframer backing, during replacement | 196,608 | [TLS deframer backing capacity](dependency-resources.md#tls-deframer-backing-capacity) |
 | TLS transcript buffer through a HelloRetryRequest, during growth | 262,228 | Two copies of 36 + 2 × 65,539; [cookie storage](dependency-resources.md#helloretryrequest-cookie-storage) |
@@ -124,7 +124,7 @@ are private ABI facts are listed with counts in the assumptions, not here.
 | Received plaintext queue with one crossing record | 32,768 | [Upstream TLS storage](dependency-resources.md#upstream-tls-storage) |
 | Verifier failure diagnostics: 32,768 inner vectors (24 bytes each) plus 2 × 65,536 `usize` components | 1,835,008 | [Verifier scratch](dependency-resources.md#certificate-verifier-scratch-and-diagnostics) |
 | DNS hostname and 64 socket addresses (32 bytes each) | 2,301 | [DNS inventory](dns-resources.md#allocation-inventory-and-shutdown) |
-| Total | 3,984,134 | |
+| Total | 3,279,649 | |
 
 The queued ciphertext window composes the control-traffic audit with the
 production drain guard. `DrainBeforeWrite` writes plaintext only after the
@@ -181,9 +181,9 @@ assumption of this composition, not a proved property.
    the only holders of the theorem's categories, and Rust field drop order,
    mutex serialization, and Tokio cancellation behave as documented. This is
    supported by the lifetime regressions, not a mechanized async refinement.
-2. **Pinned dependency source.** Hyper 1.12.0, rustls 0.23.46, tokio-rustls
-   0.26.6, bytes 1.12.1, http 1.5.0, Tokio 1.54.1, rustls-webpki 0.103.16, and
-   the Rust 1.99.1 `Vec` growth policy behave as inspected. Every dependency
+2. **Pinned dependency source.** rustls 0.23.46, tokio-rustls 0.26.6, Tokio
+   1.54.1, rustls-webpki 0.103.16, and the Rust 1.99.1 `Vec` growth policy
+   behave as inspected; the HTTP/1.1 buffers are the codec adapter's own. Every dependency
    upgrade must re-audit the cited sections.
 3. **Allocator and OS.** Requested capacities are not allocator byte counts.
    Size-class rounding, fragmentation, freed-memory caching, thread-local

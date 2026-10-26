@@ -26,9 +26,9 @@ intentional upper bound: a worker can finish while its connection still drains
 the response, and a canceled connection can leave a sender cleanup tail. If one
 endpoint disappears, the other still covers any shared mailbox payload. The
 upload charge instead spans both endpoints of a single worker-owned channel.
-Dequeued frames retained by Hyper are dependency allocations, accounted for in
-[dependency resources](dependency-resources.md), not additional application
-mailbox entries hidden in this bound.
+A dequeued frame being framed as a chunk is the connection task's allocation,
+accounted for in [dependency resources](dependency-resources.md#chunk-framing-buffers),
+not an additional application mailbox entry hidden in this bound.
 
 ## Checked count and lifecycle preservation
 
@@ -74,7 +74,7 @@ public embedding API `HttpsTransport::exchange` still accepts arbitrary byte
 readers/sinks and has no gateway worker context; embedders must supply their own
 lifetime/count correspondence. It is outside this gateway-wide bound. The fixed
 runtime reader capacity and output-frame limits are part of the reviewed adapter
-mapping. Hyper/Tokio/TLS internals, allocator capacity, wakers, and total process
+mapping. Tokio/TLS internals, allocator capacity, wakers, and total process
 RSS remain governed by their separate assumptions and accounting.
 
 ## Evidence

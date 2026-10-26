@@ -152,7 +152,8 @@ implemented.
 
 - The HypAware server honors its documented ledger and dedup semantics and
   issues credentials only to holders of a valid operator token.
-- TLS/PKI, DNS, Hyper, Tokio, and the filesystem, as for the gateway.
+- TLS/PKI, DNS, Tokio, and the filesystem, as for the gateway; the HTTPS
+  client's head parsing and writing are the verified codec.
 - The system clock for renewal decisions and row timestamps.
 - The `Effects` implementation performs what it is asked: `send` reaches the
   configured server and returns that server's reply, `read` returns the log's

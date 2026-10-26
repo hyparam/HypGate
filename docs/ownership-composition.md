@@ -3,8 +3,8 @@
 How the verified ownership and submission proofs compose through the production
 runtime: task wrappers, worker and connection credits, HTTP cleanup tails, DNS,
 TLS, and disk jobs, and the upstream mediation gate. It does not claim to verify
-Tokio, Hyper, Rust destruction, physical durability, peer receipt, audit-file
-access controls, or whole-process memory.
+Tokio, Rust destruction, physical durability, peer receipt, audit-file access
+controls, or whole-process memory.
 
 ## Checked claims
 
@@ -89,8 +89,8 @@ the joins specific to this composition are:
 - Registry identity is scoped by the private runtime wrappers. Numeric task IDs
   from different registries are not globally unique. Production never pairs a
   token with a different registry instance.
-- Hyper's dequeued-frame retention, Tokio scheduling/cancellation, TLS/DNS/OS
-  allocation, and allocator capacity remain separate dependency assumptions.
+- The chunked writer's pending frame, Tokio scheduling/cancellation, TLS/DNS/OS
+  allocation, and allocator capacity remain separate assumptions.
   Counts and payload limits do not establish a total-RSS bound or eventual
   cleanup without the documented progress assumptions.
 - Disk `Storage`/`Completion` adapters must truthfully report write/sync outcomes

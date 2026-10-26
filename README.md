@@ -59,9 +59,10 @@ Shipping runs on its own thread, so if it fails, the gateway keeps serving
 requests.
 
 These are theorems about the verified core, plus a short list of things we
-trust and do not prove: Tokio, Hyper, rustls, the OS, DNS, TLS certificates,
-the filesystem under power loss, the HypAware server, and provider JSON
-parsing. [PROOFS.md](PROOFS.md) states each guarantee exactly and lists every
+trust and do not prove: Tokio, rustls, the OS, DNS, TLS certificates, the
+filesystem under power loss, the HypAware server, and provider JSON parsing.
+The HTTP/1.1 parser and writer are verified core code; no HTTP library is
+linked ([codec](docs/http1-codec.md)). [PROOFS.md](PROOFS.md) states each guarantee exactly and lists every
 assumption.
 
 ## Why verify an AI gateway?
@@ -86,9 +87,11 @@ a compromised release pipeline from shipping different code.
 ## Status
 
 A runnable prototype. The core's authorization, configuration, streaming,
-shipping, and resource invariants are Verus-checked. The network and disk
-adapters are tested. Live-provider compatibility and production hardening
-remain incomplete.
+shipping, HTTP/1.1 codec, and resource invariants are Verus-checked. The
+network and disk adapters are tested, and live exchanges with Anthropic and
+OpenAI, streamed and not, have been run through the gateway and shipped to
+HypAware Cloud ([smoke record](docs/hypaware.md#smoke-test-record)).
+Production hardening remains incomplete.
 
 ## Run it
 
@@ -129,7 +132,8 @@ for provider configuration, scanning logs, and shutdown behavior.
 | [Storage crash contract](docs/storage-crash-contract.md) | Storage assumptions, process-death experiments, and the evidence behind the recovery claims |
 | [Resource accounting](docs/resource-accounting.md) | Source-level inventory of application buffers and queues |
 | [Resource composition](docs/resource-composition.md) | Budget ownership and the conditional requested-allocation bound |
-| [Dependency resources](docs/dependency-resources.md) | Pinned Hyper/rustls/Tokio retained-allocation audit |
+| [HTTP/1.1 codec](docs/http1-codec.md) | The verified head parser and writer, framing selection, and chunked coding; the adapter and what stays trusted |
+| [Dependency resources](docs/dependency-resources.md) | Pinned rustls/Tokio retained-allocation audit and the codec's own buffers |
 | [DNS resources](docs/dns-resources.md) | DNS lookup ownership, threads, and shutdown |
 
 Runtime and adapters:
@@ -194,8 +198,8 @@ cargo test -p gateway-runtime --release --locked server::tests::benchmark -- --i
 LOGGATE_HAPROXY=/path/to/haproxy cargo test -p gateway-runtime --locked proxy_gateway_process_failover -- --ignored --nocapture
 ```
 
-Validation on 2026-10-25: 616 core verification checks passed, 295 workspace tests including seven compile-fail
-doctests passed, all 423 deliberate mutations failed their proof obligations, and the runtime passed its
+Validation on 2026-10-25: 737 core verification checks passed, 303 workspace tests including seven compile-fail
+doctests passed, all 439 deliberate mutations failed their proof obligations, and the runtime passed its
 panic and effect-site lints. The opt-in TLS proxy/gateway
 process-failover test and six load/fault workloads passed on 2026-10-23.
 Two ten-minute overload runs and the final 100-wave-per-mode isolated memory soak

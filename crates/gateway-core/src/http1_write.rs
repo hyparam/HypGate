@@ -7,8 +7,8 @@
 //! construction; `wire_ok` checks them at run time for values that did not
 //! come out of the verified parser or configuration.
 use vstd::prelude::*;
-use crate::headers::{Field, MAX_BYTES, MAX_FIELDS, tchar};
-use crate::http1_head::{COLON, CR, LF, SP, RequestHead, StatusHead, value_byte_exec};
+use crate::headers::{Field, tchar};
+use crate::http1_head::{COLON, CR, LF, SP, value_byte_exec};
 
 verus! {
 /// A field as it may be written: a nonempty lowercase token name and a value
@@ -235,9 +235,9 @@ pub proof fn lemma_fields_roundtrip(prefix: Seq<u8>, fields: Seq<Field>)
 
 /// A written request head is a request head for its start line and fields.
 pub proof fn lemma_request_roundtrip(method: Seq<u8>, target: Seq<u8>, fields: Seq<Field>)
-    requires method_ok(method), target_ok(target), fields_wire_ok(fields), fields.len() <= MAX_FIELDS,
-        request_head_bytes(method, target, fields).len() <= MAX_BYTES,
-    ensures forall|head: RequestHead| head.method@ == method && head.target@ == target && head.fields@ == fields
+    requires method_ok(method), target_ok(target), fields_wire_ok(fields), fields.len() <= crate::headers::MAX_FIELDS,
+        request_head_bytes(method, target, fields).len() <= crate::headers::MAX_BYTES,
+    ensures forall|head: crate::http1_head::RequestHead| head.method@ == method && head.target@ == target && head.fields@ == fields
         ==> crate::http1_head::request_head_ok(request_head_bytes(method, target, fields), head),
 {
     let line = request_line_bytes(method, target);
@@ -264,15 +264,15 @@ pub proof fn lemma_request_roundtrip(method: Seq<u8>, target: Seq<u8>, fields: S
     assert forall|k: int| a + 1 <= k < b implies crate::http1_head::is_vchar(#[trigger] sub[k]) by { assert(sub[k] == target[k - a - 1]); }
     assert(crate::http1_head::request_line_split(sub, method, target, a, b));
     lemma_fields_roundtrip(line, fields);
-    assert(bytes.len() <= MAX_BYTES);
+    assert(bytes.len() <= crate::headers::MAX_BYTES);
     assert(crate::http1_head::fields_ok(bytes, e + 2, fields));
 }
 
 /// A written status head is a status head for its status and fields.
 pub proof fn lemma_status_roundtrip(status: u16, reason: Seq<u8>, fields: Seq<Field>)
-    requires 100 <= status <= 599, reason_ok(reason), fields_wire_ok(fields), fields.len() <= MAX_FIELDS,
-        status_head_bytes(status, reason, fields).len() <= MAX_BYTES,
-    ensures forall|head: StatusHead| head.status == status && head.fields@ == fields
+    requires 100 <= status <= 599, reason_ok(reason), fields_wire_ok(fields), fields.len() <= crate::headers::MAX_FIELDS,
+        status_head_bytes(status, reason, fields).len() <= crate::headers::MAX_BYTES,
+    ensures forall|head: crate::http1_head::StatusHead| head.status == status && head.fields@ == fields
         ==> crate::http1_head::status_head_ok(status_head_bytes(status, reason, fields), head),
 {
     let line = status_line_bytes(status, reason);

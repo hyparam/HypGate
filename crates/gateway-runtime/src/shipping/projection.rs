@@ -31,10 +31,12 @@ pub fn provider(host: &str) -> &str {
 }
 
 fn destination_parts(exchange: &Exchange) -> (String, String) {
-    let text = exchange.start.as_ref().and_then(|s| std::str::from_utf8(&s.destination).ok()).unwrap_or("");
-    match text.parse::<http::Uri>() {
-        Ok(uri) => (uri.host().unwrap_or("").to_owned(), uri.path().to_owned()),
-        Err(_) => (String::new(), String::new()),
+    // The record holds the configured destination text, which the verified
+    // parser accepted at startup; its host and path are that parser's.
+    let text = exchange.start.as_ref().map(|s| s.destination.as_slice()).unwrap_or(b"");
+    match gateway_core::destination::parse(text) {
+        Some(parts) => (String::from_utf8_lossy(&parts.host).into_owned(), String::from_utf8_lossy(&parts.path).into_owned()),
+        None => (String::new(), String::new()),
     }
 }
 

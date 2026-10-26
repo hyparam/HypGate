@@ -1,9 +1,9 @@
 use super::*;
 use crate::disk_log::LogReader;
-use http_body_util::BodyExt;
+use crate::test_support::http::{read_request, send_request, start_streaming, write_response, Answer};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::{fs::File, sync::Mutex};
+use std::fs::File;
 use tokio::{io::AsyncReadExt, net::TcpStream};
 use tokio_rustls::{TlsAcceptor, rustls::RootCertStore};
 use crate::test_support::{self_signed, tls, TempDir};
@@ -24,14 +24,17 @@ fn config_with_limits(port: u16, availability: bool, requests: usize, chunk_byte
     GatewayConfig::from_json(&serde_json::to_vec(&root).unwrap(), &serde_json::to_vec(&json!({"routes":routes})).unwrap(),
         |_| Some("provider-secret".into())).unwrap()
 }
-async fn send(port: u16, path: &str, token: &str, method: &str) -> (Response<Incoming>, JoinHandle<()>) {
+type Client = Answer<TcpStream>;
+/// One request over a fresh connection; the second element exists so callers
+/// can await it where a Hyper connection driver used to be joined.
+async fn send(port: u16, path: &str, token: &str, method: &str) -> (Client, JoinHandle<()>) {
+    send_body(port, path, token, method, b"{\"stream\":true}").await
+}
+async fn send_body(port: u16, path: &str, token: &str, method: &str, body: &[u8]) -> (Client, JoinHandle<()>) {
     let socket = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
-    let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(socket)).await.unwrap();
-    let connection = tokio::spawn(async move { let _ = conn.await; });
-    let request = Request::builder().method(method).uri(path).header("host", "attacker.example")
-        .header("authorization", format!("Bearer {token}")).header("x-api-key", "caller-secret")
-        .body(Full::new(Bytes::from_static(b"{\"stream\":true}"))).unwrap();
-    (sender.send_request(request).await.unwrap(), connection)
+    let token = format!("Bearer {token}");
+    let answer = send_request(socket, method, path, &[("host", "attacker.example"), ("authorization", &token), ("x-api-key", "caller-secret")], body).await.unwrap();
+    (answer, tokio::spawn(async {}))
 }
 /// Serve `app` on a fresh loopback port until the returned sender fires or drops.
 async fn spawn_gateway(app: &Arc<Gateway>, connections: usize, deadline: Duration)
@@ -96,31 +99,20 @@ fn assert_trace(records: &[crate::disk_log::StoredRecord], destination: &str, st
 // One provider connection that streams a first event, then waits for `waiting`
 // before finishing cleanly or, when truncated, disconnecting without an End marker.
 fn stalling_provider(upstream: TcpListener, acceptor: TlsAcceptor, waiting: oneshot::Receiver<()>, truncated: bool) -> JoinHandle<()> {
-    let waiting = Arc::new(Mutex::new(Some(waiting)));
     tokio::spawn(async move {
-        let (socket, _) = upstream.accept().await.unwrap(); let socket = acceptor.accept(socket).await.unwrap();
-        let service = service_fn(move |request: Request<Incoming>| {
-            let waiting = waiting.lock().unwrap().take().unwrap();
-            async move {
-                assert_eq!(request.uri(), "/v1/messages");
-                assert_eq!(request.headers()["x-api-key"], "provider-secret");
-                assert!(!request.headers().contains_key("authorization"));
-                assert_eq!(request.collect().await.unwrap().to_bytes(), "{\"stream\":true}");
-                let (mut writer, body) = http_body::channel(16);
-                tokio::spawn(async move {
-                    writer.write_all(b"data: hello\n\n").await.unwrap();
-                    if waiting.await.is_err() { return; }
-                    if truncated { return; } // no End marker: simulate a provider disconnect
-                    if writer.write_all(b"data: [DONE]\n\n").await.is_ok() { let _ = writer.shutdown().await; }
-                });
-                Ok::<_, Infallible>(Response::builder().header("content-type", "text/event-stream")
-                    .header("set-cookie", "provider-secret").body(body).unwrap())
-            }
-        });
-        let _ = hyper::server::conn::http1::Builder::new().serve_connection(TokioIo::new(socket), service).await;
+        let (socket, _) = upstream.accept().await.unwrap(); let mut socket = acceptor.accept(socket).await.unwrap();
+        let request = read_request(&mut socket).await.unwrap();
+        assert_eq!(request.target(), "/v1/messages");
+        assert_eq!(request.header("x-api-key"), Some("provider-secret"));
+        assert!(request.header("authorization").is_none());
+        assert_eq!(request.body, b"{\"stream\":true}");
+        let mut stream = start_streaming(socket, 200, &[("content-type", "text/event-stream"), ("set-cookie", "provider-secret")]).await.unwrap();
+        stream.send(b"data: hello\n\n").await.unwrap();
+        if waiting.await.is_err() { return; }
+        if truncated { return; } // no last chunk: simulate a provider disconnect
+        if stream.send(b"data: [DONE]\n\n").await.is_ok() { let _ = stream.finish().await; }
     })
 }
-
 #[derive(Clone, Copy)]
 enum Stop { None, Disconnect, Drain, Abort, SharedAbort }
 
@@ -146,13 +138,13 @@ async fn exercise(availability: bool, failed_log: bool, truncated: bool, stop: S
         for (path, token, method, status) in [("/healthz", "", "GET", 200), ("/readyz", "", "GET", if failed_log && !availability { 503 } else { 200 }),
             ("/routes/7", "wrong", "POST", 401), ("/routes/99", "gateway", "POST", 401)] {
             let (r, c) = send(port, path, token, method).await;
-            assert_eq!(r.status().as_u16(), status); r.collect().await.unwrap(); c.await.unwrap();
+            assert_eq!(r.status, status); r.collect().await.unwrap(); c.await.unwrap();
         }
         // Rejected requests must not have connected to the provider.
         assert!(tokio::time::timeout(Duration::from_millis(20), upstream.accept()).await.is_err());
         if failed_log && !availability {
             let (r, c) = send(port, "/routes/7", "gateway", "POST").await;
-            assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(r.status, 503);
             r.collect().await.unwrap(); c.await.unwrap();
             assert!(tokio::time::timeout(Duration::from_millis(20), upstream.accept()).await.is_err());
             shutdown.send(()).unwrap(); gateway.await.unwrap().unwrap();
@@ -162,16 +154,16 @@ async fn exercise(availability: bool, failed_log: bool, truncated: bool, stop: S
         let (release, waiting) = oneshot::channel();
         let upstream_task = stalling_provider(upstream, acceptor, waiting, truncated);
         let (mut response, connection) = send(port, "/routes/7", "gateway", "POST").await;
-        assert_eq!(response.status(), StatusCode::OK);
-        assert!(!response.headers().contains_key("set-cookie"));
-        let first = response.body_mut().frame().await.unwrap().unwrap().into_data().unwrap();
+        assert_eq!(response.status, 200);
+        assert!(response.header("set-cookie").is_none());
+        let first = response.chunk().await.unwrap().unwrap();
         assert!(!first.is_empty()); // arrives while the upstream is waiting, before EOF
         // The first request still owns the sole admission slot while streaming.
         let (busy, busy_connection) = send(port, "/routes/7", "gateway", "POST").await;
-        assert_eq!(busy.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(busy.status, 503);
         busy.collect().await.unwrap(); busy_connection.await.unwrap();
         let (metrics, metrics_connection) = send(port, "/metrics", "", "GET").await;
-        let metrics = metrics.collect().await.unwrap().to_bytes(); metrics_connection.await.unwrap();
+        let metrics = metrics.collect().await.unwrap(); metrics_connection.await.unwrap();
         let metrics = std::str::from_utf8(&metrics).unwrap();
         assert!(metrics.contains("loggate_admission_healthy 1\n"));
         assert!(metrics.contains("loggate_requests_active 1\n"));
@@ -190,7 +182,7 @@ async fn exercise(availability: bool, failed_log: bool, truncated: bool, stop: S
             if matches!(stop, Stop::Drain) {
                 release.send(()).unwrap();
                 let mut bytes = first.to_vec();
-                bytes.extend_from_slice(&response.collect().await.unwrap().to_bytes());
+                bytes.extend_from_slice(&response.collect().await.unwrap());
                 assert_eq!(bytes, b"data: hello\n\ndata: [DONE]\n\n");
                 tokio::time::timeout(Duration::from_secs(2), gateway).await.unwrap().unwrap().unwrap();
                 assert_eq!(app.failed_exchanges(), 0);
@@ -205,7 +197,7 @@ async fn exercise(availability: bool, failed_log: bool, truncated: bool, stop: S
             connection.await.unwrap(); upstream_task.await.unwrap();
             if let Some((shutdown, task)) = shared {
                 let (response, connection) = send(port, "/readyz", "", "GET").await;
-                assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+                assert_eq!(response.status, 503);
                 response.collect().await.unwrap(); connection.await.unwrap();
                 shutdown.send(()).unwrap(); task.await.unwrap().unwrap();
             }
@@ -243,7 +235,7 @@ async fn exercise(availability: bool, failed_log: bool, truncated: bool, stop: S
         let mut bytes = first.to_vec();
         if truncated { assert!(rest.is_err()); }
         else {
-            bytes.extend_from_slice(&rest.unwrap().to_bytes());
+            bytes.extend_from_slice(&rest.unwrap());
             assert_eq!(bytes, b"data: hello\n\ndata: [DONE]\n\n");
         }
         connection.await.unwrap(); upstream_task.await.unwrap();
@@ -251,7 +243,7 @@ async fn exercise(availability: bool, failed_log: bool, truncated: bool, stop: S
             while !app.workers.is_empty() { tokio::task::yield_now().await; }
         }).await.unwrap();
         let (metrics, metrics_connection) = send(port, "/metrics", "", "GET").await;
-        let metrics = metrics.collect().await.unwrap().to_bytes(); metrics_connection.await.unwrap();
+        let metrics = metrics.collect().await.unwrap(); metrics_connection.await.unwrap();
         let metrics = std::str::from_utf8(&metrics).unwrap();
         assert!(metrics.contains("loggate_requests_active 0\n"));
         assert!(metrics.contains(&format!("loggate_audit_gap_requests_total {}\n", u8::from(failed_log && availability))));
@@ -279,7 +271,7 @@ async fn worker_body_drop_cancels_pending_request() {
     let cancelled = token.clone();
     let task = tracker.spawn(async move { cancelled.cancelled().await; });
     let (writer, body) = http_body::channel(16);
-    let response = GatewayBody::Stream { body, _task: CancelOnDrop { token, task: Some(task) } };
+    let response = GatewayBody::Stream { body, task: CancelOnDrop { token, task: Some(task) } };
     drop(response); drop(writer); tracker.close();
     tokio::time::timeout(Duration::from_secs(1), tracker.wait()).await.unwrap();
     assert!(tracker.is_empty());
@@ -314,12 +306,12 @@ async fn failed_start_record_refuses_in_strict_mode_and_forwards_with_one_gap_in
             let upstream_task = stalling_provider(upstream, acceptor, waiting, false);
             let (response, connection) = send(port, "/routes/7", "gateway", "POST").await;
             if availability {
-                assert_eq!(response.status(), StatusCode::OK);
+                assert_eq!(response.status, 200);
                 release.send(()).unwrap();
-                assert_eq!(response.collect().await.unwrap().to_bytes(), b"data: hello\n\ndata: [DONE]\n\n"[..]);
+                assert_eq!(response.collect().await.unwrap(), b"data: hello\n\ndata: [DONE]\n\n"[..]);
                 connection.await.unwrap(); upstream_task.await.unwrap();
             } else {
-                assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+                assert_eq!(response.status, 503);
                 response.collect().await.unwrap(); connection.await.unwrap();
                 // No provider connection was opened without the start record.
                 assert!(tokio::time::timeout(Duration::from_millis(50), upstream_task).await.is_err());
@@ -329,7 +321,7 @@ async fn failed_start_record_refuses_in_strict_mode_and_forwards_with_one_gap_in
                 while !app.workers.is_empty() { tokio::task::yield_now().await; }
             }).await.unwrap();
             let (metrics, metrics_connection) = send(port, "/metrics", "", "GET").await;
-            let metrics = metrics.collect().await.unwrap().to_bytes(); metrics_connection.await.unwrap();
+            let metrics = metrics.collect().await.unwrap(); metrics_connection.await.unwrap();
             let metrics = std::str::from_utf8(&metrics).unwrap();
             assert!(metrics.contains(&format!("loggate_audit_gap_requests_total {}\n", u8::from(availability))));
             assert!(metrics.contains("loggate_audit_healthy 1\n"));
@@ -369,7 +361,7 @@ async fn upstream_timeout_records_a_timeout_completion_after_the_start_record() 
             std::future::pending::<()>().await;
         });
         let (response, connection) = send(port, "/routes/7", "gateway", "POST").await;
-        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(response.status, 504);
         response.collect().await.unwrap(); connection.await.unwrap();
         provider.abort();
         tokio::time::timeout(Duration::from_secs(1), async {
@@ -416,38 +408,27 @@ async fn concurrent_tenants_keep_credentials_bodies_and_audit_records_isolated()
                 let (socket, _) = upstream.accept().await.unwrap();
                 let acceptor = acceptor.clone(); let barrier = barrier.clone();
                 connections.spawn(async move {
-                    let socket = acceptor.accept(socket).await.unwrap();
-                    let service = service_fn(move |request: Request<Incoming>| {
-                        let barrier = barrier.clone();
-                        async move {
-                            let credential = request.headers()["x-api-key"].to_str().unwrap().to_owned();
-                            assert!(!request.headers().contains_key("authorization"));
-                            let bytes = request.collect().await.unwrap().to_bytes();
-                            match bytes.as_ref() {
-                                b"body-one" => assert_eq!(credential, "secret-KEY_ONE"),
-                                b"body-two" => assert_eq!(credential, "secret-KEY_TWO"),
-                                _ => panic!("unexpected tenant body"),
-                            }
-                            barrier.wait().await;
-                            Ok::<_, Infallible>(Response::new(Full::new(bytes)))
-                        }
-                    });
-                    let _ = hyper::server::conn::http1::Builder::new().serve_connection(TokioIo::new(socket), service).await;
+                    let mut socket = acceptor.accept(socket).await.unwrap();
+                    let request = read_request(&mut socket).await.unwrap();
+                    let credential = request.header("x-api-key").unwrap().to_owned();
+                    assert!(request.header("authorization").is_none());
+                    match request.body.as_slice() {
+                        b"body-one" => assert_eq!(credential, "secret-KEY_ONE"),
+                        b"body-two" => assert_eq!(credential, "secret-KEY_TWO"),
+                        _ => panic!("unexpected tenant body"),
+                    }
+                    barrier.wait().await;
+                    write_response(&mut socket, 200, &[], &request.body).await.unwrap();
                 });
             }
             while let Some(result) = connections.join_next().await { result.unwrap(); }
         });
         let client = |token: &'static str, bytes: &'static [u8]| async move {
             let socket = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
-            let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(socket)).await.unwrap();
-            let connection = tokio::spawn(async move { let _ = connection.await; });
-            let request = Request::builder().method("POST").uri("/routes/7").header("host", "localhost")
-                .header("authorization", format!("Bearer {token}")).header("x-api-key", "malicious-override")
-                .body(Full::new(Bytes::from_static(bytes))).unwrap();
-            let response = sender.send_request(request).await.unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-            assert_eq!(response.collect().await.unwrap().to_bytes(), bytes);
-            connection.await.unwrap();
+            let token = format!("Bearer {token}");
+            let response = send_request(socket, "POST", "/routes/7", &[("host", "localhost"), ("authorization", &token), ("x-api-key", "malicious-override")], bytes).await.unwrap();
+            assert_eq!(response.status, 200);
+            assert_eq!(response.collect().await.unwrap(), bytes);
         };
         tokio::join!(client("tenant-one", b"body-one"), client("tenant-two", b"body-two"));
         upstream_task.await.unwrap(); shutdown.send(()).unwrap(); gateway.await.unwrap().unwrap();
@@ -568,8 +549,8 @@ async fn incomplete_connections_expire_without_workers_and_capacity_recovers() {
         assert!(app.workers.is_empty());
         assert!(tokio::time::timeout(Duration::from_millis(20), upstream.accept()).await.is_err());
         let (response, connection) = send(port, "/healthz", "", "GET").await;
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.collect().await.unwrap().to_bytes(), b"ok\n"[..]);
+        assert_eq!(response.status, 200);
+        assert_eq!(response.collect().await.unwrap(), b"ok\n"[..]);
         connection.await.unwrap();
         assert!(app.config.admit(b"gateway", 7).is_ok());
         shutdown.send(()).unwrap(); gateway.await.unwrap().unwrap();
@@ -589,11 +570,11 @@ async fn poisoned_admission_is_unready_and_fail_closed_in_both_logging_modes() {
             let (port, shutdown, gateway) = spawn_gateway(&app, 4, Duration::from_secs(10)).await;
             for (path, method, status) in [("/healthz", "GET", 200), ("/readyz", "GET", 503), ("/routes/7", "POST", 503)] {
                 let (response, connection) = send(port, path, "gateway", method).await;
-                assert_eq!(response.status().as_u16(), status);
+                assert_eq!(response.status, status);
                 response.collect().await.unwrap(); connection.await.unwrap();
             }
             let (metrics, connection) = send(port, "/metrics", "", "GET").await;
-            let metrics = metrics.collect().await.unwrap().to_bytes(); connection.await.unwrap();
+            let metrics = metrics.collect().await.unwrap(); connection.await.unwrap();
             let metrics = std::str::from_utf8(&metrics).unwrap();
             assert!(metrics.contains("loggate_admission_healthy 0\n"));
             assert!(!metrics.contains("loggate_requests_active"));
@@ -609,36 +590,29 @@ async fn poisoned_admission_is_unready_and_fail_closed_in_both_logging_modes() {
 #[tokio::test]
 async fn bodyless_http_statuses_finish_worker_accounting() {
     tokio::time::timeout(Duration::from_secs(5), async {
-        for status in [StatusCode::NO_CONTENT, StatusCode::NOT_MODIFIED, StatusCode::OK] {
-            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let port = listener.local_addr().unwrap().port();
+        for status in [204u16, 304, 200] {
             let (done, completed) = oneshot::channel();
-            let done = Arc::new(Mutex::new(Some(done)));
-            let server = tokio::spawn(async move {
-                let (socket, _) = listener.accept().await.unwrap();
-                let service = service_fn(move |_: Request<Incoming>| {
-                    let done = done.lock().unwrap().take().unwrap();
-                    async move {
-                        let (head, headers) = oneshot::channel();
-                        let (writer, body) = http_body::channel(16);
-                        let task = tokio::spawn(async move {
-                            let mut output = Output { head: Some(head), writer };
-                            output.start(status, HeaderMap::new()).await.unwrap();
-                            output.finish().await.unwrap();
-                            // Emulates final metrics/lease cleanup after draining.
-                            done.send(()).unwrap();
-                        });
-                        worker_response(headers, body, CancelOnDrop { token: Default::default(), task: Some(task) }).await
-                    }
-                });
-                hyper::server::conn::http1::Builder::new().keep_alive(false)
-                    .serve_connection(TokioIo::new(socket), service).await.unwrap();
+            let (head, headers) = oneshot::channel();
+            let (writer, body) = http_body::channel(16);
+            let task = tokio::spawn(async move {
+                let mut output = Output { head: Some(head), writer };
+                output.start(status, Vec::new()).await.unwrap();
+                output.finish().await.unwrap();
+                // Emulates final metrics/lease cleanup after draining.
+                done.send(()).unwrap();
             });
-            let (response, connection) = send(port, "/", "", "GET").await;
-            assert_eq!(response.status(), status);
-            assert!(response.collect().await.unwrap().to_bytes().is_empty());
-            connection.await.unwrap(); server.await.unwrap();
-            completed.await.expect("HTTP body suppression must not abort final worker accounting");
+            let response = worker_response(headers, body, CancelOnDrop { token: Default::default(), task: Some(task) }).await;
+            assert_eq!(response.status, status);
+            match response.body {
+                // No body may follow 204 or 304: the channel is drained before the head is handed over.
+                GatewayBody::Fixed(text) => { assert_ne!(status, 200); assert!(text.is_empty()); }
+                GatewayBody::Stream { mut body, mut task } => {
+                    assert_eq!(status, 200);
+                    assert!(body.next_frame().await.is_none());
+                    task.task.take();
+                }
+            }
+            completed.await.expect("body suppression must not abort final worker accounting");
         }
     }).await.unwrap();
 }
@@ -646,18 +620,18 @@ async fn bodyless_http_statuses_finish_worker_accounting() {
 #[tokio::test]
 async fn bodyless_status_rejects_payload_or_missing_completion() {
     tokio::time::timeout(Duration::from_secs(5), async {
-        for status in [StatusCode::NO_CONTENT, StatusCode::NOT_MODIFIED] {
+        for status in [204, 304] {
             for payload in [false, true] {
                 let (head, headers) = oneshot::channel();
                 let (writer, body) = http_body::channel(16);
                 let task = tokio::spawn(async move {
                     let mut output = Output { head: Some(head), writer };
-                    output.start(status, HeaderMap::new()).await.unwrap();
+                    output.start(status, Vec::new()).await.unwrap();
                     if payload { output.write_all(b"unexpected").await.unwrap(); }
                     // Missing clean completion is an error, even with no bytes.
                 });
-                let response = worker_response(headers, body, CancelOnDrop { token: Default::default(), task: Some(task) }).await.unwrap();
-                assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+                let response = worker_response(headers, body, CancelOnDrop { token: Default::default(), task: Some(task) }).await;
+                assert_eq!(response.status, 502);
             }
         }
     }).await.unwrap();
@@ -680,13 +654,13 @@ async fn worker_budget_covers_cleanup_without_consuming_request_slots() {
         for _ in 0..16 {
             clients.spawn(async move {
                 let (response, connection) = send(port, "/routes/7", "gateway", "POST").await;
-                assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+                assert_eq!(response.status, 503);
                 response.collect().await.unwrap(); connection.await.unwrap();
             });
         }
         for path in ["/healthz", "/readyz", "/metrics"] {
             let (response, connection) = send(port, path, "", "GET").await;
-            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.status, 200);
             response.collect().await.unwrap(); connection.await.unwrap();
         }
         while let Some(result) = clients.join_next().await { result.unwrap(); }
@@ -699,7 +673,7 @@ async fn worker_budget_covers_cleanup_without_consuming_request_slots() {
         assert!(app.workers.is_empty());
         assert_eq!(app.worker_slots.usage(), Some((0, 1)));
         let (response, connection) = send(port, "/routes/7", "invalid", "POST").await;
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.status, 401);
         response.collect().await.unwrap(); connection.await.unwrap();
         while !app.workers.is_empty() { tokio::task::yield_now().await; }
         assert_eq!(app.worker_slots.usage(), Some((0, 1)));
@@ -727,11 +701,11 @@ async fn poisoned_worker_registry_is_unready_and_fail_closed_in_both_modes() {
             let (port, shutdown, gateway) = spawn_gateway(&app, 4, Duration::from_secs(3)).await;
             for (path, method, status) in [("/healthz", "GET", 200), ("/readyz", "GET", 503), ("/routes/7", "POST", 503)] {
                 let (response, connection) = send(port, path, "gateway", method).await;
-                assert_eq!(response.status().as_u16(), status);
+                assert_eq!(response.status, status);
                 response.collect().await.unwrap(); connection.await.unwrap();
             }
             let (response, connection) = send(port, "/metrics", "", "GET").await;
-            let metrics = response.collect().await.unwrap().to_bytes(); connection.await.unwrap();
+            let metrics = response.collect().await.unwrap(); connection.await.unwrap();
             let metrics = std::str::from_utf8(&metrics).unwrap();
             assert!(metrics.contains("loggate_worker_admission_healthy 0\n"));
             assert!(metrics.contains("loggate_admission_healthy 1\n"));
@@ -858,8 +832,8 @@ async fn serve_invocations_share_connection_credit_and_reject_limit_changes() {
             tokio::task::yield_now().await;
         }
         let (response, driver) = send(port, "/healthz", "", "GET").await;
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.collect().await.unwrap().to_bytes(), "ok\n");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.collect().await.unwrap(), b"ok\n");
         driver.await.unwrap();
         second_task.abort(); assert!(second_task.await.unwrap_err().is_cancelled());
         while app.connection_slots.get().unwrap().usage() != Some((0, 1)) {
@@ -888,7 +862,7 @@ async fn shutdown_closes_shared_worker_admission_before_waiting_for_existing_wor
             assert!(app.log.healthy());
             for route in ["/routes/7", "/readyz"] {
                 let (response, connection) = send(port, route, "gateway", "GET").await;
-                assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+                assert_eq!(response.status, 503);
                 response.collect().await.unwrap(); connection.await.unwrap();
             }
             assert!(app.worker_slots.acquire(&app.workers).is_none());
@@ -924,16 +898,16 @@ async fn shipping_thread_panic_changes_only_metrics() {
         let (release, waiting) = oneshot::channel();
         let upstream_task = stalling_provider(upstream, acceptor, waiting, false);
         let (response, connection) = send(port, "/routes/7", "gateway", "POST").await;
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status, 200);
         release.send(()).unwrap();
-        assert_eq!(response.collect().await.unwrap().to_bytes(), "data: hello\n\ndata: [DONE]\n\n");
+        assert_eq!(response.collect().await.unwrap(), b"data: hello\n\ndata: [DONE]\n\n");
         connection.await.unwrap(); upstream_task.await.unwrap();
         for (path, status) in [("/healthz", 200), ("/readyz", 200)] {
             let (r, c) = send(port, path, "", "GET").await;
-            assert_eq!(r.status().as_u16(), status, "{path}"); r.collect().await.unwrap(); c.await.unwrap();
+            assert_eq!(r.status, status, "{path}"); r.collect().await.unwrap(); c.await.unwrap();
         }
         let (text, c) = send(port, "/metrics", "", "GET").await;
-        let text = String::from_utf8(text.collect().await.unwrap().to_bytes().to_vec()).unwrap(); c.await.unwrap();
+        let text = String::from_utf8(text.collect().await.unwrap().to_vec()).unwrap(); c.await.unwrap();
         assert!(text.contains("loggate_shipping_enabled 1\n") && text.contains("loggate_shipping_stopped 1\n"), "{text}");
         assert!(text.contains("loggate_shipping_batches_acknowledged_total 0\n"));
         shutdown.send(()).unwrap(); gateway.await.unwrap().unwrap();
@@ -965,9 +939,9 @@ async fn shipping_uploads_forwarded_exchanges_without_touching_readiness() {
             let (release, waiting) = oneshot::channel();
             let upstream_task = stalling_provider(upstream, acceptor, waiting, false);
             let (response, connection) = send(port, "/routes/7", "gateway", "POST").await;
-            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.status, 200);
             release.send(()).unwrap();
-            assert_eq!(response.collect().await.unwrap().to_bytes(), "data: hello\n\ndata: [DONE]\n\n");
+            assert_eq!(response.collect().await.unwrap(), b"data: hello\n\ndata: [DONE]\n\n");
             connection.await.unwrap(); upstream_task.await.unwrap();
             let metrics = shipper.metrics();
             if hang {
@@ -981,10 +955,10 @@ async fn shipping_uploads_forwarded_exchanges_without_touching_readiness() {
             }
             for (path, status) in [("/healthz", 200), ("/readyz", 200)] {
                 let (r, c) = send(port, path, "", "GET").await;
-                assert_eq!(r.status().as_u16(), status, "{path} with hang={hang}"); r.collect().await.unwrap(); c.await.unwrap();
+                assert_eq!(r.status, status, "{path} with hang={hang}"); r.collect().await.unwrap(); c.await.unwrap();
             }
             let (text, c) = send(port, "/metrics", "", "GET").await;
-            let text = String::from_utf8(text.collect().await.unwrap().to_bytes().to_vec()).unwrap(); c.await.unwrap();
+            let text = String::from_utf8(text.collect().await.unwrap().to_vec()).unwrap(); c.await.unwrap();
             assert!(text.contains("loggate_shipping_enabled 1\n"), "{text}");
             assert!(text.contains(&format!("loggate_shipping_batches_acknowledged_total {}\n", u8::from(!hang))), "{text}");
             assert!(text.contains("loggate_shipping_stopped 0\n"));

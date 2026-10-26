@@ -40,3 +40,6 @@ pub(crate) fn admission(slots: usize, chunk_bytes: usize, strict: bool) -> Admis
         vec![route()], vec![route()], 1, vec![1]).unwrap();
     Admission::new(policy, slots, chunk_bytes, strict)
 }
+
+#[path = "test_support/http.rs"]
+pub(crate) mod http;

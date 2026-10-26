@@ -63,22 +63,16 @@ async fn benchmark(availability: bool, profile: Profile) {
             for _ in 0..forwarded {
                 let (socket, _) = upstream.accept().await.unwrap(); let acceptor = acceptor.clone();
                 connections.spawn(async move {
-                    let socket = acceptor.accept(socket).await.unwrap();
-                    let service = service_fn(move |request: Request<Incoming>| async move {
-                        assert_eq!(request.headers()["x-api-key"], "fixture-key");
-                        let (mut writer, body) = http_body::channel(PIECE);
-                        let uploaded = request.collect().await.unwrap().to_bytes();
-                        assert_eq!(uploaded.len(), upload); assert!(uploaded.iter().all(|b| *b == 17));
-                        tokio::spawn(async move {
-                            for _ in 0..download / PIECE {
-                                if provider_pace_ms > 0 { tokio::time::sleep(Duration::from_millis(provider_pace_ms)).await; }
-                                writer.write_all(&[29; PIECE]).await.unwrap();
-                            }
-                            writer.shutdown().await.unwrap();
-                        });
-                        Ok::<_, Infallible>(Response::new(body))
-                    });
-                    hyper::server::conn::http1::Builder::new().serve_connection(TokioIo::new(socket), service).await.unwrap();
+                    let mut socket = acceptor.accept(socket).await.unwrap();
+                    let request = read_request(&mut socket).await.unwrap();
+                    assert_eq!(request.header("x-api-key"), Some("fixture-key"));
+                    assert_eq!(request.body.len(), upload); assert!(request.body.iter().all(|b| *b == 17));
+                    let mut stream = start_streaming(socket, 200, &[]).await.unwrap();
+                    for _ in 0..download / PIECE {
+                        if provider_pace_ms > 0 { tokio::time::sleep(Duration::from_millis(provider_pace_ms)).await; }
+                        stream.send(&[29; PIECE]).await.unwrap();
+                    }
+                    stream.finish().await.unwrap();
                 });
             }
             while let Some(result) = connections.join_next().await { result.unwrap(); }
@@ -111,18 +105,16 @@ async fn benchmark(availability: bool, profile: Profile) {
                 clients.spawn(async move {
                     let start = tokio::time::Instant::now();
                     let socket = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
-                    let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(socket)).await.unwrap();
-                    let connection = tokio::spawn(async move { connection.await.unwrap(); });
-                    let request = Request::builder().method("POST").uri("/routes/7").header("host", "localhost")
-                        .header("authorization", "Bearer gateway").body(Full::new(Bytes::from(vec![17; upload]))).unwrap();
-                    let mut response = sender.send_request(request).await.unwrap();
+                    let connection = tokio::spawn(async {});
+                    let body = vec![17u8; upload];
+                    let mut response = send_request(socket, "POST", "/routes/7", &[("host", "localhost"), ("authorization", "Bearer gateway")], &body).await.unwrap();
                     if expect_rejection {
-                        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+                        assert_eq!(response.status, 503);
                         response.collect().await.unwrap(); connection.await.unwrap();
                         return Outcome::Rejected;
                     }
-                    assert_eq!(response.status(), StatusCode::OK);
-                    let first = response.body_mut().frame().await.unwrap().unwrap().into_data().unwrap();
+                    assert_eq!(response.status, 200);
+                    let first = response.chunk().await.unwrap().unwrap();
                     assert!(!first.is_empty());
                     let first_byte = start.elapsed().as_secs_f64() * 1000.;
                     assert!(first.iter().all(|b| *b == 29));
@@ -130,10 +122,9 @@ async fn benchmark(availability: bool, profile: Profile) {
                     let mut frame_gaps = Vec::new();
                     loop {
                         if client_pace_ms > 0 { tokio::time::sleep(Duration::from_millis(client_pace_ms)).await; }
-                        let Some(frame) = response.body_mut().frame().await else { break; };
+                        let Some(bytes) = response.chunk().await.unwrap() else { break; };
                         let now = tokio::time::Instant::now();
                         frame_gaps.push((now - previous).as_secs_f64() * 1000.); previous = now;
-                        let bytes = frame.unwrap().into_data().unwrap();
                         assert!(bytes.iter().all(|b| *b == 29)); received += bytes.len();
                     }
                     assert_eq!(received, download);

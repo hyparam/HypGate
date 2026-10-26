@@ -1,13 +1,14 @@
 //! Trusted parsing and secret loading. The normalized grant relation is checked
 //! by the verified core, including selection of concrete destination/credential
-//! values. JSON, URI parsing, hashing, and secret provisioning remain trusted.
+//! values. JSON parsing, hashing, and secret provisioning remain trusted;
+//! destinations are parsed by the verified core.
 use crate::admission::{Admission, AdmissionError, Request};
 use gateway_core::policy::{Identity, Policy, Route};
-use http::{HeaderValue, Uri};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 const MAX_CONFIG: usize = 1024 * 1024;
+#[cfg(test)]
 pub(crate) const MAX_DESTINATION_BYTES: usize = 8192;
 pub(crate) const MAX_CREDENTIAL_BYTES: usize = 8192;
 
@@ -58,13 +59,12 @@ enum Logging { Strict, Availability }
 
 // Intentionally no Debug implementation: neither errors nor diagnostics should
 // accidentally format loaded credentials.
-struct Credential { kind: CredentialKind, value: HeaderValue }
+struct Credential { kind: CredentialKind, value: Vec<u8> }
 
 // A destination is the verified `gateway_core::destination::Parts`: the text the
 // operator wrote and the authority, host, port, and path proved to be its
 // substrings. The resolved route hands the core these parts directly, so the
 // request-start record and the Host header are built from them by proof.
-// Hyper's URI is parsed from the same text when a request is admitted.
 pub(crate) type Destination = gateway_core::destination::Parts;
 
 pub struct GatewayConfig {
@@ -79,34 +79,22 @@ pub struct GatewayConfig {
 pub struct RoutedRequest<'a> {
     request: Request<'a>,
     resolved: gateway_core::resolved_route::ResolvedRoute<'a, Destination, Credential>,
-    uri: Uri,
-}
-
-fn destination(text: &str) -> Result<Destination, ConfigError> {
-    Ok(destination_uri(text)?.1)
 }
 
 /// The verified parts are visible ASCII, so this never fails for a destination
 /// `parse` accepted.
 fn ascii(bytes: &[u8]) -> &str { std::str::from_utf8(bytes).expect("verified destination part is ASCII") }
 
-/// Validate a destination with the verified parser, then parse Hyper's URI
-/// from the same text and require the two views to agree. The verified parts
-/// are what the runtime connects to; the URI is only Hyper's request target.
-pub(crate) fn destination_uri(text: &str) -> Result<(Uri, gateway_core::destination::Parts), ConfigError> {
+/// Validate a destination with the verified parser. The parts are what the
+/// runtime connects to, names in TLS, writes as Host, and uses as the request target.
+pub(crate) fn destination(text: &str) -> Result<Destination, ConfigError> {
     let parts = gateway_core::destination::parse(text.as_bytes()).ok_or(ConfigError::Destination)?;
-    let uri: Uri = text.parse().map_err(|_| ConfigError::Destination)?;
-    if uri.scheme_str() != Some("https") || uri.query().is_some()
-        || uri.authority().map(|a| a.as_str().as_bytes()) != Some(parts.authority.as_slice())
-        || uri.path().as_bytes() != parts.path.as_slice() {
-        return Err(ConfigError::Destination);
-    }
     // A bracketed literal must also be a real IPv6 address, not just IPv6 characters.
     if parts.authority.first() == Some(&b'[')
         && std::str::from_utf8(&parts.host).ok().and_then(|h| h.parse::<std::net::Ipv6Addr>().ok()).is_none() {
         return Err(ConfigError::Destination);
     }
-    Ok((uri, parts))
+    Ok(parts)
 }
 
 fn digest(text: &str) -> Result<Vec<u8>, ConfigError> {
@@ -157,9 +145,7 @@ impl GatewayConfig {
                 return Err(ConfigError::Credential);
             }
             let text = match input.kind { CredentialKind::Bearer => format!("Bearer {raw}"), CredentialKind::ApiKey => raw };
-            let mut value = HeaderValue::from_str(&text).map_err(|_| ConfigError::Credential)?;
-            value.set_sensitive(true);
-            credentials.push(Credential { kind: input.kind, value });
+            credentials.push(Credential { kind: input.kind, value: text.into_bytes() });
         }
         Ok(Self { chunk_bytes: root.limits.chunk_bytes, admission: Admission::new(policy, root.limits.requests, root.limits.chunk_bytes,
             matches!(root.logging, Logging::Strict)), destinations, credentials })
@@ -171,11 +157,7 @@ impl GatewayConfig {
         let request = self.admission.admit(&digest, selector)?;
         let resolved = gateway_core::resolved_route::ResolvedRoute::resolve(
             request.authority(), &self.destinations, &self.credentials).ok_or(AdmissionError::Unavailable)?;
-        // Hyper's request target, parsed from the verified destination's text;
-        // configuration already checked that the two views agree.
-        let uri = ascii(&resolved.destination(request.authority()).ok_or(AdmissionError::Unavailable)?.text)
-            .parse().map_err(|_| AdmissionError::Unavailable)?;
-        Ok(RoutedRequest { request, resolved, uri })
+        Ok(RoutedRequest { request, resolved })
     }
 }
 
@@ -186,7 +168,8 @@ impl<'a> RoutedRequest<'a> {
         crate::transfer::copy_body_bound(&mut self.request, reader, writer, log, direction, Some(&self.resolved)).await
     }
     pub(crate) fn stream(&mut self) -> &mut Request<'a> { &mut self.request }
-    pub fn destination(&self) -> &Uri { &self.uri }
+    /// The verified parts of the resolved destination.
+    pub fn destination(&self) -> &Destination { self.parts() }
     fn parts(&self) -> &Destination { self.resolved.destination(self.request.authority()).expect("private request/route binding") }
     /// The permit a socket may be opened under: the verified core binds it to
     /// this request's resolved destination and route.
@@ -195,8 +178,6 @@ impl<'a> RoutedRequest<'a> {
     }
     /// The configured destination string exactly as the operator wrote it.
     pub fn destination_text(&self) -> &str { ascii(&self.parts().text) }
-    /// The verified authority of the resolved destination, for the Host header.
-    pub(crate) fn authority(&self) -> &str { ascii(&self.parts().authority) }
     /// The request-start record payload, built by the verified core from the
     /// authorized selector and the resolved destination's configured text.
     pub(crate) fn start_record(&self, time_ms: u64) -> Option<Vec<u8>> {
@@ -204,9 +185,9 @@ impl<'a> RoutedRequest<'a> {
     }
 
     // Only the trusted HTTP boundary may inject provider credentials.
-    pub(crate) fn credential_header(&self) -> (&'static str, &HeaderValue) {
+    pub(crate) fn credential_header(&self) -> (&'static [u8], &[u8]) {
         let credential = self.resolved.credential(self.request.authority()).expect("private request/route binding");
-        let name = match credential.kind { CredentialKind::Bearer => "authorization", CredentialKind::ApiKey => "x-api-key" };
+        let name: &'static [u8] = match credential.kind { CredentialKind::Bearer => b"authorization", CredentialKind::ApiKey => b"x-api-key" };
         (name, &credential.value)
     }
 }

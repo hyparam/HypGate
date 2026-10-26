@@ -68,28 +68,23 @@ further polling. The transfer driver treats that first error as terminal and
 cancels its stream, so a later reader EOF cannot synthesize successful transfer.
 The limit applies to individual adapter frames, not total request/response size.
 
-Accepted data is copied into a reader-owned buffer before the original frame
-reference is dropped. This prevents a small `Bytes` view from retaining a much
-larger backing allocation. Exhausting the copy releases it immediately. The cost
-is one bounded copy per frame; Hyper may still retain its own input references,
-and allocator overhead is outside this payload budget.
-
-Tests cover a maximum-size frame consumed through small reads, an oversized frame
-rejected without retention or further polling, and a 40-byte slice whose 256 KiB
-backing owner must be dropped after the first one-byte read. The producing body
-already allocated each input frame before this adapter can accept or reject it;
-this is not a whole-process allocation guarantee.
+Body bytes come from `http1::BodyReader`, which reads at most 32 KiB from the
+socket into its own buffer and yields only body bytes, delimited as the verified
+framing selection says: a Content-Length count, the verified chunked decoder, or
+until the connection closes. The end of the body is a clean EOF; a body that
+stops early or a chunk coding fault is an error, never an EOF. There are no
+shared frame owners; allocator overhead is outside this payload budget.
 
 ## Responses without HTTP bodies
 
-HTTP 204 and 304 suppress body polling in Hyper. The inbound adapter therefore
-drains their internal empty completion channel and waits for the tracked worker
-to finish before returning fixed empty responses. Cancellation retains the worker
-abort guard while waiting. An unexpected payload or missing clean completion
-returns 502 before upstream headers are sent. Normal streaming responses continue
-to release the abort guard only at clean EOF. Tests reproduce the original aborted
-accounting path over real HTTP and cover unexpected data and dropped writers.
-This is trusted async adapter behavior, not a Verus proof of Hyper or cancellation.
+HTTP 204 and 304 carry no body. The transport reads them with an empty framing,
+and the inbound adapter drains the worker's empty completion channel and waits
+for the tracked worker to finish before returning a fixed empty response.
+Cancellation retains the worker abort guard while waiting. An unexpected payload
+or missing clean completion returns 502 before upstream headers are sent. Normal
+streaming responses continue to release the abort guard only at clean EOF. Tests
+cover unexpected data and dropped writers. This is trusted async adapter
+behavior, not a Verus proof of the adapter or of cancellation.
 
 The machine reads through the verified owner's pending buffer (`begin_read`,
 `read_buffer`, `finish_read`); no independent chunk is allocated. See the

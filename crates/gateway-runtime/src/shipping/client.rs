@@ -1,15 +1,17 @@
-//! One HTTPS request at a time to the configured HypAware server. Blocking DNS
-//! and an inline handshake on the shipper's own thread; no redirects, proxies,
-//! pooling, or retries here. Response bodies are capped.
+//! One HTTPS request at a time to the configured HypAware server, over the
+//! verified codec. Blocking DNS and an inline handshake on the shipper's own
+//! thread; no redirects, proxies, pooling, or retries here. Response bodies
+//! are capped.
 use super::config::ShippingServer;
+use crate::http1;
 use gateway_core::egress::Egress;
-use http::Request;
-use http_body_util::{BodyExt, Full, Limited};
-use hyper_util::rt::TokioIo;
+use gateway_core::headers::Field;
+use gateway_core::http1_framing::{Framing, framing};
+use gateway_core::http1_write::{wire_ok, write_request_head};
 use std::{io, net::ToSocketAddrs, sync::Arc, time::Duration};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::{TlsConnector, rustls::{ClientConfig, RootCertStore, pki_types::ServerName}};
-use bytes::Bytes;
 
 pub const MAX_REPLY_BYTES: usize = 64 * 1024;
 
@@ -25,7 +27,7 @@ impl Reply {
     }
 }
 
-pub struct Client { connector: TlsConnector, server: ShippingServer, host: String, authority: String, deadline: Duration }
+pub struct Client { connector: TlsConnector, server: ShippingServer, host: String, deadline: Duration }
 
 // Effect site: the only cloud socket. Resolution and connection happen under a
 // permit minted from the configured shipping server and nothing else.
@@ -43,14 +45,13 @@ impl Client {
     }
     pub fn with_roots(roots: RootCertStore, server: &ShippingServer, deadline: Duration) -> io::Result<Self> {
         if deadline.is_zero() || deadline > Duration::from_secs(3600) { return Err(io::ErrorKind::InvalidInput.into()); }
-        let (server, uri) = (server.clone(), server.uri());
+        let server = server.clone();
         let host = server.host().to_owned();
         ServerName::try_from(host.clone()).map_err(|_| io::ErrorKind::InvalidInput)?;
         let mut config = ClientConfig::builder().with_root_certificates(roots).with_no_client_auth();
         config.enable_early_data = false;
         config.cert_decompressors.clear();
-        let authority = uri.authority().ok_or(io::ErrorKind::InvalidInput)?.as_str().to_owned();
-        Ok(Self { connector: TlsConnector::from(Arc::new(config)), server, host, authority, deadline })
+        Ok(Self { connector: TlsConnector::from(Arc::new(config)), server, host, deadline })
     }
 
     /// `bearer` becomes an `Authorization` header; `headers` are added verbatim.
@@ -66,31 +67,38 @@ impl Client {
         let permit = Egress::cloud(&self.server);
         let tcp = open_socket(&permit).await?;
         let server = ServerName::try_from(self.host.clone()).map_err(|_| ClientError::Tls)?;
-        let tls = self.connector.connect(server, tcp).await.map_err(|_| ClientError::Tls)?;
-        let (mut sender, connection) = hyper::client::conn::http1::Builder::new()
-            .max_headers(crate::http_boundary::MAX_HEADER_VALUES).max_header_size(crate::http_boundary::MAX_HEADER_BYTES)
-            .handshake(TokioIo::new(tls)).await.map_err(|_| ClientError::Http)?;
-        let mut builder = Request::builder().method(method).uri(path)
-            .header("host", &self.authority).header("connection", "close")
-            .header("content-length", body.len().to_string());
+        let mut tls = self.connector.connect(server, tcp).await.map_err(|_| ClientError::Tls)?;
+        let mut fields = vec![
+            http1::field(b"host", self.server.authority().as_bytes().to_vec()),
+            http1::field(b"connection", b"close".to_vec()),
+            http1::field(b"content-length", body.len().to_string().into_bytes()),
+        ];
         if let Some(token) = bearer {
-            let mut value = http::HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_| ClientError::Http)?;
-            value.set_sensitive(true);
-            builder = builder.header("authorization", value);
+            fields.push(Field { name: b"authorization".to_vec(), value: format!("Bearer {token}").into_bytes(), sensitive: true });
         }
-        for (name, value) in headers { builder = builder.header(*name, value); }
-        let request = builder.body(Full::new(Bytes::from(body))).map_err(|_| ClientError::Http)?;
-        let operation = async {
-            let response = sender.send_request(request).await.map_err(|_| ClientError::Http)?;
-            let (parts, body) = response.into_parts();
-            let retry_after = parts.headers.get("retry-after").and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse().ok());
-            let bytes = Limited::new(body, MAX_REPLY_BYTES).collect().await.map_err(|_| ClientError::Http)?.to_bytes();
-            Ok(Reply { status: parts.status.as_u16(), retry_after, body: bytes.to_vec() })
+        for (name, value) in headers { fields.push(Field { name: name.as_bytes().to_vec(), value: value.as_bytes().to_vec(), sensitive: false }); }
+        if !wire_ok(&fields) || !path.starts_with('/') || path.bytes().any(|b| !(33..=126).contains(&b)) { return Err(ClientError::Http); }
+        let mut head = Vec::new();
+        write_request_head(method.as_bytes(), path.as_bytes(), &fields, &mut head);
+        head.extend_from_slice(&body);
+        tls.write_all(&head).await.map_err(|_| ClientError::Http)?;
+        let (status_head, leftover) = http1::read_status_head(&mut tls, Vec::new()).await.map_err(|_| ClientError::Http)?;
+        let retry_after = status_head.fields.iter().find(|f| f.name == b"retry-after")
+            .and_then(|f| std::str::from_utf8(&f.value).ok()).and_then(|v| v.trim().parse().ok());
+        let reply_framing = match status_head.status {
+            204 | 304 => Framing::Length(0),
+            _ => framing(&status_head.fields, false).map_err(|_| ClientError::Http)?,
         };
-        tokio::pin!(operation, connection);
-        tokio::select! {
-            result = &mut operation => result,
-            result = &mut connection => { result.map_err(|_| ClientError::Http)?; operation.await }
+        if let Framing::Length(n) = reply_framing { if n > MAX_REPLY_BYTES as u64 { return Err(ClientError::Http); } }
+        let mut reader = http1::BodyReader::new(&mut tls, leftover, reply_framing);
+        let mut bytes = Vec::new();
+        let mut buffer = [0u8; 4096];
+        loop {
+            let n = reader.read(&mut buffer).await.map_err(|_| ClientError::Http)?;
+            if n == 0 { break; }
+            if bytes.len().checked_add(n).is_none_or(|total| total > MAX_REPLY_BYTES) { return Err(ClientError::Http); }
+            bytes.extend_from_slice(buffer.get(..n).ok_or(ClientError::Http)?);
         }
+        Ok(Reply { status: status_head.status, retry_after, body: bytes })
     }
 }

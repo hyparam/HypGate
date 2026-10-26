@@ -87,7 +87,6 @@ mod tests {
     #[tokio::test]
     async fn canceled_worker_response_stays_owned_by_connection_until_its_cleanup() {
         use crate::server::connections::ConnectionSlots;
-        use http_body_util::BodyExt;
         use tokio::io::AsyncWriteExt;
         let workers = WorkerSlots::new(1);
         let connections = ConnectionSlots::new(1);
@@ -108,12 +107,12 @@ mod tests {
         });
         let connection = tokio::spawn(connection_lease.task(async move {
             drain.await.unwrap();
-            let frame = body.frame().await.unwrap().unwrap().into_data().unwrap();
-            assert_eq!(frame.as_ref(), b"data");
+            let frame = body.next_frame().await.unwrap().unwrap();
+            assert_eq!(frame, b"data");
             drop(frame);
             // Canceling the producer did not turn its incomplete response into
             // clean EOF, nor destroy the exact queued bytes before draining.
-            assert_eq!(body.frame().await.unwrap().unwrap_err().kind(), std::io::ErrorKind::UnexpectedEof);
+            assert_eq!(body.next_frame().await.unwrap().unwrap_err().kind(), std::io::ErrorKind::UnexpectedEof);
             received.send(()).unwrap();
             std::future::pending::<()>().await;
             drop(body);
@@ -140,14 +139,13 @@ mod tests {
     #[tokio::test]
     async fn actual_http_reader_destruction_precedes_worker_capacity_reuse() {
         use std::{pin::Pin, task::{Context, Poll}, sync::atomic::{AtomicBool, Ordering}};
-        use bytes::Bytes;
-        use tokio::io::AsyncReadExt;
+        use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
         struct Source { slots: Arc<WorkerSlots>, tracker: TaskTracker, dropped: Arc<AtomicBool> }
-        impl http_body::Body for Source {
-            type Data = Bytes;
-            type Error = std::io::Error;
-            fn poll_frame(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Result<http_body::Frame<Bytes>, std::io::Error>>> {
-                Poll::Ready(Some(Ok(http_body::Frame::data(Bytes::from_static(b"data")))))
+        impl AsyncRead for Source {
+            fn poll_read(self: Pin<&mut Self>, _: &mut Context<'_>, out: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
+                let n = out.remaining().min(4);
+                out.put_slice(&b"data"[..n]);
+                Poll::Ready(Ok(()))
             }
         }
         impl Drop for Source {
@@ -167,7 +165,7 @@ mod tests {
             let (ready, started) = tokio::sync::oneshot::channel();
             let work = async move {
                 let mut first = [0];
-                reader.read_exact(&mut first).await.unwrap(); // three copied bytes remain
+                reader.read_exact(&mut first).await.unwrap();
                 assert_eq!(first, [b'd']);
                 ready.send(()).unwrap();
                 std::future::pending::<()>().await;
@@ -191,7 +189,6 @@ mod tests {
         use crate::{credited_job::CreditedJob, disk_log::DiskLog, server::connections::ConnectionSlots,
             transfer::{AuditLog, LogRecord, RecordKind}};
         use gateway_core::resource::ResourceAdmission;
-        use http_body_util::BodyExt;
         use tokio::io::AsyncWriteExt;
         use std::time::Duration;
         tokio::time::timeout(Duration::from_secs(10), async {
@@ -226,9 +223,9 @@ mod tests {
             let (drain, drain_now) = tokio::sync::oneshot::channel();
             let connection = tokio::spawn(connection_lease.task(async move {
                 drain_now.await.unwrap();
-                let data = body.frame().await.unwrap().unwrap().into_data().unwrap();
-                assert_eq!(data.as_ref(), b"data");
-                assert_eq!(body.frame().await.unwrap().unwrap_err().kind(), std::io::ErrorKind::UnexpectedEof);
+                let data = body.next_frame().await.unwrap().unwrap();
+                assert_eq!(data, b"data");
+                assert_eq!(body.next_frame().await.unwrap().unwrap_err().kind(), std::io::ErrorKind::UnexpectedEof);
             }));
             let worker = worker_lease.spawn(async move {
                 writer.write_all(b"data").await.unwrap();
@@ -265,16 +262,14 @@ mod tests {
 
     #[test]
     fn escaped_http_owners_keep_worker_capacity_after_task_cleanup() {
-        use bytes::Bytes;
-        use http_body_util::Full;
         for role in 0..4 {
             let slots = WorkerSlots::new(1);
             let tracker = TaskTracker::new();
             let lease = slots.acquire(&tracker).unwrap();
             let http = lease.http();
             let retained: Box<dyn std::any::Any> = match role {
-                0 => Box::new(http.input(Full::new(Bytes::from_static(b"data"))).unwrap()),
-                1 => Box::new(http.output(Full::new(Bytes::from_static(b"data"))).unwrap()),
+                0 => Box::new(http.input(&b"data"[..]).unwrap()),
+                1 => Box::new(http.output(&b"data"[..]).unwrap()),
                 2 => Box::new(http.upload(4).unwrap()),
                 _ => {
                     let (writer, body) = crate::http_body::channel(4);

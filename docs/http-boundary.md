@@ -1,7 +1,8 @@
 # HTTP metadata boundary
 
-The runtime converts Hyper's header maps to byte fields, hands them to the
-verified projection in `gateway_core::headers`, and converts the result back.
+The verified HTTP/1.1 parser ([codec](http1-codec.md)) delivers each head as
+byte fields; the runtime hands them to the verified projection in
+`gateway_core::headers` and the verified writer serializes the result.
 The route selector and the bearer token are parsed by the verified
 `gateway_core::inbound`; the admission binding is tested Rust. Every header,
 selector, and token rule below is proved in both directions: what is accepted
@@ -54,31 +55,29 @@ Boundary tests exercise the same rules end to end: fixed destination/credential
 binding, caller header overrides, duplicate/malformed authentication, forbidden
 paths and methods, Connection nominations, header limits, admission cleanup, and
 response filtering.
-Workspace test totals are maintained in the [README](../README.md). No live provider
-was contacted. Network dispatch, body forwarding, and logging are covered by the
+Workspace test totals are maintained in the [README](../README.md). Live Anthropic
+and OpenAI exchanges are recorded in the [HypAware setup](hypaware.md#smoke-test-record)
+smoke test. Network dispatch, body forwarding, and logging are covered by the
 [HTTPS transport](https-transport.md), [async transfer](async-transfer.md), and
 [running](running.md) notes.
 
 ## Metadata ownership and allocation
 
-The production server consumes request `Parts` through `prepare_request_parts`;
-the transport consumes response `Parts` through `prepare_response_parts`. These
-synchronous boundaries finish and destroy the original metadata, including
-extensions, before the caller can await DNS, response output, or body streaming.
-The borrowed preparation functions remain available for library callers, who own
-and must budget their original input metadata separately.
+The server passes the parsed `RequestHead` to `prepare` and drops it as soon as
+the prepared request exists, before any await; the transport passes the parsed
+`StatusHead` to `prepare_response_head`, which consumes it. The parser already
+made every field its own vector copy, so no field shares storage with the read
+buffer or with other fields, and dropping the head frees everything the
+projection did not copy.
 
-The verified projection copies each allowed field's bytes into a fresh vector;
-the runtime rebuilds each HeaderValue with `from_bytes` and preserves its
-sensitive/redaction flag. Nothing clones shared input backing.
-This matters because a tiny HeaderValue can own a slice of a much larger parser
-buffer, including unrelated headers. Static allowlisted header names require no
-copy of an input name. Configured provider credentials remain shared with their
+The verified projection copies each allowed field's bytes into a fresh vector
+and keeps its sensitive flag. Static allowlisted header names require no copy
+of an input name. Configured provider credentials remain shared with their
 immutable configuration; they are not derived from input header storage.
 
-Both production HTTP/1 parsers cap the complete wire head, including its start
-line and delimiters, at 32 KiB and 100 fields. The subsequent adapter checks also
-allow at most 100 values and 32 KiB of header names plus values.
+The verified parser caps the complete wire head, including its start line and
+delimiters, at 32 KiB and 100 fields (proved). The projection's `fits` check
+independently allows at most 100 values and 32 KiB of header names plus values.
 Consequently, each filtered request or response owns at most 32 KiB of copied
 value contents. Requests additionally insert the configured Host, credential,
 and `accept-encoding: identity`. If H is the configured authority spelling length,
@@ -88,10 +87,10 @@ origin-form path length, H + P is conservatively at most 8,192 (including defaul
 path handling); this uses the whole-URI limit, not an assumption about port
 spelling length. Configuration validation rejects oversize before secret loading.
 Wire separators and start lines are budgeted in the
-[serialization audit](dependency-resources.md#serialized-head-lengths), which puts
-production request and response heads below 64 KiB under the pinned serializer.
-HeaderMap storage, value metadata, allocator slack, and Hyper's backing capacities
-remain outside these logical wire-length bounds.
+[written head lengths](dependency-resources.md#written-head-lengths), which put
+production request and response heads below 64 KiB under the verified writer.
+Vector spare capacity and allocator slack remain outside these logical
+wire-length bounds.
 
 The verified Connection parsing validates every comma-separated element,
 including unknown names, but retains only distinct allowlisted names: at most
@@ -102,11 +101,10 @@ value, and every allowlisted name that any element lowercases to is retained
 (`headers::complete`). The response Content-Encoding rule is therefore the exact
 nomination test, not an approximation.
 
-Regression tests supply small headers backed by 256 KiB owners and metadata
-extension drop probes. Both original owners must be destroyed while prepared
-output remains live. Tests preserve opaque non-ASCII header bytes, repeated value
-order, status, and sensitivity flags, and reject an invalid unknown Connection
-token after a long valid list. Existing filtering and upgrade tests still apply.
-This is source-level lifetime evidence, not a Verus heap theorem. Hyper or a
-library caller can retain other references, and releasing an allocation does not
-zeroize its contents or require the allocator to return pages to the OS.
+Regression tests preserve opaque non-ASCII header bytes, repeated value order,
+status, and sensitivity flags, reject an invalid unknown Connection token after
+a long valid list, and serialize the maximum request and response heads. Existing
+filtering and upgrade tests still apply. This is source-level lifetime evidence,
+not a Verus heap theorem: a library caller can retain other references, and
+releasing an allocation does not zeroize its contents or require the allocator
+to return pages to the OS.

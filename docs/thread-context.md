@@ -70,6 +70,6 @@ precondition. Tokio's own internals are outside the proof, as before.
 The permit tracks runtime entry, not every panicking precondition of every
 dependency. Mutex poisoning and indexing are handled separately (poison is
 observed and fails readiness; the shipping adapters deny indexing by lint).
-Other dynamic preconditions of Tokio or Hyper, for example calling
+Other dynamic preconditions of Tokio or rustls, for example calling
 `Handle::current` outside a runtime, remain run-time checks; the approach here
 is the template for turning any of them into a typed permit if they matter.

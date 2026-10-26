@@ -36,24 +36,16 @@ async fn exercise(availability: bool, duration: Duration) {
         for _ in 0..SLOTS + 1 {
             let (socket, _) = upstream.accept().await.unwrap();
             accepted.fetch_add(1, Ordering::Relaxed);
-            let acceptor = acceptor.clone(); let waiting = waiting.clone();
+            let acceptor = acceptor.clone(); let mut waiting = waiting.clone();
             tasks.spawn(async move {
-                let socket = acceptor.accept(socket).await.unwrap();
-                let service = service_fn(move |request: Request<Incoming>| {
-                    let mut waiting = waiting.clone();
-                    async move {
-                        assert_eq!(request.headers()["x-api-key"], "provider-secret");
-                        assert_eq!(request.collect().await.unwrap().to_bytes(), b"{\"stream\":true}"[..]);
-                        let (mut writer, body) = http_body::channel(16);
-                        tokio::spawn(async move {
-                            writer.write_all(b"held").await.unwrap();
-                            while !*waiting.borrow_and_update() { waiting.changed().await.unwrap(); }
-                            writer.write_all(b"done").await.unwrap(); writer.shutdown().await.unwrap();
-                        });
-                        Ok::<_, Infallible>(Response::new(body))
-                    }
-                });
-                hyper::server::conn::http1::Builder::new().serve_connection(TokioIo::new(socket), service).await.unwrap();
+                let mut socket = acceptor.accept(socket).await.unwrap();
+                let request = read_request(&mut socket).await.unwrap();
+                assert_eq!(request.header("x-api-key"), Some("provider-secret"));
+                assert_eq!(request.body, b"{\"stream\":true}");
+                let mut stream = start_streaming(socket, 200, &[]).await.unwrap();
+                stream.send(b"held").await.unwrap();
+                while !*waiting.borrow_and_update() { waiting.changed().await.unwrap(); }
+                stream.send(b"done").await.unwrap(); stream.finish().await.unwrap();
             });
         }
         while let Some(result) = tasks.join_next().await { result.unwrap(); }
@@ -61,8 +53,8 @@ async fn exercise(availability: bool, duration: Duration) {
     let mut held = Vec::new();
     for _ in 0..SLOTS {
         let (mut response, connection) = send(port, "/routes/7", "gateway", "POST").await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let prefix = response.body_mut().frame().await.unwrap().unwrap().into_data().unwrap();
+        assert_eq!(response.status, 200);
+        let prefix = response.chunk().await.unwrap().unwrap();
         assert!(!prefix.is_empty()); held.push((response, connection, prefix));
     }
     let started = std::time::Instant::now();
@@ -76,7 +68,7 @@ async fn exercise(availability: bool, duration: Duration) {
         for _ in 0..BURST {
             excess.spawn(async move {
                 let (response, connection) = send(port, "/routes/7", "gateway", "POST").await;
-                assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+                assert_eq!(response.status, 503);
                 response.collect().await.unwrap(); connection.await.unwrap();
             });
         }
@@ -84,7 +76,7 @@ async fn exercise(availability: bool, duration: Duration) {
         for route in ["/healthz", "/readyz", "/metrics"] {
             let health_started = std::time::Instant::now();
             let (response, connection) = send(port, route, "", "GET").await;
-            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.status, 200);
             response.collect().await.unwrap(); connection.await.unwrap();
             max_health = max_health.max(health_started.elapsed());
         }
@@ -103,15 +95,15 @@ async fn exercise(availability: bool, duration: Duration) {
         "max_rejection_wave_ms":max_rejection.as_secs_f64() * 1000.0}));
     release.send(true).unwrap();
     for (response, connection, prefix) in held {
-        let mut bytes = prefix.to_vec(); bytes.extend_from_slice(&response.collect().await.unwrap().to_bytes());
+        let mut bytes = prefix.to_vec(); bytes.extend_from_slice(&response.collect().await.unwrap());
         assert_eq!(bytes, b"helddone"); connection.await.unwrap();
     }
     while !app.workers.is_empty() { tokio::task::yield_now().await; }
     assert_eq!(app.config.usage(), Some((0, SLOTS)));
     // A fresh generation must succeed after all overloaded waves drain.
     let (response, connection) = send(port, "/routes/7", "gateway", "POST").await;
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.collect().await.unwrap().to_bytes(), b"helddone"[..]); connection.await.unwrap();
+    assert_eq!(response.status, 200);
+    assert_eq!(response.collect().await.unwrap(), b"helddone"[..]); connection.await.unwrap();
     provider.await.unwrap(); shutdown.send(()).unwrap(); gateway.await.unwrap().unwrap();
     assert_eq!(app.config.usage(), Some((0, SLOTS))); assert!(app.workers.is_empty());
     assert_eq!(app.failed_exchanges(), 0); assert_eq!(app.audit_gaps(), 0);

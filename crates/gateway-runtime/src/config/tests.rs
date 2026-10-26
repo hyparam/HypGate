@@ -31,14 +31,12 @@ fn native_provider_endpoints_keep_their_own_credentials() {
     assert_eq!(permit.target().text, one.destination_text().as_bytes());
     assert!(matches!(permit.kind(), gateway_core::egress::Origin::Provider { origin: 0, credential: 0, .. }));
     let two = c.admit(b"test-gateway-token", 8).unwrap();
-    assert_eq!(one.destination().to_string(), "https://api.openai.com/v1/responses");
-    assert_eq!(two.destination().to_string(), "https://api.anthropic.com/v1/messages");
-    assert_eq!(one.credential_header().0, "authorization");
-    assert_eq!(one.credential_header().1, "Bearer secret-OPENAI_KEY");
-    assert_eq!(two.credential_header().0, "x-api-key");
-    assert_eq!(two.credential_header().1, "secret-ANTHROPIC_KEY");
-    assert!(one.credential_header().1.is_sensitive());
-    assert!(two.credential_header().1.is_sensitive());
+    assert_eq!(one.destination_text(), "https://api.openai.com/v1/responses");
+    assert_eq!(two.destination_text(), "https://api.anthropic.com/v1/messages");
+    assert_eq!(one.credential_header().0, b"authorization");
+    assert_eq!(one.credential_header().1, b"Bearer secret-OPENAI_KEY");
+    assert_eq!(two.credential_header().0, b"x-api-key");
+    assert_eq!(two.credential_header().1, b"secret-ANTHROPIC_KEY");
 }
 
 #[test]

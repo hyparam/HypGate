@@ -17,9 +17,9 @@ at most 32 KiB of frame data into its own bounded copy. One DiskLog owns one dis
 | Retained object | Budget and ownership | Evidence and limitation |
 | --- | --- | --- |
 | Core chunk or next transfer buffer | At most K per admitted exchange in the production sequential driver | `OwnedStream::payload_bound` proves the combined stream/read-buffer logical length stays within K, with only one nonempty at a time. The driver reads into the owner and verified completion moves the filled prefix into its stream. External `Request::advance` still rejects excessive vector capacity. Slice I/O correspondence, Vec backing capacity, and allocator size remain trusted. |
-| Inbound/outbound reader copies | At most 32 KiB of copied payload per reader; conservatively two readers per admitted exchange | `http_body::Reader` copies accepted visible frame bytes and releases its input reference before yielding; it clears the copy immediately when consumed. It cannot retain a large input owner through a small slice. Upload and download run sequentially; the inbound reader object remains alive. Allocator overhead and references retained inside Hyper remain separate. |
-| Client response channel | At most C + R channels, one data message of at most 16 KiB each | Created before authorization but after acquiring worker credit in `Gateway::handle`; charging this solely to authorized request leases is incorrect. Live receivers are charged to C; sender-only control-storage cleanup tails are conservatively charged to R; the fixed-slot adapter now discards queued payload and forbids late sends when the receiver drops. A consumed message becomes Hyper-owned. End markers carry no payload. |
-| Provider upload channel | One data message of at most 16 KiB per admitted exchange | Constructed in `HttpsTransport::run`; `Writer::poll_write` reserves queue credit before copying bytes. Hyper may retain previously consumed frames outside the channel. |
+| Inbound/outbound body read buffers | One 32 KiB read buffer per body; conservatively two per admitted exchange | `http1::BodyReader` reads at most 32 KiB at a time into its own vector and yields body bytes from it; chunk framing is consumed in place. There are no shared backing owners. Upload and download run sequentially; the inbound reader object remains alive. Allocator overhead remains separate. |
+| Client response channel | At most C + R channels, one data message of at most 16 KiB each | Created before authorization but after acquiring worker credit in `Gateway::handle`; charging this solely to authorized request leases is incorrect. Live receivers are charged to C; sender-only control-storage cleanup tails are conservatively charged to R; the fixed-slot adapter now discards queued payload and forbids late sends when the receiver drops. A consumed message is owned by the connection task until its chunk is written. End markers carry no payload. |
+| Provider upload framing | One pending framed chunk of at most 16 KiB plus framing per admitted exchange | `http1::ChunkedWriter` in `HttpsTransport::run`; a frame is framed and written before the next is accepted. No channel sits between the copy and the TLS stream. |
 | Disk frames being encoded or queued | At most Q reserved/queued records, each at most A + 65 bytes, where A = max(K, 8,210) admits the metadata records | `Queue::push_with` calls verified `FrameQueue::reserve` before encoding, then inserts through verified `FrameQueue::finish_reserved` under the same queue mutex. The executable passes A to `DiskLog::create_with_payload_limit`; append rejects larger payloads before encoding, and the verified queue independently rejects oversized frames. The default library constructor retains the 1 MiB limit. |
 | Active disk frame | One additional frame of at most A + 65 bytes | Verified `DiskWorker` moves the exact queued frame into a private active handle, preserves its charge through write/sync and completion delivery, and checks the release token's session/generation. The Q+1 bound includes this active frame. Caller cancellation cannot return its credit; a stalled worker is never replaced. |
 | Delivered durable receipts | At most one frame of at most K + 65 bytes per admitted exchange (metadata receipts are dropped as soon as they are checked) | The job oneshot transfers its owned frame to the waiting request. Exact receipt validation then drops it; cancellation drops undelivered receipts. The worker can advance to another job before delivery is consumed. Custom library callers retaining receipts must budget separately. |
@@ -122,8 +122,9 @@ Tokio send/receive/drop operations and a stalled-worker cancellation test.
 
 ## Allocations outside that subtotal
 
-The [dependency audit](dependency-resources.md) traces the pinned Hyper/TLS
-implementation's thresholds, extra queues, and retained storage. In particular,
+The [dependency audit](dependency-resources.md) traces the codec adapter's own
+buffers and the pinned TLS implementation's thresholds, extra queues, and
+retained storage. In particular,
 HTTP buffer thresholds and TLS application-data limits are not hard heap caps.
 The upstream explicitly configures a 64 KiB TLS application-data buffer limit
 before handshake; control traffic and record overhead have separate accounting.
@@ -133,21 +134,17 @@ the dependency audit accounts for ticket/certificate/secret byte contents and
 identifies excluded metadata and active owners.
 
 
-- Hyper parser and output buffers, incoming-body channels, HTTP headers and URIs,
-  and data frames already consumed from our channels. Production now explicitly
-  selects Hyper queue mode on both sides, excluding body flattening into the
-  serialized-head vector; header and parser backing capacities remain separate.
-  The [queued-output audit](dependency-resources.md#output-backpressure-and-retained-capacity)
-  bounds retained streaming payload owners per Hyper writer conditionally on the
-  pinned source; its mailbox-inclusive bound overlaps the subtotal above. The
+- The codec adapter's head buffers (32 KiB each, two during the split that
+  hands the leftover to the body reader), serialized heads (under 64 KiB), and
+  chunked-writer pending frames, and data frames already consumed from our
+  mailbox but not yet written. The
+  [dependency audit](dependency-resources.md#http1-storage) bounds each. The
   [HTTP metadata boundary](http-boundary.md#metadata-ownership-and-allocation)
-  now detaches bounded allowed values and drops original Parts before awaits;
-  its copied-value subtotal and inserted Host/credential data remain separate
-  from the stream/log buffer theorem. Both HTTP/1 builders set a
-  32 KiB parser-buffer limit, but that setting alone does not prove total Hyper
-  allocation bounds or backing-storage sizes. A separate plaintext-read adapter
-  caps each actual HTTP read at 32 KiB without imposing a wire-chunk/body length
-  limit; it adds no owned payload buffer.
+  copies bounded allowed values out of the parsed head, which is dropped before
+  any await; its copied-value subtotal and inserted Host/credential data remain
+  separate from the stream/log buffer theorem. `ReadLimited` caps each upstream
+  TLS plaintext read at 32 KiB without imposing a wire-chunk/body length limit;
+  it adds no owned payload buffer.
 - rustls handshake and record buffers, certificate/root-store data, TLS overhead,
   system-resolver internals, and kernel socket buffers. The
   [DNS inventory](dns-resources.md) accounts for lookup jobs, dedicated threads,

@@ -207,6 +207,14 @@ after deleting `identity.json` and `checkpoint.json`. Both runs enrolled under
 the same gateway id and both reported one acknowledged batch; the server holds
 8 rows for those 4 exchanges, not 16, which is the batch ledger doing its job.
 
+Later the same day the gateway's HTTP library was replaced by the verified
+HTTP/1.1 codec ([codec](http1-codec.md)), and the same four requests were run
+again through it, plus a request with `Expect: 100-continue` and a request
+with a bad token: all four exchanges returned 200 with the providers' bytes
+intact, the two refusals were 100-then-200 and 401, the log scanned complete,
+and two exchanges shipped and were acknowledged by HypAware Cloud through the
+new shipping client.
+
 That run also found a bug, fixed in this commit: `loggate ship` panicked at
 startup with "Cannot start a runtime from within a runtime", because the
 subcommand built the shipper's Tokio runtime on the thread that already ran the

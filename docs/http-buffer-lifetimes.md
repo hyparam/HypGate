@@ -16,9 +16,8 @@ bounded Data frames from zero-byte End. `queued_payload_bound` derives the
 16 KiB queued-byte bound from the actual item charge. `closing_payload_bound`
 combines the closed mailbox with its transferred `Cleanup<HttpMessage>` and
 bounds their total through extraction and reported destruction. The consuming
-`into_payload` operation connects that projection to the exact vector handed to
-Hyper. Test builds substitute a local enum only to support observable backing-owner
-probes; ordinary Data paths still use the same verified OutputFrame.
+`into_payload` operation connects that projection to the exact vector the
+connection task frames as a chunk.
 Verified push/pop preserve exact item identity and reject full-slot overwrite.
 The core owns both endpoint-open flags: sender closure preserves the item for
 draining, receiver closure returns the item and clears the slot, and neither
@@ -41,10 +40,10 @@ core-owned vector whose constructor copies exactly the requested prefix, capped
 at 16 KiB. Its checked length is the write's reported accepted count. The copy is
 created only inside the existing locked send callback, so a full/closed mailbox
 never constructs it. The consuming `into_vec` handoff preserves the exact bytes;
-the adapter moves that vector into `Bytes` for Hyper. Logical payload length is
-proved; allocator rounding and Hyper's post-dequeue retention remain separate.
-Custom backing-owner dependency probes use a test-only message variant, while
-production and ordinary transfer tests use the verified frame type. `poll_send_with` checks
+the connection task frames that vector as one chunk and drops it. Logical
+payload length is proved; allocator rounding and the chunked writer's pending
+buffer ([dependency resources](dependency-resources.md#chunk-framing-buffers))
+remain separate. `poll_send_with` checks
 receiver liveness and queue capacity while holding the mutex, then constructs and
 inserts the payload under that same lock. Pending sends store only a waker, never
 a copy of the caller's bytes. Canceling a write future leaves no pending payload;
@@ -70,8 +69,9 @@ These tests cover callback placement, not arbitrary callback termination.
 An encoding panic wakes a waiting reader after poisoning and unlocking the mutex;
 poisoned operations refuse resumption. Poisoned storage remains charged until
 final destruction. Waker clone/drop/wake behavior and mutex ordering remain trusted.
-Callbacks are invoked only for bounded byte copies in production. Dequeued frames
-become Hyper-owned, so this slot bound does not cover Hyper output allocations.
+Callbacks are invoked only for bounded byte copies in production. A dequeued
+frame is owned by the connection task until its chunk is written, so this slot
+bound does not cover the chunked writer's pending buffer.
 
 ## Ownership count
 
@@ -94,10 +94,9 @@ remain Rust/allocator assumptions; the proof bounds logical backing bytes.
 The runtime constructs this owner with the 32 KiB input limit, copies from the
 checked peek into the caller's read buffer, and reports consumption synchronously.
 
-Reader copies detach accepted frames from shared backing owners, and clear their
-copy when consumed. An input frame and its new copy coexist synchronously during
-copying; source frames and references retained by Hyper belong to the dependency
-allocation account. Borrowed mutable read slices cannot resize the core owner's
+Readers no longer copy: the body reader yields bytes straight from its one
+32 KiB read buffer into the caller's buffer, and there are no shared backing
+owners to detach from. Borrowed mutable read slices cannot resize the core owner's
 pending read buffer. Metadata has its own [ownership boundary](http-boundary.md#metadata-ownership-and-allocation).
 
 ## End markers and cancellation evidence

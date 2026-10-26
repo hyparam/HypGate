@@ -1,419 +1,87 @@
 # Dependency resource audit
 
-Source inspection on 2026-10-23 of the versions in Cargo.lock: Hyper 1.12.0,
-rustls 0.23.46, and tokio-rustls 0.26.6. These are trusted implementation facts,
-not Verus proofs or whole-process allocation ceilings. Recheck them on upgrades.
-The [resource inventory](resource-accounting.md) separately accounts for our own
+Source inspection on 2026-10-23 of the versions in Cargo.lock: rustls 0.23.46 and
+tokio-rustls 0.26.6, with the HTTP/1.1 buffers of the gateway's own codec adapter
+added on 2026-10-25. These are trusted implementation facts, not Verus proofs or
+whole-process allocation ceilings. Recheck them on upgrades. The
+[resource inventory](resource-accounting.md) separately accounts for our own
 buffers and the number of live connections and requests.
 
 ## HTTP/1 storage
 
-Both production builders explicitly set `max_buf_size(32768)`,
-`max_header_size(32768)`, `max_headers(100)`, and `writev(true)`; the inbound builder disables
-keep-alive. The upstream performs one exchange
-per connection. Neither enables pipelined flush aggregation. Explicit `writev(true)` selects
-Hyper's queue strategy on both sides, including TLS, instead of allowing adapter
-capabilities to choose the buffering representation. Standard non-vectored I/O
-still works through its vectored-write fallback.
+The gateway links no HTTP library. Heads are parsed and written by the verified
+codec ([codec](http1-codec.md)); the adapter in `gateway-runtime/src/http1.rs`
+owns every HTTP buffer, and each one is a plain `Vec<u8>` with a stated bound.
+The bounds below are requested allocations under the Rust 1.99.1 `Vec` growth
+policy, not the logical byte counts the proofs state.
 
-In Hyper's [h1/io.rs](https://docs.rs/crate/hyper/1.12.0/source/src/proto/h1/io.rs),
-`set_max_buf_size` sets both the adaptive read strategy maximum and the write
-buffer threshold. `poll_read_from_io` limits the requested reserve but passes the
-available `BytesMut` spare capacity to the I/O reader. Allocation rounding and
-shared backing storage therefore prevent treating 32768 as a hard allocation
-or per-read byte cap. Both production connections now wrap their HTTP plaintext
-I/O in `http_io::ReadLimited`, which exposes at most 32768 bytes per read even
-when Hyper offers larger spare capacity. Inbound reads wrap TCP; upstream reads
-wrap the completed TLS stream, so this is not a TLS handshake-buffer limit.
-The adapter allocates no separate read buffer and preserves vectored writes.
-Its safe ReadBuf projection may initialize up to 32768 previously uninitialized
-bytes; it preserves existing filled bytes and propagates pending/error/EOF states.
-Our frame reader still independently rejects visible frames above 32768 and
-detaches accepted frames into bounded copies.
+### Head buffers
 
-This cap fixes an observed compatibility defect, not just an accounting ambiguity:
-an exactly 32768-byte valid response head grew Hyper's parser backing storage;
-subsequent body reads reused that larger allocation, and our Reader rejected a
-valid body with `InvalidData`. A deterministic eager-input regression failed
-without the wrapper and now preserves a 256 KiB opaque payload after a maximum
-head in both client/server parsers, with Content-Length and chunked framing.
-The chunked case uses a single 256 KiB wire chunk, demonstrating that the read
-limit does not impose an HTTP chunk-size or whole-body-size limit. Parser backing
-capacity, shared owners, and allocator overhead remain separate accounting work.
+`read_request_head` and `read_status_head` read into one `Vec<u8>`. Before each
+read the vector is resized to at most `headers::MAX_BYTES` (32,768) bytes in
+total, so its capacity never exceeds 32,768, and a head that has not parsed by
+that size is refused as too large rather than read further. When a head parses,
+`split_off` moves the bytes after it into a second vector of at most 32,768
+bytes; the first is dropped when the function returns, so the two coexist only
+during that return. The leftover vector becomes the body reader's buffer.
 
-`WriteBuf::can_buffer` checks the buffered length *before* accepting the next body
-buffer. The next buffer can cross the threshold. Queue strategy additionally
-limits its buffer list to 16 entries; flatten strategy copies into a growable
-header vector. Our output frames contain at most 16384 payload bytes, but HTTP
-framing overhead, serialized headers, retained vector capacity, and allocator
-rounding are additional. Headers enter through a separate encoding path. Thus
-neither 32768 nor the one-slot application channel bounds all Hyper output storage.
+The upstream status head is read the same way; interim 1xx heads other than 101
+are discarded and the buffer reused, so skipping them allocates nothing new.
 
-### Output backpressure and retained capacity
+### Body read buffer
 
-The pinned dispatcher's `poll_write` checks `can_buffer_body` before polling the
-next body frame. With pipeline aggregation disabled, a data append therefore
-starts below the 32768-byte remaining-output threshold. Our largest data frame
-is 16384 bytes; chunked encoding adds at most eight bytes (four hexadecimal digits
-and two CRLF pairs). The separate chunked end marker is five bytes. Headers are
-encoded separately and must be budgeted separately, including configured URI and
-credential lengths; a large serialized head can exceed the body threshold before
-any body is polled. The queue strategy additionally stops at 16 encoded buffers.
-These limits bound pending output, not all retained contents: a partially consumed
-queued Bytes still owns its complete original allocation.
+`BodyReader` keeps one `Vec<u8>` of at most `READ_BYTES` (32,768) bytes: the
+leftover from the head, then each socket read refills it after it is spent. It
+is never grown past 32,768. Chunk framing bytes are consumed in place; body
+bytes are copied into the caller's read buffer, which for the verified body copy
+is the stream's own chunk owner (at most K bytes, see
+[resource accounting](resource-accounting.md)). The decoder (`ChunkDecoder`)
+holds four integers and ghost state only.
 
-For the production **streaming** path, let H = 32768 and F = 16384. Inspection of
-`dispatch.rs::poll_write`, `conn.rs::{write_body,write_body_and_end,end_body}`,
-`encode.rs`, and `common/buf.rs::BufList::advance` gives these conditional bounds:
+`http_io::ReadLimited` still wraps the upstream TLS plaintext stream so each
+read requests at most 32,768 bytes from rustls regardless of the destination
+buffer offered; inbound reads go straight to the TCP half with the 32,768-byte
+buffer above.
 
-| Quantity per Hyper writer | Source-derived bound | Scope |
-| --- | --- | --- |
-| Queued encoded body descriptors | 16 | `can_buffer` checks the count before the dispatcher obtains another body frame; each encode/end operation appends one descriptor. The serialized head is separate. |
-| Remaining encoded body bytes | H + F + 13 = 49,165 | One append may cross H. Ordinary chunk framing adds at most eight bytes; 13 also covers the combined chunk/end form. A standalone end marker is five bytes. |
-| Original payload bytes retained by those descriptors | H + 2F + 13 = 65,549, and at most 16F | Fully consumed front descriptors are immediately popped. Only the front can retain a consumed payload prefix, adding at most F beyond remaining bytes. |
-| Original payload bytes including our mailbox | min(17F, H + 3F + 13) = 81,933 | One additional application frame can wait outside Hyper. This term overlaps the existing application-channel budget and must not be added twice. |
+### Chunk framing buffers
 
-The queued flush path uses `chunks_vectored` followed by `advance`; it does not
-invoke `BufList::copy_to_bytes`, whose fallback would allocate copied storage.
-The 64-entry IoSlice array is fixed stack scratch and borrows existing buffers.
+`ChunkedWriter` frames each write as one chunk in a `pending` vector: the hex
+size line (at most 18 bytes), the data, and CRLF. Writes come from the body copy
+in frames of at most 16,384 bytes, so one framed chunk is at most 16,404 bytes.
+The vector is built with `extend_from_slice` and two pushes, so doubling can
+request up to 32,808 bytes; it is cleared, not shrunk, once written, and reused.
+The last chunk is five bytes. There is one `ChunkedWriter` per upload (the
+transport's request body) and one per streamed response (the connection task).
+A partially written chunk stays in `pending` across `Pending` polls and is
+finished before the next write is accepted, so a slow peer holds at most one
+framed chunk here plus the one frame in the body mailbox.
 
-These are payload/descriptor bounds under the pinned source behavior, not Verus
-proofs or allocator-byte bounds. They rely on opaque copied frames no larger than
-F, queue mode, no trailers/pipelining, and one exchange per connection. Forwarded
-Content-Length is removed by both header allowlists, so streamed output uses
-chunked or close-delimited encoding rather than `BufKind::Limited` retaining an
-unused suffix. Reintroducing Content-Length or arbitrary shared Bytes owners
-requires revisiting this argument. Generated fixed responses have a separate
-size obligation. Descriptor ABI size, VecDeque spare capacity/growth overlap,
-Bytes ownership metadata, serialized-head capacity, and allocator overhead remain
-outside these numeric payload bounds.
+### Written head lengths
 
-`queued_hyper_partial_writes_bound_original_payload_owners` tracks destruction of
-original buffers through the real queued client dispatcher. It repeatedly grants
-zero, one, fractional-frame, and crossing-frame write budgets, for 1-, 1024-, and
-16384-byte frames. Over 64 rounds, cumulative traffic exceeds the bound while live
-original payloads remain below it; canceling releases every tracked owner. The
-probe counts original payload lengths, not only remaining Bytes views, so partial
-front-buffer retention is visible. This is regression evidence for the audited
-argument, not a measurement of total heap or RSS.
+Heads are serialized by the verified writer into a fresh `Vec<u8>` and written
+with `write_all`. The logical length is the sum of the field names and values
+(at most 32,768 bytes, 100 fields, by the projection's `fits` check), plus `: `
+and CRLF per field, the start line, the empty line, and the two fields the
+adapter adds (`connection: close` and either `transfer-encoding: chunked` or a
+`content-length`). Requests also carry the configured path (at most 8,192 bytes
+with the authority). The boundary tests pin the maxima: a maximum configured
+request head is below 65,536 bytes, and a maximum response head is at most
+33,445 bytes. `Vec` doubling can request up to 65,536 bytes for either. The
+vector is dropped as soon as `write_all` returns.
 
-The unused flatten mode has another distinction. `Cursor<Vec<u8>>::maybe_unshift` removes
-consumed prefix bytes only when spare capacity cannot fit the next encoded frame.
-The vector can therefore retain already-written bytes alongside remaining output;
-its length need not equal `WriteBuf::remaining()`. Capacity survives clearing,
-and vector growth can overlap old and new allocations. A complete backing-storage
-bound for that mode would need initial capacity, largest serialized head, growth
-and compaction. Production now excludes body flattening by selecting queue mode;
-serialized-head vector capacity, queued frame owners/control storage, and parser
-storage still require their own accounting.
+Error responses the adapter writes itself (`431`, `400`, `503`, `502`, `504`)
+have empty field lists and a `content-length: 0`, so their heads are under 100
+bytes. The `100 Continue` interim response is a 25-byte constant.
 
-`stalled_hyper_output_bounds_body_consumption_and_cancellation` runs the actual
-Hyper client dispatcher and production ChannelBody against an I/O adapter that
-never accepts a byte. It exercises both queue and flatten modes with 1-, 1024-,
-and 16384-byte frames. Accepted application payload stops within the 32768-byte
-threshold plus one crossing frame plus the one-slot application channel; queue
-mode also stays within 16 Hyper frames plus that channel. Sixteen further polls
-make no progress, with Tokio's cooperative budget renewed between polls so task
-budget exhaustion cannot produce a false plateau. Dropping the connection makes
-the blocked producer fail. This is dependency/backpressure regression evidence,
-not a heap bound, a partial-write capacity test, or a proof of the async runtime.
+### What no longer exists
 
-`queued_hyper_output_preserves_duplex_bytes_with_short_nonvectored_writes`
-forces queue mode in both client and server over a 257-byte duplex pipe. Its I/O
-wrapper reports no native vectored support and accepts at most seven bytes per
-write. A 65,537-byte opaque upload and streamed echo response survive exactly,
-including End acknowledgments and completed connection tasks. This exercises
-partial vectored fallback through chunk headers, payload, and terminators. It is
-byte/lifecycle regression evidence, not a retained-capacity theorem.
-
-Hyper's [body/chan.rs](https://docs.rs/crate/hyper/1.12.0/source/src/body/chan.rs)
-holds one data item, a separate pending error, and optional trailers. This adds a
-slot beyond our reader copy. That item can reference shared parser backing storage;
-its count alone is not a byte-allocation theorem. Peer metadata is parsed before
-our filtering can reject it. Our 100-value/32768-byte header checks bound accepted
-name/value bytes, not HeaderMap allocation or URI/parser scratch. The metadata
-adapter now detaches allowed header values into bounded copies and consumes original
-request/response Parts before awaiting further I/O; a tiny forwarded header cannot
-retain a large source owner through that copy. Connection-option storage retains
-at most five/six relevant distinct names. See [metadata accounting](http-boundary.md#metadata-ownership-and-allocation)
-for inserted credential/Host bytes and excluded serialization/collection storage.
-
-### Serialized head lengths
-
-A root-configured destination is now limited to 8,192 ASCII bytes before secret
-loading. Previously, a path could consume nearly the one-MiB config input limit
-and be serialized again for each admitted request. The new limit bounds that
-amplification while retaining fixed native provider paths. Credential values
-remain capped at 8,192 bytes before the optional seven-byte bearer prefix.
-
-For a production POST, let H be configured authority length and P the origin-form
-path length. The complete URI limit implies H + P <= 8,192, even with unusually
-long numeric port spelling; the DNS hostname limit alone would not establish
-this. The following conservative wire-length inventory uses the filtered header
-allowlists and Hyper 1.12.0's default serialization:
-
-| Request-head part | Byte allowance |
-| --- | ---: |
-| Forwarded plus injected header names/values, excluding Host value | 41,007 |
-| Separators and CRLF for up to 103 fields | 412 |
-| Host value plus request path | 8,192 |
-| POST/version/spaces/start-line CRLF | 16 |
-| Generated Transfer-Encoding: chunked line | 28 |
-| Final CRLF | 2 |
-| Total | 49,657 |
-
-Response forwarding retains at most 32,768 name/value bytes and 100 fields. A
-128-byte allowance covers Hyper's canonical status line; 37 bytes cover Date,
-19 cover Connection: close, and 66 conservatively cover generated framing lines.
-Together with separators and the final CRLF, this is at most 33,420 bytes. The
-upstream's arbitrary reason phrase is not forwarded: only its StatusCode is kept.
-Generated fixed responses have small fixed headers within this allowance.
-
-The server can additionally generate a 25-byte `100 Continue` head when the
-client supplies `Expect: 100-continue`. In `conn.rs::poll_read_body`, the
-`Reading::Continue` branch appends it only while writing is still in `Init`, then
-changes reading to `Body` before recurring. Thus it occurs at most once for the
-single request on a production connection. Budget it even if it has not drained
-before final-head encoding: the combined server-head allowance is 33,445 bytes.
-Provider informational responses are not forwarded as output heads; the client
-decoder skips them and no informational callback is installed.
-
-Both inventories fit 64 KiB. `maximum_configured_request_head_serializes_below_64_kib`
-uses the real client serializer with an exact-limit URI, a 253-byte DNS name,
-a five-digit port, an 8,192-byte bearer secret, and 100 inbound fields filling the
-32 KiB name/value budget. It captures the complete outgoing head, checks the
-exact path/credential, and completes the empty streamed exchange. The config
-boundary test accepts 8,192 bytes, rejects 8,193, and observes no secret calls
-on rejection. These are adapter/source bounds and regressions, not Verus proofs.
-
-`maximum_response_head_with_continue_serializes_below_64_kib` exercises the real
-server serializer with 100 filtered response fields filling the 32 KiB metadata
-budget. The client waits for the exact interim response before sending its body;
-the test checks that all 100 final fields survive and that the total interim/final
-wire length fits 33,445 bytes. This tests the protocol path and length inventory,
-not simultaneous internal-buffer occupancy or allocation capacity.
-
-### Serialized head reservation requests
-
-The pinned `role.rs` encoders call `reserve(30 + 30 * header_count)` before
-encoding. The client calls `set_length` first, which can add one framing field:
-103 application fields plus one generated field therefore request at most 3,150
-additional bytes. The server's 100 application fields request at most 3,030;
-including a retained interim head, the required length is at most 3,055. Its
-additional Date reservation is 37 bytes, covered by the remaining final-head
-inventory (the subsequent Date line and terminal CRLF occupy 39 bytes).
-Default lowercase writers and `FastWrite` append actual slices; they do not
-reserve an arbitrary URI formatting estimate. Under these production paths,
-every header-vector required length (`len + additional`) remains below 64 KiB.
-
-Fully consumed headers call `Cursor::reset`, which clears length but preserves
-capacity; partially consumed headers retain their original vector length. The
-interim-head allowance covers that retained prefix. One exchange per connection,
-no server keep-alive, no pipelined flush aggregation, and queue-only body output
-are essential to this reservation inventory. It is not a general Hyper bound.
-
-### Header-vector backing capacity
-
-The Rust 1.99.1 `rust-src` component supplies the next step of this audit:
-`library/alloc/src/raw_vec/mod.rs::{grow_amortized,set_ptr_and_cap}` requests
-`max(2 * old_capacity, required_capacity, minimum_capacity)` and records that
-requested capacity. For byte vectors the minimum is eight. Slice extension in
-`vec/spec_extend.rs` uses `append_elements`, reserving the actual appended count.
-`alloc/src/alloc.rs::Global::grow_impl_runtime` passes the new layout size to
-reallocation. These are pinned implementation facts, not stable Vec API promises.
-
-Hyper starts its header vector at 8,192 bytes. Let M = 65,536, the conservative
-upper bound on every required length established above. A growth occurs only
-when old capacity C is below the required length, so C < M. The new capacity is
-at most 2M. Once capacity reaches M, no further growth is needed on these paths.
-Thus each writer retains at most 131,072 requested header-vector bytes, including
-spare capacity. A replacement can overlap an old allocation below M and a new
-allocation at most 2M: allow 196,608 requested bytes during that operation.
-Do not add both the retained and replacement allowances for the same writer.
-
-These bounds exclude allocator size-class rounding, allocator-internal scratch,
-freed-memory caching, and OS mappings. They do not guarantee successful allocation
-or bound RSS. The existing wire regressions validate the serializer inputs, not
-the private Vec capacity. No Verus claim is made about Hyper, Vec, or the allocator.
-
-### Parser backing allocation requests
-
-For the read side let M = 32,768. All production paths into
-`Buffered::poll_read_from_io` start with visible length L < M: head parsing checks
-the threshold first, `MemRead::read_mem` reads only when empty, and the idle/EOF
-and notification paths likewise check emptiness. It reserves additional A with
-L + A <= M. The plaintext adapter limits each completed read to M bytes, so the
-visible length after a read is less than 2M even if spare capacity is larger.
-Splitting/advancing can leave an offset into a larger backing vector; visible
-length alone is therefore insufficient for its allocation bound.
-
-Inspection of bytes 1.12.1 `bytes_mut.rs::reserve_inner` gives a backing-vector
-capacity bound of 4M = 131,072 requested bytes per allocation, using the pinned
-Vec growth rule above. For a uniquely owned vector with backing capacity B and
-offset O, a reservation that needs allocation has two cases:
-
-- If O < L, the underlying required length O + L + A is less than 2M.
-- If O >= L, bytes reclaims the prefix whenever B >= L + A. Allocation in this
-  case therefore implies B < M, and O + L + A is again less than 2M.
-
-In either case growth is unnecessary once B >= 2M; when growth is necessary,
-doubling B and the underlying required length are at most 4M. The same reasoning
-applies to the uniquely owned shared-vector branch, including its explicit
-doubling. With multiple owners, bytes allocates a replacement of
-`max(L + A, original_capacity)`. Its original-capacity representation rounds
-down and caps at 65,536, so this branch requests at most 2M. The initial empty
-buffer and first reserve satisfy the bound.
-
-Unique-vector reallocation can overlap an old allocation below 2M and a new
-allocation at most 4M: allow 6M = 196,608 requested bytes for that operation.
-Shared replacement instead retains old allocations through outstanding header
-or body views. **This per-allocation bound does not bound their count or sum.**
-Composition must count distinct live backing owners, shared control blocks,
-detached application copies, and canceled-task tails; allocator overhead remains
-excluded. Recheck every read call site and bytes/Vec growth branch on upgrades.
-
-### Live parser backing owners
-
-For one production HTTP/1 exchange, the following locations can hold distinct
-allocations originating in `Buffered::read_buf`. Several locations often share
-one allocation; charging them independently is conservative.
-
-| Location | Maximum distinct parser allocations | Lifetime |
-| --- | ---: | --- |
-| Current parser buffer | 1 | Connection driver, including its cleanup tail |
-| Parsed request/response head | 1 | Original Parts until the consuming metadata boundary completes |
-| Incoming-body channel item or producer's decoded data frame | 1 | Delivery, rejection, or final channel destruction |
-| Reader's transient input data | 1 | Synchronous bounded copy; released before that poll returns |
-
-`role.rs` splits a complete head from one contiguous read buffer. Its retained
-HeaderValue slices all refer to that allocation; field count does not multiply
-parser backing owners. Request URI/response reason-phrase copies and collection
-storage are separate categories. Production disables header-case/order extensions
-and installs no informational-response callback; skipped 1xx heads drop before
-the next parse iteration. Only one final head is delivered per connection.
-
-Hyper's `body/chan.rs` has one `item` slot. The sole producer in
-`dispatch.rs::poll_read` checks `poll_ready` before decoding the next frame and
-moves that frame into `try_send_data`; there is no independent producer backlog.
-Once the reader takes a frame, the producer may fill the slot again while the
-reader copies. Both must be charged. Our Reader retains only its detached copy
-after the poll, and never stores the source frame across an await. Decoder trailer
-assembly copies bytes into a separate buffer; it does not retain prior data
-frames or parser slices. Trailer storage/metadata remain separate obligations.
-
-Receiver cancellation does **not** immediately release Hyper's queued item:
-`Receiver::drop` marks it closed but does not take `state.item`. An outstanding
-sender can therefore keep the item alive until it is dropped. The producer checks
-receiver closure before another decode; a cancellation racing a decode returns
-the rejected frame for local destruction. Keep the channel item charged through
-this tail, even after the application has released its request slot. This differs
-from our outgoing mailbox, whose receiver drop extracts its pending item.
-
-These four locations give a conservative 512 KiB of requested parser backing
-capacity per live exchange, using the per-allocation bound above. During a
-replacement, charge the other three locations at 128 KiB each and old/new parser
-storage together at 192 KiB: 576 KiB. In the shared-replacement branch the new
-allocation is at most 64 KiB; in the unique branch the old allocation is below
-64 KiB. This also covers overlap rather than silently reclaiming the old buffer.
-
-This is a trusted source/ownership argument for this adapter, not a Verus theorem
-or a per-connection total-memory bound. It excludes detached Reader copies,
-trailer buffers/maps, errors, metadata/control objects, allocator internals, TLS,
-and other HTTP output storage. Do not multiply it solely by active request count:
-inbound connections and canceled connection/channel tails have separate lifetimes.
-It assumes no arbitrary user extension retains additional raw Incoming frames.
-
-`incoming_body_read_ahead_stays_bounded_with_a_slow_reader` keeps the original
-response header alive, offers a two-MiB eager body, repeatedly polls the actual
-driver with renewed cooperative budgets, and consumes one byte per round.
-Read-ahead reaches a plateau while the detached remainder is occupied; the test
-also checks exact bytes and destruction of the I/O owner on cancellation. This
-measures read-ahead and task destruction, **not** private allocation identities or
-heap capacity. The separate tracked-owner Reader test checks immediate release
-of a large source owner after copying a small visible frame.
-
-### Header collections and parser scratch
-
-#### Rejected trailer storage
-
-Rejecting trailer frames in our Reader does not avoid Hyper's prior parsing
-allocations. `decode.rs` assembles trailers in a separate `BytesMut`, starting
-with capacity 64. Each following byte is appended before the length check;
-reaching 32,768 bytes returns an error, so successful trailer blocks are strictly
-smaller than that limit. No more than 100 trailer fields reach `decode_trailers`.
-The buffer is neither split nor shared during assembly. `BufMut::put_u8` reaches
-`BytesMut::chunk_mut`, which reserves 64 when full; with the pinned Vec policy
-its capacities double from 64 through at most 32,768. Allow 49,152 requested
-bytes during the largest old/new replacement, excluding allocator overhead.
-
-During decoding, that assembly buffer overlaps a scratch vector of at most 100
-httparse header views and a newly built HeaderMap. Names and values are copied
-from the assembly buffer, with combined logical contents below 32 KiB; apply the
-parsed-map collection inventory below separately. The assembly and scratch
-vectors drop when decoding returns. The resulting trailer map can then occupy
-Hyper's separate channel `trailers` slot until delivered/rejected or the final
-channel owner drops. Receiver drop alone does not clear this slot either.
-Malformed-header diagnostic formatting is additional error storage, not included
-in the payload or assembly-capacity allowance.
-
-`incoming_trailer_parser_enforces_byte_and_field_limits` uses a real queued
-client connection and raw chunked responses: 32,767 trailer bytes and 100 fields
-are delivered by Hyper, while 32,768 bytes and 101 fields produce body errors
-before a trailer map is delivered. The existing Reader test independently rejects
-delivered trailer frames. Neither test measures private allocator capacity.
-
-#### Head and trailer maps
-
-The explicit wire-head limit includes the request/status line, field separators,
-and terminal CRLF, rather than only the names/values checked by the adapter.
-Hyper checks the completed parsed head length before constructing its HeaderMap;
-the parser-buffer threshold still governs incomplete heads. The same explicit
-limit also applies to chunked trailer parsing, although the gateway rejects
-trailers. Socket tests accept exactly 32 KiB/100 fields and reject one byte/field
-more on both directions, including a large upstream reason phrase with almost no
-header-value content. These checks do not bound backing-buffer capacity or every
-transient read allocation.
-
-Pinned `http` 1.5.0 [header/map.rs](https://docs.rs/crate/http/1.5.0/source/src/header/map.rs)
-stores an index array, a vector of distinct-name buckets, and a separate vector
-for additional values under repeated names. A count of 100 values is therefore
-not a count of 100 equal-sized allocations. The following are source-derived
-collection slot requests for this gateway, before allocator overhead:
-
-| Map at the inspected boundary | Index slots | Distinct-name bucket capacity request | Additional-value count |
-| --- | ---: | ---: | ---: |
-| Hyper parsed head, at most 100 fields | At most 256 | At most 192 | At most 99 |
-| Newly filtered/injected request map, at most eight distinct names | At most 16 | At most 12 | At most 99 |
-| Newly filtered response map, at most six distinct names | At most 16 | At most 12 | At most 99 |
-
-Hyper reserves for the parsed field count. HeaderMap rounds raw capacity to a
-power of two and uses three quarters for distinct-name buckets. Its insertion
-path reserves before checking whether the name already exists, so appending a
-duplicate can grow a six-name map from eight to sixteen index slots. The adaptive
-hashing growth thresholds are 128 displaced / 512 shifted entries, beyond these
-100-or-fewer-distinct-name maps. This reasoning assumes the parser's cached map
-starts empty and only retains capacities from the same bounded head path; it does
-not apply to arbitrary externally pre-reserved HeaderMaps.
-
-The extra-value vector grows independently; with the pinned standard Vec growth
-and at most 99 extras, its requested capacity is at most 128 elements. Each
-private Bucket contains a HeaderName, HeaderValue, hash, and optional link pair;
-each ExtraValue contains a HeaderValue and two links. Their ABI sizes, padding,
-shared Bytes control blocks, and allocator rounding must be added separately.
-Growth can temporarily retain old and new arrays; the final capacities above are
-not peak allocation bounds. Hyper may also modify a map after the adapter handoff.
-
-`role.rs` additionally uses two parser scratch arrays of up to 100 elements each:
-one of httparse header views, one of header byte-range indices. Their SmallVec
-storage and frame/stack placement are separate from the HeaderMap. A noncanonical
-response reason phrase has its own copied bytes, now bounded by the wire-head
-limit and released with response Parts at the metadata boundary. Header-case
-preservation and original-order recording are not enabled in this transport.
-
-These per-map facts advance collection accounting; composing every live/cached
-map, parser scratch, and growth overlap across connections and worker cleanup
-remains part of the complete allocation inventory. They are source audits, not
-Verus proofs of Hyper/http/Vec or a total process-memory ceiling.
+There is no parser backing store that grows past the head limit, no header
+vector or `HeaderMap`, no URI, no dequeued-frame retention outside our mailbox,
+and no trailer assembly: trailers are refused by the chunked decoder at the
+first byte of a trailer field. The `Bytes` type and its shared backing owners
+are gone with the dependency, so a small value can no longer pin a large
+parser buffer; every field value is its own `Vec<u8>` copy made by the parser.
+Allocator rounding and `Vec` spare capacity remain outside the logical bounds.
 
 ## Upstream TLS storage
 
@@ -677,7 +345,7 @@ into the ciphertext queue. The observed queued length increases by exactly
 
 This is a counterexample to treating the rustls application setting as a total
 ciphertext-queue bound. It is not a production gateway exploit: the fixture
-explicitly schedules reads and writes, without Hyper or tokio-rustls. The next
+explicitly schedules reads and writes, without the HTTP adapter or tokio-rustls. The next
 obligation is to establish whether production polling and body backpressure
 permit equivalent repeated interleavings, including empty peer application
 records, or enforce an explicit queue bound at the TLS adapter. The consecutive
@@ -779,16 +447,16 @@ regression evidence, not a portability guarantee about arbitrary allocators.
 TLS 1.2 and AES-128 follow the audited analogous source paths but are not
 separately covered by this allocation-address test.
 
-Hyper passes at most 64 `IoSlice`s per queued vectored call. Rustls's
-`PlaintextSink::write_vectored` collects the borrowed slice references into a
-`Vec<&[u8]>` for two or more slices. The pinned exact-size collection path requests
-at most 64 fat-pointer entries (1,024 bytes on the supported 64-bit ABI).
+The adapter writes heads and chunks with `write_all`, one slice at a time, so
+production never reaches rustls's `PlaintextSink::write_vectored` collection
+path with more than one slice. That path collects borrowed slice references into
+a `Vec<&[u8]>` for two or more slices and is kept in this audit because
+`ReadLimited` still forwards `poll_write_vectored` when a caller offers it:
+the pinned exact-size collection requests one fat pointer per slice.
 `OutboundChunks` borrows those references and does not clone their payloads.
-The Vec exists only during that synchronous writer call. Hyper and rustls each
-also use a 64-entry `IoSlice` stack array, and these can overlap during the nested
-write; count both (2,048 bytes on the same ABI), separately from heap storage and
-other stack frames. The test with 65,537 slices deliberately bypasses Hyper and
-therefore does not represent production descriptor usage.
+The Vec exists only during that synchronous writer call. The test with 65,537
+slices deliberately bypasses the adapter and therefore does not represent
+production descriptor usage.
 
 `ChunkVecBuffer::len` subtracts `prefix_used`, while its first Vec keeps the
 entire original allocation until `consume` pops that record. Consequently a
@@ -1030,7 +698,7 @@ or additional gateway instances must add those resources separately.
 
 The bounded counts above help identify retained allocations but cannot be summed
 as a proven RSS ceiling. Still needed are backing-capacity/lifetime bounds for
-Hyper parser/output storage, TLS handshake state and the cache metadata/active owners excluded above, task/channel nodes,
+the codec adapter's `Vec` spare capacity, TLS handshake state and the cache metadata/active owners excluded above, task/channel nodes,
 configuration and credential storage, allocator/thread overhead, and kernel socket
 buffers. Source-level inspection and isolated process measurements must distinguish
 these from the verified logical payload budget. This audit does not replace the

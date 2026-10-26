@@ -8,9 +8,7 @@ use crate::test_support::{self_signed, TempDir};
 use crate::transfer::{AuditLog, LogRecord, RecordKind};
 use gateway_core::exchange_assembler::{Assembler, Exchange};
 use gateway_core::metadata::{encode_completion, encode_request_start, encode_response_head};
-use http_body_util::{BodyExt, Full};
-use hyper::{body::Incoming, service::service_fn, Request, Response};
-use hyper_util::rt::TokioIo;
+use crate::test_support::http::{read_request, write_response, Received};
 use serde_json::{json, Value};
 use std::{collections::HashSet, sync::Mutex};
 use tokio::net::TcpListener;
@@ -46,28 +44,29 @@ async fn serve_fake(listener: TcpListener, acceptor: tokio_rustls::TlsAcceptor, 
         let Ok((socket, _)) = listener.accept().await else { return; };
         let acceptor = acceptor.clone(); let state = state.clone();
         tokio::spawn(async move {
-            let Ok(tls) = acceptor.accept(socket).await else { return; };
-            let service = service_fn(move |request: Request<Incoming>| { let state = state.clone(); async move { handle_fake(request, state).await } });
-            let _ = hyper::server::conn::http1::Builder::new().serve_connection(TokioIo::new(tls), service).await;
+            let Ok(mut tls) = acceptor.accept(socket).await else { return; };
+            let Ok(received) = read_request(&mut tls).await else { return; };
+            let (status, body, retry_after) = handle_fake(received, state).await;
+            let retry = retry_after.map(|seconds| seconds.to_string());
+            let mut fields: Vec<(&str, &str)> = Vec::new();
+            if let Some(retry) = retry.as_deref() { fields.push(("retry-after", retry)); }
+            fields.push(("accept-encoding", "gzip"));
+            let _ = write_response(&mut tls, status, &fields, body.as_bytes()).await;
+            let _ = tokio::io::AsyncWriteExt::shutdown(&mut tls).await;
         });
     }
 }
 
-async fn handle_fake(request: Request<Incoming>, state: Shared) -> Result<Response<Full<bytes::Bytes>>, std::convert::Infallible> {
-    let path = request.uri().path().to_owned();
-    let auth = request.headers().get("authorization").and_then(|v| v.to_str().ok()).map(str::to_owned).unwrap_or_default();
-    let batch_id = request.headers().get("x-hyp-batch-id").and_then(|v| v.to_str().ok()).map(str::to_owned);
-    let content_type = request.headers().get("content-type").and_then(|v| v.to_str().ok()).map(str::to_owned).unwrap_or_default();
-    let body = request.into_body().collect().await.map(|b| b.to_bytes().to_vec()).unwrap_or_default();
+/// The fake's reply: status, body, and an optional Retry-After in seconds.
+async fn handle_fake(request: Received, state: Shared) -> (u16, String, Option<u64>) {
+    let path = request.target().to_owned();
+    let auth = request.header("authorization").map(str::to_owned).unwrap_or_default();
+    let batch_id = request.header("x-hyp-batch-id").map(str::to_owned);
+    let content_type = request.header("content-type").map(str::to_owned).unwrap_or_default();
+    let body = request.body;
     let hang = { let mut fake = state.lock().unwrap(); fake.requests.push(path.clone()); fake.hang };
     if hang { tokio::time::sleep(Duration::from_secs(3600)).await; }
-    let reply = |status: u16, body: String, retry_after: Option<u64>| {
-        let mut response = Response::new(Full::new(bytes::Bytes::from(body)));
-        *response.status_mut() = http::StatusCode::from_u16(status).unwrap();
-        if let Some(seconds) = retry_after { response.headers_mut().insert("retry-after", seconds.to_string().parse().unwrap()); }
-        response.headers_mut().insert("accept-encoding", "gzip".parse().unwrap());
-        Ok(response)
-    };
+    let reply = |status: u16, body: String, retry_after: Option<u64>| (status, body, retry_after);
     let mut fake = state.lock().unwrap();
     let now = now_seconds();
     match path.as_str() {
@@ -362,7 +361,7 @@ fn shipping_section_is_optional_and_validated() {
     assert!(crate::config::GatewayConfig::from_json(&shipping_json(443, &dir.0, json!({})), br#"{"routes":[]}"#, |_| None).is_ok(),
         "the gateway configuration ignores the section");
     let config = ShippingConfig::from_root_json(&shipping_json(443, &dir.0, json!({})), resolver).unwrap().unwrap();
-    assert_eq!(config.server.uri().to_string(), "https://localhost:443/");
+    assert_eq!(config.server.url(), "https://localhost:443/");
     assert_eq!((config.max_open_exchanges, config.max_exchange_bytes, config.poll_ms), (64, 1_048_576, 100));
     for (extra, error) in [
         (json!({"server": "http://localhost/"}), crate::config::ConfigError::Destination),

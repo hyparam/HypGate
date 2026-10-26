@@ -43,7 +43,7 @@ directions are proved, so every such text is accepted and userinfo, fragments,
 queries, backslashes, control characters, encoded authorities, ambiguous hosts,
 and paths starting with two slashes are rejected. The authority, host, port, and
 path the runtime uses are proved to be exactly the substrings of the configured
-text; Hyper's URI is parsed from the same text and must agree with them. No client path is joined onto
+text, and the verified writer puts that path in the request line. No client path is joined onto
 this endpoint. New API paths need explicitly granted endpoints; this initial
 interface does not support dynamic query parameters.
 
@@ -65,8 +65,10 @@ categories, never input strings or secret values. Secret memory is not zeroized.
 Six configuration unit tests cover native provider endpoint/credential bindings,
 invalid authentication, forbidden routes, hostile destinations, invalid limits and
 digests, cross-tenant credentials, malformed schemas, and secret/header injection.
-Workspace test totals are maintained in the [README](../README.md). No live provider
-call was made; this does not establish provider compatibility.
+Workspace test totals are maintained in the [README](../README.md). Live Anthropic
+Messages and OpenAI Responses exchanges, JSON and SSE, passed through these
+bindings on 2026-10-25; the [HypAware setup](hypaware.md#smoke-test-record)
+records the run.
 
 JSON parsing, hashing, secret resolution, and the runtime mapping are trusted and
 tested, not formally verified; destination validation is verified. The core theorem still concerns
