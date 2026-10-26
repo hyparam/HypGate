@@ -95,9 +95,10 @@ zeros, or lone low surrogates would make the reader incomplete).
 schema (allowed keys, once each, required kinds); `shipping/config.rs` reads
 the `shipping` section; `shipping/state.rs` reads and writes the identity
 and checkpoint files and reads the claims of the gateway credential;
-`shipping/client.rs` reads error replies; `shipping/projection.rs` reads
-provider request and response bodies and SSE events and builds the rows the
-shipper writes; `main.rs` writes the scan output. The runtime's `json_build`
+`shipping/client.rs` reads error replies; the verified projection
+(`gateway_core::projection`) reads provider request and response bodies and
+SSE events and builds the rows the shipper writes; `main.rs` writes the
+scan output. The runtime's `json_build`
 module arranges values for the writer (text, numbers from `u64`, objects
 from key-value lists); it holds no logic of its own. `serde_json` is no
 longer a dependency of the gateway binary; the tests still use it to read

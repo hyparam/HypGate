@@ -198,8 +198,9 @@ metadata, not the full HTTP exchange.
 write and sync outcomes truthfully; the copy loop performs the effect the
 body-copy machine names on the reader, writer, and logger it was given, and
 those report truthfully; the server honors its batch
-ledger and part-id dedup; the projection of an exchange's provider JSON into text and usage is
-faithful (tested against recorded bodies, not proved); the runtime's `Effects`
+ledger and part-id dedup; the projection's choice of which provider fields hold
+the model, the text, and the usage is faithful (tested against recorded bodies;
+the rows' structure, bounds, ids, and UTF-8 are proved); the runtime's `Effects`
 implementation performs what it is asked (sends to the configured server,
 returns the log's records in order, writes the checkpoint it is given); the
 scanner reads the same file on restart (the checkpoint names the session).
@@ -257,14 +258,12 @@ an assumption we take on; the proofs that could be written have been.
   machines. The HTTP status comes from the verified status-line parser. The
   clock, session uniqueness, and the one-registry-per-log mapping remain
   trusted.
-- *Shipping trusts its edges.* The machine and driver are proved; the HTTPS
-  client, SSE line splitting, the projection into HypAware rows, and the
-  server's dedup ledger are not, and the projection is lossy by design;
-  the JSON the projection reads and the rows it writes go through the
-  verified reader and writer.
-  Mostly assumption: the server and TLS stack are outside the process. The
-  projection could be removed from the trusted set by shipping raw record
-  bytes and parsing server side, which is a design choice rather than a proof.
+- *Shipping trusts its edges.* The machine, the driver, the JSON reader and
+  writer, and the projection into HypAware rows are proved; the HTTPS
+  client, the calendar text, and the server's dedup ledger are not. The
+  projection's choice of provider fields is lossy by design and pinned by
+  tests rather than proved.
+  Mostly assumption: the server and TLS stack are outside the process.
 
 ## Guarantee 3: there is no crash state
 

@@ -53,6 +53,8 @@ pub mod shipping_driver;
 pub mod exchange_driver;
 pub mod serve_driver;
 pub mod json;
+pub mod utf8;
+pub mod projection;
 
 #[cfg(test)]
 #[path = "tests/streaming.rs"]
@@ -90,3 +92,9 @@ mod serve_driver_tests;
 #[cfg(test)]
 #[path = "tests/json.rs"]
 mod json_tests;
+#[cfg(test)]
+#[path = "tests/utf8.rs"]
+mod utf8_tests;
+#[cfg(test)]
+#[path = "tests/projection.rs"]
+mod projection_tests;

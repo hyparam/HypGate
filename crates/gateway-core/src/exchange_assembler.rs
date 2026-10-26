@@ -35,8 +35,9 @@ pub struct Exchange {
     pub incomplete: bool,
     /// Records arrived without an open request start for this request.
     pub orphan: bool,
-    upload_all: Ghost<Seq<u8>>,
-    download_all: Ghost<Seq<u8>>,
+    /// Every body byte received, kept in proof only; public so the exchange is not opaque to other modules.
+    pub upload_all: Ghost<Seq<u8>>,
+    pub download_all: Ghost<Seq<u8>>,
 }
 
 impl Exchange {

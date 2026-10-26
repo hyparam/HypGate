@@ -8,9 +8,12 @@ send with which credential, how to read a reply, and how long to wait. The
 loop that calls it is verified too (`gateway_core::shipping_driver::drive`):
 it runs against an `Effects` trait whose runtime implementation is a clock, a
 record source, a row projector, one request sender, sleeps, a checkpoint
-writer, and a metrics sink, with no decisions in it. The HTTPS client, JSON
-and SSE parsing, the projection of an exchange into HypAware rows, the state
-files, and the server's own behavior are trusted and tested; the shipping
+writer, and a metrics sink, with no decisions in it. The projection of an
+exchange into HypAware rows is verified too (`gateway_core::projection`, see
+[the projection](#the-projection)), reading provider bodies through the
+verified JSON reader and writing rows through the verified writer. The
+HTTPS client, the calendar text for timestamps, the state files' I/O, and
+the server's own behavior are trusted and tested; the shipping
 adapters are held to a panic-free standard by clippy denies on unwrap,
 expect, panic, indexing, and unchecked arithmetic. The client runs on the
 shipper's own thread with blocking sockets and rustls used directly, no
@@ -162,8 +165,9 @@ implemented.
 - The system clock for renewal decisions and row timestamps.
 - The `Effects` implementation performs what it is asked: `send` reaches the
   configured server and returns that server's reply, `read` returns the log's
-  records in order, `project` is a faithful projection, and `checkpoint`
-  writes the values it is given. The driver that calls them is verified.
+  records in order, `project` hands the exchange to the verified projection
+  with the runtime's calendar, and `checkpoint` writes the values it is
+  given. The driver that calls them is verified.
 - The checkpoint names the log session, and the restarted shipper reads the
   same file from its header. Given that, emission numbering is proved to be a
   function of the records (`exchange_assembler::emitted_requests`), so the
@@ -184,6 +188,24 @@ and the executable prints the figure at startup. See
 ## What is not covered
 
 No proof connects the thread's loop to the verified transitions; that is the
-same trusted-join situation as the gateway's threaded shell. The projection is a
-heuristic and lossy. gzip, dataset registration, config pulls, diagnostics,
+same trusted-join situation as the gateway's threaded shell. The projection's
+choice of provider fields is a heuristic and lossy by design, and the calendar
+text is trusted. gzip, dataset registration, config pulls, diagnostics,
 and fan-out to several servers are not implemented.
+
+## The projection
+
+`gateway_core::projection::rows` builds the two `ai_gateway_messages` rows
+of an exchange. It is proved to return exactly two objects with fixed key
+lists (`user_keys`, `assistant_keys`, and `gateway_keys` inside
+`attributes`), every row well formed for the writer, every string value
+well-formed UTF-8 (`gateway_core::utf8`, which also proves the sanitizer
+keeps well-formed text and replaces each other byte with U+FFFD), each
+`content_text` at most `max_exchange_bytes` long and cut only at a character
+boundary, the message and part ids the hex of the verified keys, the request
+id the hex of the exchange key, and the schema version and message indexes
+fixed. Which provider fields it reads (`model`, `messages`/`input` and the
+last user message's content blocks, `usage` in its Anthropic and OpenAI
+spellings, the SSE event types) is a choice pinned by tests against recorded
+bodies, not a theorem; the runtime supplies only the RFC 3339 text of the
+timestamps through the `Calendar` trait.
