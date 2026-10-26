@@ -7,6 +7,8 @@ pub mod policy;
 pub mod resolved_route;
 pub mod egress;
 pub mod thread_context;
+pub mod http1_head;
+pub mod http1_write;
 pub mod resource;
 pub mod stream;
 pub mod owned_stream;
@@ -55,3 +57,9 @@ mod composition_tests;
 #[cfg(test)]
 #[path = "tests/metadata.rs"]
 mod metadata_tests;
+#[cfg(test)]
+#[path = "tests/http1_head.rs"]
+mod http1_head_tests;
+#[cfg(test)]
+#[path = "tests/http1_write.rs"]
+mod http1_write_tests;

@@ -156,7 +156,7 @@ pub fn lowercase(name: &[u8]) -> (out: Vec<u8>)
     out
 }
 
-fn tchar(b: u8) -> (out: bool)
+pub fn tchar(b: u8) -> (out: bool)
     ensures out == is_tchar(b),
 {
     (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122)
