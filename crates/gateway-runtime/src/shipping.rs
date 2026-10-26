@@ -20,7 +20,6 @@ use crate::disk_log::{LogReader, ScanError};
 pub mod config;
 pub mod client;
 pub mod state;
-pub mod projection;
 pub use config::ShippingConfig;
 use client::{Client, Reply};
 use state::{hex, Checkpoint, Identity};
@@ -254,7 +253,7 @@ impl Effects for Engine {
 
     fn project(&mut self, exchange: &Exchange) -> Projected {
         let session = self.session.unwrap_or([0; 16]);
-        let rows = projection::rows(&session, exchange, self.config.max_exchange_bytes);
+        let rows = gateway_core::projection::rows(&session, exchange, self.config.max_exchange_bytes);
         let mut body = Vec::new();
         for row in &rows { body.extend_from_slice(&crate::json_build::write(row)); body.push(b'\n'); }
         Projected { body, rows: rows.len() }

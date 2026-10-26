@@ -259,8 +259,8 @@ an assumption we take on; the proofs that could be written have been.
   clock, session uniqueness, and the one-registry-per-log mapping remain
   trusted.
 - *Shipping trusts its edges.* The machine, the driver, the JSON reader and
-  writer, and the projection into HypAware rows are proved; the HTTPS
-  client, the calendar text, and the server's dedup ledger are not. The
+  writer, the calendar, and the projection into HypAware rows are proved;
+  the HTTPS client and the server's dedup ledger are not. The
   projection's choice of provider fields is lossy by design and pinned by
   tests rather than proved.
   Mostly assumption: the server and TLS stack are outside the process.

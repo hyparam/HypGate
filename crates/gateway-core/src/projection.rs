@@ -11,8 +11,9 @@
 //! most `max_text` bytes and cut only at a character boundary; the message
 //! and part ids are the hex of the verified keys and the request id is the
 //! hex of the exchange key; the schema version and message indexes are
-//! fixed. Which provider fields are read, and the calendar text the runtime
-//! supplies for timestamps, are choices pinned by tests, not theorems.
+//! fixed; the timestamps are the verified calendar's text of the exchange's
+//! start and completion times. Which provider fields are read is a choice
+//! pinned by tests, not a theorem.
 use vstd::prelude::*;
 use vstd::slice::{slice_index_get, slice_subrange, slice_to_vec};
 use crate::exchange_assembler::Exchange;
@@ -124,14 +125,6 @@ pub const O_CLIENT_DISCONNECT: [u8; 17] = *b"client_disconnect";
 pub const O_LOG_REFUSAL: [u8; 11] = *b"log_refusal";
 pub const O_OTHER: [u8; 5] = *b"other";
 
-/// Calendar text for Unix milliseconds, supplied by the runtime: an RFC 3339
-/// timestamp and a civil date. Whatever bytes it returns are sanitized
-/// before they enter a row.
-pub trait Calendar {
-    fn timestamp(&self, ms: u64) -> Vec<u8>;
-    fn date(&self, ms: u64) -> Vec<u8>;
-}
-
 #[derive(Debug, PartialEq, Eq)]
 pub struct Usage { pub input: u64, pub cache_read: u64, pub cache_write: u64, pub output: u64 }
 struct ParsedRequest { model: Option<Vec<u8>>, session_hint: Option<Vec<u8>>, user_text: Option<Vec<u8>> }
@@ -183,6 +176,16 @@ pub open spec fn value_at(v: Value, k: int) -> Value { crate::json::members_of(v
 pub open spec fn is_text(v: Value, max: int) -> bool { v is Str && crate::utf8::valid(v->Str_0@) && v->Str_0@.len() <= max }
 pub open spec fn is_hex_of(v: Value, bytes: Seq<u8>) -> bool { v is Str && v->Str_0@ == crate::shipping_identity::hex_encoding(bytes) }
 pub open spec fn is_number(v: Value, n: nat) -> bool { v is Number && v->Number_0@ == crate::inbound::decimal(n) }
+pub open spec fn is_timestamp(v: Value, ms: u64) -> bool { v is Str && v->Str_0@ == crate::calendar::iso_timestamp(crate::calendar::civil_of(ms)) }
+pub open spec fn is_date(v: Value, ms: u64) -> bool { v is Str && v->Str_0@ == crate::calendar::iso_date(crate::calendar::civil_of(ms)) }
+/// When the exchange started: its request start, else its response head, else its completion, else 0.
+pub open spec fn started_ms(e: Exchange) -> u64 {
+    match e.start { Some(s) => s.time_ms, None => match e.head { Some(h) => h.time_ms, None => match e.completion { Some(c) => c.time_ms, None => 0 } } }
+}
+/// When it finished: its completion, else its response head, else when it started.
+pub open spec fn finished_ms(e: Exchange) -> u64 {
+    match e.completion { Some(c) => c.time_ms, None => match e.head { Some(h) => h.time_ms, None => started_ms(e) } }
+}
 
 // ---- building values --------------------------------------------------------------------
 
@@ -219,6 +222,31 @@ fn number(n: u64) -> (out: Value)
     ensures is_number(out, n as nat), values_valid(out), crate::json::well_formed(out),
 {
     Value::from_u64(n)
+}
+/// ASCII text is kept by the sanitizer.
+proof fn lemma_ascii_text(s: Seq<u8>)
+    requires crate::calendar::ascii(s),
+    ensures crate::utf8::sanitized(s) == s,
+{
+    assert forall|k: int| 0 <= k < s.len() implies #[trigger] s[k] < 0x80 by {}
+    crate::utf8::lemma_ascii_valid(s);
+    crate::utf8::lemma_valid_fixed(s);
+}
+/// The verified calendar's timestamp as a text value.
+fn time_text(ms: u64) -> (out: Value)
+    ensures is_timestamp(out, ms), values_valid(out), crate::json::well_formed(out),
+{
+    let bytes = crate::calendar::timestamp(ms);
+    proof { crate::calendar::lemma_iso_ascii(crate::calendar::civil_of(ms)); lemma_ascii_text(bytes@); }
+    text(bytes.as_slice())
+}
+/// The verified calendar's date as a text value.
+fn date_text(ms: u64) -> (out: Value)
+    ensures is_date(out, ms), values_valid(out), crate::json::well_formed(out),
+{
+    let bytes = crate::calendar::date(ms);
+    proof { crate::calendar::lemma_iso_ascii(crate::calendar::civil_of(ms)); lemma_ascii_text(bytes@); }
+    text(bytes.as_slice())
 }
 fn boolean(b: bool) -> (out: Value)
     ensures out == Value::Bool(b), values_valid(out), crate::json::well_formed(out),
@@ -672,8 +700,10 @@ struct Shared<'a> {
 
 /// The eighteen members both rows begin with.
 #[verifier::rlimit(100)]
-fn base_members<C: Calendar>(shared: &Shared<'_>, index: u32, calendar: &C) -> (ms: Vec<Member>)
+fn base_members(shared: &Shared<'_>, index: u32) -> (ms: Vec<Member>)
+    requires shared.started == started_ms(*shared.exchange),
     ensures crate::json::well_formed_members(ms@), values_valid_members(ms@), ms@.len() == 18,
+        is_timestamp(ms@[6].value, started_ms(*shared.exchange)), is_date(ms@[14].value, started_ms(*shared.exchange)),
         forall|k: int| 0 <= k < 18 ==> #[trigger] ms@[k].key@ == base_keys()[k],
         is_number(ms@[0].value, SCHEMA_VERSION as nat),
         is_hex_of(ms@[9].value, crate::shipping_identity::message_key_encoding(shared.session@, shared.exchange.request, index)),
@@ -689,8 +719,7 @@ fn base_members<C: Calendar>(shared: &Shared<'_>, index: u32, calendar: &C) -> (
     push_member(&mut ms, K_USER_ID.as_slice(), text(tenant.as_slice()));
     push_member(&mut ms, K_PROVIDER.as_slice(), provider(shared.host.as_slice()));
     push_member(&mut ms, K_MODEL.as_slice(), option_text(&shared.model));
-    let started_at = calendar.timestamp(shared.started);
-    push_member(&mut ms, K_CONVERSATION_STARTED_AT.as_slice(), text(started_at.as_slice()));
+    push_member(&mut ms, K_CONVERSATION_STARTED_AT.as_slice(), time_text(shared.started));
     push_member(&mut ms, K_CONVERSATION_SOURCE.as_slice(), text(V_LOGGATE.as_slice()));
     push_member(&mut ms, K_CLIENT_NAME.as_slice(), text(V_LOGGATE.as_slice()));
     let message = hex_text(message_key(shared.session, shared.exchange.request, index).as_slice());
@@ -700,8 +729,7 @@ fn base_members<C: Calendar>(shared: &Shared<'_>, index: u32, calendar: &C) -> (
     push_member(&mut ms, K_PART_ID.as_slice(), part);
     push_member(&mut ms, K_PART_INDEX.as_slice(), number(0));
     push_member(&mut ms, K_PART_TYPE.as_slice(), text(V_TEXT.as_slice()));
-    let date = calendar.date(shared.started);
-    push_member(&mut ms, K_DATE.as_slice(), text(date.as_slice()));
+    push_member(&mut ms, K_DATE.as_slice(), date_text(shared.started));
     push_member(&mut ms, K_REQUEST_ID.as_slice(), hex_text(exchange_key(shared.session, shared.exchange.request).as_slice()));
     push_member(&mut ms, K_IS_ERROR.as_slice(), boolean(shared.is_error));
     let mut status: Vec<Member> = Vec::new();
@@ -731,8 +759,11 @@ fn hex_text(key: &[u8]) -> (out: Value)
 
 /// Two rows per exchange. `max_text` caps each `content_text`.
 #[verifier::rlimit(100)]
-pub fn rows<C: Calendar>(session: &[u8; 16], exchange: &Exchange, max_text: usize, calendar: &C) -> (out: Vec<Value>)
+pub fn rows(session: &[u8; 16], exchange: &Exchange, max_text: usize) -> (out: Vec<Value>)
     ensures out@.len() == 2,
+        is_timestamp(value_at(out@[0], 6), started_ms(*exchange)), is_timestamp(value_at(out@[1], 6), started_ms(*exchange)),
+        is_date(value_at(out@[0], 14), started_ms(*exchange)), is_date(value_at(out@[1], 14), started_ms(*exchange)),
+        is_timestamp(value_at(out@[0], 19), started_ms(*exchange)), is_timestamp(value_at(out@[1], 19), finished_ms(*exchange)),
         crate::json::well_formed(out@[0]) && crate::json::well_formed(out@[1]),
         values_valid(out@[0]) && values_valid(out@[1]),
         keys_of(out@[0]) == user_keys(), keys_of(out@[1]) == assistant_keys(),
@@ -757,12 +788,12 @@ pub fn rows<C: Calendar>(session: &[u8; 16], exchange: &Exchange, max_text: usiz
     let session_id = match &request.session_hint { Some(h) => slice_to_vec(h.as_slice()), None => slice_to_vec(exchange_id.as_slice()) };
     let model = match &request.model { Some(m) => Some(slice_to_vec(m.as_slice())), None => match &response.model { Some(m) => Some(slice_to_vec(m.as_slice())), None => None } };
     let is_error = (match status { Some(s) => s >= 400, None => false }) || (match outcome { Some(o) => o != 0, None => false }) || exchange.incomplete;
+    proof { assert(started == started_ms(*exchange)); assert(finished == finished_ms(*exchange)); }
     let shared = Shared { session, exchange, exchange_id, session_id, host, path, model, started, status, outcome, is_error, sse };
 
-    let mut user = base_members(&shared, 0, calendar);
+    let mut user = base_members(&shared, 0);
     push_member(&mut user, K_ROLE.as_slice(), text(V_USER.as_slice()));
-    let started_at = calendar.timestamp(started);
-    push_member(&mut user, K_MESSAGE_CREATED_AT.as_slice(), text(started_at.as_slice()));
+    push_member(&mut user, K_MESSAGE_CREATED_AT.as_slice(), time_text(started));
     let user_text = match &request.user_text { Some(t) => capped(t.as_slice(), max_text), None => truncated_text(exchange.upload.as_slice(), max_text) };
     push_member(&mut user, K_CONTENT_TEXT.as_slice(), user_text);
     let mut user_attributes: Vec<Member> = Vec::new();
@@ -770,10 +801,9 @@ pub fn rows<C: Calendar>(session: &[u8; 16], exchange: &Exchange, max_text: usiz
     push_member(&mut user, K_ATTRIBUTES.as_slice(), object(user_attributes));
     let user_row = object(user);
 
-    let mut assistant = base_members(&shared, 1, calendar);
+    let mut assistant = base_members(&shared, 1);
     push_member(&mut assistant, K_ROLE.as_slice(), text(V_ASSISTANT.as_slice()));
-    let finished_at = calendar.timestamp(finished);
-    push_member(&mut assistant, K_MESSAGE_CREATED_AT.as_slice(), text(finished_at.as_slice()));
+    push_member(&mut assistant, K_MESSAGE_CREATED_AT.as_slice(), time_text(finished));
     push_member(&mut assistant, K_PREVIOUS_MESSAGE_ID.as_slice(), single(hex_text(message_key(session, exchange.request, 0).as_slice())));
     // Nothing recognizable parsed: ship the raw response text instead of nothing.
     let unparsed = response.text.len() == 0 && response.usage.is_none() && exchange.download.len() > 0;

@@ -11,9 +11,9 @@ record source, a row projector, one request sender, sleeps, a checkpoint
 writer, and a metrics sink, with no decisions in it. The projection of an
 exchange into HypAware rows is verified too (`gateway_core::projection`, see
 [the projection](#the-projection)), reading provider bodies through the
-verified JSON reader and writing rows through the verified writer. The
-HTTPS client, the calendar text for timestamps, the state files' I/O, and
-the server's own behavior are trusted and tested; the shipping
+verified JSON reader and writing rows through the verified writer, with
+timestamps from the verified calendar. The HTTPS client, the state files'
+I/O, and the server's own behavior are trusted and tested; the shipping
 adapters are held to a panic-free standard by clippy denies on unwrap,
 expect, panic, indexing, and unchecked arithmetic. The client runs on the
 shipper's own thread with blocking sockets and rustls used directly, no
@@ -189,8 +189,8 @@ and the executable prints the figure at startup. See
 
 No proof connects the thread's loop to the verified transitions; that is the
 same trusted-join situation as the gateway's threaded shell. The projection's
-choice of provider fields is a heuristic and lossy by design, and the calendar
-text is trusted. gzip, dataset registration, config pulls, diagnostics,
+choice of provider fields is a heuristic and lossy by design. gzip, dataset
+registration, config pulls, diagnostics,
 and fan-out to several servers are not implemented.
 
 ## The projection
@@ -207,5 +207,10 @@ id the hex of the exchange key, and the schema version and message indexes
 fixed. Which provider fields it reads (`model`, `messages`/`input` and the
 last user message's content blocks, `usage` in its Anthropic and OpenAI
 spellings, the SSE event types) is a choice pinned by tests against recorded
-bodies, not a theorem; the runtime supplies only the RFC 3339 text of the
-timestamps through the `Calendar` trait.
+bodies, not a theorem. The timestamps are the verified calendar's
+(`gateway_core::calendar`): `civil` is proved to return the one proleptic
+Gregorian date whose day number is the day of the given Unix milliseconds,
+with the time of day decomposed exactly, and the formatters to print RFC 3339
+text of exactly those fields; the rows' `conversation_started_at`, `date`,
+and `message_created_at` are proved to be that text of the exchange's start
+and completion times.

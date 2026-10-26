@@ -1,7 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 use super::*;
 use super::config::ShippingConfig;
-use super::projection::{civil, iso_date, iso_timestamp};
 use super::state::{base64url_encode, jwt_claims, load_checkpoint, load_identity, save_checkpoint, save_identity};
 use crate::disk_log::DiskLog;
 use crate::test_support::{self_signed, wait_until, TempDir};
@@ -15,7 +14,7 @@ use std::{collections::HashSet, io::{self, Write}, net::{SocketAddr, TcpListener
 
 /// The projected rows, written by the verified writer and read back by serde_json for the assertions.
 fn project(session: &[u8; 16], exchange: &gateway_core::exchange_assembler::Exchange, max_text: usize) -> Vec<Value> {
-    super::projection::rows(session, exchange, max_text).iter()
+    gateway_core::projection::rows(session, exchange, max_text).iter()
         .map(|row| serde_json::from_slice(&crate::json_build::write(row)).expect("the writer emits a document")).collect()
 }
 
@@ -514,16 +513,4 @@ event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
         assert!(!text.contains("raw_frame") && !text.contains("authorization") && !text.contains("x-api-key"));
         assert!(!text.contains('\n'));
     }
-}
-
-#[test]
-fn dates_and_timestamps_follow_the_proleptic_gregorian_calendar() {
-    assert_eq!(civil(0), (1970, 1, 1, 0, 0, 0, 0));
-    assert_eq!(iso_timestamp(0), "1970-01-01T00:00:00.000Z");
-    assert_eq!(iso_date(951_782_400_000), "2000-02-29");
-    assert_eq!(iso_date(951_868_799_999), "2000-02-29");
-    assert_eq!(iso_timestamp(951_868_800_000), "2000-03-01T00:00:00.000Z");
-    assert_eq!(iso_date(4_107_542_400_000), "2100-03-01"); // 2100 is not a leap year
-    assert_eq!(iso_timestamp(1_700_000_000_123), "2023-11-14T22:13:20.123Z");
-    assert_eq!(iso_date(253_402_300_799_000), "9999-12-31");
 }

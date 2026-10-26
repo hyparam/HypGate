@@ -57,6 +57,7 @@ pub mod utf8;
 pub mod projection;
 pub mod config_schema;
 pub mod config_values;
+pub mod calendar;
 
 #[cfg(test)]
 #[path = "tests/streaming.rs"]
@@ -103,3 +104,6 @@ mod projection_tests;
 #[cfg(test)]
 #[path = "tests/config_values.rs"]
 mod config_values_tests;
+#[cfg(test)]
+#[path = "tests/calendar.rs"]
+mod calendar_tests;
