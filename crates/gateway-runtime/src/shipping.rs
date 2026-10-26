@@ -15,6 +15,8 @@ use gateway_core::shipping_driver::{drive, Effects, Event, Halt, Mode, Projected
 use std::{fs::File, io::{self, Seek, SeekFrom}, path::PathBuf, sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}, mpsc}, time::{Duration, SystemTime}};
 use tokio_rustls::rustls::RootCertStore;
 use crate::disk_log::{LogReader, ScanError};
+use crate::thread_runtime::EnteredRuntime;
+use gateway_core::thread_context::ThreadContext;
 
 pub mod config;
 pub mod client;
@@ -28,8 +30,7 @@ const INGEST_PATH: &str = "/v1/ingest/proxy";
 const BOOTSTRAP_PATH: &str = "/v1/identity/bootstrap";
 const REFRESH_PATH: &str = "/v1/identity/refresh";
 const REQUEST_DEADLINE: Duration = Duration::from_secs(30);
-/// Stack of the shipper thread; `loggate ship` uses the same size.
-pub const STACK_BYTES: usize = 2 * 1024 * 1024;
+const STACK_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Default)]
 pub struct Metrics {
@@ -64,8 +65,8 @@ impl Shipper {
     /// Start the thread. The log must already exist with a valid header.
     pub fn spawn(config: ShippingConfig, log_path: PathBuf) -> io::Result<Self> { Self::spawn_with_roots(config, log_path, None) }
     pub fn spawn_with_roots(config: ShippingConfig, log_path: PathBuf, roots: Option<RootCertStore>) -> io::Result<Self> {
-        Self::spawn_thread(move |stop, metrics| {
-            let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Self::spawn_thread(move |stop, metrics, context| {
+            let runtime = match EnteredRuntime::current_thread(context) {
                 Ok(runtime) => runtime, Err(_) => { metrics.stopped.store(true, Ordering::Relaxed); return; }
             };
             let result = Engine::new(config, log_path, roots, stop, metrics.clone(), runtime).run(Mode::Follow);
@@ -75,14 +76,14 @@ impl Shipper {
     /// The thread body runs under `catch_unwind`: a panic marks the shipper
     /// stopped and panicked and ends the thread. Nothing else in the process
     /// observes it; the gateway holds only this metrics view.
-    fn spawn_thread(body: impl FnOnce(Arc<AtomicBool>, Arc<Metrics>) + Send + 'static) -> io::Result<Self> {
+    fn spawn_thread(body: impl FnOnce(Arc<AtomicBool>, Arc<Metrics>, ThreadContext) + Send + 'static) -> io::Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let metrics = Arc::new(Metrics::default());
         let (done, finished) = mpsc::channel();
         let (flag, shared) = (stop.clone(), metrics.clone());
-        let thread = std::thread::Builder::new().name("loggate-shipping".into()).stack_size(STACK_BYTES).spawn(move || {
+        let thread = crate::thread_runtime::spawn_fresh(std::thread::Builder::new().name("loggate-shipping".into()).stack_size(STACK_BYTES), move |context| {
             let _done = done; // dropped when the thread ends, however it ends
-            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(flag, shared.clone())));
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(flag, shared.clone(), context)));
             if outcome.is_err() {
                 shared.panicked.store(true, Ordering::Relaxed);
                 shared.stopped.store(true, Ordering::Relaxed);
@@ -91,7 +92,7 @@ impl Shipper {
         Ok(Self { stop, finished, thread: Some(thread), metrics })
     }
     #[cfg(test)]
-    pub(crate) fn spawn_for_test(body: impl FnOnce() + Send + 'static) -> io::Result<Self> { Self::spawn_thread(move |_, _| body()) }
+    pub(crate) fn spawn_for_test(body: impl FnOnce() + Send + 'static) -> io::Result<Self> { Self::spawn_thread(move |_, _, _| body()) }
     pub fn metrics(&self) -> Arc<Metrics> { self.metrics.clone() }
     /// Ask the thread to stop after its current step and join it within the
     /// deadline. A thread still inside a request is left to finish on its own;
@@ -111,10 +112,11 @@ impl Shipper {
 impl Drop for Shipper { fn drop(&mut self) { self.stop.store(true, Ordering::Relaxed); } }
 
 /// Ship a finished log on the current thread until every exchange is resolved
-/// or the enrollment is stopped for good. Used by `loggate ship`.
-pub fn ship_to_end(config: ShippingConfig, log_path: PathBuf) -> Result<Metrics, &'static str> { ship_to_end_with_roots(config, log_path, None) }
-pub fn ship_to_end_with_roots(config: ShippingConfig, log_path: PathBuf, roots: Option<RootCertStore>) -> Result<Metrics, &'static str> {
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|_| "cannot start shipping runtime")?;
+/// or the enrollment is stopped for good. Used by `loggate ship`. The caller's
+/// thread context is spent on the runtime the loop blocks on.
+pub fn ship_to_end(config: ShippingConfig, log_path: PathBuf, context: ThreadContext) -> Result<Metrics, &'static str> { ship_to_end_with_roots(config, log_path, None, context) }
+pub fn ship_to_end_with_roots(config: ShippingConfig, log_path: PathBuf, roots: Option<RootCertStore>, context: ThreadContext) -> Result<Metrics, &'static str> {
+    let runtime = EnteredRuntime::current_thread(context).map_err(|_| "cannot start shipping runtime")?;
     let metrics = Arc::new(Metrics::default());
     let stop = Arc::new(AtomicBool::new(false));
     let result = Engine::new(config, log_path, roots, stop, metrics.clone(), runtime).run(Mode::Drain);
@@ -131,7 +133,7 @@ struct Engine {
     roots: Option<RootCertStore>,
     stop: Arc<AtomicBool>,
     metrics: Arc<Metrics>,
-    runtime: tokio::runtime::Runtime,
+    runtime: EnteredRuntime,
     client: Option<Client>,
     session: Option<[u8; 16]>,
     reader: Option<LogReader<File>>,
@@ -157,7 +159,7 @@ fn parse_credential(body: &[u8]) -> Option<Issued> {
 
 impl Engine {
     fn new(config: ShippingConfig, log_path: PathBuf, roots: Option<RootCertStore>, stop: Arc<AtomicBool>, metrics: Arc<Metrics>,
-        runtime: tokio::runtime::Runtime) -> Self {
+        runtime: EnteredRuntime) -> Self {
         Engine { config, log_path, roots, stop, metrics, runtime, client: None, session: None, reader: None, valid_end: 56, issued: None }
     }
 

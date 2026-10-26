@@ -21,10 +21,11 @@ impl Pool {
         &self, future: impl Future<Output = io::Result<T>> + Send + 'static,
     ) -> io::Result<Reply<T>> {
         let runtime = tokio::runtime::Handle::current();
-        self.jobs.submit(move |send| {
+        self.jobs.submit(move |send, context| {
             // The socket stays registered with the caller's reactor. Only polling
             // the handshake moves threads; successful streams return to that caller.
-            runtime.block_on(async move {
+            // The worker lends its context: it has entered no runtime of its own.
+            crate::thread_runtime::block_on_handle(context, &runtime, async move {
                 tokio::select! {
                     biased;
                     _ = send.closed() => None,

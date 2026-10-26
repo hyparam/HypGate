@@ -255,6 +255,11 @@ with what the server already holds.
 
 - Absence of panics, overflow, and out-of-bounds access in every core
   function, by construction of the verifier.
+- Runtime entry is a typed permit: a thread's context is minted once at its
+  birth and spent by the one runtime it enters, so the executable cannot
+  build or block on a runtime from a thread that already has one, which is
+  the Tokio precondition whose violation panics (`thread_context.rs`,
+  `thread_runtime.rs`, [thread context](docs/thread-context.md)).
 - Recovery exposes only complete records; acknowledged records survive any
   crash in the specified storage model; retry delays are bounded.
 - Slots, buffers, and queues stay within explicit budgets, and capacity
@@ -272,7 +277,9 @@ with what the server already holds.
   (`a_crash_at_any_step_resends_only_the_unacknowledged_exchanges_and_the_server_stores_each_once`).
 
 **Premises.** The storage contract (synced bytes survive); Tokio cancellation
-reaches the futures; the shipping adapters are panic-free, which clippy
+reaches the futures; the process main thread and a newly spawned OS thread
+have entered no runtime, and Tokio's runtime-entry panic fires only when one
+is entered; the shipping adapters are panic-free, which clippy
 denies on unwrap, expect, panic, indexing, and unchecked arithmetic enforce
 (`cargo clippy -p gateway-runtime`), and the thread boundary contains any
 panic that does occur; the clock is monotone enough for the enrollment

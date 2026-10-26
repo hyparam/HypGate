@@ -57,10 +57,18 @@ with an "Effect site" comment, and `scripts/check_effect_sites.sh` fails when
 the set of marked sites differs from its pinned list. The two outbound socket
 sites take an `egress::Egress` permit: the provider one is minted by the
 verified core from the request's resolved route, the cloud one only from the
-parsed `shipping` section's `ShippingServer`.
+parsed `shipping` section's `ShippingServer`. Runtime construction and entry
+are pinned the same way: the sites in `thread_runtime.rs` spend a
+`thread_context::ThreadContext`, minted only on the process main thread and in
+`spawn_fresh`, so no thread can enter a second runtime; see
+[thread context](thread-context.md).
 
 | Effect | Production site | What must already hold when it runs |
 | --- | --- | --- |
+| Mint the main thread's context | `ThreadContext::fresh` in `main.rs::main` | Process start; the one permit is spent by the gateway runtime or by `loggate ship` |
+| Build and enter a runtime | `Builder::build` in `thread_runtime::EnteredRuntime::current_thread`; `Runtime::block_on` in `EnteredRuntime::block_on` | A `ThreadContext` was spent, so no runtime is entered on the thread; the runtime is not `Send` and stays there |
+| Block on another runtime's handle | `Handle::block_on` in `thread_runtime::block_on_handle` | The calling worker thread lends its `ThreadContext`; used by the TLS handshake pool |
+| Start a thread with a context | `ThreadContext::fresh` in `thread_runtime::spawn_fresh` | The new OS thread has entered no runtime; the shipper thread and the DNS and handshake workers start here |
 | Listen on loopback | `TcpListener::bind` in `main.rs::bind` | `run` rejects a non-loopback address before loading configuration; configuration and audit log already created |
 | Read root policy, routes, and secrets | `main.rs::bounded_file` and `std::env::var` in `main.rs::secret` | Startup only; bounded file reads, secrets from environment through `GatewayConfig::from_json` and `ShippingConfig::from_root_json` |
 | Accept inbound connection | `listener.accept()` in `server::serve` | Connection credit from `ConnectionSlots::acquire` over the verified `ResponseRegistry` |

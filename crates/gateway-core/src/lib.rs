@@ -6,6 +6,7 @@ use vstd::prelude::*;
 pub mod policy;
 pub mod resolved_route;
 pub mod egress;
+pub mod thread_context;
 pub mod resource;
 pub mod stream;
 pub mod owned_stream;

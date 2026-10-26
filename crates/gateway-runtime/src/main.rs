@@ -1,6 +1,7 @@
 #![deny(clippy::disallowed_methods)]
+use gateway_core::thread_context::ThreadContext;
 use gateway_runtime::{config::GatewayConfig, disk_log::{DiskLog, LogReader, Metadata, ScanError, StoredRecord}, server::{self, Gateway},
-    shipping::{self, Shipper, ShippingConfig}, transport::HttpsTransport};
+    shipping::{self, Shipper, ShippingConfig}, thread_runtime::EnteredRuntime, transport::HttpsTransport};
 use std::{io::{self, Read, Write}, net::SocketAddr, path::Path, time::Duration};
 
 // Effect site: secrets come only from the environment variables the root
@@ -17,11 +18,14 @@ fn bounded_file(path: &str) -> io::Result<Vec<u8>> {
     std::fs::File::open(path)?.take(1024 * 1024 + 1).read_to_end(&mut bytes)?;
     Ok(bytes)
 }
-#[tokio::main(flavor = "current_thread")]
-async fn main() {
-    if let Err(message) = run().await { eprintln!("loggate: {message}"); std::process::exit(1); }
+// Effect site: the process main thread has entered no runtime; its context
+// permit is minted here once and spent by whichever command enters one.
+#[allow(clippy::disallowed_methods)]
+fn main() {
+    let context = ThreadContext::fresh();
+    if let Err(message) = run(context) { eprintln!("loggate: {message}"); std::process::exit(1); }
 }
-async fn run() -> Result<(), &'static str> {
+fn run(context: ThreadContext) -> Result<(), &'static str> {
     let args: Vec<_> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("scan") {
         if args.len() != 3 { return Err("usage: loggate scan LOG"); }
@@ -29,11 +33,18 @@ async fn run() -> Result<(), &'static str> {
     }
     if args.get(1).map(String::as_str) == Some("ship") {
         if args.len() != 4 { return Err("usage: loggate ship ROOT.json LOG"); }
-        return ship(&args[2], &args[3]);
+        return ship(&args[2], &args[3], context);
     }
     if !(4..=5).contains(&args.len()) { return Err("usage: loggate ROOT.json ROUTES.json NEW_LOG [127.0.0.1:8080]"); }
     let address: SocketAddr = args.get(4).map(String::as_str).unwrap_or("127.0.0.1:8080").parse().map_err(|_| "invalid listen address")?;
     if !address.ip().is_loopback() { return Err("listen address must be loopback; use a trusted TLS reverse proxy for remote clients"); }
+    // The gateway's runtime is the only one on this thread; the permit says so.
+    let runtime = EnteredRuntime::current_thread(context).map_err(|_| "cannot start runtime")?;
+    let served = runtime.block_on(serve(&args, address));
+    drop(runtime.leave());
+    served
+}
+async fn serve(args: &[String], address: SocketAddr) -> Result<(), &'static str> {
     let (config, shipping) = {
         let root = bounded_file(&args[1]).map_err(|_| "cannot read root policy")?;
         let routes = bounded_file(&args[2]).map_err(|_| "cannot read candidate routes")?;
@@ -87,16 +98,12 @@ async fn run() -> Result<(), &'static str> {
 }
 
 /// Ship a finished log with the root policy's `shipping` section, then exit.
-fn ship(root_path: &str, log_path: &str) -> Result<(), &'static str> {
+/// Runs on the main thread, whose context the shipping loop spends on its runtime.
+fn ship(root_path: &str, log_path: &str, context: ThreadContext) -> Result<(), &'static str> {
     let root = bounded_file(root_path).map_err(|_| "cannot read root policy")?;
     let config = ShippingConfig::from_root_json(&root, secret)
         .map_err(|_| "invalid shipping configuration or missing token")?.ok_or("root policy has no shipping section")?;
-    // `main` already runs inside a Tokio runtime and the shipper builds its own,
-    // so the loop runs on a plain thread, as it does beside the gateway.
-    let log = Path::new(log_path).to_path_buf();
-    let metrics = std::thread::Builder::new().name("loggate-shipping".into()).stack_size(shipping::STACK_BYTES)
-        .spawn(move || shipping::ship_to_end(config, log)).map_err(|_| "cannot start shipping thread")?
-        .join().map_err(|_| "shipper panicked")??;
+    let metrics = shipping::ship_to_end(config, Path::new(log_path).to_path_buf(), context)?;
     let mut text = String::new(); metrics.render(&mut text);
     print!("{text}");
     Ok(())

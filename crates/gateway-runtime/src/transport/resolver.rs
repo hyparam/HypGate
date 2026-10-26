@@ -30,7 +30,7 @@ impl Resolver {
     async fn resolve_with<F>(&self, host: String, port: u16, lookup: F) -> io::Result<Reply<Vec<SocketAddr>>>
         where F: FnOnce(&str, u16) -> io::Result<Vec<SocketAddr>> + Send + 'static,
     {
-        self.jobs.submit(move |send| {
+        self.jobs.submit(move |send, _context| {
             if send.is_closed() { return None; } // skip canceled queued work
             Some(lookup(&host, port))
         }).await

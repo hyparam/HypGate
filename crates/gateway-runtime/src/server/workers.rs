@@ -211,12 +211,12 @@ mod tests {
             let (release_job, wait_job) = std::sync::mpsc::channel();
             let key = background.lock().unwrap().acquire().unwrap();
             let result_owner = ResultOwner(background.clone());
-            let (job, receive) = CreditedJob::new(background.clone(), key, move |_| {
+            let (job, receive) = CreditedJob::new(background.clone(), key, move |_, _| {
                 entered.send(()).unwrap();
                 wait_job.recv_timeout(Duration::from_secs(5)).unwrap();
                 Some(Ok(result_owner))
             });
-            let thread = std::thread::spawn(move || job.run());
+            let thread = crate::thread_runtime::spawn_fresh(std::thread::Builder::new(), move |mut context| job.run(&mut context)).unwrap();
             let (log, syncing, release_disk, writes) = DiskLog::stalled_for_test(1, Duration::from_secs(5));
             let mut append_log = log.clone();
             let worker_lease = workers.acquire(&tracker).unwrap();

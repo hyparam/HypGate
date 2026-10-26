@@ -259,7 +259,9 @@ async fn ships_many_exchanges_in_bounded_batches_with_drain_mode() {
     let mut config = shipping_config(port, &state_dir, json!({"max_exchange_bytes": 1048576}));
     config.poll_ms = 100;
     let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || { let _ = tx.send(ship_to_end_with_roots(config, log_path, Some(roots)).map(|m| m.batches_acknowledged())); });
+    crate::thread_runtime::spawn_fresh(std::thread::Builder::new(), move |context| {
+        let _ = tx.send(ship_to_end_with_roots(config, log_path, Some(roots), context).map(|m| m.batches_acknowledged()));
+    }).unwrap();
     let result = loop {
         match rx.try_recv() { Ok(result) => break result, Err(_) => tokio::time::sleep(Duration::from_millis(20)).await }
     };

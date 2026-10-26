@@ -21,5 +21,10 @@ disallowed-methods = [
     { path = "std::env::var", reason = "secrets are read once at startup, in main::secret" },
     { path = "std::env::var_os", reason = "secrets are read once at startup, in main::secret" },
     { path = "std::process::Command::new", reason = "the runtime starts no processes" },
+    { path = "tokio::runtime::Builder::build", reason = "a runtime is entered only through thread_runtime::EnteredRuntime::current_thread, which spends the thread's context permit" },
+    { path = "tokio::runtime::Runtime::block_on", reason = "only thread_runtime::EnteredRuntime::block_on, on the thread whose permit the runtime holds" },
+    { path = "tokio::runtime::Handle::block_on", reason = "only thread_runtime::block_on_handle, with the thread's context permit as evidence" },
+    { path = "tokio::task::block_in_place", reason = "no blocking inside a runtime; the permit discipline has no token for it" },
+    { path = "gateway_core::thread_context::ThreadContext::fresh", reason = "a thread's context is minted once, at its birth: main::main and thread_runtime::spawn_fresh" },
     { path = "gateway_core::exchange_lifecycle::Closed::without_request", reason = "a worker closes without a lifecycle only for a request refused before admission, in http_boundary::HttpError::close" },
 ]

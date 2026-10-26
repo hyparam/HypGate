@@ -1,6 +1,6 @@
 //! Verified credits follow background work through queued replies. The request
 //! adopts a successful result before its independent background credit returns.
-use gateway_core::{resource::{RequestKey, ResourceAdmission}, task_credit::{TaskCredit, TaskResult}};
+use gateway_core::{resource::{RequestKey, ResourceAdmission}, task_credit::{TaskCredit, TaskResult}, thread_context::ThreadContext};
 use std::{io, sync::{Arc, Mutex, mpsc}};
 use tokio::sync::oneshot;
 
@@ -68,15 +68,15 @@ impl<T> Drop for Reply<T> {
 }
 
 pub(crate) type Sender<T> = oneshot::Sender<io::Result<Reply<T>>>;
-trait Runnable: Send { fn run(self: Box<Self>); }
+trait Runnable: Send { fn run(self: Box<Self>, context: &mut ThreadContext); }
 pub(crate) struct CreditedJob(Box<dyn Runnable>);
 struct Job<T, F> { work: Option<F>, send: Option<Sender<T>>, credit: Option<Credit> }
-impl<T: Send + 'static, F: FnOnce(&mut Sender<T>) -> Option<io::Result<T>> + Send + 'static> Runnable for Job<T, F> {
-    fn run(mut self: Box<Self>) {
+impl<T: Send + 'static, F: FnOnce(&mut Sender<T>, &mut ThreadContext) -> Option<io::Result<T>> + Send + 'static> Runnable for Job<T, F> {
+    fn run(mut self: Box<Self>, context: &mut ThreadContext) {
         let work = self.work.take().expect("job runs once");
         // FnOnce destroys its captures before returning or unwinding. Credit
         // remains in this owner throughout a blocked lookup or handshake poll.
-        let result = work(self.send.as_mut().expect("job reply sender"));
+        let result = work(self.send.as_mut().expect("job reply sender"), context);
         match result {
             Some(Ok(value)) => {
                 let value = self.credit.as_mut().unwrap().state.as_mut().unwrap().finish_work_with(value)
@@ -104,7 +104,7 @@ impl<T, F> Drop for Job<T, F> {
 }
 impl CreditedJob {
     pub(crate) fn new<T: Send + 'static>(slots: Arc<Mutex<ResourceAdmission>>, key: RequestKey,
-        work: impl FnOnce(&mut Sender<T>) -> Option<io::Result<T>> + Send + 'static)
+        work: impl FnOnce(&mut Sender<T>, &mut ThreadContext) -> Option<io::Result<T>> + Send + 'static)
         -> (Self, oneshot::Receiver<io::Result<Reply<T>>>)
     {
         let mut state = TaskCredit::new(key);
@@ -113,13 +113,17 @@ impl CreditedJob {
         (Self(Box::new(Job { work: Some(work), send: Some(send),
             credit: Some(Credit { slots, state: Some(state) }) })), receive)
     }
-    pub(crate) fn run(self) { self.0.run(); }
+    /// Run on the worker thread, which lends its context so the job may
+    /// drive a future through a runtime handle but never enter a runtime.
+    pub(crate) fn run(self, context: &mut ThreadContext) { self.0.run(context); }
 }
 
 const STACK_BYTES: usize = 2 * 1024 * 1024;
 
 /// Fixed dedicated threads run credited jobs. Request cancellation cannot
 /// return a running job's credit; the threads never hold runtime shutdown open.
+/// Each thread owns its `ThreadContext`: it enters no runtime, so a job may
+/// block on another runtime's handle.
 pub(crate) struct JobPool { sender: mpsc::SyncSender<CreditedJob>, pub(crate) slots: Arc<Mutex<ResourceAdmission>> }
 impl JobPool {
     pub(crate) fn new(name: &str, limit: usize, workers: usize) -> io::Result<Self> {
@@ -127,8 +131,8 @@ impl JobPool {
         let receiver = Arc::new(Mutex::new(receiver));
         for _ in 0..workers {
             let receiver = receiver.clone();
-            std::thread::Builder::new().name(name.into()).stack_size(STACK_BYTES)
-                .spawn(move || loop {
+            crate::thread_runtime::spawn_fresh(std::thread::Builder::new().name(name.into()).stack_size(STACK_BYTES),
+                move |mut context| loop {
                     let job = {
                         let Ok(receiver) = receiver.lock() else { break; };
                         receiver.recv()
@@ -136,13 +140,13 @@ impl JobPool {
                     let Ok(job) = job else { break; };
                     // A job panic drops its job/credit and closes the reply; it
                     // must not silently remove a worker from the fixed pool.
-                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job.run()));
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job.run(&mut context)));
                 })?;
         }
         Ok(Self { sender, slots: Arc::new(Mutex::new(ResourceAdmission::new(limit, 0))) })
     }
     pub(crate) async fn submit<T: Send + 'static>(&self,
-        work: impl FnOnce(&mut Sender<T>) -> Option<io::Result<T>> + Send + 'static) -> io::Result<Reply<T>>
+        work: impl FnOnce(&mut Sender<T>, &mut ThreadContext) -> Option<io::Result<T>> + Send + 'static) -> io::Result<Reply<T>>
     {
         let key = self.slots.lock().map_err(|_| io::Error::from(io::ErrorKind::Other))?
             .acquire().ok_or(io::ErrorKind::WouldBlock)?;
@@ -166,8 +170,8 @@ mod tests {
             let mut request = admission.admit(&[11; 32], 7).unwrap();
             let slots = Arc::new(Mutex::new(ResourceAdmission::new(1, 0)));
             let key = slots.lock().unwrap().acquire().unwrap();
-            let (job, mut receive) = CreditedJob::new(slots.clone(), key, |_| Some(Ok(vec![1, 2, 3])));
-            job.run();
+            let (job, mut receive) = CreditedJob::new(slots.clone(), key, |_, _| Some(Ok(vec![1, 2, 3])));
+            job.run(&mut ThreadContext::fresh());
             let reply = receive.try_recv().unwrap().unwrap();
             assert_eq!(slots.lock().unwrap().usage(), (1, 1));
             if canceled { request.cancel(); }
@@ -196,13 +200,13 @@ mod tests {
             let slots = Arc::new(Mutex::new(ResourceAdmission::new(1, 0)));
             let key = slots.lock().unwrap().acquire().unwrap();
             let capture = Capture(slots.clone());
-            let (job, mut receive) = CreditedJob::new(slots.clone(), key, move |_| {
+            let (job, mut receive) = CreditedJob::new(slots.clone(), key, move |_, _| {
                 if exit == 2 { panic!("injected running job panic"); }
                 Some(Ok(capture))
             });
             if exit == 3 { receive.close(); }
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                if exit == 0 { drop(job); } else { job.run(); }
+                if exit == 0 { drop(job); } else { job.run(&mut ThreadContext::fresh()); }
             }));
             assert_eq!(result.is_err(), exit == 2);
             if exit == 1 {
@@ -225,10 +229,10 @@ mod tests {
             let slots = Arc::new(Mutex::new(ResourceAdmission::new(1, 0)));
             let key = slots.lock().unwrap().acquire().unwrap();
             let capture = Panics;
-            let (job, mut receive) = CreditedJob::new(slots.clone(), key, move |_| Some(Ok(capture)));
+            let (job, mut receive) = CreditedJob::new(slots.clone(), key, move |_, _| Some(Ok(capture)));
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 if delivered {
-                    job.run();
+                    job.run(&mut ThreadContext::fresh());
                     drop(receive.try_recv().unwrap().unwrap());
                 } else { drop(job); }
             }));

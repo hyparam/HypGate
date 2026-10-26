@@ -145,6 +145,7 @@ Runtime and adapters:
 | [Disk logging](docs/disk-logging.md) | Bounded disk worker, sync acknowledgments, recovery scanner |
 | [Cloud shipping](docs/cloud-shipping.md) | HypAware shipper thread: protocol, configuration, proved and trusted parts |
 | [HypAware setup](docs/hypaware.md) | Operator walkthrough: tokens, shipping config, checking rows on the server, live smoke test record |
+| [Thread context](docs/thread-context.md) | Runtime entry as a typed permit: the sites, what is proved, typed, and trusted |
 | [HTTP ownership](docs/http-ownership.md) | HTTP owner counts derived from the worker and connection registries |
 | [HTTP buffer lifetimes](docs/http-buffer-lifetimes.md) | HTTP body buffers, mailbox credit, and cancellation |
 | [Audit buffer lifetimes](docs/audit-buffer-lifetimes.md) | Audit queue credit, worker ownership, and receipt delivery |
@@ -193,8 +194,8 @@ cargo test -p gateway-runtime --release --locked server::tests::benchmark -- --i
 LOGGATE_HAPROXY=/path/to/haproxy cargo test -p gateway-runtime --locked proxy_gateway_process_failover -- --ignored --nocapture
 ```
 
-Validation on 2026-10-25: 613 core verification checks passed, 295 workspace tests including seven compile-fail
-doctests passed, all 419 deliberate mutations failed their proof obligations, and the runtime passed its
+Validation on 2026-10-25: 616 core verification checks passed, 295 workspace tests including seven compile-fail
+doctests passed, all 423 deliberate mutations failed their proof obligations, and the runtime passed its
 panic and effect-site lints. The opt-in TLS proxy/gateway
 process-failover test and six load/fault workloads passed on 2026-10-23.
 Two ten-minute overload runs and the final 100-wave-per-mode isolated memory soak
