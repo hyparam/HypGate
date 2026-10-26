@@ -73,9 +73,16 @@ records the run.
 JSON parsing is verified (`gateway_core::json`), and so is the schema walk
 (`gateway_core::config_schema`: which keys each object may hold, once each,
 which are required, and of what kind; the reader accepts exactly that shape and
-returns the fields the file holds). Hashing, secret resolution, the UTF-8 check
-on strings, and the runtime mapping are trusted and tested, not formally
-verified; destination validation is verified. The core theorem still concerns
+returns the fields the file holds), and so are the rules on values
+(`gateway_core::config_values`: a digest is 64 hex digits decoding to 32
+bytes, a secret name is 1 to 128 alphanumeric or underscore bytes, a
+credential or token is visible ASCII within its limit, and the header value
+built from a credential, with its `Bearer ` prefix, holds no control byte, so
+no line break can enter a request head; the shipping limits and state
+directory are within their ranges). Hashing, secret resolution, the UTF-8
+check on strings, the IPv6 literal check, and the runtime mapping are trusted
+and tested, not formally verified; destination validation is verified. The
+core theorem still concerns
 normalized route handles. The HTTP adapter consumes `RoutedRequest`; the verified
 header projection strips client credential headers and constructs Host from the
 fixed destination, while disabling redirects/proxies/retries and retaining request

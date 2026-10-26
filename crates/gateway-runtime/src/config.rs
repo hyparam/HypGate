@@ -2,11 +2,13 @@
 //! reader, its shape (which keys, once each, which kinds) by the verified
 //! `gateway_core::config_schema`, and the normalized grant relation is checked
 //! by the verified core, including selection of concrete destination/credential
-//! values; destinations are parsed by the verified core. The checks on values
-//! here (digests, secret names and values, UTF-8) and secret provisioning
-//! remain trusted.
+//! values; destinations are parsed by the verified core; digests, secret
+//! names and values, and the credential header value follow the verified
+//! rules in `gateway_core::config_values`. The UTF-8 check on strings, the
+//! IPv6 literal check, and secret provisioning remain trusted.
 use crate::admission::{Admission, AdmissionError, Request};
 use gateway_core::config_schema as schema;
+use gateway_core::config_values as values;
 use gateway_core::json;
 use gateway_core::policy::{Identity, Policy, Route};
 use sha2::{Digest, Sha256};
@@ -14,7 +16,7 @@ use sha2::{Digest, Sha256};
 const MAX_CONFIG: usize = 1024 * 1024;
 #[cfg(test)]
 pub(crate) const MAX_DESTINATION_BYTES: usize = 8192;
-pub(crate) const MAX_CREDENTIAL_BYTES: usize = 8192;
+pub(crate) use gateway_core::config_values::MAX_CREDENTIAL_BYTES;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ConfigError { Syntax, Limits, Identity, Destination, Credential, Policy }
@@ -96,13 +98,8 @@ pub(crate) fn destination(text: &str) -> Result<Destination, ConfigError> {
     Ok(parts)
 }
 
-fn digest(text: &str) -> Result<Vec<u8>, ConfigError> {
-    if text.len() != 64 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(ConfigError::Identity);
-    }
-    (0..64).step_by(2).map(|i| u8::from_str_radix(&text[i..i + 2], 16)
-        .map_err(|_| ConfigError::Identity)).collect()
-}
+/// The verified decoding of a 64-digit hex digest.
+fn digest(text: &str) -> Result<Vec<u8>, ConfigError> { values::digest(text.as_bytes()).ok_or(ConfigError::Identity) }
 
 impl GatewayConfig {
     pub fn chunk_bytes(&self) -> usize { self.chunk_bytes }
@@ -133,17 +130,14 @@ impl GatewayConfig {
         let policy = Policy::validate(identities, root.grants, candidate.routes, destinations.len(), owners)
             .ok_or(ConfigError::Policy)?;
         let mut credentials = Vec::new();
+        // The secret name, the secret's bytes, and the header value built from
+        // them are checked and formed by the verified rules: the value is
+        // visible ASCII with the `Bearer ` prefix, so it cannot break a header.
         for input in root.credentials {
-            if input.env.is_empty() || input.env.len() > 128
-                || !input.env.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
-                return Err(ConfigError::Credential);
-            }
+            if !values::secret_name_ok_exec(input.env.as_bytes()) { return Err(ConfigError::Credential); }
             let raw = secret(&input.env).ok_or(ConfigError::Credential)?;
-            if raw.is_empty() || raw.len() > MAX_CREDENTIAL_BYTES || !raw.bytes().all(|b| (33..=126).contains(&b)) {
-                return Err(ConfigError::Credential);
-            }
-            let text = match input.kind { CredentialKind::Bearer => format!("Bearer {raw}"), CredentialKind::ApiKey => raw };
-            credentials.push(Credential { kind: input.kind, value: text.into_bytes() });
+            if !values::secret_ok_exec(raw.as_bytes(), MAX_CREDENTIAL_BYTES) { return Err(ConfigError::Credential); }
+            credentials.push(Credential { kind: input.kind, value: values::credential_value_exec(input.kind, raw.as_bytes()) });
         }
         Ok(Self { chunk_bytes: root.limits.chunk_bytes, admission: Admission::new(policy, root.limits.requests, root.limits.chunk_bytes,
             matches!(root.logging, Logging::Strict)), destinations, credentials })
