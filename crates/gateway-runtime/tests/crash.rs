@@ -8,18 +8,16 @@ use common::{Process, TempDir};
 #[test]
 fn crash_child() {
     let Some(path) = std::env::var_os("LOGGATE_CRASH_CHILD_LOG") else { return; };
-    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
-        let mut log = DiskLog::create(std::path::Path::new(&path), 1, Duration::from_secs(5)).unwrap();
-        for chunk in 1..=64u64 {
-            let bytes = vec![chunk as u8; 64 * 1024];
-            log.append(LogRecord { tenant: 7, request: 11, chunk, kind: RecordKind::Upload, bytes: &bytes }).await.unwrap();
-            println!("LOGGATE_ACK {chunk}"); std::io::stdout().flush().unwrap();
-            if std::env::var_os("LOGGATE_CRASH_PAUSE_AFTER_ACK").is_some() {
-                std::future::pending::<()>().await;
-            }
+    let mut log = DiskLog::create(std::path::Path::new(&path), 1, Duration::from_secs(5)).unwrap();
+    for chunk in 1..=64u64 {
+        let bytes = vec![chunk as u8; 64 * 1024];
+        log.append(LogRecord { tenant: 7, request: 11, chunk, kind: RecordKind::Upload, bytes: &bytes }).unwrap();
+        println!("LOGGATE_ACK {chunk}"); std::io::stdout().flush().unwrap();
+        if std::env::var_os("LOGGATE_CRASH_PAUSE_AFTER_ACK").is_some() {
+            loop { std::thread::park(); } // wait to be killed
         }
-        std::future::pending::<()>().await;
-    });
+    }
+    loop { std::thread::park(); } // wait to be killed
 }
 
 fn kill_and_scan(pause_after_ack: bool) {

@@ -135,7 +135,7 @@ metadata, not the full HTTP exchange.
   has already failed, releases bytes only through the authorization gate one
   ticket at a time, flushes, and finishes only on a clean end of input with
   nothing pending. Every failure closes the stream. Its byte count equals the
-  growth of the stream's completed history. The async loop around it performs
+  growth of the stream's completed history. The blocking loop around it performs
   the effect the machine names and reports the result; it decides nothing.
 - The start record is built by the verified core
   (`exchange_lifecycle::start_record`): its selector is the authorized route's
@@ -195,7 +195,7 @@ metadata, not the full HTTP exchange.
 
 **Premises.** The storage contract (synced bytes survive, see the
 [storage contract](docs/storage-crash-contract.md)); the disk adapter reports
-write and sync outcomes truthfully; the async loop performs the effect the
+write and sync outcomes truthfully; the copy loop performs the effect the
 body-copy machine names on the reader, writer, and logger it was given, and
 those report truthfully; the server honors its batch
 ledger and part-id dedup; the projection of an exchange's provider JSON into text and usage is
@@ -209,21 +209,22 @@ an assumption we take on; the proofs that could be written have been.
 
 - *The effects are trusted; their sequencing is not.* Both body directions run
   under the verified `BodyCopy` machine, so what is read, logged, released,
-  and counted, and in what order, is proved. The async loop performs the
-  effect the machine names and reports the result. What remains trusted is
-  that the reader, writer, and logger do what they report and that Tokio
-  cancellation reaches the loop's drop guard. The framing the reader
+  and counted, and in what order, is proved. The loop performs the effect the
+  machine names on the calling thread and reports the result. What remains
+  trusted is that the reader, writer, and logger do what they report and that
+  a shut-down or timed-out socket makes the blocked read or write return, so
+  the loop's guard runs. The framing the reader
   decodes and the writer encodes is the verified chunked coding, whose
   decoder accepts exactly the grammar, and the Content-Length count
   ([codec](docs/http1-codec.md)).
 - *Every admitted exchange reaches its completion record.* The lifecycle is a
-  verified machine that is terminal after exactly one event, and the worker
-  future must return the `Closed` token only a terminal lifecycle produces.
+  verified machine that is terminal after exactly one event, and the exchange
+  must return the `Closed` token only a terminal lifecycle produces.
   The one escape, for a request refused before admission, is a single
   lint-pinned call site (`HttpError::close`); clippy denies the constructor
   everywhere else and `scripts/check_effect_sites.sh` fails if the site
-  moves. Shutdown cancels workers cooperatively and awaits them with no
-  deadline, so the only ways an admitted exchange ends without a record are
+  moves. Shutdown cancels exchanges by shutting their sockets and waits for
+  them, so the only ways an admitted exchange ends without a record are
   a logger that is already unhealthy and process death, both reported by
   the record's absence.
 - *Durability stops at the storage contract.* Acknowledged records survive
@@ -266,11 +267,6 @@ with what the server already holds.
   `Connection: close` and matching framing, never a body after 204 or 304,
   and a chunked body that ends cleanly only through its last chunk
   (`http1_exchange.rs`, [codec](docs/http1-codec.md)).
-- Runtime entry is a typed permit: a thread's context is minted once at its
-  birth and spent by the one runtime it enters, so the executable cannot
-  build or block on a runtime from a thread that already has one, which is
-  the Tokio precondition whose violation panics (`thread_context.rs`,
-  `thread_runtime.rs`, [thread context](docs/thread-context.md)).
 - Recovery exposes only complete records; acknowledged records survive any
   crash in the specified storage model; retry delays are bounded.
 - Slots, buffers, and queues stay within explicit budgets, and capacity
@@ -287,17 +283,15 @@ with what the server already holds.
   checkpoint, leaves the server with exactly the uninterrupted run's rows
   (`a_crash_at_any_step_resends_only_the_unacknowledged_exchanges_and_the_server_stores_each_once`).
 
-**Premises.** The storage contract (synced bytes survive); Tokio cancellation
-reaches the futures; the process main thread and a newly spawned OS thread
-have entered no runtime, and Tokio's runtime-entry panic fires only when one
-is entered; the shipping adapters are panic-free, which clippy
+**Premises.** The storage contract (synced bytes survive); shutting down a
+socket makes a thread blocked on it return; the shipping adapters are panic-free, which clippy
 denies on unwrap, expect, panic, indexing, and unchecked arithmetic enforce
 (`cargo clippy -p gateway-runtime`), and the thread boundary contains any
 panic that does occur; the clock is monotone enough for the enrollment
 windows.
 
-The gateway's own async cancellation and whole-process memory are documented
-rather than mechanized; the table below records where.
+The gateway's own cancellation across threads and whole-process memory are
+documented rather than mechanized; the table below records where.
 
 ## Where the proofs live
 
@@ -343,18 +337,18 @@ checked definitions for each row.
 | Authorization and fail-closed security | Every upstream dispatch requires an authenticated tenant's grant; authentication or policy failures cannot authorize forwarding, in either logging mode. | Core token issuance proved; HTTP binding tested; every production body write passes the checked `ResolvedRoute::write_bytes` gate, and every other socket, lookup, and file-write site is denied by lint. The socket write itself is trusted. |
 | Tenant and credential isolation | Requests, completions, and credentials cannot cross tenant/request boundaries; gateway authentication material never becomes an upstream credential. | Core tenant/credential-handle and ticket checks proved; cross-owner lifecycle composition checked; header projection and credential injection proved (`headers::forward_request`); secret loading tested. Audit-file access control is an operator obligation. |
 | Routing and configuration confinement | Candidate configuration and request fields cannot expand operator grants or change the authorized destination/credential binding. | Normalized configuration and route selection proved; destination grammar and the extraction of host, port, and path proved (`destination::parse`); DNS, TLS, and actual dispatch remain trusted/tested. |
-| Byte integrity and ordering | Forwarded body bytes form an unchanged, ordered prefix of the input, across chunks and partial writes, without skipped or duplicated advancement. | Core byte-prefix and completion properties proved; async HTTP integration tested. Peer receipt is not proved. |
+| Byte integrity and ordering | Forwarded body bytes form an unchanged, ordered prefix of the input, across chunks and partial writes, without skipped or duplicated advancement. | Core byte-prefix and completion properties proved; HTTP integration over real sockets tested. Peer receipt is not proved. |
 | Strict audit-before-forwarding | Every submitted body range in strict mode is covered by a durable log acknowledgment for that request and chunk. | Core gate and exact journal-receipt/stream binding proved; disk sync adapter tested. Filesystem crash guarantees remain open. |
 | Crash-safe recovery | Recovery exposes only complete records, and acknowledged records survive every crash in the specified storage model. | Journal acknowledgment ordering and conditional synced-prefix survival proved; header/payload encoding, header decoding, frame extents, scanner cursor transitions, and whole-file emission proved; scanner I/O tested. Process-kill recovery tested and storage assumptions documented; conditional scanner steps proved; acknowledged-prefix reconstruction proved under preserved-byte/read/checksum assumptions. Linux ext4 error/process-death tests passed; physical power-loss validation remains open. |
-| Cancellation and no replay | Cancellation prevents new submissions; uncertain effects, crashes, or failover never trigger automatic replay of a possibly executed generation. | Core cancellation/stale-event checks proved; transport has no replay path. Async cancellation and recovery composition remain unproved. |
-| Resource bounds and safe release | Slots, buffers, queues, and outstanding operations stay within explicit budgets; capacity cannot be reused while work retaining it remains alive. | Logical slot limits, ID isolation, and combined payload bound under an explicit stream-to-slot mapping proved; fixed disk-FIFO order, slot capacity, permanent closure, and actual queued-frame byte bound proved; HTTP mailbox occupancy and endpoint closure proved; ownership and deadlines tested. Conditional allocation composition and shutdown/release arguments are documented; mechanized async refinement remains open. |
+| Cancellation and no replay | Cancellation prevents new submissions; uncertain effects, crashes, or failover never trigger automatic replay of a possibly executed generation. | Core cancellation/stale-event checks proved; transport has no replay path. Socket cancellation and recovery composition remain unproved. |
+| Resource bounds and safe release | Slots, buffers, queues, and outstanding operations stay within explicit budgets; capacity cannot be reused while work retaining it remains alive. | Logical slot limits, ID isolation, and combined payload bound under an explicit stream-to-slot mapping proved; fixed disk-FIFO order, slot capacity, permanent closure, and actual queued-frame byte bound proved; HTTP role occupancy proved; ownership and deadlines tested. Conditional allocation composition and shutdown/release arguments are documented; a mechanized refinement of the threaded runtime remains open. |
 | Logging-mode separation | Availability mode may lose audit coverage but cannot relax authorization, routing, or tenant isolation; logging failure cannot create unbounded replacement work. | Core logging-mode transitions proved; bounded logger and failure handling tested. Submission and lifecycle composition are checked under the documented adapter assumptions. |
 | Cloud shipping | The optional HypAware shipper cannot affect authorization, forwarding, or readiness; it never modifies the log; every request it sends is chosen by a verified machine and names no host; no exchange is dropped between the log and the acknowledged batch; delivery is at least once with idempotent batch and row identities, so the server stores each exchange once. | Isolation is structural and tested; tailing, exchange assembly bounds, batch limits, upload progress, identity injectivity, enrollment transitions, and the machine's conservation, request shape, and bounded waiting are core proved; HTTPS, parsing, projection, and the server's ledger/dedup are trusted and tested. See [cloud shipping](docs/cloud-shipping.md). |
-| Honest completion and conditional progress | Failed/truncated streams cannot masquerade as successful completion; under stated scheduler and I/O assumptions, admitted work terminates or times out and releases resources. | Core admission/release and conditional streaming progress proved; EOF/error behavior and deadlines tested. Permanent worker closure and drain rank are proved; the conditional shutdown/resource argument is documented. Mechanized async liveness verification remains open. |
+| Honest completion and conditional progress | Failed/truncated streams cannot masquerade as successful completion; under stated scheduler and I/O assumptions, admitted work terminates or times out and releases resources. | Core admission/release and conditional streaming progress proved; EOF/error behavior and deadlines tested. Permanent worker closure and drain rank are proved; the conditional shutdown/resource argument is documented. Mechanized liveness verification remains open. |
 
-Verus does not verify Tokio, rustls, the OS, DNS/PKI, or the filesystem for
-us; the gateway links no HTTP library, its HTTP/1.1 codec is verified core
-code ([codec](docs/http1-codec.md)). Availability also depends on deployment: an external load balancer
+Verus does not verify rustls, the OS, DNS/PKI, or the filesystem for us; the
+gateway links no HTTP library and no async executor, and its HTTP/1.1 codec is
+verified core code ([codec](docs/http1-codec.md)). Availability also depends on deployment: an external load balancer
 must route around a failed gateway instance, and interrupted generations are
 not transparently replayed. The [security contract](docs/security-contract.md)
 specifies the assumptions and limits; these targets do not promise secrecy of

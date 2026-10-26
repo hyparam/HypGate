@@ -50,8 +50,9 @@ and filesystem caches. The acknowledgment deadline must be positive and no more
 than 300 seconds. Dropping all logger handles closes the queue; a responsive worker
 drains and exits. `shutdown` closes admission atomically across all clones, drains
 already-admitted jobs, and joins the worker only after its thread has finished.
-It polls completion asynchronously with a caller-selected deadline; it never
-blocks the executor in a join of a running thread. Server shutdown invokes it
+It polls for the worker to finish under a caller-selected deadline and joins it
+only once it has; it never blocks past the deadline in a join of a running
+thread. Server shutdown invokes it
 with a two-second deadline after request workers stop. A timeout marks logging
 unhealthy and returns an error; the existing worker can remain blocked until the
 syscall returns or the process exits. A later shutdown call can join that same
@@ -59,7 +60,7 @@ worker. Successful shutdown means the worker exited, not that every previous
 append succeeded; append results and audit health retain that distinction.
 
 Admission and closure share a short mutex-protected section containing bounded
-record encoding and enqueueing, with no await or filesystem operations. This
+record encoding and enqueueing, with no filesystem operations. This
 prevents a retained sender/permit from keeping admission alive after closure.
 The thread handle and queue are shared across clones; shutdown is irreversible.
 Tests block sync, queue a second record, close admission, reject later records,

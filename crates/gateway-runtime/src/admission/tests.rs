@@ -33,8 +33,8 @@ fn outstanding_ticket_cannot_advance_replacement_request() {
     assert_eq!(second.pending_bytes(&tail, Direction::Upload), Some(&[4][..]));
 }
 
-#[tokio::test]
-async fn strict_logging_and_cancellation_keep_the_lease_until_drop() {
+#[test]
+fn strict_logging_and_cancellation_keep_the_lease_until_drop() {
     let a = admission(1, 4, true);
     let mut r = a.admit(&[11; 32], 7).unwrap();
     assert!(r.advance(vec![0; 5]).is_none());
@@ -43,13 +43,13 @@ async fn strict_logging_and_cancellation_keep_the_lease_until_drop() {
     struct Log;
     impl AuditLog for Log {
         fn session_id(&self) -> u128 { 0 }
-        async fn append(&mut self, record: LogRecord<'_>) -> std::io::Result<DurableFrame> {
+        fn append(&mut self, record: LogRecord<'_>) -> std::io::Result<DurableFrame> {
             assert_eq!((record.tenant, record.request, record.chunk), (1, 1, 1));
             assert_eq!(record.bytes, &[1, 2]);
             Ok(receipt(record))
         }
     }
-    r.audit_current(&mut Log, Direction::Upload).await.unwrap();
+    r.audit_current(&mut Log, Direction::Upload).unwrap();
     let ticket = r.prepare(2, Direction::Upload).unwrap();
     r.cancel();
     assert!(r.pending_bytes(&ticket, Direction::Upload).is_none());
@@ -126,22 +126,26 @@ fn spare_vector_capacity_cannot_escape_the_retained_chunk_budget() {
     assert!(a.admit(&[11; 32], 7).is_ok());
 }
 
-#[tokio::test]
-async fn canceled_audit_cannot_authorize_or_reuse_the_chunk() {
-    struct PendingLog;
-    impl AuditLog for PendingLog {
+#[test]
+fn abandoned_audit_cannot_authorize_or_reuse_the_chunk() {
+    // An append that never returns normally (here it unwinds) leaves the
+    // request closed: the logger may already have had an unknown effect.
+    struct PanickingLog;
+    impl AuditLog for PanickingLog {
         fn session_id(&self) -> u128 { 0 }
-        async fn append(&mut self, record: LogRecord<'_>) -> std::io::Result<DurableFrame> {
+        fn append(&mut self, record: LogRecord<'_>) -> std::io::Result<DurableFrame> {
             assert_eq!(record.bytes, &[7, 8]);
-            std::future::pending().await
+            panic!("injected logger failure mid-append");
         }
     }
     for strict in [true, false] {
         let a = admission(1, 4, strict);
         let mut r = a.admit(&[11; 32], 7).unwrap();
         r.advance(vec![7, 8]).unwrap();
-        assert!(tokio::time::timeout(std::time::Duration::from_millis(10),
-            r.audit_current(&mut PendingLog, Direction::Download)).await.is_err());
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = r.audit_current(&mut PanickingLog, Direction::Download);
+        })).is_err());
+        assert!(r.is_closed());
         assert!(r.prepare(2, Direction::Upload).is_none());
         assert!(r.advance(vec![9]).is_none());
         assert!(matches!(a.admit(&[11; 32], 7), Err(AdmissionError::AtCapacity)));
@@ -150,14 +154,12 @@ async fn canceled_audit_cannot_authorize_or_reuse_the_chunk() {
     }
 }
 
-#[tokio::test]
-async fn mismatched_durable_receipts_never_authorize_forwarding() {
+#[test]
+fn mismatched_durable_receipts_never_authorize_forwarding() {
     struct WrongLog(u8);
     impl AuditLog for WrongLog {
         fn session_id(&self) -> u128 { if self.0 == 6 { 1 } else { 0 } }
-        async fn append(&mut self, mut record: LogRecord<'_>)
-            -> std::io::Result<DurableFrame>
-        {
+        fn append(&mut self, mut record: LogRecord<'_>) -> std::io::Result<DurableFrame> {
             match self.0 {
                 0 => record.tenant += 1,
                 1 => record.request += 1,
@@ -175,8 +177,7 @@ async fn mismatched_durable_receipts_never_authorize_forwarding() {
             let a = admission(1, 4, strict);
             let mut request = a.admit(&[11; 32], 7).unwrap();
             request.advance(vec![7, 8]).unwrap();
-            let result = request.audit_current(&mut WrongLog(mismatch),
-                Direction::Upload).await;
+            let result = request.audit_current(&mut WrongLog(mismatch), Direction::Upload);
             assert_eq!(result, Err(TransferError::InvalidState));
             assert!(request.prepare(2, Direction::Upload).is_none());
             assert!(request.advance(vec![9]).is_none());
@@ -187,12 +188,12 @@ async fn mismatched_durable_receipts_never_authorize_forwarding() {
     }
 }
 
-#[tokio::test]
-async fn request_refuses_logger_session_switch_before_append() {
+#[test]
+fn request_refuses_logger_session_switch_before_append() {
     struct SwitchingLog { session: u128, calls: usize }
     impl AuditLog for SwitchingLog {
         fn session_id(&self) -> u128 { self.session }
-        async fn append(&mut self, record: LogRecord<'_>) -> std::io::Result<DurableFrame> {
+        fn append(&mut self, record: LogRecord<'_>) -> std::io::Result<DurableFrame> {
             self.calls += 1;
             Ok(receipt(record))
         }
@@ -202,30 +203,30 @@ async fn request_refuses_logger_session_switch_before_append() {
         let mut request = a.admit(&[11; 32], 7).unwrap();
         request.advance(vec![7, 8]).unwrap();
         let mut log = SwitchingLog { session: 0, calls: 0 };
-        request.audit_current(&mut log, Direction::Upload).await.unwrap();
+        request.audit_current(&mut log, Direction::Upload).unwrap();
         // Same-session repeated use remains legal; changed designation is rejected
         // before a second append, even if it could issue matching content.
-        request.audit_current(&mut log, Direction::Upload).await.unwrap();
+        request.audit_current(&mut log, Direction::Upload).unwrap();
         assert_eq!(log.calls, 2);
         log.session = 1;
-        assert_eq!(request.audit_current(&mut log, Direction::Upload).await, Err(TransferError::InvalidState));
+        assert_eq!(request.audit_current(&mut log, Direction::Upload), Err(TransferError::InvalidState));
         assert_eq!(log.calls, 2);
         assert!(request.prepare(2, Direction::Upload).is_none());
     }
 }
 
-#[tokio::test]
-async fn strict_submission_requires_receipt_for_the_transfer_direction() {
+#[test]
+fn strict_submission_requires_receipt_for_the_transfer_direction() {
     struct Log;
     impl AuditLog for Log {
         fn session_id(&self) -> u128 { 0 }
-        async fn append(&mut self, record: LogRecord<'_>) -> std::io::Result<DurableFrame> { Ok(receipt(record)) }
+        fn append(&mut self, record: LogRecord<'_>) -> std::io::Result<DurableFrame> { Ok(receipt(record)) }
     }
     for strict in [true, false] {
         let a = admission(1, 4, strict);
         let mut request = a.admit(&[11; 32], 7).unwrap();
         request.advance(vec![1, 2]).unwrap();
-        request.audit_current(&mut Log, Direction::Download).await.unwrap();
+        request.audit_current(&mut Log, Direction::Download).unwrap();
         if strict { assert!(request.prepare(2, Direction::Upload).is_none()); }
         let ticket = request.prepare(2, Direction::Download).unwrap();
         assert!(request.pending_bytes(&ticket, Direction::Upload).is_none());
@@ -236,15 +237,15 @@ async fn strict_submission_requires_receipt_for_the_transfer_direction() {
     }
 }
 
-#[tokio::test]
-async fn metadata_records_use_chunk_zero_and_never_authorize_body_writes() {
+#[test]
+fn metadata_records_use_chunk_zero_and_never_authorize_body_writes() {
     use crate::transfer::RecordKind;
     use std::sync::{Arc, Mutex};
     #[derive(Default)]
     struct Log { seen: Arc<Mutex<Vec<(u64, RecordKind, Vec<u8>)>>>, fail: bool }
     impl AuditLog for Log {
         fn session_id(&self) -> u128 { 0 }
-        async fn append(&mut self, record: LogRecord<'_>) -> std::io::Result<DurableFrame> {
+        fn append(&mut self, record: LogRecord<'_>) -> std::io::Result<DurableFrame> {
             self.seen.lock().unwrap().push((record.chunk, record.kind, record.bytes.to_vec()));
             if self.fail { Err(std::io::ErrorKind::Other.into()) } else { Ok(receipt(record)) }
         }
@@ -254,37 +255,37 @@ async fn metadata_records_use_chunk_zero_and_never_authorize_body_writes() {
         let mut r = a.admit(&[11; 32], 7).unwrap();
         let mut log = Log::default();
         // Body kinds are refused on the metadata path; oversized payloads too.
-        assert_eq!(r.audit_metadata(&mut log, RecordKind::Upload, b"x").await, Err(TransferError::InvalidState));
-        assert_eq!(r.audit_metadata(&mut log, RecordKind::RequestStart, &vec![0; 8211]).await, Err(TransferError::InvalidState));
+        assert_eq!(r.audit_metadata(&mut log, RecordKind::Upload, b"x"), Err(TransferError::InvalidState));
+        assert_eq!(r.audit_metadata(&mut log, RecordKind::RequestStart, &vec![0; 8211]), Err(TransferError::InvalidState));
         assert!(log.seen.lock().unwrap().is_empty());
         let start = gateway_core::metadata::encode_request_start(5, 7, b"https://example.test/v1").unwrap();
-        r.audit_metadata(&mut log, RecordKind::RequestStart, &start).await.unwrap();
+        r.audit_metadata(&mut log, RecordKind::RequestStart, &start).unwrap();
         assert_eq!(*log.seen.lock().unwrap(), vec![(0, RecordKind::RequestStart, start.clone())]);
         // The metadata receipt is not body evidence and did not advance the stream:
         // the next body chunk is still chunk 1, and strict mode still needs its own receipt.
         assert!(r.prepare(1, Direction::Upload).is_none());
         assert_eq!(r.advance(vec![1, 2]), Some(1));
         if strict { assert!(r.prepare(1, Direction::Upload).is_none()); }
-        r.audit_current(&mut log, Direction::Upload).await.unwrap();
+        r.audit_current(&mut log, Direction::Upload).unwrap();
         assert_eq!(log.seen.lock().unwrap().last().unwrap().0, 1);
         let ticket = r.prepare(2, Direction::Upload).unwrap();
         assert_eq!(r.pending_bytes(&ticket, Direction::Upload), Some(&[1, 2][..]));
         assert!(r.complete(&ticket, 2));
         let head = gateway_core::metadata::encode_response_head(6, 200).unwrap();
-        r.audit_metadata(&mut log, RecordKind::ResponseHead, &head).await.unwrap();
+        r.audit_metadata(&mut log, RecordKind::ResponseHead, &head).unwrap();
         // A failed metadata append degrades the request exactly like a failed body append.
         log.fail = true;
         let head = gateway_core::metadata::encode_response_head(7, 200).unwrap();
-        assert_eq!(r.audit_metadata(&mut log, RecordKind::ResponseHead, &head).await, Err(TransferError::Log));
+        assert_eq!(r.audit_metadata(&mut log, RecordKind::ResponseHead, &head), Err(TransferError::Log));
         assert!(r.log_failed());
         assert_eq!(r.is_closed(), strict);
         // Later start/head records are skipped; the completion is still attempted
         // because it describes an exchange that is already over.
-        assert_eq!(r.audit_metadata(&mut log, RecordKind::ResponseHead, &head).await, Err(TransferError::Log));
+        assert_eq!(r.audit_metadata(&mut log, RecordKind::ResponseHead, &head), Err(TransferError::Log));
         let calls = log.seen.lock().unwrap().len();
         log.fail = false;
         let done = gateway_core::metadata::encode_completion(8, 6, 2, 0).unwrap();
-        r.audit_metadata(&mut log, RecordKind::Completion, &done).await.unwrap();
+        r.audit_metadata(&mut log, RecordKind::Completion, &done).unwrap();
         assert_eq!(log.seen.lock().unwrap().len(), calls + 1);
         assert_eq!(log.seen.lock().unwrap().last().unwrap(), &(0, RecordKind::Completion, done));
     }

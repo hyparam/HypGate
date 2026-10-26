@@ -1,39 +1,45 @@
-//! Shared connection credits survive canceled serve invocations until task cleanup.
-use gateway_core::{task_credit::TaskCredit, http_connection::ResponseRegistry};
-use std::{future::Future, sync::{Arc, Mutex}};
-use super::leased_task::{LeasedTask, TaskLease};
+//! Connection credits bound the threads that parse heads for clients that may
+//! never be admitted. A credit returns when the connection thread's work and
+//! its captures are gone.
+use gateway_core::{resource::ResourceAdmission, task_credit::TaskCredit};
+use std::{sync::{Arc, Condvar, Mutex}, time::Instant};
+use super::leased::TaskLease;
 
-pub(super) struct ConnectionSlots { registry: Arc<Mutex<ResponseRegistry>>, limit: usize }
-pub(super) struct ConnectionLease { slots: Arc<ConnectionSlots>, credit: Option<TaskCredit>, responses: crate::http_body::ConnectionResponses }
+pub(super) struct ConnectionSlots { registry: Mutex<ResourceAdmission>, drained: Condvar, limit: usize }
+pub(super) struct ConnectionLease { slots: Arc<ConnectionSlots>, credit: Option<TaskCredit> }
 
 impl TaskLease for ConnectionLease {
     fn credit(&mut self) -> &mut TaskCredit { self.credit.as_mut().expect("live connection lease") }
-}
-
-impl ConnectionLease {
-    pub(super) fn responses(&self) -> crate::http_body::ConnectionResponses { self.responses.clone() }
-    pub(super) fn task<F: Future<Output = ()>>(self, work: F) -> impl Future<Output = ()> {
-        LeasedTask::new(work, self)
-    }
 }
 impl Drop for ConnectionLease {
     fn drop(&mut self) {
         if let Ok(mut registry) = self.slots.registry.lock() {
             let credit = self.credit.take().expect("live connection lease");
-            // A retained or leaked response body independently forbids reuse.
-            registry.release_task(credit);
+            // A credit still running (the work panicked) is not releasable and stays occupied.
+            credit.release(&mut registry);
         }
+        self.slots.drained.notify_all();
     }
 }
 impl ConnectionSlots {
     pub(super) fn new(limit: usize) -> Arc<Self> {
-        Arc::new(Self { registry: Arc::new(Mutex::new(ResponseRegistry::new(limit))), limit })
+        Arc::new(Self { registry: Mutex::new(ResourceAdmission::new(limit, 0)), drained: Condvar::new(), limit })
     }
     pub(super) fn limit(&self) -> usize { self.limit }
     pub(super) fn acquire(self: &Arc<Self>) -> Option<ConnectionLease> {
-        let (credit, issuer) = self.registry.lock().ok()?.acquire()?;
-        let responses = crate::http_body::ConnectionResponses::new(self.registry.clone(), issuer);
-        Some(ConnectionLease { slots: self.clone(), credit: Some(credit), responses })
+        let key = self.registry.lock().ok()?.acquire()?;
+        Some(ConnectionLease { slots: self.clone(), credit: Some(TaskCredit::new(key)) })
+    }
+    /// Wait until no connection holds credit, or `until` passes; true when drained.
+    pub(super) fn wait_drained(&self, until: Instant) -> bool {
+        let Ok(mut registry) = self.registry.lock() else { return false; };
+        loop {
+            if registry.usage().0 == 0 { return true; }
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() { return false; }
+            let Ok((guard, _)) = self.drained.wait_timeout(registry, left) else { return false; };
+            registry = guard;
+        }
     }
     #[cfg(test)]
     pub(super) fn usage(&self) -> Option<(usize, usize)> {
@@ -44,63 +50,10 @@ impl ConnectionSlots {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
-    fn response_cleanup_gates_connection_reuse_and_prevents_late_issuance() {
-        let slots = ConnectionSlots::new(1);
-        let lease = slots.acquire().unwrap();
-        let responses = lease.responses();
-        let (writer, body) = responses.channel(4).unwrap();
-        assert!(responses.channel(4).is_none());
-        let task = lease.task(async move { drop(body); });
-        drop(task); // never polled; the actual body returns its permit
-        assert_eq!(slots.usage(), Some((0, 1)));
-        assert!(responses.channel(4).is_none());
-        // An empty sender tail does not retain the receiver's connection credit.
-        drop(writer);
-        let replacement = slots.acquire().unwrap();
-        assert!(responses.channel(4).is_none());
-        let (writer, body) = replacement.responses().channel(4).unwrap();
-        assert_eq!(slots.registry.lock().unwrap().response_count(), 1);
-        drop(replacement.task(async move { drop(body); }));
-        drop(writer);
-        assert_eq!(slots.registry.lock().unwrap().response_count(), 0);
-        assert_eq!(slots.usage(), Some((0, 1)));
-    }
-
-    #[test]
-    fn escaped_response_strands_connection_even_after_task_cleanup() {
-        let slots = ConnectionSlots::new(1);
-        let lease = slots.acquire().unwrap();
-        let responses = lease.responses();
-        let (writer, body) = responses.channel(4).unwrap();
-        drop(lease.task(async {}));
-        assert_eq!(slots.registry.lock().unwrap().response_count(), 1);
-        assert_eq!(slots.usage(), Some((1, 1)));
-        assert!(slots.acquire().is_none());
-        drop(body);
-        drop(writer);
-        assert_eq!(slots.registry.lock().unwrap().response_count(), 0);
-        assert!(slots.acquire().is_none());
-        assert!(responses.channel(4).is_none());
-    }
-
-    #[test]
-    fn panicking_capture_strands_connection_credit() {
-        struct Capture;
-        impl Drop for Capture {
-            fn drop(&mut self) { panic!("injected capture cleanup panic"); }
-        }
-        let slots = ConnectionSlots::new(1);
-        let capture = Capture;
-        let task = slots.acquire().unwrap().task(async move { drop(capture); });
-        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(task))).is_err());
-        assert_eq!(slots.usage(), Some((1, 1)));
-        assert!(slots.acquire().is_none());
-    }
-
-    #[test]
-    fn never_polled_task_drops_captures_before_connection_credit() {
+    fn captures_drop_before_connection_credit_on_normal_return() {
         struct Capture(Arc<ConnectionSlots>);
         impl Drop for Capture {
             fn drop(&mut self) {
@@ -110,8 +63,28 @@ mod tests {
         }
         let slots = ConnectionSlots::new(1);
         let capture = Capture(slots.clone());
-        let task = slots.acquire().unwrap().task(async move { drop(capture); });
-        drop(task);
+        super::super::leased::run(slots.acquire().unwrap(), move || drop(capture));
+        assert_eq!(slots.usage(), Some((0, 1)));
+        assert!(slots.acquire().is_some());
+    }
+
+    #[test]
+    fn a_panicking_connection_strands_its_credit() {
+        let slots = ConnectionSlots::new(1);
+        let lease = slots.acquire().unwrap();
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::super::leased::run(lease, || panic!("injected connection panic"));
+        })).is_err());
+        assert_eq!(slots.usage(), Some((1, 1)));
+        assert!(slots.acquire().is_none());
+    }
+
+    #[test]
+    fn a_never_started_lease_returns_its_credit() {
+        let slots = ConnectionSlots::new(1);
+        let lease = slots.acquire().unwrap();
+        assert!(slots.acquire().is_none());
+        drop(lease);
         assert_eq!(slots.usage(), Some((0, 1)));
         assert!(slots.acquire().is_some());
     }
@@ -129,33 +102,15 @@ mod tests {
         assert_eq!(slots.usage(), None);
     }
 
-    #[tokio::test]
-    async fn connection_captures_drop_before_credit_on_every_exit() {
-        struct Capture(Arc<ConnectionSlots>);
-        impl Drop for Capture {
-            fn drop(&mut self) {
-                assert_eq!(self.0.usage(), Some((1, 1)));
-                assert!(self.0.acquire().is_none());
-            }
-        }
-        for exit in 0..4 {
-            let slots = ConnectionSlots::new(1);
-            let capture = Capture(slots.clone());
-            let (started, running) = tokio::sync::oneshot::channel();
-            let task = tokio::spawn(slots.acquire().unwrap().task(async move {
-                let _ = started.send(());
-                if exit == 3 { panic!("injected connection panic"); }
-                if exit != 0 { std::future::pending::<()>().await; }
-                drop(capture);
-            }));
-            if exit == 2 { running.await.unwrap(); }
-            if exit == 1 || exit == 2 { task.abort(); }
-            let result = task.await;
-            if exit == 0 { result.unwrap(); }
-            else if exit == 3 { assert!(result.unwrap_err().is_panic()); }
-            else { assert!(result.unwrap_err().is_cancelled()); }
-            assert_eq!(slots.usage(), Some((0, 1)));
-            assert!(slots.acquire().is_some());
-        }
+    #[test]
+    fn drain_waits_for_the_last_connection_thread() {
+        let slots = ConnectionSlots::new(1);
+        let lease = slots.acquire().unwrap();
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        let thread = std::thread::spawn(move || super::super::leased::run(lease, move || { let _ = blocked.recv(); }));
+        assert!(!slots.wait_drained(Instant::now() + Duration::from_millis(20)));
+        drop(release);
+        assert!(slots.wait_drained(Instant::now() + Duration::from_secs(2)));
+        thread.join().unwrap();
     }
 }

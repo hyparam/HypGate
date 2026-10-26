@@ -15,15 +15,17 @@ fn record(chunk: u64, bytes: &[u8]) -> LogRecord<'_> {
     LogRecord { tenant: 7, request: 11, chunk, kind: RecordKind::Upload, bytes }
 }
 
-#[tokio::test]
+#[test]
 #[ignore = "requires the isolated ext4 fixture created by scripts/check_storage.sh"]
-async fn filesystem_full_preserves_acknowledged_prefix_and_fails_closed() {
-    tokio::time::timeout(Duration::from_secs(30), async {
+fn filesystem_full_preserves_acknowledged_prefix_and_fails_closed() {
+    // A watchdog bounds the whole test, as the async timeout did.
+    let _watchdog = Watchdog::start(Duration::from_secs(30));
+    {
         let dir = TempDir(fixture().join("full-test")); fs::create_dir(&dir.0).unwrap();
         let path = dir.0.join("audit.log");
         let mut log = DiskLog::create(&path, 2, Duration::from_secs(5)).unwrap();
         let first = vec![17; 64 * 1024];
-        log.append(record(1, &first)).await.unwrap();
+        log.append(record(1, &first)).unwrap();
         let session = log.session();
         let acknowledged_end = fs::metadata(&path).unwrap().len();
 
@@ -41,12 +43,12 @@ async fn filesystem_full_preserves_acknowledged_prefix_and_fails_closed() {
         }
         assert!(full, "private fixture did not fill within 128 MiB");
         drop(filler);
-        assert!(log.append(record(2, &block)).await.is_err());
+        assert!(log.append(record(2, &block)).is_err());
         assert!(!log.healthy());
         fs::remove_file(filler_path).unwrap();
-        assert!(log.append(record(3, b"must not resume")).await.is_err());
+        assert!(log.append(record(3, b"must not resume")).is_err());
         assert!(!log.healthy());
-        log.shutdown(Duration::from_secs(2)).await.unwrap();
+        log.shutdown(Duration::from_secs(2)).unwrap();
         let before = fs::read(&path).unwrap();
         assert!(before.len() as u64 >= acknowledged_end);
         let mut reader = LogReader::new(File::open(&path).unwrap()).unwrap();
@@ -62,11 +64,26 @@ async fn filesystem_full_preserves_acknowledged_prefix_and_fails_closed() {
         assert!(DiskLog::create(&path, 1, Duration::from_secs(1)).is_err());
         let mut fresh = DiskLog::create(&dir.0.join("next.log"), 1, Duration::from_secs(5)).unwrap();
         assert_ne!(fresh.session(), session);
-        fresh.append(record(1, b"fresh session")).await.unwrap();
-        fresh.shutdown(Duration::from_secs(2)).await.unwrap();
+        fresh.append(record(1, b"fresh session")).unwrap();
+        fresh.shutdown(Duration::from_secs(2)).unwrap();
         println!("ext4 ENOSPC: acknowledged prefix preserved, uncertain tail rejected, restart uses a fresh session");
-    }).await.unwrap();
+    }
 }
+
+/// Aborts the process if the test outlives its deadline; disarmed on drop.
+struct Watchdog(std::sync::Arc<std::sync::atomic::AtomicBool>);
+impl Watchdog {
+    fn start(limit: Duration) -> Self {
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = done.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(limit);
+            if !flag.load(std::sync::atomic::Ordering::SeqCst) { eprintln!("storage test exceeded {limit:?}"); std::process::abort(); }
+        });
+        Self(done)
+    }
+}
+impl Drop for Watchdog { fn drop(&mut self) { self.0.store(true, std::sync::atomic::Ordering::SeqCst); } }
 
 #[test]
 #[ignore = "requires the isolated ext4 fixture remounted read-only by scripts/check_storage.sh"]

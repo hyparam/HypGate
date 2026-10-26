@@ -4,7 +4,7 @@
 //! the documented per-owner bounds, so a changed audit must change this file.
 use gateway_core::{framing::RecordFrame, journal::DurableFrame, resource::validate_limits};
 use std::{mem::size_of, net::SocketAddr};
-use tokio_rustls::rustls::pki_types::TrustAnchor;
+use rustls::pki_types::TrustAnchor;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits { pub requests: usize, pub chunk_bytes: usize, pub connections: usize, pub queue: usize }
@@ -17,28 +17,29 @@ pub struct Budget {
     pub inbound_connections: u64,
     /// R times the per-admitted-exchange dependency allowance.
     pub admitted_exchanges: u64,
-    /// Registries, dedicated stacks, session cache, DNS jobs, configuration, queue slots, roots.
+    /// Registries, dedicated stacks, session cache, DNS replies, configuration, queue slots, roots.
     pub instance: u64,
     pub total: u64,
 }
 
-/// Hyper server parser owners, header vector, queued output owners, trailer assembly, response head copy.
-pub const PER_INBOUND_CONNECTION: u64 = 589_824 + 196_608 + 65_549 + 49_152 + 32_768;
-/// Hyper client storage, metadata copies, TLS deframer/transcript/retry/queue/chain/session/plaintext
+/// The connection thread's and its watcher's stacks, plus the allowances the
+/// Hyper-era inventory charged a connection for parser owners, header vector,
+/// queued output owners, trailer assembly, and response head copy, kept as an
+/// upper bound on the codec adapter's own buffers.
+pub const PER_INBOUND_CONNECTION: u64 = (crate::server::CONNECTION_STACK_BYTES + crate::server::WATCHER_STACK_BYTES) as u64
+    + 589_824 + 196_608 + 65_549 + 49_152 + 32_768;
+/// Client storage and metadata copies (the Hyper-era allowance, kept as an
+/// upper bound), TLS deframer/transcript/retry/queue/chain/session/plaintext
 /// allowances, verifier failure diagnostics, and the DNS reply.
 pub const PER_ADMITTED_EXCHANGE: u64 = 589_824 + 196_608 + 65_549 + 49_152 + 81_967
     + 196_608 + 262_228 + 196_617 + 82_194 + 131_072 + 262_238 + 32_768 + 1_835_008 + DNS_REPLY;
 const DNS_REPLY: u64 = 253 + 64 * size_of::<SocketAddr>() as u64;
-const DEDICATED_STACKS: u64 = 9 * 2 * 1024 * 1024; // audit worker, four DNS, four handshake threads
+const DEDICATED_STACKS: u64 = 5 * 2 * 1024 * 1024; // audit worker and four DNS threads
 const SESSION_CACHE_CONTENT: u64 = 33 * 9 * 131_119;
 const DNS_JOBS: u64 = 32 * DNS_REPLY;
-// Canceled handshakes can retain TLS state after their request credit returns.
-// Conservatively charge every job the full exchange allowance, including unused
-// HTTP categories, instead of assuming its storage remains covered by R.
-const HANDSHAKE_JOBS: u64 = 32 * PER_ADMITTED_EXCHANGE;
 const CONFIGURATION_CONTENT: u64 = 2 * 1024 * 1024;
-const POOL_SLOTS: u64 = 64; // 32 DNS plus 32 handshake registry entries
-type QueueSlot = Option<(RecordFrame, tokio::sync::oneshot::Sender<Option<DurableFrame>>)>;
+const POOL_SLOTS: u64 = 32; // DNS registry entries
+type QueueSlot = Option<(RecordFrame, std::sync::mpsc::Sender<Option<DurableFrame>>)>;
 
 /// Returns `None` for limits the gateway refuses or sums that overflow `u64`.
 pub fn compose(limits: Limits) -> Option<Budget> {
@@ -55,7 +56,7 @@ pub fn compose(limits: Limits) -> Option<Budget> {
     let inbound_connections = c.checked_mul(PER_INBOUND_CONNECTION)?;
     let admitted_exchanges = r.checked_mul(PER_ADMITTED_EXCHANGE)?;
     let instance = (8 * (2 * r + c + POOL_SLOTS)).checked_add(DEDICATED_STACKS)?
-        .checked_add(SESSION_CACHE_CONTENT)?.checked_add(DNS_JOBS)?.checked_add(HANDSHAKE_JOBS)?.checked_add(CONFIGURATION_CONTENT)?
+        .checked_add(SESSION_CACHE_CONTENT)?.checked_add(DNS_JOBS)?.checked_add(CONFIGURATION_CONTENT)?
         .checked_add(q.checked_mul(size_of::<QueueSlot>() as u64)?)?
         .checked_add(webpki_roots::TLS_SERVER_ROOTS.len() as u64 * size_of::<TrustAnchor<'static>>() as u64)?;
     let total = visible_payload.checked_add(inbound_connections)?.checked_add(admitted_exchanges)?.checked_add(instance)?;
@@ -87,19 +88,19 @@ mod tests {
     #[test]
     fn documented_constants_and_example_match_resource_composition() {
         assert_eq!(size_of::<SocketAddr>(), 32);
-        assert_eq!(PER_INBOUND_CONNECTION, 933_901);
+        assert_eq!(PER_INBOUND_CONNECTION, 589_824 + 933_901);
         assert_eq!(PER_ADMITTED_EXCHANGE, 3_984_134);
         let budget = compose(EXAMPLE).unwrap();
         assert_eq!(budget.visible_payload, 6_574_258);
-        assert_eq!(budget.inbound_connections, 128 * 933_901);
+        assert_eq!(budget.inbound_connections, 128 * 1_523_725);
         assert_eq!(budget.admitted_exchanges, 32 * 3_984_134);
-        let fixed = 8 * (64 + 128 + 64) + 18_874_368 + 38_942_343 + 73_632 + 32 * PER_ADMITTED_EXCHANGE + 2_097_152;
+        let fixed = 8 * (64 + 128 + 32) + 10_485_760 + 38_942_343 + 73_632 + 2_097_152;
         let sized = 16 * size_of::<QueueSlot>() as u64
             + webpki_roots::TLS_SERVER_ROOTS.len() as u64 * size_of::<TrustAnchor<'static>>() as u64;
         assert_eq!(budget.instance, fixed + sized);
         assert!(sized < 65_536, "{sized}");
-        assert_eq!(budget.total, 6_574_258 + 128 * 933_901 + 32 * 3_984_134 + fixed + sized);
-        assert!((440_900_000..441_200_000).contains(&budget.total), "{}", budget.total);
+        assert_eq!(budget.total, 6_574_258 + 128 * 1_523_725 + 32 * 3_984_134 + fixed + sized);
+        assert!((380_600_000..380_800_000).contains(&budget.total), "{}", budget.total);
     }
 
     #[test]

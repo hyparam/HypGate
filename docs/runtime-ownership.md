@@ -41,7 +41,7 @@ independent registries are not globally distinct. The runtime lease binds that
 identity by ownership. Raw `StreamChunk::new`, `authorized_stream`, and
 `release_stream` are now crate-private. External callers, including the runtime
 crate, must construct and retire streams through the consuming `OwnedStream` API.
-Async effects, release timing, and whole-process budgets remain separate obligations. No proof claims that a slot cannot be released while an
+I/O effects, release timing, and whole-process budgets remain separate obligations. No proof claims that a slot cannot be released while an
 independently retained stream exists; the runtime wrapper prevents that extraction.
 
 ## Verified stream retirement
@@ -53,10 +53,10 @@ rejection leaves the registry unchanged. Both outcomes consume the supplied stre
 The runtime lease uses this operation through `OwnedStream::retire` for constructed
 streams, retaining reservation-only
 `release` for reservations that failed before stream construction. Storage is
-dropped inside the locked operation; no async I/O occurs under the lock.
+dropped inside the locked operation; no I/O occurs under the lock.
 
 This proves the synchronous ownership check and registry transition. It does not
-prove that external async effects have stopped, distinguish equal numeric IDs in
+prove that external I/O effects have stopped, distinguish equal numeric IDs in
 separate registries, or verify every privileged call inside the core crate.
 External code can no longer use raw constructors to synthesize another stream
 with the same owner; runtime encapsulation still binds each owner to its registry. Reservation-only `release` now rejects every claimed
@@ -97,7 +97,7 @@ The constructor proves zero occupied slots. A recursive `occupied_update` lemma
 then establishes that a successful `acquire` increases occupancy by exactly one,
 and a successful `release` decreases it by exactly one. Rejected operations leave
 the registry unchanged. These contracts compose count changes across arbitrary
-valid synchronous call sequences; they do not prove when async owners drop leases.
+valid synchronous call sequences; they do not prove when the owning threads drop leases.
 
 The runtime takes this snapshot under the admission mutex. `/metrics` reports
 `loggate_requests_active`, `loggate_requests_limit`, and
@@ -168,7 +168,7 @@ only ever maps `OwnedStream` values, so that duplicate map and its preservation
 lemmas were removed.
 
 The theorem composes the synchronous slot and chunk bounds under the stated
-ownership mapping. It does not prove that every async transition maintains that
+ownership mapping. It does not prove that every runtime transition maintains that
 mapping, or that dropping a request stops every external effect. Numeric owners
 remain scoped to their registry. It also excludes vector spare capacity, HTTP/TLS
 backing storage, log queues, allocator overhead, and OS caches. The runtime
@@ -202,7 +202,7 @@ read bytes, oversized replacements, and retained payload after retirement.
 This is still a conditional resource proof. The ghost map is a specification
 snapshot, not a runtime registry of buffers. Safe Rust lease encapsulation must
 faithfully implement its insertion/replacement/removal events and enforce one
-stream per key. Formal composition of that async ownership boundary, additional
+stream per key. Formal composition of that runtime ownership boundary, additional
 queue/receipt allocations, and dependency backing storage remains open. No new
 runtime collection or retained historical payload is introduced.
 
@@ -225,16 +225,16 @@ a second per-request payload buffer.
 
 The runtime lease now stores either an unclaimed reservation or this owner. Its
 Drop implementation holds the same registry mutex while retiring the owner; no
-raw stream/key re-pairing is performed by the async adapter. A panic during the
+raw stream/key re-pairing is performed by the adapter. A panic during the
 synchronous reservation-to-owner transfer can leak a slot until restart, but cannot
 return credit while retaining the stream. Normal rejection restores the reservation
 for Drop to release. Poisoning continues to close admission.
 
 The constructor/transition/retirement proofs reduce the trusted ownership surface;
-they do not verify Tokio scheduling, mutex identity, cancellation/drop execution,
+they do not verify thread scheduling, mutex identity, cancellation/drop execution,
 or all allocation lifetimes. Lower-level construction/release is confined to the
 core crate; registry namespaces remain externally scoped. These limits prevent
-claiming a complete global async ownership proof. The composition test covers failed
+claiming a complete global ownership proof. The composition test covers failed
 claim, capacity, partial writes, rollover, cancellation, retirement, and slot reuse;
 compile-fail doctests reject raw construction, raw claim/release, mutation through
 the read-only accessor, and completion while a read-buffer borrow remains live.
@@ -255,12 +255,12 @@ chunk; canceled or invalid completion cannot authorize forwarding. Valid complet
 has an exact acceptance contract and preserves byte history and owner identity.
 Retirement explicitly drops any pending read buffer before releasing its slot.
 
-The async loop reads through the machine's `read_buffer`; it owns no separately
-allocated chunk. That accessor borrows the owner's mutable slice through the awaited
-read. Rust slices cannot resize their underlying vector. Because vstd's mutable
-slice projection represents future contents abstractly, the accessor's proof states
-preservation conditional on unchanged slice length; Rust/AsyncRead correspondence
-at that boundary remains trusted. No new assumed specification or external-body
+The copy loop reads through the machine's `read_buffer`; it owns no separately
+allocated chunk. That accessor borrows the owner's mutable slice through the
+blocking read. Rust slices cannot resize their underlying vector. Because vstd's
+mutable slice projection represents future contents abstractly, the accessor's
+proof states preservation conditional on unchanged slice length; Rust/`Read`
+correspondence at that boundary remains trusted. No new assumed specification or external-body
 escape was added. Vec backing capacity and allocator behavior are still outside
 Verus's logical-length model; allocation uses `with_capacity` before zero-filling.
 
@@ -282,7 +282,7 @@ The theorem proves that the total is at most live-slot occupancy times per-reque
 capacity, hence at most the configured request limit times capacity. With the
 validated configuration budget, that logical total is at most 128 MiB. It also
 supplies the `bounded` chunk-category predicate consumed by the combined buffer
-subtotal theorem, so pending async reads are included in that category.
+subtotal theorem, so reads in progress are included in that category.
 
 The actual registry constructor establishes the empty owner map. Acquisition
 preserves it, `OwnedStream::claim` proves insertion of its returned owner, and
@@ -293,5 +293,5 @@ wrong-owner replacement, omitted read bytes, oversized replacements, and retaine
 payload after retirement.
 
 The runtime must still maintain a complete single-registry map of its live owners;
-this is not a proof of all Tokio scheduling or global allocation lifetimes. The
+this is not a proof of all thread scheduling or global allocation lifetimes. The
 mutable-read-slice length obligation and dependency/allocator exclusions remain.

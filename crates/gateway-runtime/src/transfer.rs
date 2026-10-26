@@ -1,11 +1,11 @@
-//! Async shell around the verified body-copy machine. The reader's bytes, the
-//! writer's accepted count, and the logger's durable acknowledgment are
+//! Blocking shell around the verified body-copy machine. The reader's bytes,
+//! the writer's accepted count, and the logger's durable acknowledgment are
 //! external contracts; which of them happens next is the machine's decision.
 use crate::admission::{CancelOnDrop, Request};
+use crate::net::{read_uninterrupted, write_uninterrupted};
 pub use gateway_core::journal::DurableFrame;
 use gateway_core::{body_copy::{Action, BodyCopy, Failure}, resolved_route::ResolvedRoute};
-use std::{future::Future, io};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use std::io::{self, Read, Write};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Direction { Upload, Download }
@@ -60,12 +60,11 @@ pub struct LogRecord<'a> {
 pub trait AuditLog {
     /// Stable identity of the designated journal; must match every returned receipt.
     fn session_id(&self) -> u128;
-    /// Returns an owned journal receipt for this exact record, durable under the logger's documented
-    /// crash model. Implementations must bound work and retain any buffer credits
-    /// for effects that survive cancellation. The receipt retains its frame until
-    /// consumed or dropped. DiskLog supplies this implementation.
-    fn append<'a>(&'a mut self, record: LogRecord<'a>)
-        -> impl Future<Output = io::Result<DurableFrame>> + Send + 'a;
+    /// Returns an owned journal receipt for this exact record, durable under
+    /// the logger's documented crash model. Implementations must bound their
+    /// work: this blocks the calling thread. The receipt retains its frame
+    /// until consumed or dropped. DiskLog supplies this implementation.
+    fn append(&mut self, record: LogRecord<'_>) -> io::Result<DurableFrame>;
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -81,21 +80,21 @@ impl From<Failure> for TransferError {
 }
 
 #[cfg(test)]
-pub(crate) async fn copy_body<R, W, L>(request: &mut Request<'_>, reader: &mut R,
+pub(crate) fn copy_body<R, W, L>(request: &mut Request<'_>, reader: &mut R,
     writer: &mut W, log: &mut L, direction: Direction) -> Result<BodyCopy, TransferError>
-where R: AsyncRead + Unpin, W: AsyncWrite + Unpin, L: AuditLog {
-    copy_body_bound::<_, _, _, (), ()>(request, reader, writer, log, direction, None).await
+where R: Read, W: Write, L: AuditLog {
+    copy_body_bound::<_, _, _, (), ()>(request, reader, writer, log, direction, None)
 }
 
 /// Copy one body under the verified `BodyCopy` machine. The machine names each
 /// effect (read, append, write, flush); this loop performs it and reports the
 /// result back. Nothing here decides what is read, logged, released, or
 /// counted. Successful EOF leaves the request usable for the next direction;
-/// errors or cancellation close it. EOF/framing correctness belongs to the HTTP
-/// body adapter. No detached task, transparent retry, or whole-body buffering.
-pub(crate) async fn copy_body_bound<R, W, L, D: Sync, C: Sync>(request: &mut Request<'_>, reader: &mut R,
+/// errors or a panic close it. EOF/framing correctness belongs to the HTTP
+/// body adapter. No detached thread, transparent retry, or whole-body buffering.
+pub(crate) fn copy_body_bound<R, W, L, D: Sync, C: Sync>(request: &mut Request<'_>, reader: &mut R,
     writer: &mut W, log: &mut L, direction: Direction, route: Option<&ResolvedRoute<'_, D, C>>) -> Result<BodyCopy, TransferError>
-where R: AsyncRead + Unpin, W: AsyncWrite + Unpin, L: AuditLog {
+where R: Read, W: Write, L: AuditLog {
     let mut guard = CancelOnDrop { request, armed: true };
     let mut copy = BodyCopy::begin(guard.request.owned(), direction.id()).ok_or(TransferError::InvalidState)?;
     loop {
@@ -103,7 +102,7 @@ where R: AsyncRead + Unpin, W: AsyncWrite + Unpin, L: AuditLog {
             Action::Read => {
                 let (stream, _, _) = guard.request.parts();
                 if copy.begin_read(stream) {
-                    let length = reader.read(copy.read_buffer(stream)).await.ok();
+                    let length = read_uninterrupted(reader, copy.read_buffer(stream)).ok();
                     copy.finish_read(stream, length);
                 }
             }
@@ -113,19 +112,19 @@ where R: AsyncRead + Unpin, W: AsyncWrite + Unpin, L: AuditLog {
                 if let Some((header, bytes)) = copy.audit_record(stream, authority, journal, session) {
                     let record = LogRecord { tenant: header.tenant, request: header.request, chunk: header.chunk,
                         kind: direction.into(), bytes };
-                    let receipt = log.append(record).await.ok();
+                    let receipt = log.append(record).ok();
                     copy.finish_audit(stream, authority, journal, receipt.as_ref());
                 }
             }
             Action::Write => {
                 let (stream, authority, journal) = guard.request.parts();
                 if let Some((write, bytes)) = copy.write_bytes(stream, authority, journal, route) {
-                    let count = writer.write(bytes).await.ok();
+                    let count = write_uninterrupted(writer, bytes).ok();
                     copy.finish_write(stream, &write, count);
                 }
             }
             Action::Flush => {
-                let ok = writer.flush().await.is_ok();
+                let ok = writer.flush().is_ok();
                 let (stream, _, _) = guard.request.parts();
                 copy.finish_flush(stream, ok);
             }

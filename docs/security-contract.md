@@ -6,7 +6,7 @@ properties are checked by Verus. Production body writes pass the checked
 `ResolvedRoute::write_bytes` gate ([ownership composition](ownership-composition.md)),
 and the [end-to-end audit](end-to-end-audit.md) traces that mediation through every
 effect site and failure exit. The socket adapter, TLS, DNS, and the OS remain trusted,
-and there is no single mechanized theorem over the async runtime. The
+and there is no single mechanized theorem over the threaded runtime. The
 [authorization notes](authorization-core.md) give the exact boundary.
 
 ## Threat and policy boundary
@@ -29,7 +29,7 @@ and credential ownership mechanism must be settled before exposing an endpoint.
 | Property | Obligation | Current status |
 | --- | --- | --- |
 | Authorization | Every upstream dispatch is justified by an authenticated principal's grant for that route and policy snapshot. Unknown identities, missing grants, and validation errors produce no dispatch. | Digest identity and tenant-scoped token issuance proved; HTTP authentication is tested; production dispatch is bound through the checked `ResolvedRoute::write_bytes` gate, with TLS/DNS delivery trusted. |
-| Tenant isolation | A principal cannot select another tenant's credential, route grant, request state, or private audit destination. Async completion cannot attach to another live request. | Local owner/ticket checks and authenticated token tenant binding proved; cross-owner lifecycle composition is checked (`cleanup_before_reuse`); audit-file access control remains an operator obligation. |
+| Tenant isolation | A principal cannot select another tenant's credential, route grant, request state, or private audit destination. A background reply cannot attach to another live request. | Local owner/ticket checks and authenticated token tenant binding proved; cross-owner lifecycle composition is checked (`cleanup_before_reuse`); audit-file access control remains an operator obligation. |
 | Credential confinement | Only the credential handle authorized for the tenant and exact origin may reach the secret-bearing transport operation. Gateway authentication material is never forwarded upstream; credential headers are excluded from client-visible metadata, audit metadata, and diagnostics. | Authorized handles satisfy tenant ownership and exact root grants; the header projection that injects the credential and drops the client's is proved (`headers::forward_request`); secret loading is tested; the transport consumes only the resolved route's credential, with head serialization proved (`http1_write`) and TLS delivery trusted. |
 | Routing integrity | Effective scheme, host, port, and route template come from validated policy, not arbitrary request fields, provider response headers, ambient proxy settings, or unvalidated configuration. | Normalized origin handles confined to root grants; the destination grammar and the host, port, and path it yields are proved (`destination::parse`); socket/TLS naming derives from those verified parts, with DNS and TLS name checks trusted. |
 | Security failure is closed | Authentication, authorization, destination validation, and credential selection failures never permit upstream dispatch. | Invalid core authentication/configuration cannot yield authority; dispatch mediation is audited at the source level in the end-to-end audit. Distinct from logging policy. |
@@ -91,18 +91,18 @@ No fallback is in scope. If later introduced, each destination needs its own gra
 and correctly scoped credential; a fallback cannot inherit authority merely because
 an earlier request was allowed.
 
-## Synchronous proofs, asynchronous execution
+## Synchronous proofs, concurrent execution
 
 Keep authentication evidence validation, route admission, policy decisions, write
-reservation, and completion transitions in a synchronous state machine. The async
-shell supplies events and executes only its allowed actions. It must preserve owner,
-generation, policy, and destination bindings across awaits, cancellations, errors,
-partial writes, and shutdown.
+reservation, and completion transitions in a synchronous state machine. The
+threaded shell supplies events and executes only its allowed actions. It must
+preserve owner, generation, policy, and destination bindings across blocking
+calls, cancellations, errors, partial writes, and shutdown.
 
 Cancellation cannot retract bytes already submitted to the OS. Known completion
 may still be recorded; an unknown outcome cannot justify replay. Bound outstanding
 effects and resource lifetimes, and define every error transition before connecting
-the core to an executor. Fairness, I/O progress, and deadline behavior need separate
+the core to the threaded shell. Fairness, I/O progress, and deadline behavior need separate
 assumptions and tests; state-machine safety does not imply availability.
 
 ## Trusted computing base and evidence
@@ -110,7 +110,7 @@ assumptions and tests; state-machine safety does not imply availability.
 For each theorem, publish its exact scope and preconditions. The current trust
 boundary includes Verus and its translation/solver, vstd specifications, rustc/LLVM,
 standard-library implementations, allocation behavior, and platform execution.
-Runtime dependencies include the adapter, Tokio, rustls, OS sockets/filesystem,
+Runtime dependencies include the adapter, rustls, OS sockets/filesystem and their timeouts,
 DNS/PKI, secret provisioning, and authentication bindings. None is automatically
 verified by adding Verus contracts to the core.
 

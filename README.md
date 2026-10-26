@@ -59,7 +59,7 @@ Shipping runs on its own thread, so if it fails, the gateway keeps serving
 requests.
 
 These are theorems about the verified core, plus a short list of things we
-trust and do not prove: Tokio, rustls, the OS, DNS, TLS certificates, the
+trust and do not prove: rustls, the OS, DNS, TLS certificates, the
 filesystem under power loss, the HypAware server, and provider JSON parsing.
 The HTTP/1.1 parser and writer are verified core code; no HTTP library is
 linked ([codec](docs/http1-codec.md)). [PROOFS.md](PROOFS.md) states each guarantee exactly and lists every
@@ -133,7 +133,7 @@ for provider configuration, scanning logs, and shutdown behavior.
 | [Resource accounting](docs/resource-accounting.md) | Source-level inventory of application buffers and queues |
 | [Resource composition](docs/resource-composition.md) | Budget ownership and the conditional requested-allocation bound |
 | [HTTP/1.1 codec](docs/http1-codec.md) | The verified head parser and writer, framing selection, chunked coding, and exchange machines; the adapter and what stays trusted |
-| [Dependency resources](docs/dependency-resources.md) | Pinned rustls/Tokio retained-allocation audit and the codec's own buffers |
+| [Dependency resources](docs/dependency-resources.md) | Pinned rustls retained-allocation audit and the codec's own buffers |
 | [DNS resources](docs/dns-resources.md) | DNS lookup ownership, threads, and shutdown |
 
 Runtime and adapters:
@@ -141,17 +141,16 @@ Runtime and adapters:
 | Document | Purpose |
 | --- | --- |
 | [Runtime ownership](docs/runtime-ownership.md) | Binding authorized requests to capacity leases and owned streams |
-| [Worker lifetimes](docs/worker-lifetimes.md) | Worker credits and task destruction order |
+| [Worker lifetimes](docs/worker-lifetimes.md) | Worker credits and the order in which a thread's work and its credit are destroyed |
 | [Configuration](docs/configuration.md) | Root policy and candidate route parsing, credential loading, endpoint binding |
 | [HTTP boundary](docs/http-boundary.md) | Inbound authentication and fixed upstream request preparation |
-| [Async transfer](docs/async-transfer.md) | Tokio body driver and the durable-log contract |
-| [HTTPS transport](docs/https-transport.md) | Upstream TLS exchange and handshake isolation |
+| [Body transfer](docs/body-transfer.md) | Blocking body driver and the durable-log contract |
+| [HTTPS transport](docs/https-transport.md) | Upstream TLS exchange on the connection thread, deadlines, and cancellation |
 | [Disk logging](docs/disk-logging.md) | Bounded disk worker, sync acknowledgments, recovery scanner |
 | [Cloud shipping](docs/cloud-shipping.md) | HypAware shipper thread: protocol, configuration, proved and trusted parts |
 | [HypAware setup](docs/hypaware.md) | Operator walkthrough: tokens, shipping config, checking rows on the server, live smoke test record |
-| [Thread context](docs/thread-context.md) | Runtime entry as a typed permit: the sites, what is proved, typed, and trusted |
 | [HTTP ownership](docs/http-ownership.md) | HTTP owner counts derived from the worker and connection registries |
-| [HTTP buffer lifetimes](docs/http-buffer-lifetimes.md) | HTTP body buffers, mailbox credit, and cancellation |
+| [HTTP buffer lifetimes](docs/http-buffer-lifetimes.md) | HTTP body buffers, role credit, and cancellation |
 | [Audit buffer lifetimes](docs/audit-buffer-lifetimes.md) | Audit queue credit, worker ownership, and receipt delivery |
 
 Operations:
@@ -198,9 +197,9 @@ cargo test -p gateway-runtime --release --locked server::tests::benchmark -- --i
 LOGGATE_HAPROXY=/path/to/haproxy cargo test -p gateway-runtime --locked proxy_gateway_process_failover -- --ignored --nocapture
 ```
 
-Validation on 2026-10-25: 791 core verification checks passed, 311 workspace tests including seven compile-fail
-doctests passed, all 452 deliberate mutations failed their proof obligations, and the runtime passed its
-panic and effect-site lints. The opt-in TLS proxy/gateway
+Validation on 2026-10-26: 788 core verification checks passed, 288 workspace tests passed, all 449
+deliberate mutations failed their proof obligations, and the runtime passed its panic and effect-site
+lints with no async executor linked. The opt-in TLS proxy/gateway
 process-failover test and six load/fault workloads passed on 2026-10-23.
 Two ten-minute overload runs and the final 100-wave-per-mode isolated memory soak
 also passed; measurements and limits are in the benchmark notes.

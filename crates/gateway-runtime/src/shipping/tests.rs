@@ -4,14 +4,14 @@ use super::config::ShippingConfig;
 use super::projection::{civil, iso_date, iso_timestamp, rows as project};
 use super::state::{base64url_encode, jwt_claims, load_checkpoint, load_identity, save_checkpoint, save_identity};
 use crate::disk_log::DiskLog;
-use crate::test_support::{self_signed, TempDir};
+use crate::test_support::{self_signed, wait_until, TempDir};
 use crate::transfer::{AuditLog, LogRecord, RecordKind};
 use gateway_core::exchange_assembler::{Assembler, Exchange};
 use gateway_core::metadata::{encode_completion, encode_request_start, encode_response_head};
 use crate::test_support::http::{read_request, write_response, Received};
+use rustls::{RootCertStore, ServerConfig, ServerConnection, StreamOwned};
 use serde_json::{json, Value};
-use std::{collections::HashSet, sync::Mutex};
-use tokio::net::TcpListener;
+use std::{collections::HashSet, io::{self, Write}, net::{SocketAddr, TcpListener, TcpStream}, sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}}, thread, time::Duration};
 
 // ---- fake HypAware server -------------------------------------------------
 
@@ -31,7 +31,18 @@ pub(crate) struct Fake {
     pub(crate) requests: Vec<String>,
     hang: bool,
 }
-pub(crate) type Shared = std::sync::Arc<Mutex<Fake>>;
+pub(crate) type Shared = Arc<Mutex<Fake>>;
+
+/// The fake server's accept thread. Dropping it stops accepting and joins the
+/// thread; connections already being served finish on their own threads.
+pub(crate) struct FakeServer { stop: Arc<AtomicBool>, address: SocketAddr, thread: Option<thread::JoinHandle<()>> }
+impl Drop for FakeServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        let _ = TcpStream::connect_timeout(&self.address, Duration::from_secs(1));
+        if let Some(thread) = self.thread.take() { let _ = thread.join(); }
+    }
+}
 
 fn fake_jwt(sub: &str, exp: u64, serial: u64) -> String {
     let header = base64url_encode(br#"{"alg":"HS256","typ":"JWT"}"#);
@@ -39,33 +50,45 @@ fn fake_jwt(sub: &str, exp: u64, serial: u64) -> String {
     format!("{header}.{payload}.{}", base64url_encode(b"signature-not-checked-by-client"))
 }
 
-async fn serve_fake(listener: TcpListener, acceptor: tokio_rustls::TlsAcceptor, state: Shared) {
+/// Complete the server side of a TLS handshake on an accepted socket.
+fn tls_server(socket: TcpStream, config: &Arc<ServerConfig>) -> io::Result<StreamOwned<ServerConnection, TcpStream>> {
+    socket.set_read_timeout(Some(Duration::from_secs(10)))?;
+    socket.set_write_timeout(Some(Duration::from_secs(10)))?;
+    let mut connection = ServerConnection::new(config.clone()).map_err(io::Error::other)?;
+    while connection.is_handshaking() { connection.complete_io(&mut &socket)?; }
+    Ok(StreamOwned::new(connection, socket))
+}
+
+fn serve_fake(listener: TcpListener, config: Arc<ServerConfig>, state: Shared, stop: Arc<AtomicBool>) {
     loop {
-        let Ok((socket, _)) = listener.accept().await else { return; };
-        let acceptor = acceptor.clone(); let state = state.clone();
-        tokio::spawn(async move {
-            let Ok(mut tls) = acceptor.accept(socket).await else { return; };
-            let Ok(received) = read_request(&mut tls).await else { return; };
-            let (status, body, retry_after) = handle_fake(received, state).await;
+        let Ok((socket, _)) = listener.accept() else { return; };
+        if stop.load(Ordering::SeqCst) { return; }
+        let config = config.clone(); let state = state.clone();
+        thread::spawn(move || {
+            let Ok(mut tls) = tls_server(socket, &config) else { return; };
+            let Ok(received) = read_request(&mut tls) else { return; };
+            let (status, body, retry_after) = handle_fake(received, state);
             let retry = retry_after.map(|seconds| seconds.to_string());
             let mut fields: Vec<(&str, &str)> = Vec::new();
             if let Some(retry) = retry.as_deref() { fields.push(("retry-after", retry)); }
             fields.push(("accept-encoding", "gzip"));
-            let _ = write_response(&mut tls, status, &fields, body.as_bytes()).await;
-            let _ = tokio::io::AsyncWriteExt::shutdown(&mut tls).await;
+            let _ = write_response(&mut tls, status, &fields, body.as_bytes());
+            tls.conn.send_close_notify();
+            let _ = tls.flush();
+            let _ = tls.sock.shutdown(std::net::Shutdown::Both);
         });
     }
 }
 
 /// The fake's reply: status, body, and an optional Retry-After in seconds.
-async fn handle_fake(request: Received, state: Shared) -> (u16, String, Option<u64>) {
+fn handle_fake(request: Received, state: Shared) -> (u16, String, Option<u64>) {
     let path = request.target().to_owned();
     let auth = request.header("authorization").map(str::to_owned).unwrap_or_default();
     let batch_id = request.header("x-hyp-batch-id").map(str::to_owned);
     let content_type = request.header("content-type").map(str::to_owned).unwrap_or_default();
     let body = request.body;
     let hang = { let mut fake = state.lock().unwrap(); fake.requests.push(path.clone()); fake.hang };
-    if hang { tokio::time::sleep(Duration::from_secs(3600)).await; }
+    if hang { thread::sleep(Duration::from_secs(3600)); }
     let reply = |status: u16, body: String, retry_after: Option<u64>| (status, body, retry_after);
     let mut fake = state.lock().unwrap();
     let now = now_seconds();
@@ -109,22 +132,23 @@ async fn handle_fake(request: Received, state: Shared) -> (u16, String, Option<u
 }
 
 /// A fake server on a fresh port with its trust roots and shared state.
-async fn fake_server(token: &str) -> (u16, tokio_rustls::rustls::RootCertStore, Shared, tokio::task::JoinHandle<()>) {
-    let (_, acceptor, roots) = self_signed();
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let state = std::sync::Arc::new(Mutex::new(Fake { expected_token: token.into(), jwt_ttl: 21 * 86_400, ..Default::default() }));
-    let task = tokio::spawn(serve_fake(listener, acceptor, state.clone()));
-    (port, roots, state, task)
+fn fake_server(token: &str) -> (u16, RootCertStore, Shared, FakeServer) {
+    let (_, config, roots) = self_signed();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let state = Arc::new(Mutex::new(Fake { expected_token: token.into(), jwt_ttl: 21 * 86_400, ..Default::default() }));
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread = { let state = state.clone(); let stop = stop.clone(); thread::spawn(move || serve_fake(listener, config, state, stop)) };
+    (address.port(), roots, state, FakeServer { stop, address, thread: Some(thread) })
 }
 
 pub(crate) const TOKEN: &str = "hsa_0123456789abcdef_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq";
 
 /// The fake server for the gateway-level test, optionally hanging every request.
-pub(crate) async fn fake_server_for_gateway(hang: bool) -> (u16, tokio_rustls::rustls::RootCertStore, Shared, tokio::task::JoinHandle<()>) {
-    let (port, roots, state, task) = fake_server(TOKEN).await;
+pub(crate) fn fake_server_for_gateway(hang: bool) -> (u16, RootCertStore, Shared, FakeServer) {
+    let (port, roots, state, server) = fake_server(TOKEN);
     state.lock().unwrap().hang = hang;
-    (port, roots, state, task)
+    (port, roots, state, server)
 }
 
 fn shipping_json(port: u16, state_dir: &std::path::Path, extra: Value) -> Vec<u8> {
@@ -139,24 +163,18 @@ fn shipping_config(port: u16, state_dir: &std::path::Path, extra: Value) -> Ship
 }
 
 /// Append one complete exchange to the log and return its request id.
-async fn write_exchange(log: &mut DiskLog, request: u64, destination: &str, upload: &[u8], status: u16, download: &[&[u8]], outcome: u8) {
+fn write_exchange(log: &mut DiskLog, request: u64, destination: &str, upload: &[u8], status: u16, download: &[&[u8]], outcome: u8) {
     let start = encode_request_start(1_700_000_000_000 + request, 7, destination.as_bytes()).unwrap();
-    log.append(LogRecord { tenant: 1, request, chunk: 0, kind: RecordKind::RequestStart, bytes: &start }).await.unwrap();
-    log.append(LogRecord { tenant: 1, request, chunk: 1, kind: RecordKind::Upload, bytes: upload }).await.unwrap();
+    log.append(LogRecord { tenant: 1, request, chunk: 0, kind: RecordKind::RequestStart, bytes: &start }).unwrap();
+    log.append(LogRecord { tenant: 1, request, chunk: 1, kind: RecordKind::Upload, bytes: upload }).unwrap();
     let head = encode_response_head(1_700_000_000_500 + request, status).unwrap();
-    log.append(LogRecord { tenant: 1, request, chunk: 0, kind: RecordKind::ResponseHead, bytes: &head }).await.unwrap();
+    log.append(LogRecord { tenant: 1, request, chunk: 0, kind: RecordKind::ResponseHead, bytes: &head }).unwrap();
     for (i, chunk) in download.iter().enumerate() {
-        log.append(LogRecord { tenant: 1, request, chunk: 2 + i as u64, kind: RecordKind::Download, bytes: chunk }).await.unwrap();
+        log.append(LogRecord { tenant: 1, request, chunk: 2 + i as u64, kind: RecordKind::Download, bytes: chunk }).unwrap();
     }
     let total: usize = download.iter().map(|c| c.len()).sum();
     let done = encode_completion(1_700_000_001_000 + request, outcome, upload.len() as u64, total as u64).unwrap();
-    log.append(LogRecord { tenant: 1, request, chunk: 0, kind: RecordKind::Completion, bytes: &done }).await.unwrap();
-}
-
-async fn wait_until(deadline: Duration, mut condition: impl FnMut() -> bool) -> bool {
-    let start = std::time::Instant::now();
-    while start.elapsed() < deadline { if condition() { return true; } tokio::time::sleep(Duration::from_millis(20)).await; }
-    condition()
+    log.append(LogRecord { tenant: 1, request, chunk: 0, kind: RecordKind::Completion, bytes: &done }).unwrap();
 }
 
 const ANTHROPIC_REQUEST: &str = r#"{"model":"claude-opus-4","max_tokens":64,"metadata":{"user_id":"session-abc"},"messages":[{"role":"user","content":"hello there"}]}"#;
@@ -164,19 +182,19 @@ const ANTHROPIC_RESPONSE: &str = r#"{"id":"msg_1","type":"message","role":"assis
 
 // ---- shipper against the fake server ---------------------------------------
 
-#[tokio::test]
-async fn ships_exchanges_once_with_stable_ids_and_resumes_from_checkpoint() {
-    let (port, roots, state, _server) = fake_server(TOKEN).await;
+#[test]
+fn ships_exchanges_once_with_stable_ids_and_resumes_from_checkpoint() {
+    let (port, roots, state, _server) = fake_server(TOKEN);
     let dir = TempDir::new(); let state_dir = dir.0.join("state"); std::fs::create_dir(&state_dir).unwrap();
     let log_path = dir.0.join("audit.log");
     let mut log = DiskLog::create(&log_path, 4, Duration::from_secs(2)).unwrap();
-    write_exchange(&mut log, 1, "https://api.anthropic.com/v1/messages", ANTHROPIC_REQUEST.as_bytes(), 200, &[ANTHROPIC_RESPONSE.as_bytes()], 0).await;
+    write_exchange(&mut log, 1, "https://api.anthropic.com/v1/messages", ANTHROPIC_REQUEST.as_bytes(), 200, &[ANTHROPIC_RESPONSE.as_bytes()], 0);
     let shipper = Shipper::spawn_with_roots(shipping_config(port, &state_dir, json!({})), log_path.clone(), Some(roots.clone())).unwrap();
     let metrics = shipper.metrics();
-    assert!(wait_until(Duration::from_secs(10), || metrics.batches_acknowledged() == 1).await, "first batch");
+    assert!(wait_until(Duration::from_secs(10), || metrics.batches_acknowledged() == 1), "first batch");
     // Tail: a second exchange written while the shipper runs is shipped in a later batch.
-    write_exchange(&mut log, 2, "https://api.openai.com/v1/responses", br#"{"model":"gpt-5","user":"u-9","input":"ping"}"#, 500, &[b"upstream exploded"], 1).await;
-    assert!(wait_until(Duration::from_secs(10), || metrics.batches_acknowledged() == 2).await, "second batch");
+    write_exchange(&mut log, 2, "https://api.openai.com/v1/responses", br#"{"model":"gpt-5","user":"u-9","input":"ping"}"#, 500, &[b"upstream exploded"], 1);
+    assert!(wait_until(Duration::from_secs(10), || metrics.batches_acknowledged() == 2), "second batch");
     assert!(metrics.enrolled() && !metrics.stopped() && metrics.lag() == 0);
     shipper.shutdown(Duration::from_secs(5)).unwrap();
     let identity = load_identity(&state_dir).expect("identity persisted");
@@ -217,10 +235,10 @@ async fn ships_exchanges_once_with_stable_ids_and_resumes_from_checkpoint() {
     // Restart from the checkpoint: nothing already resolved is sent again, and a
     // new exchange goes out. Wiping the checkpoint re-sends everything under the
     // same batch id, which the server's ledger recognizes.
-    write_exchange(&mut log, 3, "https://api.anthropic.com/v1/messages", b"not json", 200, &[b"plain"], 0).await;
+    write_exchange(&mut log, 3, "https://api.anthropic.com/v1/messages", b"not json", 200, &[b"plain"], 0);
     let shipper = Shipper::spawn_with_roots(shipping_config(port, &state_dir, json!({})), log_path.clone(), Some(roots.clone())).unwrap();
     let metrics = shipper.metrics();
-    assert!(wait_until(Duration::from_secs(10), || metrics.batches_acknowledged() == 1).await);
+    assert!(wait_until(Duration::from_secs(10), || metrics.batches_acknowledged() == 1));
     shipper.shutdown(Duration::from_secs(5)).unwrap();
     assert_eq!(state.lock().unwrap().batches.len(), 3);
     assert_eq!(state.lock().unwrap().batches[2].1[0]["content_text"], "not json");
@@ -228,7 +246,7 @@ async fn ships_exchanges_once_with_stable_ids_and_resumes_from_checkpoint() {
     std::fs::remove_file(state_dir.join("checkpoint.json")).unwrap();
     let shipper = Shipper::spawn_with_roots(shipping_config(port, &state_dir, json!({})), log_path.clone(), Some(roots)).unwrap();
     let metrics = shipper.metrics();
-    assert!(wait_until(Duration::from_secs(10), || metrics.batches_acknowledged() == 1).await);
+    assert!(wait_until(Duration::from_secs(10), || metrics.batches_acknowledged() == 1));
     shipper.shutdown(Duration::from_secs(5)).unwrap();
     let fake = state.lock().unwrap();
     // The replay batched all three exchanges together, so its id is new, but
@@ -239,21 +257,21 @@ async fn ships_exchanges_once_with_stable_ids_and_resumes_from_checkpoint() {
     assert_eq!(fake.batches[0].0, first_id);
 }
 
-#[tokio::test]
-async fn ships_many_exchanges_in_bounded_batches_with_drain_mode() {
-    let (port, roots, state, _server) = fake_server(TOKEN).await;
+#[test]
+fn ships_many_exchanges_in_bounded_batches_with_drain_mode() {
+    let (port, roots, state, _server) = fake_server(TOKEN);
     let dir = TempDir::new(); let state_dir = dir.0.join("state"); std::fs::create_dir(&state_dir).unwrap();
     let log_path = dir.0.join("audit.log");
     let mut log = DiskLog::create(&log_path, 8, Duration::from_secs(2)).unwrap();
     let big = vec![b'x'; 300 * 1024];
     for request in 1..=20u64 {
-        write_exchange(&mut log, request, "https://api.anthropic.com/v1/messages", &big, 200, &[&big], 0).await;
+        write_exchange(&mut log, request, "https://api.anthropic.com/v1/messages", &big, 200, &[&big], 0);
     }
     // Two open exchanges never complete; drain flushes them as incomplete.
     let start = encode_request_start(1, 7, b"https://api.anthropic.com/v1/messages").unwrap();
-    log.append(LogRecord { tenant: 1, request: 21, chunk: 0, kind: RecordKind::RequestStart, bytes: &start }).await.unwrap();
-    log.append(LogRecord { tenant: 1, request: 22, chunk: 0, kind: RecordKind::RequestStart, bytes: &start }).await.unwrap();
-    log.append(LogRecord { tenant: 1, request: 22, chunk: 1, kind: RecordKind::Upload, bytes: b"partial" }).await.unwrap();
+    log.append(LogRecord { tenant: 1, request: 21, chunk: 0, kind: RecordKind::RequestStart, bytes: &start }).unwrap();
+    log.append(LogRecord { tenant: 1, request: 22, chunk: 0, kind: RecordKind::RequestStart, bytes: &start }).unwrap();
+    log.append(LogRecord { tenant: 1, request: 22, chunk: 1, kind: RecordKind::Upload, bytes: b"partial" }).unwrap();
     drop(log);
     let mut config = shipping_config(port, &state_dir, json!({"max_exchange_bytes": 1048576}));
     config.poll_ms = 100;
@@ -261,9 +279,7 @@ async fn ships_many_exchanges_in_bounded_batches_with_drain_mode() {
     std::thread::spawn(move || {
         let _ = tx.send(ship_to_end_with_roots(config, log_path, Some(roots)).map(|m| m.batches_acknowledged()));
     });
-    let result = loop {
-        match rx.try_recv() { Ok(result) => break result, Err(_) => tokio::time::sleep(Duration::from_millis(20)).await }
-    };
+    let result = rx.recv_timeout(Duration::from_secs(60)).expect("drain thread reports");
     let acknowledged = result.expect("drain finishes");
     let fake = state.lock().unwrap();
     let rows: Vec<&Value> = fake.batches.iter().flat_map(|b| b.1.iter()).collect();
@@ -279,9 +295,9 @@ async fn ships_many_exchanges_in_bounded_batches_with_drain_mode() {
     assert_eq!(load_checkpoint(&state_dir).unwrap().resolved, 22);
 }
 
-#[tokio::test]
-async fn recovers_from_rejected_tokens_throttling_and_poison_and_stops_on_revocation() {
-    let (port, roots, state, _server) = fake_server(TOKEN).await;
+#[test]
+fn recovers_from_rejected_tokens_throttling_and_poison_and_stops_on_revocation() {
+    let (port, roots, state, _server) = fake_server(TOKEN);
     {
         let mut fake = state.lock().unwrap();
         fake.ingest_script.extend([
@@ -298,10 +314,10 @@ async fn recovers_from_rejected_tokens_throttling_and_poison_and_stops_on_revoca
     let dir = TempDir::new(); let state_dir = dir.0.join("state"); std::fs::create_dir(&state_dir).unwrap();
     let log_path = dir.0.join("audit.log");
     let mut log = DiskLog::create(&log_path, 4, Duration::from_secs(2)).unwrap();
-    for request in 1..=3u64 { write_exchange(&mut log, request, "https://api.anthropic.com/v1/messages", b"{}", 200, &[b"{}"], 0).await; }
+    for request in 1..=3u64 { write_exchange(&mut log, request, "https://api.anthropic.com/v1/messages", b"{}", 200, &[b"{}"], 0); }
     let shipper = Shipper::spawn_with_roots(shipping_config(port, &state_dir, json!({})), log_path.clone(), Some(roots.clone())).unwrap();
     let metrics = shipper.metrics();
-    assert!(wait_until(Duration::from_secs(30), || metrics.batches_acknowledged() == 2 && metrics.poisoned_batches() == 1).await,
+    assert!(wait_until(Duration::from_secs(30), || metrics.batches_acknowledged() == 2 && metrics.poisoned_batches() == 1),
         "acked {} poisoned {} requests {:?}", metrics.batches_acknowledged(), metrics.poisoned_batches(), state.lock().unwrap().requests);
     {
         let fake = state.lock().unwrap();
@@ -316,10 +332,10 @@ async fn recovers_from_rejected_tokens_throttling_and_poison_and_stops_on_revoca
     assert_eq!(load_checkpoint(&state_dir).unwrap().poisoned, 1);
     // Revocation stops the shipper for good; later exchanges stay unshipped.
     state.lock().unwrap().ingest_script.push_back((403, "service_token_revoked", None));
-    write_exchange(&mut log, 4, "https://api.anthropic.com/v1/messages", b"{}", 200, &[b"{}"], 0).await;
-    assert!(wait_until(Duration::from_secs(10), || metrics.stopped()).await);
-    write_exchange(&mut log, 5, "https://api.anthropic.com/v1/messages", b"{}", 200, &[b"{}"], 0).await;
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    write_exchange(&mut log, 4, "https://api.anthropic.com/v1/messages", b"{}", 200, &[b"{}"], 0);
+    assert!(wait_until(Duration::from_secs(10), || metrics.stopped()));
+    write_exchange(&mut log, 5, "https://api.anthropic.com/v1/messages", b"{}", 200, &[b"{}"], 0);
+    thread::sleep(Duration::from_millis(400));
     assert_eq!(state.lock().unwrap().batches.len(), 2);
     assert!(!metrics.enrolled());
     shipper.shutdown(Duration::from_secs(5)).unwrap();
@@ -328,23 +344,23 @@ async fn recovers_from_rejected_tokens_throttling_and_poison_and_stops_on_revoca
     std::fs::remove_file(state_dir.join("identity.json")).unwrap();
     let shipper = Shipper::spawn_with_roots(shipping_config(port, &state_dir, json!({})), log_path, Some(roots)).unwrap();
     let metrics = shipper.metrics();
-    assert!(wait_until(Duration::from_secs(10), || metrics.stopped()).await);
+    assert!(wait_until(Duration::from_secs(10), || metrics.stopped()));
     shipper.shutdown(Duration::from_secs(5)).unwrap();
 }
 
-#[tokio::test]
-async fn shutdown_returns_within_its_window_while_the_server_hangs() {
-    let (port, roots, state, _server) = fake_server(TOKEN).await;
+#[test]
+fn shutdown_returns_within_its_window_while_the_server_hangs() {
+    let (port, roots, state, _server) = fake_server(TOKEN);
     state.lock().unwrap().hang = true;
     let dir = TempDir::new(); let state_dir = dir.0.join("state"); std::fs::create_dir(&state_dir).unwrap();
     let log_path = dir.0.join("audit.log");
     let mut log = DiskLog::create(&log_path, 4, Duration::from_secs(2)).unwrap();
-    write_exchange(&mut log, 1, "https://api.anthropic.com/v1/messages", b"{}", 200, &[b"{}"], 0).await;
+    write_exchange(&mut log, 1, "https://api.anthropic.com/v1/messages", b"{}", 200, &[b"{}"], 0);
     let shipper = Shipper::spawn_with_roots(shipping_config(port, &state_dir, json!({})), log_path, Some(roots)).unwrap();
     let metrics = shipper.metrics();
-    assert!(wait_until(Duration::from_secs(5), || state.lock().unwrap().requests.iter().any(|p| p == BOOTSTRAP_PATH)).await);
+    assert!(wait_until(Duration::from_secs(5), || state.lock().unwrap().requests.iter().any(|p| p == BOOTSTRAP_PATH)));
     let started = std::time::Instant::now();
-    let result = tokio::task::spawn_blocking(move || shipper.shutdown(Duration::from_millis(300))).await.unwrap();
+    let result = shipper.shutdown(Duration::from_millis(300));
     assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
     assert!(started.elapsed() < Duration::from_secs(2));
     assert_eq!(metrics.batches_acknowledged(), 0);

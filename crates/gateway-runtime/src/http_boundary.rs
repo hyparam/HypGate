@@ -51,10 +51,10 @@ pub struct PreparedRequest<'a> {
     upstream: Option<UpstreamHead>,
 }
 impl<'a> PreparedRequest<'a> {
-    pub(crate) async fn copy_body<R, W, L>(&mut self, reader: &mut R, writer: &mut W, log: &mut L,
+    pub(crate) fn copy_body<R, W, L>(&mut self, reader: &mut R, writer: &mut W, log: &mut L,
         direction: crate::transfer::Direction) -> Result<gateway_core::body_copy::BodyCopy, crate::transfer::TransferError>
-    where R: tokio::io::AsyncRead + Unpin, W: tokio::io::AsyncWrite + Unpin, L: crate::transfer::AuditLog {
-        self.routed.copy_body(reader, writer, log, direction).await
+    where R: std::io::Read, W: std::io::Write, L: crate::transfer::AuditLog {
+        self.routed.copy_body(reader, writer, log, direction)
     }
     /// The configured destination string exactly as the operator wrote it.
     pub fn destination_text(&self) -> &str { self.routed.destination_text() }
@@ -69,26 +69,26 @@ impl<'a> PreparedRequest<'a> {
     /// text of the destination this request resolved to, built by the verified
     /// `exchange_lifecycle::start_record`. Appended before any DNS, TCP, or TLS
     /// effect.
-    pub(crate) async fn audit_request_start<L: crate::transfer::AuditLog>(&mut self, log: &mut L)
+    pub(crate) fn audit_request_start<L: crate::transfer::AuditLog>(&mut self, log: &mut L)
         -> Result<(), crate::transfer::TransferError>
     {
         let payload = self.routed.start_record(unix_ms()).ok_or(crate::transfer::TransferError::InvalidState)?;
-        self.routed.stream().audit_metadata(log, crate::transfer::RecordKind::RequestStart, &payload).await
+        self.routed.stream().audit_metadata(log, crate::transfer::RecordKind::RequestStart, &payload)
     }
     /// Kind 3: wall clock and the upstream HTTP status, appended after the
     /// response head passed the boundary checks and before it reaches the client.
-    pub(crate) async fn audit_response_head<L: crate::transfer::AuditLog>(&mut self, log: &mut L, status: u16)
+    pub(crate) fn audit_response_head<L: crate::transfer::AuditLog>(&mut self, log: &mut L, status: u16)
         -> Result<(), crate::transfer::TransferError>
     {
         let payload = gateway_core::metadata::encode_response_head(unix_ms(), status)
             .ok_or(crate::transfer::TransferError::InvalidState)?;
-        self.routed.stream().audit_metadata(log, crate::transfer::RecordKind::ResponseHead, &payload).await
+        self.routed.stream().audit_metadata(log, crate::transfer::RecordKind::ResponseHead, &payload)
     }
     /// Kind 4: the completion payload the verified lifecycle produced.
-    pub(crate) async fn audit_completion<L: crate::transfer::AuditLog>(&mut self, log: &mut L, payload: &[u8])
+    pub(crate) fn audit_completion<L: crate::transfer::AuditLog>(&mut self, log: &mut L, payload: &[u8])
         -> Result<(), crate::transfer::TransferError>
     {
-        self.routed.stream().audit_metadata(log, crate::transfer::RecordKind::Completion, payload).await
+        self.routed.stream().audit_metadata(log, crate::transfer::RecordKind::Completion, payload)
     }
     // Validate the configured binding before any DNS/TCP/TLS effect, then move
     // the only upstream head into the transport. It can be taken once.

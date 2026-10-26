@@ -89,8 +89,8 @@ are handled by the durability gate instead.
 
 `GET /metrics` exposes these gauges and counters, with no payloads or credentials:
 
-- `loggate_failed_exchanges_total`: transport errors returned to the worker. It does
-  not count every externally canceled task.
+- `loggate_failed_exchanges_total`: transport errors returned to the worker,
+  including exchanges cancelled by a client leaving or by shutdown.
 - `loggate_audit_gap_requests_total`: availability-mode requests whose first log
   append failed, counted once per request even if the request later fails or is
   canceled (the verified `health::GapObserver` decides when an append counts). It
@@ -137,7 +137,7 @@ DNS resolution has a fixed budget per transport of four workers and 32 queued or
 running jobs. When it is saturated the exchange fails rather than queuing another
 lookup, and answers with more than 64 addresses are rejected. Request deadlines
 include DNS wait time but cannot interrupt a running system lookup. Resolver threads
-do not block Tokio shutdown. See [DNS accounting](dns-resources.md) for the
+do not block shutdown. See [DNS accounting](dns-resources.md) for the
 system-resolver assumptions and behavior under a permanent stall.
 
 The [operational limits](operational-limits.md) page lists every limit, what happens
@@ -145,10 +145,12 @@ when it is reached, and the test behind each.
 
 ## Response behavior
 
-The response body owns its worker's abort guard, so a client disconnect or a
-connection timeout cancels the worker. Successful completion drains the bounded body
-queue before releasing request capacity; it does not prove the client consumed the
-bytes. Errors after response headers abort the body rather than emitting a clean
+Each connection is one thread, and a small watcher thread peeks the client
+socket while the exchange runs: a client disconnect shuts the exchange's sockets
+and cancels it, and the connection deadline bounds the whole connection through
+socket timeouts. Successful completion writes the last chunk before releasing
+request capacity; it does not prove the client consumed the bytes. Errors after
+response headers abort the body rather than emitting a clean
 final chunk. Before headers, transport errors give 502 or 504; authentication and
 admission errors keep their own status codes.
 
@@ -157,21 +159,27 @@ already have run it.
 
 ## Shutdown
 
-SIGINT or SIGTERM stops acceptance, allows up to ten seconds for connections to
-drain, then aborts them and waits for tracked request workers to drop. The server
-then gives the logger two seconds to drain and join; a timeout returns an error and
-cannot interrupt an in-progress filesystem syscall. A stuck disk worker is not
-replaced and does not hold the Tokio executor. The ten-second drain plus two-second
-logger window is not a hard twelve-second exit guarantee. Crash guarantees stay
-conditional on the [storage contract](storage-crash-contract.md).
+The executable installs no signal handler, since that would need a C binding:
+SIGINT or SIGTERM ends the process at once. In-flight exchanges end abruptly;
+every record already acknowledged is durable, the recovery scanner tolerates a
+torn tail, and nothing is replayed. Crash guarantees stay conditional on the
+[storage contract](storage-crash-contract.md).
+
+Embedders trigger `server::Shutdown` instead. It stops acceptance, allows up to
+ten seconds for connections and workers to drain, then cancels remaining
+exchanges by shutting their sockets, so each writes its completion record and
+returns its credit. The server then gives the logger two seconds to drain and
+join; a timeout returns an error and cannot interrupt an in-progress filesystem
+syscall. A stuck disk worker is not replaced. The windows are cooperative, not a
+hard exit guarantee.
 
 Graceful shutdown permanently closes worker admission across every listener that
 shares the Gateway. One ten-second window covers local connections and shared
-workers; remaining workers are then canceled, including those whose connections
+workers; remaining exchanges are then canceled, including those whose connections
 belong to another listener. Each listener still owns its socket and must be told to
 stop accepting. Restarting after a graceful shutdown needs a fresh Gateway and a new
 log file. The [shutdown proof](shutdown-proof.md) covers the scheduler and destructor
-assumptions, poison behavior, and retained disk, DNS, and TLS work.
+assumptions, poison behavior, and retained disk and DNS work.
 
 ## What the tests cover
 

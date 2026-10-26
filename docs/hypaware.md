@@ -227,3 +227,12 @@ enforced by socket timeouts. `loggate ship` was run again against HypAware
 Cloud with a fresh service-account token and state directory: it enrolled,
 read the smoke log's 32 records into four exchanges, and had the one batch
 acknowledged in about two seconds.
+
+Later on 2026-10-26 the gateway itself followed: Tokio, tokio-util, and
+tokio-rustls left the dependency tree, and the server now runs one thread per
+connection over blocking sockets, with the exchange deadline enforced by
+socket timeouts. The same smoke was run through the threaded server: Anthropic
+and OpenAI, JSON and SSE, all returned 200 with the providers' bytes intact; a
+bad token got 401; a request with `Expect: 100-continue` got its 100 and then
+200; `/metrics` showed no failed exchanges and a healthy log; and the log
+scanned complete with 37 records.

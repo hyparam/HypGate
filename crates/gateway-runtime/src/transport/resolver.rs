@@ -1,11 +1,7 @@
-//! Bounded blocking DNS work. Request cancellation cannot return a running
-//! lookup's credit; dedicated threads do not hold Tokio runtime shutdown open.
-use crate::credited_job::{JobPool, Reply};
+//! Bounded blocking DNS work on fixed threads. A requester whose deadline
+//! passes stops waiting; the lookup's credit returns when the lookup does.
+use crate::credited_job::{JobPool, Pending};
 use std::{io, net::{IpAddr, SocketAddr, ToSocketAddrs}};
-#[cfg(test)]
-use std::sync::Arc;
-#[cfg(test)]
-use tokio::sync::oneshot;
 
 const LOOKUPS: usize = 32;
 const WORKERS: usize = 4;
@@ -19,21 +15,21 @@ impl Resolver {
     }
     // Effect site: the system resolver, for the host of a provider permit.
     #[allow(clippy::disallowed_methods)]
-    pub(super) async fn resolve(&self, host: String, port: u16) -> io::Result<Reply<Vec<SocketAddr>>> {
-        if let Ok(ip) = host.parse::<IpAddr>() { return Ok(Reply::direct(vec![SocketAddr::new(ip, port)])); }
+    pub(super) fn resolve(&self, host: String, port: u16) -> io::Result<Pending<Vec<SocketAddr>>> {
+        if let Ok(ip) = host.parse::<IpAddr>() { return Ok(Pending::direct(vec![SocketAddr::new(ip, port)])); }
         self.resolve_with(host, port, |host, port| {
             // The system resolver can allocate before returning its iterator.
             // Detach a bounded result instead of reusing that iterator's backing.
             bounded_addresses((host, port).to_socket_addrs()?)
-        }).await
+        })
     }
-    async fn resolve_with<F>(&self, host: String, port: u16, lookup: F) -> io::Result<Reply<Vec<SocketAddr>>>
+    fn resolve_with<F>(&self, host: String, port: u16, lookup: F) -> io::Result<Pending<Vec<SocketAddr>>>
         where F: FnOnce(&str, u16) -> io::Result<Vec<SocketAddr>> + Send + 'static,
     {
-        self.jobs.submit(move |send, _context| {
-            if send.is_closed() { return None; } // skip canceled queued work
+        self.jobs.submit(move |send| {
+            if send.is_closed() { return None; } // skip work nobody waits for
             Some(lookup(&host, port))
-        }).await
+        })
     }
 }
 
@@ -49,91 +45,64 @@ fn bounded_addresses(input: impl Iterator<Item = SocketAddr>) -> io::Result<Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{sync::atomic::{AtomicUsize, Ordering}, time::Duration};
+    use std::{sync::{Arc, mpsc, atomic::{AtomicUsize, Ordering}}, time::{Duration, Instant}};
 
-    #[tokio::test]
-    async fn canceled_lookups_keep_credit_until_blocking_work_finishes() {
+    fn wait_idle(resolver: &Resolver) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while resolver.jobs.slots.lock().unwrap().usage().0 != 0 {
+            assert!(Instant::now() < deadline, "pool did not drain");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn departed_lookups_keep_credit_until_blocking_work_finishes() {
         let resolver = Arc::new(Resolver::with_limit(5).unwrap());
         let calls = Arc::new(AtomicUsize::new(0));
-        let (started, mut starts) = tokio::sync::mpsc::channel(4);
-        let mut tasks = Vec::new(); let mut release = Vec::new();
+        let (started, starts) = mpsc::channel();
+        let mut pending = Vec::new(); let mut release = Vec::new();
         for _ in 0..4 {
-            let resolver = resolver.clone(); let calls = calls.clone(); let started = started.clone();
-            let (send, receive) = std::sync::mpsc::channel::<()>(); release.push(send);
-            tasks.push(tokio::spawn(async move {
-                resolver.resolve_with("blocked.example".into(), 443, move |_, _| {
-                    calls.fetch_add(1, Ordering::SeqCst);
-                    started.blocking_send(()).unwrap();
-                    let _ = receive.recv();
-                    Ok(vec!["127.0.0.1:443".parse().unwrap()])
-                }).await
-            }));
+            let calls = calls.clone(); let started = started.clone();
+            let (send, receive) = mpsc::channel::<()>(); release.push(send);
+            pending.push(resolver.resolve_with("blocked.example".into(), 443, move |_, _| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                started.send(()).unwrap();
+                let _ = receive.recv();
+                Ok(vec!["127.0.0.1:443".parse().unwrap()])
+            }).unwrap());
         }
-        for _ in 0..4 { tokio::time::timeout(Duration::from_secs(2), starts.recv()).await.unwrap().unwrap(); }
-        let queued_resolver = resolver.clone(); let queued_calls = calls.clone();
-        let queued = tokio::spawn(async move {
-            queued_resolver.resolve_with("queued.example".into(), 443, move |_, _| {
-                queued_calls.fetch_add(1, Ordering::SeqCst); Ok(Vec::new())
-            }).await
-        });
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while resolver.jobs.slots.lock().unwrap().usage().0 != 5 { tokio::task::yield_now().await; }
-        }).await.unwrap();
-        queued.abort(); assert!(queued.await.unwrap_err().is_cancelled());
-        for task in tasks { task.abort(); assert!(task.await.unwrap_err().is_cancelled()); }
+        for _ in 0..4 { starts.recv_timeout(Duration::from_secs(2)).unwrap(); }
+        let queued_calls = calls.clone();
+        let queued = resolver.resolve_with("queued.example".into(), 443, move |_, _| {
+            queued_calls.fetch_add(1, Ordering::SeqCst); Ok(Vec::new())
+        }).unwrap();
+        assert_eq!(resolver.jobs.slots.lock().unwrap().usage(), (5, 5));
+        drop(queued);
+        for lookup in pending { assert_eq!(lookup.wait(Duration::from_millis(10)).unwrap_err().kind(), io::ErrorKind::TimedOut); }
         for _ in 0..16 {
             assert_eq!(resolver.resolve_with("excess.example".into(), 443, |_, _| panic!("over budget"))
-                .await.unwrap_err().kind(), io::ErrorKind::WouldBlock);
+                .err().expect("over budget").kind(), io::ErrorKind::WouldBlock);
         }
         assert_eq!(calls.load(Ordering::SeqCst), 4);
         assert_eq!(resolver.jobs.slots.lock().unwrap().usage(), (5, 5));
-        assert_eq!(resolver.resolve("::1".into(), 8443).await.unwrap().into_inner_for_test(),
+        assert_eq!(resolver.resolve("::1".into(), 8443).unwrap().wait(Duration::ZERO).unwrap().into_inner_for_test(),
             vec!["[::1]:8443".parse::<SocketAddr>().unwrap()]);
         drop(release);
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while resolver.jobs.slots.lock().unwrap().usage().0 != 0 { tokio::task::yield_now().await; }
-        }).await.unwrap();
-        assert_eq!(calls.load(Ordering::SeqCst), 4); // canceled queued job was skipped
+        wait_idle(&resolver);
+        assert_eq!(calls.load(Ordering::SeqCst), 4); // the queued lookup nobody waited for was skipped
         assert_eq!(resolver.resolve_with("later.example".into(), 8443, |_, port|
-            Ok(vec![SocketAddr::from(([127, 0, 0, 1], port))])).await.unwrap().into_inner_for_test(),
+            Ok(vec![SocketAddr::from(([127, 0, 0, 1], port))])).unwrap().wait(Duration::from_secs(2)).unwrap().into_inner_for_test(),
             vec!["127.0.0.1:8443".parse::<SocketAddr>().unwrap()]);
     }
 
     #[test]
-    fn stalled_lookup_does_not_block_tokio_runtime_shutdown() {
-        let (release, blocked) = std::sync::mpsc::channel::<()>();
-        let (started, running) = oneshot::channel();
-        let (finished, done) = std::sync::mpsc::channel::<()>();
-        let runtime = std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-            rt.block_on(async {
-                let resolver = Resolver::with_limit(1).unwrap();
-                let task = tokio::spawn(async move {
-                    resolver.resolve_with("blocked.example".into(), 443, move |_, _| {
-                        started.send(()).unwrap(); let _ = blocked.recv(); Ok(Vec::new())
-                    }).await
-                });
-                tokio::time::timeout(Duration::from_secs(2), running).await.unwrap().unwrap();
-                task.abort(); assert!(task.await.unwrap_err().is_cancelled());
-            });
-            drop(rt);
-            finished.send(()).unwrap();
-        });
-        done.recv_timeout(Duration::from_secs(3)).expect("runtime must exit while DNS is still blocked");
-        drop(release);
-        runtime.join().unwrap();
-    }
-
-    #[tokio::test]
-    async fn panicked_lookup_returns_credit_without_losing_the_pool_worker() {
+    fn panicked_lookup_returns_credit_without_losing_the_pool_worker() {
         let resolver = Resolver::with_limit(1).unwrap();
-        assert_eq!(resolver.resolve_with("panic.example".into(), 443, |_, _| panic!("injected DNS panic"))
-            .await.unwrap_err().kind(), io::ErrorKind::Other);
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while resolver.jobs.slots.lock().unwrap().usage().0 != 0 { tokio::task::yield_now().await; }
-            assert_eq!(resolver.resolve_with("later.example".into(), 443, |_, _|
-                Ok(vec!["127.0.0.1:443".parse().unwrap()])).await.unwrap().into_inner_for_test().len(), 1);
-        }).await.unwrap();
+        let pending = resolver.resolve_with("panic.example".into(), 443, |_, _| panic!("injected DNS panic")).unwrap();
+        assert!(pending.wait(Duration::from_secs(2)).is_err());
+        wait_idle(&resolver);
+        assert_eq!(resolver.resolve_with("later.example".into(), 443, |_, _|
+            Ok(vec!["127.0.0.1:443".parse().unwrap()])).unwrap().wait(Duration::from_secs(2)).unwrap().into_inner_for_test().len(), 1);
     }
 
     #[test]

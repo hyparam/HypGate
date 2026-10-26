@@ -2,8 +2,8 @@
 
 This is a source-level correspondence argument for the audit terms in
 `Buffers::accounted_payload_bound`, checked against the production DiskLog path
-and the verified fixed FIFO with Tokio 1.54.1 completion oneshots. It does not
-formally verify synchronization, Tokio channels, or Rust destruction.
+and the verified fixed FIFO with `std::sync::mpsc` completion channels. It does
+not formally verify synchronization, channels, or Rust destruction.
 Let Q be disk queue capacity, R the request limit, and K the request chunk size.
 The production log-frame payload is at most K; independent library callers can
 supply up to `MAX_RECORD_BYTES` and must account for retained receipts separately.
@@ -16,7 +16,7 @@ supply up to `MAX_RECORD_BYTES` and must account for retained receipts separatel
 | Writing/syncing/committing | Verified `DiskWorker::take` moves the exact queued frame/sender into a private `ActiveAppend` and charges the independent active slot. `DiskWorker::run` owns it across synchronous write and sync calls. Dequeue returns queue credit, allowing another producer to encode. | One active frame in addition to Q |
 | Delivering | `commit_frame` moves the same frame into `DurableFrame`; no payload clone is made. `FinishedAppend::deliver` consumes the receipt/sender into the caller's oneshot or destroys the undeliverable value, then returns a private release token. | Active-frame term until transfer, then receipt term |
 | Delivered, awaiting consumption | The body-copy loop retains exclusive request ownership across the append, and `BodyCopy::finish_audit` checks the exact receipt before dropping it. | At most one receipt per live production request, hence R |
-| Dropped/canceled | The frame is dropped at its current owner; dropping the caller alone cannot drop a queued Job or interrupt its syscall. | Credit follows the surviving frame, not the caller's task |
+| Dropped/canceled | The frame is dropped at its current owner; a caller whose deadline passed cannot drop a queued Job or interrupt its syscall. | Credit follows the surviving frame, not the caller's thread |
 
 The resulting frame term is `(Q + 1 + R) * (A + 65)` with `A = max(K, 8210)`, the
 audit payload limit that also admits metadata records. The checked production
@@ -63,8 +63,8 @@ The remaining adapter contracts are narrow: `Storage` truthfully appends the
 supplied bytes and reports sync under the storage crash model; `Completion`
 transfers its sole receipt to the request-owned channel or destroys it before
 returning. Production implementations are `Write::write_all`, `sync_all`, and
-one consuming oneshot send. They neither retain application payload copies nor
-spawn replacement/delivery tasks. Rust destruction, mutex/channel behavior, one
+one consuming `mpsc` send. They neither retain application payload copies nor
+spawn replacement/delivery threads. Rust destruction, mutex/channel behavior, one
 worker per logger, and the fresh file-session binding remain explicit assumptions.
 Receipt-to-request accounting joins the separate composition proof; this does
 not claim that request cancellation stops filesystem operations.
@@ -137,8 +137,9 @@ is checked. No new assumed lemma or external-body
 contract hides queue behavior.
 
 The production wrapper uses a mutex and condvar. A producer reserves capacity under
-the same lock held through encoding and verified insertion; no await or reservation
-escapes it. The sole worker pops under that lock, then releases it before file I/O.
+the same lock held through encoding and verified insertion; no wait or reservation
+escapes it, and a producer that finds the queue full waits on a condition
+variable under that lock until a slot frees or its deadline passes. The sole worker pops under that lock, then releases it before file I/O.
 Canceling an append caller only drops its completion receiver; it cannot remove
 an admitted Job. Shutdown calls verified `close` and wakes the worker, which drains
 existing entries before exiting. Dropping the last DiskLog handle also closes the
@@ -150,21 +151,21 @@ waiting callers still have their logging deadline. It is never reused for new wo
 
 Backing storage requests Q `Option<Job>` elements once at initialization. Push/pop
 use indexed replacement and swap without resizing; there are no audit mpsc block
-allocations or permit futures. Vec capacity/allocator rounding, mutex/condvar and
-Arc layout, payload storage inside Jobs, and completion oneshots are still separate
+allocations or permit objects. Vec capacity/allocator rounding, mutex/condvar and
+Arc layout, payload storage inside Jobs, and completion channels are still separate
 from the verified slot-count theorem. Synchronization and destructor execution
 remain trusted; this is not a proof of arbitrary thread scheduling.
 
-In [oneshot.rs](https://docs.rs/crate/tokio/1.54.1/source/src/sync/oneshot.rs), sending
-to an already closed receiver returns the unsent value. DiskLog immediately drops
-that result, including the receipt's frame. If delivery wins the race, receiver
-Drop closes the channel and consumes/drops the delivered value. The receipt is
+With `std::sync::mpsc`, sending to a channel whose receiver is gone returns the
+unsent value. DiskLog immediately drops that result, including the receipt's
+frame. If delivery wins the race, receiver Drop closes the channel and drops
+the delivered value. The receipt is
 moved, not cloned; `DurableFrame` has no cloning API. These channel/drop semantics
 are trusted obligations supporting the count hypotheses, not Verus-checked code.
 
 ## Cancellation and failure evidence
 
-`canceling_append_callers_does_not_release_queued_or_active_frame_credit` stalls
+`callers_that_give_up_do_not_release_queued_or_active_frame_credit` stalls
 one writer in sync, queues a second Job in a one-slot channel, and aborts both
 append callers. The queued slot remains occupied and sixteen excess appends are
 refused. Releasing the same worker produces exactly the two admitted frames and

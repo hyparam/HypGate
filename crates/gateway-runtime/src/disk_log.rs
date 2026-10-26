@@ -5,8 +5,7 @@ use gateway_core::{audit_journal::AuditJournal as Journal, journal::DurableFrame
 use gateway_core::framing::{self, Header, RecordBody, RecordFrame};
 use sha2::{Digest, Sha256};
 use std::{fs::{File, OpenOptions}, io::{self, Read, Write}, path::Path,
-    sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}}, time::Duration};
-use tokio::sync::oneshot;
+    sync::{Arc, Mutex, mpsc, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
 mod queue;
 use queue::Queue;
 
@@ -19,7 +18,7 @@ pub const MAX_RECORD_BYTES: usize = 1024 * 1024;
 // pages, and thread-local/kernel storage remain separate resource categories.
 const WORKER_STACK_BYTES: usize = 2 * 1024 * 1024;
 
-struct Completion(oneshot::Sender<Option<DurableFrame>>);
+struct Completion(mpsc::Sender<Option<DurableFrame>>);
 impl gateway_core::disk_worker::Completion for Completion {
     fn complete(self, receipt: Option<DurableFrame>) {
         // Ownership goes to the request's reply channel, or the unsent value is
@@ -29,7 +28,7 @@ impl gateway_core::disk_worker::Completion for Completion {
 }
 #[cfg(test)]
 impl Completion {
-    fn send(self, receipt: Option<DurableFrame>) -> Result<(), Option<DurableFrame>> { self.0.send(receipt) }
+    fn send(self, receipt: Option<DurableFrame>) -> Result<(), Option<DurableFrame>> { self.0.send(receipt).map_err(|e| e.0) }
 }
 type Job = (RecordFrame, Completion);
 
@@ -135,43 +134,42 @@ impl DiskLog {
 
     /// Close admission across all clones, drain queued jobs, and join the worker.
     /// A stuck syscall cannot be canceled; timeout never spawns a replacement.
-    pub async fn shutdown(&self, deadline: Duration) -> io::Result<()> {
+    /// Blocks the calling thread for at most the deadline.
+    pub fn shutdown(&self, deadline: Duration) -> io::Result<()> {
         if deadline.is_zero() || deadline > Duration::from_secs(300) {
             return Err(io::ErrorKind::InvalidInput.into());
         }
         self.queue.0.close();
-        let joined = tokio::time::timeout(deadline, async {
-            loop {
-                {
-                    let mut thread = self.thread.lock().unwrap();
-                    if thread.as_ref().is_none_or(|thread| thread.is_finished()) {
-                        if let Some(thread) = thread.take() {
-                            if thread.join().is_err() {
-                                self.healthy.store(false, Ordering::Release);
-                                return Err(io::ErrorKind::Other.into());
-                            }
+        let end = Instant::now() + deadline;
+        loop {
+            {
+                let mut thread = self.thread.lock().unwrap();
+                if thread.as_ref().is_none_or(|thread| thread.is_finished()) {
+                    if let Some(thread) = thread.take() {
+                        if thread.join().is_err() {
+                            self.healthy.store(false, Ordering::Release);
+                            return Err(io::ErrorKind::Other.into());
                         }
-                        return Ok(());
                     }
+                    return Ok(());
                 }
-                tokio::time::sleep(Duration::from_millis(1)).await;
             }
-        }).await;
-        if joined.is_err() {
-            self.healthy.store(false, Ordering::Release);
-            return Err(io::ErrorKind::TimedOut.into());
+            if Instant::now() >= end {
+                self.healthy.store(false, Ordering::Release);
+                return Err(io::ErrorKind::TimedOut.into());
+            }
+            std::thread::sleep(Duration::from_millis(1));
         }
-        joined.unwrap()
     }
     #[cfg(test)]
     pub(crate) fn inject_failure(&self) { self.healthy.store(false, Ordering::Release); }
     #[cfg(test)]
     pub(crate) fn stalled_for_test(capacity: usize, deadline: Duration) ->
-        (Self, oneshot::Receiver<()>, std::sync::mpsc::Sender<()>, Arc<std::sync::atomic::AtomicUsize>)
+        (Self, mpsc::Receiver<()>, mpsc::Sender<()>, Arc<std::sync::atomic::AtomicUsize>)
     {
         struct Stalled {
-            entered: Option<oneshot::Sender<()>>,
-            release: std::sync::mpsc::Receiver<()>,
+            entered: Option<mpsc::Sender<()>>,
+            release: mpsc::Receiver<()>,
             writes: Arc<std::sync::atomic::AtomicUsize>,
         }
         impl Write for Stalled {
@@ -189,8 +187,8 @@ impl DiskLog {
                 Ok(())
             }
         }
-        let (entered, started) = oneshot::channel();
-        let (release, waiting) = std::sync::mpsc::channel();
+        let (entered, started) = mpsc::channel();
+        let (release, waiting) = mpsc::channel();
         let writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let log = Self::start(Stalled { entered: Some(entered), release: waiting, writes: writes.clone() },
             capacity, deadline, [0; 16]).unwrap();
@@ -203,7 +201,7 @@ impl DiskLog {
 
 impl AuditLog for DiskLog {
     fn session_id(&self) -> u128 { u128::from_le_bytes(self.session) }
-    async fn append(&mut self, record: LogRecord<'_>) -> io::Result<DurableFrame> {
+    fn append(&mut self, record: LogRecord<'_>) -> io::Result<DurableFrame> {
         if !self.healthy() { return Err(io::ErrorKind::BrokenPipe.into()); }
         if record.bytes.len() > self.payload_limit || record.request == 0 {
             return Err(io::ErrorKind::InvalidInput.into());
@@ -217,15 +215,16 @@ impl AuditLog for DiskLog {
         // One deadline covers waiting for a free slot and waiting for the sync
         // acknowledgment: a worker that stops freeing slots fails the append and
         // poisons health exactly as a worker that stops acknowledging does.
-        let outcome = tokio::time::timeout(self.deadline, async {
-            let completion = queue.enqueue(record).await?;
-            Ok::<_, io::Error>(completion.await.ok().flatten())
-        }).await;
+        let deadline = Instant::now().checked_add(self.deadline).unwrap_or_else(Instant::now);
+        let outcome = queue.enqueue(record, deadline).and_then(|completion| {
+            let left = deadline.saturating_duration_since(Instant::now());
+            completion.recv_timeout(left).map_err(|_| io::Error::from(io::ErrorKind::TimedOut))
+        });
         match outcome {
-            Ok(Ok(Some(receipt))) => Ok(receipt),
+            Ok(Some(receipt)) => Ok(receipt),
             // Only a verified-reservation refusal that the permit should have
             // prevented; the logger stays usable and nothing was lost.
-            Ok(Err(error)) if error.kind() == io::ErrorKind::WouldBlock => Err(error),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Err(error),
             _ => {
                 self.healthy.store(false, Ordering::Release);
                 Err(io::ErrorKind::BrokenPipe.into())

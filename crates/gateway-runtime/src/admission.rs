@@ -67,8 +67,9 @@ pub struct Request<'a> {
     lease: Lease<'a>,
 }
 
-// Dropping a pending future must also close the stream: the underlying I/O may
-// have had an effect whose completion is now unknown. Never reuse/replay it.
+// Leaving a copy by panic or early return must also close the stream: the
+// underlying I/O may have had an effect whose completion is now unknown.
+// Never reuse/replay it.
 pub(crate) struct CancelOnDrop<'r, 'a> { pub(crate) request: &'r mut Request<'a>, pub(crate) armed: bool }
 impl Drop for CancelOnDrop<'_, '_> {
     fn drop(&mut self) { if self.armed { self.request.cancel(); } }
@@ -159,10 +160,10 @@ impl<'a> Request<'a> {
         if bytes.capacity() > self.capacity { return None; }
         self.stream_mut().advance(bytes)
     }
-    /// Bind the awaited logger result to this request's current immutable chunk.
-    /// The logger remains trusted to report actual durability. Cancellation closes
-    /// the stream, since an append may already have had an unknown effect.
-    pub async fn audit_current<L: AuditLog>(&mut self, log: &mut L, direction: Direction)
+    /// Bind the logger's result to this request's current immutable chunk.
+    /// The logger remains trusted to report actual durability. An abandoned
+    /// append closes the stream, since it may already have had an unknown effect.
+    pub fn audit_current<L: AuditLog>(&mut self, log: &mut L, direction: Direction)
         -> Result<(), TransferError>
     {
         let mut pending = CancelOnDrop { request: self, armed: true };
@@ -179,7 +180,7 @@ impl<'a> Request<'a> {
         let chunk = header.chunk;
         let record = LogRecord { tenant: header.tenant, request: header.request,
             chunk, kind: direction.into(), bytes };
-        let receipt = match log.append(record).await {
+        let receipt = match log.append(record) {
             Ok(receipt) => receipt,
             Err(_) => {
                 pending.request.fail_log();
@@ -203,7 +204,7 @@ impl<'a> Request<'a> {
     /// record describes an exchange that is already over, so it is attempted
     /// even for a closed or log-failed request; the caller skips it only when
     /// the logger itself is unhealthy.
-    pub(crate) async fn audit_metadata<L: AuditLog>(&mut self, log: &mut L, kind: RecordKind, payload: &[u8])
+    pub(crate) fn audit_metadata<L: AuditLog>(&mut self, log: &mut L, kind: RecordKind, payload: &[u8])
         -> Result<(), TransferError>
     {
         if kind.direction().is_some() || payload.len() > gateway_core::metadata::MAX_PAYLOAD {
@@ -221,7 +222,7 @@ impl<'a> Request<'a> {
         let header = gateway_core::framing::Header { payload: payload.len() as u32, tenant: pending.request.tenant_id(),
             request: pending.request.request_id(), chunk: 0, kind: kind.id() };
         let record = LogRecord { tenant: header.tenant, request: header.request, chunk: 0, kind, bytes: payload };
-        let receipt = match log.append(record).await {
+        let receipt = match log.append(record) {
             Ok(receipt) => receipt,
             Err(_) => {
                 if !completion { pending.request.fail_log(); }

@@ -10,24 +10,25 @@ queues outside that model. RSS measurements include still more memory.
 Let R be the configured request-slot limit, K the per-request chunk size, C the
 inbound connection limit, and Q the disk queue capacity. Configuration checks
 R × K ≤ 128 MiB, R ≤ 65,536, and K ≤ 1 MiB. The executable currently sets C = 128
-and Q = 16; library callers can configure these separately. Each HTTP body channel
-has one message slot and a maximum copied data frame of 16 KiB. Each reader accepts
-at most 32 KiB of frame data into its own bounded copy. One DiskLog owns one disk worker.
+and Q = 16; library callers can configure these separately. Each body reader
+reads at most 32 KiB at a time into its own buffer; each chunked writer frames
+one write of at most 16 KiB at a time. One DiskLog owns one disk worker. The
+runtime links no executor: each connection is one thread plus a watcher thread.
 
 | Retained object | Budget and ownership | Evidence and limitation |
 | --- | --- | --- |
 | Core chunk or next transfer buffer | At most K per admitted exchange in the production sequential driver | `OwnedStream::payload_bound` proves the combined stream/read-buffer logical length stays within K, with only one nonempty at a time. The driver reads into the owner and verified completion moves the filled prefix into its stream. External `Request::advance` still rejects excessive vector capacity. Slice I/O correspondence, Vec backing capacity, and allocator size remain trusted. |
 | Inbound/outbound body read buffers | One 32 KiB read buffer per body; conservatively two per admitted exchange | `http1::BodyReader` reads at most 32 KiB at a time into its own vector and yields body bytes from it; chunk framing is consumed in place. There are no shared backing owners. Upload and download run sequentially; the inbound reader object remains alive. Allocator overhead remains separate. |
-| Client response channel | At most C + R channels, one data message of at most 16 KiB each | Created before authorization but after acquiring worker credit in `Gateway::handle`; charging this solely to authorized request leases is incorrect. Live receivers are charged to C; sender-only control-storage cleanup tails are conservatively charged to R; the fixed-slot adapter now discards queued payload and forbids late sends when the receiver drops. A consumed message is owned by the connection task until its chunk is written. End markers carry no payload. |
+| Client response writer | One framed chunk of at most 16 KiB plus framing per connection | `http1::ChunkedWriter` inside `server::Output`; the body copy's write becomes one chunk written to the client socket before the next is accepted. There is no channel between the copy and the socket; the verified subtotal's C + 2R output-queue term has no runtime counterpart and over-approximates. |
 | Provider upload framing | One pending framed chunk of at most 16 KiB plus framing per admitted exchange | `http1::ChunkedWriter` in `HttpsTransport::run`; a frame is framed and written before the next is accepted. No channel sits between the copy and the TLS stream. |
-| Disk frames being encoded or queued | At most Q reserved/queued records, each at most A + 65 bytes, where A = max(K, 8,210) admits the metadata records | `Queue::push_with` calls verified `FrameQueue::reserve` before encoding, then inserts through verified `FrameQueue::finish_reserved` under the same queue mutex. The executable passes A to `DiskLog::create_with_payload_limit`; append rejects larger payloads before encoding, and the verified queue independently rejects oversized frames. The default library constructor retains the 1 MiB limit. |
+| Disk frames being encoded or queued | At most Q reserved/queued records, each at most A + 65 bytes, where A = max(K, 8,210) admits the metadata records | `Queue::enqueue` calls verified `FrameQueue::reserve` before encoding, then inserts through verified `FrameQueue::finish_reserved` under the same queue mutex. The executable passes A to `DiskLog::create_with_payload_limit`; append rejects larger payloads before encoding, and the verified queue independently rejects oversized frames. The default library constructor retains the 1 MiB limit. |
 | Active disk frame | One additional frame of at most A + 65 bytes | Verified `DiskWorker` moves the exact queued frame into a private active handle, preserves its charge through write/sync and completion delivery, and checks the release token's session/generation. The Q+1 bound includes this active frame. Caller cancellation cannot return its credit; a stalled worker is never replaced. |
-| Delivered durable receipts | At most one frame of at most K + 65 bytes per admitted exchange (metadata receipts are dropped as soon as they are checked) | The job oneshot transfers its owned frame to the waiting request. Exact receipt validation then drops it; cancellation drops undelivered receipts. The worker can advance to another job before delivery is consumed. Custom library callers retaining receipts must budget separately. |
+| Delivered durable receipts | At most one frame of at most K + 65 bytes per admitted exchange (metadata receipts are dropped as soon as they are checked) | The job's `mpsc` channel transfers its owned frame to the waiting thread. Exact receipt validation then drops it; a caller that stopped waiting drops undelivered receipts. The worker can advance to another job before delivery is consumed. Custom library callers retaining receipts must budget separately. |
 | Encoding/comparison scratch | One 33-byte header vector per logger encoder plus one per validating request | `framing::encode_payload` copies a canonical header into the reserved frame; header encoding requests exactly 33 bytes up front. Receipt validation also encodes the expected 33-byte header, then compares payload slices without copying the payload. SHA-256 state and the 32-byte digest are additional fixed-size implementation state. |
-| Inbound connection tasks | At most C live connection leases across one Gateway, including canceled-parent tails | A separate verified registry is shared by every serve invocation on that Gateway. A boxed connection future drops before its credit. Each invocation also caps its JoinSet at C, including completed-but-unreaped entries. Listener/accept-loop and completed task metadata remain per invocation. |
-| Server request workers, including rejection and cleanup | At most R worker leases | A separate verified `ResourceAdmission` registry issues a private key before response allocation or spawning. `LeasedTask` drops the entire boxed task future before its lease; the lease drops tracking before returning the key. Registry transitions and the `TaskCredit` cleanup/release gate are verified; mutex serialization, truthful destruction reporting, and Tokio cancellation remain trusted. |
-| Admitted exchanges and upstream connections | At most R live leases; one upstream connection per exchange | Verified slot transitions plus trusted ownership. The outer exchange owns admission while the timed TCP/TLS/HTTP future borrows it, so network-future cleanup precedes request release. No pooling, replay, or detached upstream connection task. Failed authentication can still create a tracked server worker without a lease. |
-| TLS handshakes | Four dedicated threads; at most 32 queued/running jobs or unadopted replies per transport | Verified cleanup/handoff gates retain credit through work and unread replies, until destruction or adoption by a live request. Each job owns one socket and TLS handshake state; completed replies belong to the waiting request. See [TLS scheduling](https-transport.md#tls-scheduling-isolation). |
+| Inbound connection threads | At most C live connection leases across one Gateway, each one connection thread (512 KiB stack) and one watcher thread (64 KiB) | A separate verified registry is shared by every serve invocation on that Gateway. The thread's work and its captures return before its credit. Listener and accept-loop state remain per invocation. |
+| Server request workers, including rejection and cleanup | At most R worker leases | A separate verified `ResourceAdmission` registry issues a private key before the exchange starts. `leased::run` lets the work drop its captures before recording cleanup and returning the key. Registry transitions and the `TaskCredit` cleanup/release gate are verified; mutex serialization, truthful destruction reporting, and socket shutdown as cancellation remain trusted. |
+| Admitted exchanges and upstream connections | At most R live leases; one upstream connection per exchange | Verified slot transitions plus trusted ownership. The exchange owns admission while `run` borrows it for the TCP/TLS/HTTP work, whose socket and TLS state are locals of `run`, so network cleanup precedes request release. No pooling, replay, or detached upstream connection. Failed authentication can still take a worker lease briefly without a request lease. |
+| TLS handshakes | On the connection thread, one per exchange | The handshake state is the exchange's `ClientConnection`, owned by `run`; nothing survives the exchange. See [TLS on the connection thread](https-transport.md#tls-on-the-connection-thread). |
 | DNS lookups | Four dedicated threads; at most 32 queued/running jobs or unadopted replies per transport | Jobs and unread replies retain verified credit across request cancellation until cleanup or checked adoption. Returned address vectors contain at most 64 addresses. System-resolver internal allocations remain trusted; see [DNS accounting](dns-resources.md). |
 | Disk operations | One worker, one sequential write/sync operation | A timeout bounds caller waiting, not syscall duration. Outstanding work retains its frame until completion or process exit. |
 
@@ -35,47 +36,45 @@ The [HTTP buffer lifetime audit](http-buffer-lifetimes.md) follows reservations,
 receiver closure, sender cleanup, and End acknowledgment. Its conservative channel
 count includes cleanup after a client connection has gone away.
 
-### Connection-task lifetime boundary
+### Connection-thread lifetime boundary
 
 The first validated `serve` invocation fixes C in a OnceLock on its Gateway.
 Later invocations must request the same C or fail with InvalidInput before
 acceptance. Each accepted socket must obtain a private lease from the shared
-`ConnectionSlots` registry before spawning. The same verified `ResourceAdmission`
-transitions used for request/worker admission enforce this count; connection keys
-never create streams. Poison prevents new credits and is not recovered on drop.
+`ConnectionSlots` registry before a thread is started for it. The same verified
+`ResourceAdmission` transitions used for request/worker admission enforce this
+count; connection keys never create streams. Poison prevents new credits and is
+not recovered on drop.
 
-`LeasedTask` explicitly destroys the boxed connection future before marking its
-`TaskCredit` cleaned. Socket, parser, service, and response-body captures are
-destroyed before the verified release gate permits registry release, including
-never-polled cancellation and task panic. A panic during wrapper cleanup leaves
-the credit cleaning and capacity stranded. Mutex
-serialization, Rust destruction, OnceLock initialization, and Tokio scheduling
-remain trusted; no async refinement theorem is claimed. The registry itself
-retains C fixed u64 slots plus its control fields, for the Gateway lifetime.
+`leased::run` on the connection thread lets the work return, and with it its
+socket, head buffer, output writer, and watcher, before marking its
+`TaskCredit` cleaned and releasing it. A panic in the work leaves the credit
+running and capacity stranded. Mutex serialization, Rust destruction, OnceLock
+initialization, and thread scheduling remain trusted; no refinement theorem of
+the threaded runtime is claimed. The registry itself retains C fixed u64 slots
+plus its control fields, for the Gateway lifetime.
 
-Each invocation also checks JoinSet length before spawning. Completed-but-unreaped
-entries remain counted by that local cap, and biased selection reaps them before
-acceptance. Multiple invocations share live connection capacity but still have
-separate listeners, one just-accepted socket each, and JoinSet/completed-task
-metadata. A whole-process bound must count those invocation objects separately.
+Multiple invocations share live connection capacity but still have separate
+listeners and one just-accepted socket each. A whole-process bound must count
+those invocation objects separately.
 
 Normal shutdown drains/joins its connection set, then waits for shared request
 workers and shuts down the logger. Aborting `serve` only requests child abort;
 joining the parent does not imply completed child destruction. Its connection
 leases remain charged against the same Gateway's C during that cleanup, preventing
 restarts from multiplying live connection budgets. Worker tails retain separate
-R credits. Library callers should use graceful shutdown and await `serve` when
+R credits. Library callers should trigger `Shutdown` and let `serve` return when
 they require completed cleanup; concurrent graceful shutdown still affects the
-shared worker tracker/logger and is not an independent multi-listener lifecycle.
+shared worker registry/logger and is not an independent multi-listener lifecycle.
 
 The shared-listener regression fills C = 1 through one listener, verifies closure
 of an excess socket at a second listener, rejects changing C, aborts the first
 server, then serves health traffic through the second after credit is reclaimed.
-Lease tests check capture-before-credit destruction on success, cancellation
-before/after polling, and panic, plus fail-closed behavior after registry poison.
+Lease tests check capture-before-credit destruction on normal return, escaped
+roles, and panic, plus fail-closed behavior after registry poison.
 
-The repeated-abort regression withholds the provider's TLS handshake, then aborts
-the actual server future in each of 16 waves per logging mode. It checks client
+The repeated-abort regression withholds the provider's TLS handshake, then shuts
+the actual server down in each of 16 waves per logging mode. It checks client
 and provider socket closure, listener closure, zero connection/worker/request occupancy,
 and reuse of the same one-slot gateway on the next wave. The test explicitly
 waits for child cleanup before restarting; it does not claim that joining the
@@ -83,8 +82,8 @@ aborted parent synchronously joins its descendants. The shared logger remains
 healthy across these cancellations and is explicitly shut down at the end.
 Removing `CancelOnDrop`'s worker cancellation makes this regression hit its deadline,
 confirming that it detects a detached worker still waiting on the handshake.
-These are trusted Tokio/Rust lifecycle facts and adapter tests, not a new formal
-task-liveness or whole-process allocation proof.
+These are trusted Rust and OS lifecycle facts and adapter tests, not a new formal
+thread-liveness or whole-process allocation proof.
 
 A conservative **visible payload subtotal**, under the ownership relationships
 above, is:
@@ -103,7 +102,7 @@ theorem category to its production owner, insertion, and removal event is the
 [runtime correspondence table](resource-composition.md#runtime-correspondence-to-the-combined-theorem);
 the queue reservation, encoding permit, and receipt mechanics are in the
 [audit-buffer lifetime audit](audit-buffer-lifetimes.md). This is a
-size-composition proof, not proof that every async runtime state supplies those
+size-composition proof, not proof that every runtime state supplies those
 snapshots; the runtime correspondence and all excluded allocations below remain
 separate obligations.
 Do not substitute the lower observed concurrent-request count for R when publishing
@@ -117,8 +116,8 @@ standard Vec behavior. Capacity/address regressions supplement the length proofs
 but do not establish allocator or physical-memory bounds.
 
 The [audit-buffer lifetime audit](audit-buffer-lifetimes.md) follows queue credit,
-worker ownership, and receipt delivery through cancellation, including the pinned
-Tokio send/receive/drop operations and a stalled-worker cancellation test.
+worker ownership, and receipt delivery through cancellation, including the
+`mpsc` send/receive/drop operations and a stalled-worker cancellation test.
 
 ## Allocations outside that subtotal
 
@@ -141,24 +140,23 @@ identifies excluded metadata and active owners.
   [dependency audit](dependency-resources.md#http1-storage) bounds each. The
   [HTTP metadata boundary](http-boundary.md#metadata-ownership-and-allocation)
   copies bounded allowed values out of the parsed head, which is dropped before
-  any await; its copied-value subtotal and inserted Host/credential data remain
-  separate from the stream/log buffer theorem. `ReadLimited` caps each upstream
-  TLS plaintext read at 32 KiB without imposing a wire-chunk/body length limit;
-  it adds no owned payload buffer.
+  any network effect; its copied-value subtotal and inserted Host/credential data
+  remain separate from the stream/log buffer theorem. The body reader's own
+  32 KiB buffer caps each upstream TLS plaintext read without imposing a
+  wire-chunk/body length limit.
 - rustls handshake and record buffers, certificate/root-store data, TLS overhead,
   system-resolver internals, and kernel socket buffers. The
   [DNS inventory](dns-resources.md) accounts for lookup jobs, dedicated threads,
   stacks, and bounded returned address vectors separately from request leases.
 - The worker registry adds R `u64` entries (8 × R logical bytes, at most 512 KiB
   with validated limits), plus vector spare capacity and mutex/registry metadata.
-  Acquisition scans at most R slots under a synchronous mutex; it creates no async
-  waiter. Each `LeasedTask` additionally boxes its future to enforce safe drop order.
-- The shared shutdown token adds one token state per Gateway and at most R
-  cancellation-wait registrations in credited worker futures; each serving
-  invocation adds its tracker drain waiter. Token clones share state and never
-  create child-token trees. These are control/waker objects, not payload bytes.
-- Tokio task/future state, task trackers, queue nodes, channel permits/oneshots,
-  thread stacks, allocator rounding/fragmentation, and runtime bookkeeping.
+  Acquisition scans at most R slots under a synchronous mutex; it creates no
+  waiter object.
+- Each in-flight exchange adds one `net::Cancel` handle in the gateway's live
+  table: an atomic flag and the duplicated socket handles it may shut down.
+  These are control objects, not payload bytes.
+- Thread stacks and kernel thread objects, `mpsc` channel nodes, allocator
+  rounding/fragmentation, and condition-variable bookkeeping.
   The [channel inventory](dependency-resources.md#channel-control-storage) now
   bounds control-object counts separately from variable payloads and identifies
   fixed HTTP slots and their two registered wakers; the former mpsc block-reuse obligation no longer applies. The disk
@@ -176,11 +174,11 @@ identifies excluded metadata and active owners.
 
 The request tracker includes rejected/unauthenticated requests and completion tails
 after body EOF. It has a separate R-slot verified registry, so a free stream slot does not imply
-that a new worker can start. A `LeasedTask` owns the pinned task future followed
-by its lease: explicit future destruction precedes the verified cleanup-complete
-transition and credit release, including cancellation before the first poll. The lease removes tracking before
-returning its key to its original registry. Saturation returns 503 without
-spawning a waiter or worker. Health, readiness, and metrics bypass this worker gate
+that a new worker can start. `leased::run` runs the exchange under its lease:
+the work's return and the destruction of its captures precede the verified
+cleanup-complete transition and credit release. The lease returns its key to
+its original registry. Saturation returns 503 without starting any work.
+Health, readiness, and metrics bypass this worker gate
 but remain subject to the inbound connection limit. A poisoned registry at gateway
 construction produces a zero-worker gate, preserving fail-closed behavior. Worker
 registry poisoning also permanently closes that gate and fails readiness in both
@@ -188,10 +186,10 @@ logging modes. Exhausted registry IDs refuse new work rather than wrap.
 
 The real-socket worker-budget test holds a cleanup lease with all core slots free,
 checks sixteen excess requests plus health endpoints, observes no upstream
-connection, and verifies permit recovery when an unpolled task is aborted. Existing
+connection, and verifies permit recovery when the work returns. Existing
 stream, disconnect, and shutdown tests exercise normal worker lifetimes. Formal
 composition still depends on the trusted mutex/private-key/drop relationships;
-the Tokio executor may also retain completed task bookkeeping outside our lease.
+the OS may also retain thread bookkeeping after a thread exits.
 [Worker lifetime notes](worker-lifetimes.md) map the checked transitions to the
 production wrapper and document the remaining assumptions.
 

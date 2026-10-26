@@ -58,13 +58,13 @@ response filtering.
 Workspace test totals are maintained in the [README](../README.md). Live Anthropic
 and OpenAI exchanges are recorded in the [HypAware setup](hypaware.md#smoke-test-record)
 smoke test. Network dispatch, body forwarding, and logging are covered by the
-[HTTPS transport](https-transport.md), [async transfer](async-transfer.md), and
+[HTTPS transport](https-transport.md), [body transfer](body-transfer.md), and
 [running](running.md) notes.
 
 ## Metadata ownership and allocation
 
 The server passes the parsed `RequestHead` to `prepare` and drops it as soon as
-the prepared request exists, before any await; the transport passes the parsed
+the prepared request exists, before any network effect; the transport passes the parsed
 `StatusHead` to `prepare_response_head`, which consumes it. The parser already
 made every field its own vector copy, so no field shares storage with the read
 buffer or with other fields, and dropping the head frees everything the

@@ -27,19 +27,19 @@ fn executable_starts_and_serves_health_with_real_configuration() {
 #[test]
 fn scan_command_reports_valid_prefix_without_printing_payload_or_editing_log() {
     let dir = TempDir::new("loggate-scan"); let path = dir.0.join("audit.log");
-    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+    {
         let mut log = DiskLog::create(&path, 1, Duration::from_secs(2)).unwrap();
         let start = gateway_core::metadata::encode_request_start(1_700_000_000_000, 7, b"https://example.test/v1/messages").unwrap();
-        log.append(LogRecord { tenant: 1, request: 2, chunk: 0, kind: RecordKind::RequestStart, bytes: &start }).await.unwrap();
+        log.append(LogRecord { tenant: 1, request: 2, chunk: 0, kind: RecordKind::RequestStart, bytes: &start }).unwrap();
         log.append(LogRecord { tenant: 1, request: 2, chunk: 1, kind: RecordKind::Upload,
-            bytes: b"private-payload-marker" }).await.unwrap();
+            bytes: b"private-payload-marker" }).unwrap();
         let head = gateway_core::metadata::encode_response_head(1_700_000_000_001, 200).unwrap();
-        log.append(LogRecord { tenant: 1, request: 2, chunk: 0, kind: RecordKind::ResponseHead, bytes: &head }).await.unwrap();
+        log.append(LogRecord { tenant: 1, request: 2, chunk: 0, kind: RecordKind::ResponseHead, bytes: &head }).unwrap();
         log.append(LogRecord { tenant: 1, request: 2, chunk: 1, kind: RecordKind::Download,
-            bytes: b"private-response-marker" }).await.unwrap();
+            bytes: b"private-response-marker" }).unwrap();
         let done = gateway_core::metadata::encode_completion(1_700_000_000_002, 0, 22, 23).unwrap();
-        log.append(LogRecord { tenant: 1, request: 2, chunk: 0, kind: RecordKind::Completion, bytes: &done }).await.unwrap();
-    });
+        log.append(LogRecord { tenant: 1, request: 2, chunk: 0, kind: RecordKind::Completion, bytes: &done }).unwrap();
+    }
     let complete_length = fs::metadata(&path).unwrap().len();
     for incomplete in [false, true] {
         if incomplete { fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(b"SG").unwrap(); }

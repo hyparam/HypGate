@@ -162,10 +162,10 @@ impl GatewayConfig {
 }
 
 impl<'a> RoutedRequest<'a> {
-    pub(crate) async fn copy_body<R, W, L>(&mut self, reader: &mut R, writer: &mut W, log: &mut L,
+    pub(crate) fn copy_body<R, W, L>(&mut self, reader: &mut R, writer: &mut W, log: &mut L,
         direction: crate::transfer::Direction) -> Result<gateway_core::body_copy::BodyCopy, crate::transfer::TransferError>
-    where R: tokio::io::AsyncRead + Unpin, W: tokio::io::AsyncWrite + Unpin, L: crate::transfer::AuditLog {
-        crate::transfer::copy_body_bound(&mut self.request, reader, writer, log, direction, Some(&self.resolved)).await
+    where R: std::io::Read, W: std::io::Write, L: crate::transfer::AuditLog {
+        crate::transfer::copy_body_bound(&mut self.request, reader, writer, log, direction, Some(&self.resolved))
     }
     pub(crate) fn stream(&mut self) -> &mut Request<'a> { &mut self.request }
     /// The verified parts of the resolved destination.

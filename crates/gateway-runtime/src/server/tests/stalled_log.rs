@@ -1,115 +1,114 @@
 use super::*;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 
-#[tokio::test]
-async fn stalled_log_under_load_preserves_health_deadlines_and_mode_policy() {
-    tokio::time::timeout(Duration::from_secs(20), async {
-        for availability in [false, true] { exercise(availability, false).await; }
-    }).await.unwrap();
+#[test]
+fn stalled_log_under_load_preserves_health_deadlines_and_mode_policy() {
+    for availability in [false, true] { exercise(availability, false); }
 }
 
-#[tokio::test]
-async fn shutdown_with_blocked_disk_returns_error_without_replacement_or_replay() {
-    tokio::time::timeout(Duration::from_secs(20), async {
-        for availability in [false, true] { exercise(availability, true).await; }
-    }).await.unwrap();
+#[test]
+fn shutdown_with_blocked_disk_returns_error_without_replacement_or_replay() {
+    for availability in [false, true] { exercise(availability, true); }
 }
 
-async fn exercise(availability: bool, shutdown_blocked: bool) {
+fn exercise(availability: bool, shutdown_blocked: bool) {
     const SLOTS: usize = 8;
-    let (upstream, acceptor, roots) = tls().await;
+    let (upstream, acceptor, roots) = tls();
     let (log, started, release, writes) = DiskLog::stalled_for_test(2, Duration::from_secs(1));
     let app = Gateway::new(config_with_limits(upstream.local_addr().unwrap().port(), availability, SLOTS, 16384),
         HttpsTransport::with_roots(roots, Duration::from_secs(5)).unwrap(), log);
-    let (port, shutdown, gateway) = spawn_gateway(&app, 64, Duration::from_secs(7)).await;
-    let connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let gateway = spawn_gateway(&app, 64, Duration::from_secs(7));
+    let port = gateway.port;
+    let connections = Arc::new(AtomicUsize::new(0));
     let accepted = connections.clone();
-    let (stop_provider, provider_stopped) = oneshot::channel();
-    let provider = tokio::spawn(async move {
-        tokio::pin!(provider_stopped);
-        let mut tasks = JoinSet::new();
-        loop {
-            let socket = tokio::select! {
-                _ = &mut provider_stopped => break,
-                result = upstream.accept() => result.unwrap().0,
+    let stop_provider = Arc::new(AtomicBool::new(false));
+    let stopping = stop_provider.clone();
+    let provider = std::thread::spawn(move || {
+        upstream.set_nonblocking(true).unwrap();
+        let mut handlers = Vec::new();
+        while !stopping.load(Ordering::Relaxed) {
+            let socket = match upstream.accept() {
+                Ok((socket, _)) => socket,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => { std::thread::sleep(Duration::from_millis(5)); continue; }
+                Err(e) => panic!("{e}"),
             };
             accepted.fetch_add(1, Ordering::Relaxed);
             let acceptor = acceptor.clone();
-            tasks.spawn(async move {
-                let mut socket = acceptor.accept(socket).await.unwrap();
-                let request = read_request(&mut socket).await;
+            handlers.push(std::thread::spawn(move || {
+                let mut socket = tls_accept(socket, &acceptor);
+                let request = read_request(&mut socket);
                 assert!(availability, "strict mode must not connect without a start record");
                 let request = request.unwrap();
                 assert_eq!(request.header("x-api-key"), Some("provider-secret"));
                 assert_eq!(request.body, b"{\"stream\":true}");
-                write_response(&mut socket, 200, &[], b"complete").await.unwrap();
-            });
+                write_response(&mut socket, 200, &[], b"complete").unwrap();
+            }));
         }
-        while let Some(result) = tasks.join_next().await { result.unwrap(); }
+        for handler in handlers { handler.join().unwrap(); }
     });
-    // Strict mode now refuses at the request-start record, before any upstream
+    // Strict mode refuses at the request-start record, before any upstream
     // connection: a stalled logger is observed at kind 2, not during the body.
-    let mut clients = JoinSet::new();
-    clients.spawn(request(port, availability));
-    started.await.unwrap(); // The real disk worker is blocked inside sync.
+    let mut clients = vec![request(port, availability)];
+    started.recv_timeout(Duration::from_secs(5)).unwrap(); // The real disk worker is blocked inside sync.
     // Fill both queue slots before creating enough traffic to hit saturation.
     for queued in 1..=2 {
-        clients.spawn(request(port, availability));
-        while app.log.queued_for_test() < queued { tokio::task::yield_now().await; }
+        clients.push(request(port, availability));
+        assert!(wait_until(Duration::from_secs(3), || app.log.queued_for_test() >= queued));
     }
     assert_eq!(writes.load(Ordering::Relaxed), 1);
-    for _ in 3..SLOTS { clients.spawn(request(port, availability)); }
+    for _ in 3..SLOTS { clients.push(request(port, availability)); }
     for path in ["/healthz", "/metrics"] {
-        let (response, connection) = send(port, path, "", "GET").await;
+        let response = send(port, path, "", "GET");
         assert_eq!(response.status, 200);
-        response.collect().await.unwrap(); connection.await.unwrap();
+        response.collect().unwrap();
     }
-    while let Some(result) = clients.join_next().await { result.unwrap(); }
-    while !app.workers.is_empty() { tokio::task::yield_now().await; }
+    for client in clients.drain(..) { client.join().unwrap(); }
+    wait_workers_idle(&app);
     assert!(!app.log.healthy());
     assert_eq!(app.config.usage(), Some((0, SLOTS)));
     assert_eq!(app.log.queued_for_test(), 2);
-    let (ready, connection) = send(port, "/readyz", "", "GET").await;
+    let ready = send(port, "/readyz", "", "GET");
     assert_eq!(ready.status, if availability { 200 } else { 503 });
-    ready.collect().await.unwrap(); connection.await.unwrap();
-    for _ in 0..SLOTS { clients.spawn(request(port, availability)); }
-    while let Some(result) = clients.join_next().await { result.unwrap(); }
-    while !app.workers.is_empty() { tokio::task::yield_now().await; }
+    ready.collect().unwrap();
+    for _ in 0..SLOTS { clients.push(request(port, availability)); }
+    for client in clients.drain(..) { client.join().unwrap(); }
+    wait_workers_idle(&app);
     assert_eq!(app.config.usage(), Some((0, SLOTS)));
     assert_eq!(connections.load(Ordering::Relaxed), if availability { 2 * SLOTS } else { 0 });
     assert_eq!(app.audit_gaps(), if availability { (2 * SLOTS) as u64 } else { 0 });
     assert_eq!(writes.load(Ordering::Relaxed), 1); // No replacement writer or retry.
-    stop_provider.send(()).unwrap(); provider.await.unwrap();
+    stop_provider.store(true, Ordering::Relaxed); provider.join().unwrap();
     if shutdown_blocked {
-        shutdown.send(()).unwrap();
-        let result = tokio::time::timeout(Duration::from_secs(4), gateway).await.unwrap().unwrap();
+        let stopped = Instant::now();
+        let result = gateway.stop();
+        assert!(stopped.elapsed() < Duration::from_secs(5));
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
-        assert!(app.workers.is_empty());
+        assert!(workers_idle(&app));
         assert_eq!(app.config.usage(), Some((0, SLOTS)));
         assert_eq!(writes.load(Ordering::Relaxed), 1);
         assert_eq!(app.log.queued_for_test(), 2);
         assert!(!app.log.healthy());
-        assert!(tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_err());
+        assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
     } else {
         release.send(()).unwrap();
-        app.log.shutdown(Duration::from_secs(1)).await.unwrap();
-        shutdown.send(()).unwrap(); gateway.await.unwrap().unwrap();
+        app.log.shutdown(Duration::from_secs(1)).unwrap();
+        gateway.stop().unwrap();
         assert_eq!(writes.load(Ordering::Relaxed), 1);
-        assert!(app.workers.is_empty());
+        assert!(workers_idle(&app));
         return;
     }
     release.send(()).unwrap();
-    app.log.shutdown(Duration::from_secs(1)).await.unwrap();
+    app.log.shutdown(Duration::from_secs(1)).unwrap();
     assert_eq!(writes.load(Ordering::Relaxed), 1); // Queued jobs fail after timeout.
-    assert!(app.workers.is_empty());
+    assert!(workers_idle(&app));
 }
 
-async fn request(port: u16, availability: bool) {
-    tokio::time::timeout(Duration::from_secs(3), async {
-        let (response, connection) = send(port, "/routes/7", "gateway", "POST").await;
+fn request(port: u16, availability: bool) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        let response = send(port, "/routes/7", "gateway", "POST");
         let expected = if availability { 200 } else { 503 };
         assert_eq!(response.status, expected);
-        let bytes = response.collect().await.unwrap();
+        let bytes = response.collect().unwrap();
         if availability { assert_eq!(bytes, b"complete"[..]); }
-        connection.await.unwrap();
-    }).await.unwrap();
+    })
 }

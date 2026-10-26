@@ -1,9 +1,19 @@
 # HTTP body buffers, credit, and cancellation
 
 This is the production `http_body.rs` correspondence audit for the reader and
-output-channel terms in `Buffers::accounted_payload_bound`. The channel uses a
-verified inline `Mailbox` under a trusted Rust mutex/waker adapter; Tokio oneshots
-acknowledge End. Rust destruction, wakeups, and async scheduling remain trusted.
+output-channel terms in `Buffers::accounted_payload_bound`.
+
+**Status (2026-10-26).** The output channel no longer exists. The connection
+thread runs the exchange itself and copies body bytes straight from
+`http1::BodyReader` to `http1::ChunkedWriter`, so there is no mailbox, no End
+acknowledgment, and no queued HTTP payload; the theorem's output-queue term
+over-approximates the runtime, which has none. `http_body.rs` keeps the
+`Reader` role binding (input and output readers) and the `Charged` writer role
+binding (upload and response writers); the four roles are issued by
+`WorkerHttp` and released on drop, before the worker's credit can return. The
+mailbox sections below describe the verified `Mailbox` and the removed adapter
+for the record; the verified core keeps the type. Rust destruction and thread
+scheduling remain trusted.
 
 ## Writer queue and pending operations
 
@@ -127,19 +137,14 @@ bytes in availability mode on macOS. These observations are regression evidence,
 not a memory ceiling or a comparative performance benchmark.
 
 
-## Cross-owner cancellation regression
+## Role regressions
 
-`server::workers::tests::canceled_worker_response_stays_owned_by_connection_until_its_cleanup`
-uses the actual HTTP channel, WorkerSlots, ConnectionSlots, and leased task wrappers.
-It queues a frame, cancels and joins its worker, admits a replacement worker, and
-confirms that the original connection slot still cannot be reused. The connection
-then receives the exact queued bytes and reports incomplete EOF; only cancellation
-and joined cleanup of that connection returns its slot. This exercises the live
-receiver category independently of worker lifetime.
-
-`actual_http_reader_destruction_precedes_worker_capacity_reuse` captures an actual
-Reader in a worker task, both never polled and canceled after a partial frame read.
-Its source destructor observes the still-occupied worker slot and tracker, and
-cannot acquire replacement capacity. Capacity becomes available only after task
-cleanup. These are adapter regressions, not the missing global owner-count or
-cross-owner preservation theorem.
+`server::workers::tests::a_live_stream_keeps_the_credit_after_the_work_returns`
+lets a credited `Reader` escape the work through a channel: the worker slot stays
+occupied after the thread finishes, and because the lease dropped with a role
+still active the registry closes admission rather than reusing the slot even
+once the reader is gone. `captures_drop_before_worker_credit_returns` checks the
+normal order. `http_body::worker::tests` cover both reader roles and both writer
+roles holding their role until destruction or `into_inner`. These are adapter
+regressions, not the missing global owner-count or cross-owner preservation
+theorem.

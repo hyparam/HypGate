@@ -38,8 +38,8 @@ body but no host: the host lives only in the client built from
 poisoned batch.
 
 The shipper never writes to the log, never replays provider traffic, and never
-touches admission, forwarding, or readiness. It shares no executor, resolver,
-handshake pool, or mailbox with request workers.
+touches admission, forwarding, or readiness. It shares no resolver or socket
+with request workers; like them it runs blocking sockets on its own thread.
 
 ## Configuration
 
@@ -157,8 +157,8 @@ implemented.
 - The HypAware server honors its documented ledger and dedup semantics and
   issues credentials only to holders of a valid operator token.
 - rustls, DNS, the OS socket timeouts that enforce the deadline, and the
-  filesystem; the shipper uses no Tokio. The HTTPS client's head parsing,
-  framing, and chunk decoding are the verified codec.
+  filesystem; nothing in the process uses an async executor. The HTTPS client's
+  head parsing, framing, and chunk decoding are the verified codec.
 - The system clock for renewal decisions and row timestamps.
 - The `Effects` implementation performs what it is asked: `send` reaches the
   configured server and returns that server's reply, `read` returns the log's
@@ -184,6 +184,6 @@ and the executable prints the figure at startup. See
 ## What is not covered
 
 No proof connects the thread's loop to the verified transitions; that is the
-same trusted-join situation as the gateway's async shell. The projection is a
+same trusted-join situation as the gateway's threaded shell. The projection is a
 heuristic and lossy. gzip, dataset registration, config pulls, diagnostics,
 and fan-out to several servers are not implemented.

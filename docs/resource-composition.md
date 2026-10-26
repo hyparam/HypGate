@@ -6,7 +6,14 @@ each budget, how the production owners correspond to the categories of the
 verified buffer theorem, and how the dependency allocation inventories sum. The
 result is a **requested-allocation ceiling under explicit assumptions**, listed
 at the end. It is not a whole-process RSS theorem: allocator rounding, kernel
-memory, and executor bookkeeping are assumptions, not accounted bytes.
+memory, and thread bookkeeping are assumptions, not accounted bytes.
+
+**Status (2026-10-26).** The runtime no longer links Tokio or tokio-rustls; it
+runs one thread per connection over blocking sockets. The per-exchange
+dependency allowance below is the Hyper-era and tokio-rustls-era figure, kept
+as an upper bound on the codec adapter's and rustls's storage; the handshake
+pool terms are gone, and each inbound connection now carries its two thread
+stacks. `budget.rs` is the authority for the exact sums.
 
 Let R be the configured request limit, K the chunk size, C the inbound
 connection limit, and Q the disk queue capacity. The executable uses C = 128
@@ -24,18 +31,18 @@ of each; library callers that construct more instances multiply the budgets.
 | Owner | Lifetime | Budgets it holds | Tails that outlive callers |
 | --- | --- | --- | --- |
 | `GatewayConfig` (`Admission` registry) | Process, immutable after construction | R request slots (8 bytes each), identity/route/destination/credential storage, K | Request leases retire under the admission mutex; a panic during reservation-to-owner transfer strands one slot until restart |
-| `Gateway` | Until the last `Arc` drops | R worker slots, C connection slots (fixed by the first `serve`), task tracker, counters | Worker tasks keep R credit through future destruction after client disconnect; connection tasks keep C credit through aborted-parent cleanup |
-| One `serve` invocation | From listener bind to drained shutdown | Listener, JoinSet of at most C entries, one just-accepted socket | Completed-but-unreaped JoinSet entries until reaped; aborted children until Tokio destroys them |
-| `HttpsTransport` | Until dropped | TLS client config and root store, session cache (32 servers, 33 during insertion), DNS pool (4 threads, 32 credits), handshake pool (4 threads, 32 credits) | DNS/handshake jobs and unread replies keep verified credit until cleanup or checked adoption by a live request; the cache survives when no request is live |
+| `Gateway` | Until the last `Arc` drops | R worker slots, C connection slots (fixed by the first `serve`), the table of live exchanges' cancel handles, counters | An exchange keeps R credit until its work returns and drops its captures after a client disconnect; a connection keeps C credit until its thread's work returns |
+| One `serve` invocation | From listener bind to drained shutdown | Listener, one just-accepted socket | Connection threads it started that are still finishing their work, bounded by C |
+| `HttpsTransport` | Until dropped | TLS client config and root store, session cache (32 servers, 33 during insertion), DNS pool (4 threads, 32 credits) | DNS jobs and unread replies keep verified credit until cleanup or checked adoption by a live request; the cache survives when no request is live |
 | `DiskLog` | Until the last clone drops and the worker exits | Q fixed frame slots, one encoding reservation, one active frame, one worker thread stack | The active frame stays owned through a stuck syscall; queued jobs survive caller cancellation; poisoned storage stays charged until destruction |
-| Admitted exchange (`PreparedRequest` → `HttpsTransport::exchange`) | From admission to retirement of the owned stream | One K chunk/read owner, one upstream connection, one upload channel, reader copies, one receipt | HTTP cleanup precedes request credit return; dispatched TLS handshake work retains separate pool credit through cancellation |
-| Inbound connection task | From accept to connection-task destruction | One 32 KiB head buffer, one 32 KiB body read buffer, one chunked writer, one response mailbox, one worker abort guard | A client disconnect leaves the worker running until it observes the dropped receiver |
+| Admitted exchange (`PreparedRequest` → `HttpsTransport::exchange`) | From admission to retirement of the owned stream | One K chunk/read owner, one upstream connection and its TLS state, one chunked upload writer, two 32 KiB body read buffers, one receipt | HTTP cleanup precedes request credit return; the TLS handshake runs on the same thread and leaves nothing behind |
+| Inbound connection thread | From accept to the thread's work returning | One 512 KiB thread stack and one 64 KiB watcher stack, one 32 KiB head buffer, one chunked response writer, one cancel handle | A client disconnect cancels the exchange through the watcher; the thread finishes its completion record before its credit returns |
 
 Instances compose additively. A second `serve` on the same `Gateway` shares C
-but adds its own listener and JoinSet; a second `Gateway` or `HttpsTransport`
-adds every budget in its row. There is no path that reclaims an operation's
-resources because its caller timed out: timeouts drop waiting futures, and the
-rows above list what remains owned afterward.
+but adds its own listener; a second `Gateway` or `HttpsTransport` adds every
+budget in its row. There is no path that reclaims an operation's resources
+because its caller timed out: a deadline fails the waiting thread's operation,
+and the rows above list what remains owned afterward.
 
 ## Runtime correspondence to the combined theorem
 
@@ -47,8 +54,8 @@ the mechanism that keeps the count hypothesis true.
 | Theorem category and hypothesis | Production owner | Inserted by | Removed by | Count enforcement |
 | --- | --- | --- | --- | --- |
 | `chunks`: at most R, each at most K | `OwnedStream` inside `admission::Request` (stream body or pending read buffer, never both nonempty) | `OwnedStream::claim` in `Admission::admit` | `OwnedStream::retire` in `Lease::drop` under the admission mutex | Verified registry occupancy; `registry_owned_payload_bound` supplies the chunk predicate; raw construction is crate-private |
-| `readers`: at most 2R, each at most 32 KiB | `http_body::Reader::buffered` for the inbound body and for the upstream response body | `Reader::new` in `Gateway::handle` and `HttpsTransport::run` | Worker future destruction (`LeasedTask` drops its future before its lease) | Production `WorkerRegistry` issues each reader role once; active permits prevent release. `http_owner_bounds` derives 2R; copies remain charged through partial reads and destruction |
-| `output_queues`: at most C + 2R, each at most 16 KiB | `http_body` mailbox items: client response channel (one per connection), its sender-only cleanup tail (one per worker), upload channel (one per exchange) | `ConnectionResponses::channel` in `Gateway::handle`; `http_body::channel` in `HttpsTransport::run` | Receiver drop extracts the item; sender drop preserves it for draining | Verified `Mailbox` slot bound; production `ResponseRegistry` preserves the active-response/occupied-connection mapping and proves the C bound. Active permits forbid release, including during cleanup. Production worker roles bound upload channels and response-writer tails by R each; `http_owner_bounds` derives C+2R. See [HTTP ownership](http-ownership.md) for the runtime mapping |
+| `readers`: at most 2R, each at most 32 KiB | `http1::BodyReader` buffers for the inbound body and for the upstream response body, under `http_body::Reader` roles | `WorkerHttp::input` in `Gateway::run_exchange` and `WorkerHttp::output` in `HttpsTransport::run` | The work returns and drops them before `leased::run` records cleanup | Production `WorkerRegistry` issues each reader role once; active permits prevent release. `http_owner_bounds` derives 2R; buffers remain charged through partial reads and destruction |
+| `output_queues`: at most C + 2R, each at most 16 KiB | None: the runtime has no body queue; the connection thread writes each copied frame as a chunk before accepting the next | The chunked writers under `WorkerHttp::upload_writer` and `WorkerHttp::response_writer` | Dropped with the work | The theorem's term is kept and over-approximates; the framed chunk in flight is charged under [chunk framing buffers](dependency-resources.md#chunk-framing-buffers). See [HTTP ownership](http-ownership.md) for the runtime mapping |
 | `queued_log`: at most Q, each at most A = max(K, 8,210) | `FrameQueue<Completion>` slots in `disk_log::queue::Queue` | `enqueue` through the verified reservation and `finish_reserved` | Worker `recv` pops under the queue mutex | Verified fixed-queue occupancy; the executable binds the payload limit to A so metadata records fit; the theorem is instantiated at A, which bounds K |
 | Encoding snapshot: at most one, within A + 65 | `RecordBody`/`RecordFrame` built by the single-use `EncodingPermit` | `FrameQueue::reserve` under the queue mutex | `finish_reserved` or construction panic (poisoned, still charged) | Verified reservation bit; the permit is non-cloneable and consumed |
 | `active_log`: at most one, within K | `ActiveAppend` / `FinishedAppend` matched to the disk worker's retained frame snapshot | Verified `DiskWorker::take` inside `recv` returns credit to Q and charges the active slot | Verified run commits or drops the frame; consuming delivery and a matching session/generation token permit release | Verified busy gate and `queued_and_active_bound`; one worker per `DiskLog`, never replaced |
@@ -60,14 +67,15 @@ caller. They are enumerated here so that no entry is dropped from the sum:
 
 - A canceled request keeps its chunk until `Lease::drop` retires the owner;
   `copy_body` cancels the stream through `CancelOnDrop` first.
-- A canceled client connection leaves the worker's sender-only mailbox control
-  object, charged to the 2R term, until the worker future is destroyed.
+- A canceled client connection leaves the exchange running until its blocked
+  socket operation fails; the 2R output-queue term of the verified subtotal has
+  no runtime counterpart any more and over-approximates.
 - A canceled append leaves its queued or active frame where it is; the receipt
   for that frame is dropped unsent or dropped with the dead receiver.
-- A canceled DNS or handshake job keeps its credit, hostname, socket, and TLS
-  state until the blocking work returns, in the transport's 32-job budgets.
-- A canceled connection task keeps its C credit until Tokio destroys the boxed
-  future, including the parser buffer and the response mailbox receiver.
+- A DNS lookup whose requester stopped waiting keeps its credit and hostname
+  until the system call returns, in the transport's 32-job budget.
+- A connection thread keeps its C credit until its work returns, including the
+  head buffer and the response writer.
 
 The correspondence is enforced by Rust ownership and privacy: each owner type
 is constructed only by the listed production path, holds its credit in a field
@@ -75,7 +83,7 @@ declared after the resource it guards, and has no accessor that moves the
 resource out. This is checked by the lifetime regressions cited in the
 [runtime ownership](runtime-ownership.md), [worker](worker-lifetimes.md),
 [HTTP](http-buffer-lifetimes.md), and [audit](audit-buffer-lifetimes.md) notes,
-not by a mechanized refinement of the async runtime. That remains the first
+not by a mechanized refinement of the threaded runtime. That remains the first
 assumption listed below.
 
 ## Composed allocation bound
@@ -127,8 +135,8 @@ are private ABI facts are listed with counts in the assumptions, not here.
 | Total | 3,279,649 | |
 
 The queued ciphertext window composes the control-traffic audit with the
-production drain guard. `DrainBeforeWrite` writes plaintext only after the
-previously queued ciphertext has been written, and `perhaps_write_key_update`
+production write path. rustls's blocking `Stream` writes plaintext only after
+the previously queued ciphertext has been written, and `perhaps_write_key_update`
 moves a pending key-update reply only from `buffer_plaintext` (application
 writes) and `queue_tls_message` (control records); the unbuffered
 `write_plaintext` path is unused. Between drains the queue therefore holds at
@@ -149,10 +157,9 @@ checks this over 3,000 rounds.
 
 | Allocation | Bytes | Source |
 | --- | ---: | --- |
-| Verified registries: R request, R worker, C connection, 32 DNS, 32 handshake slots | 8 × (2R + C + 64) | [Resource inventory](resource-accounting.md) |
-| Dedicated thread stacks: audit worker, four DNS, four handshake workers | 18,874,368 | [Dedicated thread stacks](dependency-resources.md#dedicated-thread-stacks), [TLS scheduling](https-transport.md#tls-scheduling-isolation) |
+| Verified registries: R request, R worker, C connection, 32 DNS slots | 8 × (2R + C + 32) | [Resource inventory](resource-accounting.md) |
+| Dedicated thread stacks: audit worker, four DNS workers | 10,485,760 | [Dedicated thread stacks](dependency-resources.md#dedicated-thread-stacks); the per-connection and watcher stacks are charged per inbound connection |
 | TLS session cache contents, 33 servers × 9 sessions × 131,119 | 38,942,343 | [Shared TLS session storage](dependency-resources.md#shared-tls-session-storage) |
-| Queued/running handshake jobs including canceled callers, conservatively charged the full exchange allowance | 32 × 3,984,134 = 127,492,288 | [TLS scheduling](https-transport.md#tls-scheduling-isolation); separate from request credit, includes unused HTTP categories for a conservative subtotal |
 | Queued DNS jobs, 32 × (253 + 2,048) | 73,632 | DNS inventory |
 | Retained configuration content, bounded by both one-MiB input documents | 2,097,152 | [Configuration storage](configuration.md#configuration-storage-and-startup-scratch) |
 | Disk queue slot vector | Q × size of `Option<(RecordFrame, Sender)>` | [Audit ownership](audit-buffer-lifetimes.md#verified-fixed-queue-and-synchronization-obligations) |
@@ -161,10 +168,12 @@ checks this over 3,000 rounds.
 
 The composed bound is:
 
-    B(R, K, C, Q) = V(R, K, C, Q) + C × 933,901 + R × 3,984,134 + instance(R, C, Q)
+    B(R, K, C, Q) = V(R, K, C, Q) + C × 1,523,725 + R × 3,984,134 + instance(R, C, Q)
 
-For the executable example (R = 32, K = 16,384, C = 128, Q = 16), V is
-6,574,258 bytes and B is about 441.1 MB; `budget::tests` pins the exact value
+where the per-connection term is the 512 KiB connection stack, the 64 KiB
+watcher stack, and the retained 933,901-byte adapter allowance. For the
+executable example (R = 32, K = 16,384, C = 128, Q = 16), V is
+6,574,258 bytes and B is about 380.7 MB; `budget::tests` pins the exact value
 from the sizes computed at build time. The isolated-process workload measured a
 kernel peak of 14,168,064 bytes on Linux with R = 8 ([benchmarks](benchmarks.md#isolated-gateway-process-memory)).
 The gap is expected: the bound charges every owner at its replacement peak
@@ -179,12 +188,13 @@ assumption of this composition, not a proved property.
 
 1. **Runtime correspondence.** The production owners in the table above are
    the only holders of the theorem's categories, and Rust field drop order,
-   mutex serialization, and Tokio cancellation behave as documented. This is
-   supported by the lifetime regressions, not a mechanized async refinement.
-2. **Pinned dependency source.** rustls 0.23.46, tokio-rustls 0.26.6, Tokio
-   1.54.1, rustls-webpki 0.103.16, and the Rust 1.99.1 `Vec` growth policy
-   behave as inspected; the HTTP/1.1 buffers are the codec adapter's own. Every dependency
-   upgrade must re-audit the cited sections.
+   mutex serialization, and socket shutdown as cancellation behave as
+   documented. This is supported by the lifetime regressions, not a
+   mechanized refinement of the threaded runtime.
+2. **Pinned dependency source.** rustls 0.23.46, rustls-webpki 0.103.16, and
+   the Rust 1.99.1 `Vec` growth policy behave as inspected; the HTTP/1.1
+   buffers are the codec adapter's own, and no executor is linked. Every
+   dependency upgrade must re-audit the cited sections.
 3. **Allocator and OS.** Requested capacities are not allocator byte counts.
    Size-class rounding, fragmentation, freed-memory caching, thread-local
    caches, guard pages, committed stack pages, kernel socket buffers, page
@@ -193,16 +203,17 @@ assumption of this composition, not a proved property.
 4. **Fixed-size descriptors and control objects.** The sum omits objects whose
    size is a private ABI fact: `HeaderMap` buckets (at most 256 index slots,
    192 buckets, 128 extra values per parsed head), certificate-entry
-   descriptors (at most 16,384 slots, 24,576 during growth), Tokio task
-   harnesses (at most C + R + 1 live tasks), wakers (two per mailbox), oneshot
-   control blocks (one per worker response, append, DNS job, and handshake job),
-   `Arc`/mutex/condvar headers, and TLS key schedules and cipher states. Their
-   counts are bounded by the same R, C, Q, and 32-job limits.
+   descriptors (at most 16,384 slots, 24,576 during growth), kernel thread
+   objects (at most 2C + 6 live threads plus the shipper), `mpsc` channel
+   control blocks (one per append and per DNS job), cancel handles (one per
+   in-flight exchange), `Arc`/mutex/condvar headers, and TLS key schedules and
+   cipher states. Their counts are bounded by the same R, C, Q, and 32-job
+   limits.
 5. **One instance of each owner.** The executable constructs one
    `GatewayConfig`, `Gateway`, `HttpsTransport`, `DiskLog`, and `serve`
-   invocation on a current-thread runtime, plus at most one shipper thread
-   with its own current-thread runtime, charged on its own row. Library callers multiply the
-   per-instance row and must budget their own runtime threads and main stack.
+   invocation on the main thread, plus at most one shipper thread, charged on
+   its own row. Library callers multiply the per-instance row and must budget
+   their own threads and main stack.
 6. **Protocol scope.** One HTTP/1 exchange per connection without keep-alive,
    pipelining, trailers, Content-Length forwarding, ECH, client authentication,
    certificate compression, QUIC, or early data. TLS peers are bounded by the
@@ -219,9 +230,9 @@ themselves, which this document does not hide.
 
 ## Cross-owner regressions and lifecycle composition
 
-The cross-owner cancellation regressions that exercise the actual HTTP channel
-across separately credited worker and connection tasks are described in the
-[HTTP buffer lifetime audit](http-buffer-lifetimes.md#cross-owner-cancellation-regression);
+The role regressions that exercise the credited readers and writers under
+the worker lease are described in the
+[HTTP buffer lifetime audit](http-buffer-lifetimes.md#role-regressions);
 the checked lifecycle composition they support is recorded in the
 [ownership composition](ownership-composition.md). The allocation snapshot
 theorem above retains its stated correspondence and allocator assumptions.

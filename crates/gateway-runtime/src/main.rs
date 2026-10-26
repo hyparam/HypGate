@@ -1,8 +1,7 @@
 #![deny(clippy::disallowed_methods)]
-use gateway_core::thread_context::ThreadContext;
-use gateway_runtime::{config::GatewayConfig, disk_log::{DiskLog, LogReader, Metadata, ScanError, StoredRecord}, server::{self, Gateway},
-    shipping::{self, Shipper, ShippingConfig}, thread_runtime::EnteredRuntime, transport::HttpsTransport};
-use std::{io::{self, Read, Write}, net::SocketAddr, path::Path, time::Duration};
+use gateway_runtime::{config::GatewayConfig, disk_log::{DiskLog, LogReader, Metadata, ScanError, StoredRecord}, server::{self, Gateway, Shutdown},
+    shipping::{self, Shipper, ShippingConfig}, transport::HttpsTransport};
+use std::{io::{self, Read, Write}, net::{SocketAddr, TcpListener}, path::Path, time::Duration};
 
 // Effect site: secrets come only from the environment variables the root
 // policy names, read once at startup.
@@ -11,21 +10,17 @@ fn secret(name: &str) -> Option<String> { std::env::var(name).ok() }
 
 // Effect site: the one listening socket.
 #[allow(clippy::disallowed_methods)]
-async fn bind(address: SocketAddr) -> io::Result<tokio::net::TcpListener> { tokio::net::TcpListener::bind(address).await }
+fn bind(address: SocketAddr) -> io::Result<TcpListener> { TcpListener::bind(address) }
 
 fn bounded_file(path: &str) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     std::fs::File::open(path)?.take(1024 * 1024 + 1).read_to_end(&mut bytes)?;
     Ok(bytes)
 }
-// Effect site: the process main thread has entered no runtime; its context
-// permit is minted here once and spent by whichever command enters one.
-#[allow(clippy::disallowed_methods)]
 fn main() {
-    let context = ThreadContext::fresh();
-    if let Err(message) = run(context) { eprintln!("loggate: {message}"); std::process::exit(1); }
+    if let Err(message) = run() { eprintln!("loggate: {message}"); std::process::exit(1); }
 }
-fn run(context: ThreadContext) -> Result<(), &'static str> {
+fn run() -> Result<(), &'static str> {
     let args: Vec<_> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("scan") {
         if args.len() != 3 { return Err("usage: loggate scan LOG"); }
@@ -38,13 +33,9 @@ fn run(context: ThreadContext) -> Result<(), &'static str> {
     if !(4..=5).contains(&args.len()) { return Err("usage: loggate ROOT.json ROUTES.json NEW_LOG [127.0.0.1:8080]"); }
     let address: SocketAddr = args.get(4).map(String::as_str).unwrap_or("127.0.0.1:8080").parse().map_err(|_| "invalid listen address")?;
     if !address.ip().is_loopback() { return Err("listen address must be loopback; use a trusted TLS reverse proxy for remote clients"); }
-    // The gateway's runtime is the only one on this thread; the permit says so.
-    let runtime = EnteredRuntime::current_thread(context).map_err(|_| "cannot start runtime")?;
-    let served = runtime.block_on(serve(&args, address));
-    let _context = runtime.leave();
-    served
+    serve(&args, address)
 }
-async fn serve(args: &[String], address: SocketAddr) -> Result<(), &'static str> {
+fn serve(args: &[String], address: SocketAddr) -> Result<(), &'static str> {
     let (config, shipping) = {
         let root = bounded_file(&args[1]).map_err(|_| "cannot read root policy")?;
         let routes = bounded_file(&args[2]).map_err(|_| "cannot read candidate routes")?;
@@ -61,13 +52,13 @@ async fn serve(args: &[String], address: SocketAddr) -> Result<(), &'static str>
     // body chunk is smaller; the queue bound in docs/resource-composition.md uses this value.
     let payload_limit = config.chunk_bytes().max(gateway_core::metadata::MAX_PAYLOAD);
     let log = DiskLog::create_with_payload_limit(Path::new(&args[3]), 16, Duration::from_secs(2), payload_limit).map_err(|_| "cannot create and sync new audit log")?;
-    // One extra thread with its own runtime; it only ever reads this file.
+    // One extra thread that only ever reads this file.
     let shipping_limits = shipping.as_ref().map(|s| (s.max_open_exchanges, s.max_exchange_bytes));
     let shipper = match shipping {
         Some(shipping) => Some(Shipper::spawn(shipping, Path::new(&args[3]).to_path_buf()).map_err(|_| "cannot start shipping thread")?),
         None => None,
     };
-    let listener = bind(address).await.map_err(|_| "cannot bind listener")?;
+    let listener = bind(address).map_err(|_| "cannot bind listener")?;
     eprintln!("loggate listening on {}", listener.local_addr().map_err(|_| "cannot read listen address")?);
     let budget = gateway_runtime::budget::compose(gateway_runtime::budget::Limits {
         requests: config.request_limit(), chunk_bytes: config.chunk_bytes(), connections: 128, queue: 16,
@@ -78,18 +69,14 @@ async fn serve(args: &[String], address: SocketAddr) -> Result<(), &'static str>
         let extra = gateway_runtime::budget::shipping(open, bytes).ok_or("shipping budget overflow")?;
         let _ = writeln!(io::stderr().lock(), "loggate shipping thread adds {extra} bytes to that budget");
     }
-    let shutdown = async {
-        #[cfg(unix)] {
-            if let Ok(mut terminate) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-                tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = terminate.recv() => {} }
-                return;
-            }
-        }
-        let _ = tokio::signal::ctrl_c().await;
-    };
+    // The executable runs until it is killed; it installs no signal handler,
+    // since that would need a C binding. A kill ends in-flight exchanges
+    // abruptly: every record already acknowledged is durable, and the
+    // recovery scanner tolerates a torn tail. `Shutdown` is for embedders.
+    let shutdown = Shutdown::new();
     let metrics = shipper.as_ref().map(Shipper::metrics);
-    let served = server::serve(listener, Gateway::with_shipping_metrics(config, transport, log, metrics), 128, Duration::from_secs(310), shutdown)
-        .await.map_err(|_| "server failed");
+    let served = server::serve(listener, Gateway::with_shipping_metrics(config, transport, log, metrics), 128, Duration::from_secs(310), &shutdown)
+        .map_err(|_| "server failed");
     // After request workers and the logger: a bounded window, no replacement.
     if let Some(shipper) = shipper {
         if shipper.shutdown(Duration::from_secs(2)).is_err() { eprintln!("loggate: shipping thread did not stop within its window"); }
@@ -98,7 +85,7 @@ async fn serve(args: &[String], address: SocketAddr) -> Result<(), &'static str>
 }
 
 /// Ship a finished log with the root policy's `shipping` section, then exit.
-/// Runs on the main thread with blocking sockets and enters no runtime.
+/// Runs on the main thread with blocking sockets.
 fn ship(root_path: &str, log_path: &str) -> Result<(), &'static str> {
     let root = bounded_file(root_path).map_err(|_| "cannot read root policy")?;
     let config = ShippingConfig::from_root_json(&root, secret)

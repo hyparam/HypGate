@@ -9,11 +9,11 @@ these counts to request, disk, DNS, and TLS ownership.
 
 | Payload owner | Checked issuance | Runtime retention and cleanup |
 | --- | --- | --- |
-| Inbound detached reader copy, at most 32 KiB | `WorkerRegistry::issue(INPUT_READER)` | `Gateway::handle` calls `WorkerHttp::input`. `Reader::drop` destroys the body and detached `ReadBuffer` before completing its permit. |
-| Upstream detached reader copy, at most 32 KiB | `WorkerRegistry::issue(OUTPUT_READER)` | `HttpsTransport::run` calls `WorkerHttp::output`. The same explicit reader cleanup retains the charge through partial reads and cancellation. |
-| Upload mailbox, at most 16 KiB | `WorkerRegistry::issue(UPLOAD_CHANNEL)` | `WorkerHttp::upload` attaches one shared charge to both endpoints. The last endpoint returns it after mailbox cleanup; a cleanup panic is recorded and strands the permit even if the other endpoint drops normally later. |
-| Client-response sender and any sender-only mailbox tail, at most 16 KiB | `WorkerRegistry::issue(RESPONSE_WRITER)` | `Gateway::handle` attaches the charge before spawning the writer. `Writer::drop` destroys the sender before completing its permit. |
-| Client-response receiver and receiver cleanup, at most 16 KiB | `ResponseRegistry::issue` | `ConnectionResponses::channel` binds the permit to the receiver. `ChannelBody::drop` destroys the receiver and its pending cleanup before returning the permit. |
+| Inbound body reader and its 32 KiB read buffer | `WorkerRegistry::issue(INPUT_READER)` | `Gateway::run_exchange` calls `WorkerHttp::input`. `Reader::drop` destroys the body reader before completing its permit. |
+| Upstream body reader and its 32 KiB read buffer | `WorkerRegistry::issue(OUTPUT_READER)` | `HttpsTransport::run` calls `WorkerHttp::output`. The same explicit reader cleanup retains the charge through partial reads and cancellation. |
+| Upload writer, one framed chunk of at most 16 KiB plus framing | `WorkerRegistry::issue(UPLOAD_CHANNEL)` | `HttpsTransport::run` calls `WorkerHttp::upload_writer` around the chunked writer on the TLS stream. `Charged::drop` or `into_inner` destroys the writer before completing its permit. |
+| Client-response writer, one framed chunk of at most 16 KiB plus framing | `WorkerRegistry::issue(RESPONSE_WRITER)` | `serve_connection` calls `WorkerHttp::response_writer` around the server's `Output` before the exchange. `Charged::drop` destroys the output before completing its permit. |
+| Connection credit | `ResourceAdmission::acquire` with a `TaskCredit` | `ConnectionSlots::acquire` in the accept loop; the credit is spent by `leased::run` on the connection thread and released when the thread's work returns. There is no separate response permit: the response is written by the same thread. |
 
 `ReadBuffer` proves bounded loading and preserves the full detached backing charge
 through partial consumption. Production output uses `OutputFrame` and
@@ -26,9 +26,10 @@ intentional upper bound: a worker can finish while its connection still drains
 the response, and a canceled connection can leave a sender cleanup tail. If one
 endpoint disappears, the other still covers any shared mailbox payload. The
 upload charge instead spans both endpoints of a single worker-owned channel.
-A dequeued frame being framed as a chunk is the connection task's allocation,
-accounted for in [dependency resources](dependency-resources.md#chunk-framing-buffers),
-not an additional application mailbox entry hidden in this bound.
+A frame being framed as a chunk is the chunked writer's allocation on the
+connection thread, accounted for in
+[dependency resources](dependency-resources.md#chunk-framing-buffers), not an
+additional application queue entry hidden in this bound; there is no queue.
 
 ## Checked count and lifecycle preservation
 
@@ -38,11 +39,13 @@ creates a fresh generation. Each role can be issued once, completion consumes it
 non-cloneable permit without resetting issuance, and task release retires the
 issuer permanently. Stale issuers cannot act on a replacement generation.
 Allocation, completion, closure, and release preserve unrelated active roles.
-Any outstanding role prevents task release, even after its future cleanup has
-completed; failed worker release closes admission and strands the slot.
+Any outstanding role prevents task release, even after the work has returned;
+failed worker release closes admission and strands the slot.
 
-`http_connection::ResponseRegistry` provides the corresponding one-response
-connection lifecycle. Both registries maintain the invariant that every active
+`http_connection::ResponseRegistry` provides a corresponding one-response
+connection lifecycle; the runtime no longer uses it, since the connection
+thread writes the response itself, and its connection credits are a plain
+`ResourceAdmission`. Both registries maintain the invariant that every active
 role belongs to an occupied slot. Their count theorems derive bounds from their
 actual arrays, with no independently supplied owner-count premise.
 
@@ -74,20 +77,17 @@ public embedding API `HttpsTransport::exchange` still accepts arbitrary byte
 readers/sinks and has no gateway worker context; embedders must supply their own
 lifetime/count correspondence. It is outside this gateway-wide bound. The fixed
 runtime reader capacity and output-frame limits are part of the reviewed adapter
-mapping. Tokio/TLS internals, allocator capacity, wakers, and total process
+mapping. TLS internals, allocator capacity, thread stacks, and total process
 RSS remain governed by their separate assumptions and accounting.
 
 ## Evidence
 
 Core tests exercise all four roles, duplicate/invalid issuance, independent
 completion, stale generations, closure, and retained-role release rejection.
-Runtime tests cover both partially consumed readers, both upload endpoint drop
-orders, payload destruction while the global charge remains active, and an
-upload cleanup panic followed by normal destruction of the surviving sender.
-The actual worker wrapper rejects reuse when any HTTP owner escapes task cleanup.
-Existing worker/connection cancellation tests now use the credited reader and
-response-writer paths; the queued response still drains under connection credit
-after worker cancellation. The locked gateway suite also covers normal exchanges,
+Runtime tests cover both partially consumed readers and both writer roles held
+until destruction or `into_inner`. The actual worker wrapper refuses reuse and
+closes admission when any HTTP owner escapes the work. The locked gateway suite
+also covers normal exchanges,
 deadlines, shutdown, blocked logging, and canceled requests through this path.
 
 Current validation totals are maintained in the [README](../README.md). Mutations cover duplicate/stale/foreign issuance, wrong roles, missing

@@ -42,9 +42,12 @@ decides nothing about what a byte means:
   says; the end of the body is a clean EOF, and a body that stops early, a
   chunk coding fault, or data missing after a fixed length is an error.
 - `ChunkedWriter` writes the bytes a verified `ChunkStream` yields for each
-  write and for shutdown; it never closes the stream, the caller decides that.
-- `http1::blocking` is the same `read_status_head` and `BodyReader` over
-  `std::io::Read`, for threads that run no executor.
+  write and for `finish`; it never closes the stream, the caller decides that.
+
+All of it is blocking `std::io`; no executor is linked. How long a read or
+write may take is the business of the `net::Timed` stream the adapter is
+handed, which re-arms the socket timeout from the exchange deadline before
+each operation.
 
 The server (`server.rs`) reads the head under a ten-second deadline and then
 asks the `Connection` machine for every byte it writes: the refusal for a head
@@ -53,7 +56,7 @@ chunks, and the last chunk. The transport (`transport.rs`) asks the `Upstream`
 machine for the request head and the upload chunks, and classifies each
 status head it reads with `upstream_status` until a final one. The shipping
 client reuses `upstream_status` with a fixed Content-Length request, over the
-blocking half of the adapter on its own thread.
+same adapter on its own thread.
 
 ## Trusted
 
@@ -65,9 +68,9 @@ blocking half of the adapter on its own thread.
   (after the head read, before the body, on a fault), and the reason phrases
   the server passes, which the machine checks for value bytes but does not
   choose.
-- Tokio, rustls, the OS, DNS, and TLS certificates, as before. Hyper,
-  hyper-util, http, http-body, http-body-util, and bytes are no longer
-  dependencies.
+- rustls, the OS, DNS, and TLS certificates, as before. Hyper, hyper-util,
+  http, http-body, http-body-util, bytes, Tokio, tokio-util, and tokio-rustls
+  are no longer dependencies.
 
 ## Why this matters
 

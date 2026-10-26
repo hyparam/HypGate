@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # Pin the runtime's external effect sites.
 #
-# clippy.toml disallows every socket, name lookup, listener, file write,
-# secret read, runtime construction, runtime entry, and thread-context mint in
-# gateway-runtime; each audited site is marked with
+# clippy.toml disallows every socket, name lookup, listener, file write, and
+# secret read in gateway-runtime; each audited site is marked with
 # `#[allow(clippy::disallowed_methods)]` and an "Effect site" comment. This
 # script fails when that set of marked sites differs from the list below, so a
 # new site cannot appear without updating this file and the end-to-end audit.
@@ -13,14 +12,10 @@ cd "$(dirname "$0")/.."
 expected='crates/gateway-runtime/src/disk_log.rs:create_with_payload_limit
 crates/gateway-runtime/src/http_boundary.rs:close
 crates/gateway-runtime/src/main.rs:bind
-crates/gateway-runtime/src/main.rs:main
 crates/gateway-runtime/src/main.rs:secret
+crates/gateway-runtime/src/server.rs:wake_accept
 crates/gateway-runtime/src/shipping/client.rs:open_socket
 crates/gateway-runtime/src/shipping/state.rs:write_private
-crates/gateway-runtime/src/thread_runtime.rs:block_on
-crates/gateway-runtime/src/thread_runtime.rs:block_on_handle
-crates/gateway-runtime/src/thread_runtime.rs:current_thread
-crates/gateway-runtime/src/thread_runtime.rs:spawn_fresh
 crates/gateway-runtime/src/transport.rs:open_socket
 crates/gateway-runtime/src/transport/resolver.rs:resolve'
 
@@ -44,10 +39,9 @@ if ! grep -rn --include='*.rs' -B3 '#\[allow(clippy::disallowed_methods)\]' crat
   exit 1
 fi
 
-# The runtime macro builds and enters a runtime outside the lint's reach; the
-# executable enters its runtime explicitly, under the thread-context permit.
-if grep -rn --include='*.rs' 'tokio::main' crates/gateway-runtime/src >&2; then
-  echo "the executable enters its runtime through thread_runtime::EnteredRuntime, not #[tokio::main]" >&2
+# The runtime links no executor: blocking sockets and threads only.
+if grep -rn 'tokio' crates/gateway-runtime/src crates/gateway-runtime/tests crates/gateway-runtime/Cargo.toml >&2; then
+  echo "the runtime must not depend on an async executor" >&2
   exit 1
 fi
 

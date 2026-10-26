@@ -6,7 +6,6 @@ use vstd::prelude::*;
 pub mod policy;
 pub mod resolved_route;
 pub mod egress;
-pub mod thread_context;
 pub mod http1_head;
 pub mod http1_write;
 pub mod http1_framing;

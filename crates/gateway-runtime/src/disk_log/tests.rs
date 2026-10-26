@@ -1,20 +1,21 @@
 use super::*;
-use crate::{test_support::{TempDir, admission}, transfer::copy_body};
-use std::{io::Cursor, sync::{Mutex, mpsc as blocking}};
+use crate::{test_support::{TempDir, admission, wait_until}, transfer::copy_body};
+use std::{io::Cursor, sync::{Mutex, mpsc as blocking}, thread};
 
 fn record(bytes: &[u8], chunk: u64) -> LogRecord<'_> {
     LogRecord { tenant: 1, request: 2, chunk, kind: RecordKind::Download, bytes }
 }
+const WAIT: Duration = Duration::from_secs(5);
 
-#[tokio::test]
-async fn strict_transfer_and_real_disk_records_have_identical_payloads() {
+#[test]
+fn strict_transfer_and_real_disk_records_have_identical_payloads() {
     let admission = admission(1, 3, true);
     let mut request = admission.admit(&[11; 32], 7).unwrap();
     let dir = TempDir::new(); let path = dir.0.join("transfer.log");
     let mut log = DiskLog::create_with_payload_limit(&path, 1, Duration::from_secs(5), 3).unwrap();
     let input = b"data: hello\n\ndata: [DONE]\n\n";
     let mut output = Vec::new();
-    let stats = copy_body(&mut request, &mut &input[..], &mut output, &mut log, Direction::Download).await.unwrap();
+    let stats = copy_body(&mut request, &mut &input[..], &mut output, &mut log, Direction::Download).unwrap();
     assert_eq!(output, input);
     assert_eq!(stats.accepted_bytes(), input.len() as u64);
     assert!(!stats.audit_gap());
@@ -33,18 +34,18 @@ fn header() -> Vec<u8> {
     h.extend_from_slice(&Sha256::digest(&h)); h
 }
 
-#[tokio::test]
-async fn maximum_record_roundtrips_and_excess_is_rejected_without_poisoning() {
+#[test]
+fn maximum_record_roundtrips_and_excess_is_rejected_without_poisoning() {
     let dir = TempDir::new(); let path = dir.0.join("maximum.log");
     let mut log = DiskLog::create(&path, 1, Duration::from_secs(5)).unwrap();
     let payload: Vec<u8> = (0..MAX_RECORD_BYTES).map(|i| (i % 251) as u8).collect();
     // Exercise the maximum supported frame on the production worker stack.
-    drop(log.append(record(&payload, 1)).await.unwrap());
+    drop(log.append(record(&payload, 1)).unwrap());
     let excess = vec![0; MAX_RECORD_BYTES + 1];
-    assert!(matches!(log.append(record(&excess, 2)).await, Err(error) if error.kind() == io::ErrorKind::InvalidInput));
+    assert!(matches!(log.append(record(&excess, 2)), Err(error) if error.kind() == io::ErrorKind::InvalidInput));
     assert!(log.healthy());
-    drop(log.append(record(b"after", 2)).await.unwrap());
-    log.shutdown(Duration::from_secs(5)).await.unwrap();
+    drop(log.append(record(b"after", 2)).unwrap());
+    log.shutdown(Duration::from_secs(5)).unwrap();
     let mut reader = LogReader::new(File::open(&path).unwrap()).unwrap();
     assert_eq!(reader.next_record().unwrap().unwrap().bytes, payload);
     let next = reader.next_record().unwrap().unwrap();
@@ -53,13 +54,13 @@ async fn maximum_record_roundtrips_and_excess_is_rejected_without_poisoning() {
     assert_eq!(reader.valid_end(), std::fs::metadata(path).unwrap().len());
 }
 
-#[tokio::test]
-async fn actual_file_acknowledgments_are_readable_and_existing_files_are_not_overwritten() {
+#[test]
+fn actual_file_acknowledgments_are_readable_and_existing_files_are_not_overwritten() {
     let dir = TempDir::new(); let path = dir.0.join("traffic.log");
     let mut log = DiskLog::create(&path, 2, Duration::from_secs(5)).unwrap();
-    let receipt = log.append(record(b"data: hello\n\n", 1)).await.unwrap();
+    let receipt = log.append(record(b"data: hello\n\n", 1)).unwrap();
     assert_eq!(receipt.session_id(), u128::from_le_bytes(log.session()));
-    log.append(record(b"data: [DONE]\n\n", 2)).await.unwrap();
+    log.append(record(b"data: [DONE]\n\n", 2)).unwrap();
     let mut reader = LogReader::new(File::open(&path).unwrap()).unwrap();
     assert_eq!(reader.session(), log.session());
     let first = reader.next_record().unwrap().unwrap();
@@ -115,7 +116,7 @@ struct Sink {
     syncs: Arc<std::sync::atomic::AtomicUsize>,
     fail_write: bool,
     fail_sync: bool,
-    gate: Option<(oneshot::Sender<()>, blocking::Receiver<()>)>,
+    gate: Option<(blocking::Sender<()>, blocking::Receiver<()>)>,
 }
 impl Write for Sink {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
@@ -138,92 +139,97 @@ fn sink() -> Sink {
     Sink { bytes: Arc::new(Mutex::new(Vec::new())), syncs: Arc::default(),
         fail_write: false, fail_sync: false, gate: None }
 }
+/// A sink whose first sync blocks until the returned sender fires; the
+/// receiver reports that the sync has been entered.
+fn gated_sink() -> (Sink, blocking::Receiver<()>, blocking::Sender<()>) {
+    let mut file = sink();
+    let (entered, started) = blocking::channel(); let (release, wait) = blocking::channel();
+    file.gate = Some((entered, wait));
+    (file, started, release)
+}
+/// Run an append on its own thread, returning a handle to its result.
+fn append_on_thread(mut log: DiskLog, bytes: &'static [u8], chunk: u64) -> thread::JoinHandle<io::Result<DurableFrame>> {
+    thread::spawn(move || log.append(record(bytes, chunk)))
+}
 
-#[tokio::test]
-async fn dropping_final_logger_handle_wakes_and_releases_idle_worker() {
-    struct OwnedSink { file: Sink, done: Option<oneshot::Sender<()>> }
+#[test]
+fn dropping_final_logger_handle_wakes_and_releases_idle_worker() {
+    struct OwnedSink { file: Sink, done: Option<blocking::Sender<()>> }
     impl Write for OwnedSink {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> { self.file.write(bytes) }
         fn flush(&mut self) -> io::Result<()> { self.file.flush() }
     }
     impl DurableWrite for OwnedSink { fn sync(&mut self) -> io::Result<()> { self.file.sync() } }
     impl Drop for OwnedSink { fn drop(&mut self) { let _ = self.done.take().unwrap().send(()); } }
-    let (done, released) = oneshot::channel();
+    let (done, released) = blocking::channel();
     let mut log = DiskLog::start(OwnedSink { file: sink(), done: Some(done) }, 1, Duration::from_secs(2), [0; 16]).unwrap();
-    drop(log.append(record(b"complete", 1)).await.unwrap());
+    drop(log.append(record(b"complete", 1)).unwrap());
     let last = log.clone(); drop(log);
     assert!(last.healthy());
     drop(last);
-    tokio::time::timeout(Duration::from_secs(2), released).await.unwrap().unwrap();
+    released.recv_timeout(Duration::from_secs(2)).unwrap();
 }
 
-#[tokio::test]
-async fn poisoned_fixed_queue_refuses_logging_and_worker_can_shutdown() {
+#[test]
+fn poisoned_fixed_queue_refuses_logging_and_worker_can_shutdown() {
     let mut log = DiskLog::start(sink(), 1, Duration::from_secs(2), [0; 16]).unwrap();
     let queue = log.queue.0.clone();
     assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         queue.panic_during_encoding();
     })).is_err());
     assert!(!log.healthy());
-    assert!(matches!(log.append(record(b"refused", 1)).await, Err(error) if error.kind() == io::ErrorKind::BrokenPipe));
-    log.shutdown(Duration::from_secs(2)).await.unwrap();
+    assert!(matches!(log.append(record(b"refused", 1)), Err(error) if error.kind() == io::ErrorKind::BrokenPipe));
+    log.shutdown(Duration::from_secs(2)).unwrap();
     assert!(log.thread.lock().unwrap().is_none());
 }
 
-#[tokio::test]
-async fn write_and_sync_failures_never_acknowledge_and_poison_future_appends() {
+#[test]
+fn write_and_sync_failures_never_acknowledge_and_poison_future_appends() {
     for fail_write in [true, false] {
         let mut file = sink(); file.fail_write = fail_write; file.fail_sync = !fail_write;
         let bytes = file.bytes.clone(); let syncs = file.syncs.clone();
         let mut log = DiskLog::start(file, 1, Duration::from_secs(1), [1; 16]).unwrap();
-        assert!(log.append(record(b"first", 1)).await.is_err());
+        assert!(log.append(record(b"first", 1)).is_err());
         assert!(!log.healthy());
         let length = bytes.lock().unwrap().len();
-        assert!(log.append(record(b"second", 2)).await.is_err());
+        assert!(log.append(record(b"second", 2)).is_err());
         assert_eq!(bytes.lock().unwrap().len(), length);
         assert_eq!(syncs.load(Ordering::Relaxed), if fail_write { 0 } else { 1 });
     }
 }
 
-#[tokio::test]
-async fn blocked_disk_times_out_without_spawning_replacements() {
-    let mut file = sink(); let syncs = file.syncs.clone();
-    let (entered, started) = oneshot::channel(); let (release, wait) = blocking::channel();
-    file.gate = Some((entered, wait));
-    let mut log = DiskLog::start(file, 1, Duration::from_millis(20), [1; 16]).unwrap();
+#[test]
+fn blocked_disk_times_out_without_spawning_replacements() {
+    let (file, started, release) = gated_sink(); let syncs = file.syncs.clone();
+    let log = DiskLog::start(file, 1, Duration::from_millis(20), [1; 16]).unwrap();
     let mut other = log.clone();
-    let first = tokio::spawn(async move { log.append(record(b"first", 1)).await });
-    started.await.unwrap();
-    assert!(first.await.unwrap().is_err());
+    let first = append_on_thread(log, b"first", 1);
+    started.recv_timeout(WAIT).unwrap();
+    assert!(first.join().unwrap().is_err());
     assert!(!other.healthy());
-    assert!(other.append(record(b"next", 2)).await.is_err());
+    assert!(other.append(record(b"next", 2)).is_err());
     assert_eq!(syncs.load(Ordering::Relaxed), 1);
     release.send(()).unwrap();
 }
 
-#[tokio::test]
-async fn full_queue_parks_excess_work_before_allocation_and_serves_it_in_order() {
-    let mut file = sink(); let syncs = file.syncs.clone(); let bytes = file.bytes.clone();
-    let (entered, started) = oneshot::channel(); let (release, wait) = blocking::channel();
-    file.gate = Some((entered, wait));
+#[test]
+fn full_queue_parks_excess_work_before_allocation_and_serves_it_in_order() {
+    let (file, started, release) = gated_sink(); let syncs = file.syncs.clone(); let bytes = file.bytes.clone();
     let log = DiskLog::start(file, 1, Duration::from_secs(5), [1; 16]).unwrap();
-    let mut first_log = log.clone(); let mut second_log = log.clone(); let mut third_log = log.clone();
-    let first = tokio::spawn(async move { first_log.append(record(b"first", 1)).await });
-    started.await.unwrap();
-    let second = tokio::spawn(async move { second_log.append(record(b"second", 2)).await });
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while log.queued_for_test() != 1 { tokio::task::yield_now().await; }
-    }).await.unwrap();
+    let first = append_on_thread(log.clone(), b"first", 1);
+    started.recv_timeout(WAIT).unwrap();
+    let second = append_on_thread(log.clone(), b"second", 2);
+    assert!(wait_until(Duration::from_secs(1), || log.queued_for_test() == 1));
     // The third append waits for a slot instead of failing; while it waits nothing
     // is reserved or encoded, and the logger stays healthy.
-    let third = tokio::spawn(async move { third_log.append(record(b"third", 3)).await });
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    let third = append_on_thread(log.clone(), b"third", 3);
+    thread::sleep(Duration::from_millis(50));
     assert!(!third.is_finished());
     assert_eq!(log.queued_for_test(), 1);
     assert!(log.healthy());
     assert_eq!(syncs.load(Ordering::Relaxed), 1); // Only the blocked first sync.
     release.send(()).unwrap();
-    first.await.unwrap().unwrap(); second.await.unwrap().unwrap(); third.await.unwrap().unwrap();
+    first.join().unwrap().unwrap(); second.join().unwrap().unwrap(); third.join().unwrap().unwrap();
     assert_eq!(syncs.load(Ordering::Relaxed), 3);
     let mut expected = encode(record(b"first", 1));
     expected.extend(encode(record(b"second", 2))); expected.extend(encode(record(b"third", 3)));
@@ -231,79 +237,62 @@ async fn full_queue_parks_excess_work_before_allocation_and_serves_it_in_order()
     assert!(log.healthy());
 }
 
-#[tokio::test]
-async fn slot_wait_is_bounded_by_the_deadline_and_poisons_health() {
-    let mut file = sink(); let syncs = file.syncs.clone();
-    let (entered, started) = oneshot::channel(); let (release, wait) = blocking::channel();
-    file.gate = Some((entered, wait));
+#[test]
+fn slot_wait_is_bounded_by_the_deadline_and_poisons_health() {
+    let (file, started, release) = gated_sink(); let syncs = file.syncs.clone();
     let mut log = DiskLog::start(file, 1, Duration::from_millis(40), [1; 16]).unwrap();
-    let mut first_log = log.clone(); let mut second_log = log.clone();
-    let first = tokio::spawn(async move { first_log.append(record(b"first", 1)).await });
-    started.await.unwrap();
-    let second = tokio::spawn(async move { second_log.append(record(b"second", 2)).await });
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while log.queued_for_test() != 1 { tokio::task::yield_now().await; }
-    }).await.unwrap();
+    let first = append_on_thread(log.clone(), b"first", 1);
+    started.recv_timeout(WAIT).unwrap();
+    let second = append_on_thread(log.clone(), b"second", 2);
+    assert!(wait_until(Duration::from_secs(1), || log.queued_for_test() == 1));
     // A worker that never frees a slot is indistinguishable from one that never
     // acknowledges: the waiting append fails at its deadline and health closes.
-    let started_waiting = tokio::time::Instant::now();
-    assert_eq!(log.append(record(b"third", 3)).await.err().unwrap().kind(), io::ErrorKind::BrokenPipe);
+    let started_waiting = Instant::now();
+    assert_eq!(log.append(record(b"third", 3)).err().unwrap().kind(), io::ErrorKind::BrokenPipe);
     assert!(started_waiting.elapsed() >= Duration::from_millis(40));
     assert!(!log.healthy());
     assert_eq!(log.queued_for_test(), 1);
-    assert!(first.await.unwrap().is_err()); assert!(second.await.unwrap().is_err());
+    assert!(first.join().unwrap().is_err()); assert!(second.join().unwrap().is_err());
     assert_eq!(syncs.load(Ordering::Relaxed), 1);
     release.send(()).unwrap();
 }
 
-
-#[tokio::test]
-async fn shutdown_closes_all_clones_drains_admitted_jobs_and_joins() {
-    let mut file = sink();
+#[test]
+fn shutdown_closes_all_clones_drains_admitted_jobs_and_joins() {
+    let (file, inside, release) = gated_sink();
     let bytes = file.bytes.clone();
-    let (entered, inside) = oneshot::channel();
-    let (release, wait) = blocking::channel();
-    file.gate = Some((entered, wait));
     let log = DiskLog::start(file, 2, Duration::from_secs(5), [0; 16]).unwrap();
-    let mut first = log.clone();
-    let first = tokio::spawn(async move { first.append(record(b"first", 1)).await });
-    inside.await.unwrap();
-    let mut second = log.clone();
-    let second = tokio::spawn(async move { second.append(record(b"second", 2)).await });
-    while log.queued_for_test() != 1 {
-        tokio::task::yield_now().await;
-    }
-    let closing = log.clone();
-    let closing = tokio::spawn(async move { closing.shutdown(Duration::from_secs(2)).await });
-    while log.healthy() { tokio::task::yield_now().await; }
+    let first = append_on_thread(log.clone(), b"first", 1);
+    inside.recv_timeout(WAIT).unwrap();
+    let second = append_on_thread(log.clone(), b"second", 2);
+    assert!(wait_until(WAIT, || log.queued_for_test() == 1));
+    let closing_log = log.clone();
+    let closing = thread::spawn(move || closing_log.shutdown(Duration::from_secs(2)));
+    assert!(wait_until(WAIT, || !log.healthy()));
     assert!(!closing.is_finished());
-    assert!(log.clone().append(record(b"late", 3)).await.is_err());
+    assert!(log.clone().append(record(b"late", 3)).is_err());
     release.send(()).unwrap();
-    first.await.unwrap().unwrap(); second.await.unwrap().unwrap(); closing.await.unwrap().unwrap();
+    first.join().unwrap().unwrap(); second.join().unwrap().unwrap(); closing.join().unwrap().unwrap();
     assert!(log.thread.lock().unwrap().is_none());
     let mut expected = encode(record(b"first", 1)); expected.extend(encode(record(b"second", 2)));
     assert_eq!(*bytes.lock().unwrap(), expected);
-    log.shutdown(Duration::from_secs(1)).await.unwrap();
+    log.shutdown(Duration::from_secs(1)).unwrap();
 }
 
-#[tokio::test]
-async fn shutdown_deadline_does_not_wait_for_stuck_sync_or_replace_worker() {
-    let mut file = sink();
-    let (entered, inside) = oneshot::channel();
-    let (release, wait) = blocking::channel();
-    file.gate = Some((entered, wait));
+#[test]
+fn shutdown_deadline_does_not_wait_for_stuck_sync_or_replace_worker() {
+    let (file, inside, release) = gated_sink();
     let log = DiskLog::start(file, 1, Duration::from_secs(5), [0; 16]).unwrap();
-    let mut pending = log.clone();
-    let pending = tokio::spawn(async move { pending.append(record(b"pending", 1)).await });
-    inside.await.unwrap();
-    assert_eq!(log.shutdown(Duration::from_millis(20)).await.unwrap_err().kind(), io::ErrorKind::TimedOut);
+    let pending = append_on_thread(log.clone(), b"pending", 1);
+    inside.recv_timeout(WAIT).unwrap();
+    assert_eq!(log.shutdown(Duration::from_millis(20)).unwrap_err().kind(), io::ErrorKind::TimedOut);
     assert!(!log.healthy());
     assert!(log.thread.lock().unwrap().is_some());
-    assert!(log.clone().append(record(b"late", 2)).await.is_err());
+    assert!(log.clone().append(record(b"late", 2)).is_err());
     release.send(()).unwrap();
     // The already-running sync may still finish durably after timeout.
-    pending.await.unwrap().unwrap();
-    log.shutdown(Duration::from_secs(1)).await.unwrap();
+    pending.join().unwrap().unwrap();
+    log.shutdown(Duration::from_secs(1)).unwrap();
     assert!(log.thread.lock().unwrap().is_none());
 }
 
@@ -380,10 +369,9 @@ fn scanner_io_error_at_every_record_byte_preserves_prefix_and_stops_reading() {
     }
 }
 
-
-#[tokio::test]
-async fn worker_panic_marks_health_failed_even_after_append_caller_is_canceled() {
-    struct PanicSync { entered: Option<oneshot::Sender<()>>, release: blocking::Receiver<()> }
+#[test]
+fn worker_panic_marks_health_failed_without_a_deadline_and_fails_the_waiting_caller() {
+    struct PanicSync { entered: Option<blocking::Sender<()>>, release: blocking::Receiver<()> }
     impl Write for PanicSync {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> { Ok(bytes.len()) }
         fn flush(&mut self) -> io::Result<()> { Ok(()) }
@@ -395,79 +383,54 @@ async fn worker_panic_marks_health_failed_even_after_append_caller_is_canceled()
             panic!("injected disk worker panic");
         }
     }
-    tokio::time::timeout(Duration::from_secs(5), async {
-        let (entered, inside) = oneshot::channel();
-        let (release, wait) = blocking::channel();
-        let log = DiskLog::start(PanicSync { entered: Some(entered), release: wait },
-            1, Duration::from_secs(60), [0; 16]).unwrap();
-        let mut caller = log.clone();
-        let caller = tokio::spawn(async move { caller.append(record(b"pending", 1)).await });
-        inside.await.unwrap();
-        caller.abort(); assert!(caller.await.err().unwrap().is_cancelled());
-        assert!(log.healthy());
-        release.send(()).unwrap();
-        while !log.thread.lock().unwrap().as_ref().unwrap().is_finished() {
-            tokio::task::yield_now().await;
-        }
-        // No live append observer or deadline was needed to detect worker death.
-        assert!(!log.healthy());
-        assert!(log.clone().append(record(b"later", 2)).await.is_err());
-        assert_eq!(log.shutdown(Duration::from_secs(1)).await.unwrap_err().kind(), io::ErrorKind::Other);
-        assert!(log.thread.lock().unwrap().is_none());
-    }).await.unwrap();
+    let (entered, inside) = blocking::channel();
+    let (release, wait) = blocking::channel();
+    let log = DiskLog::start(PanicSync { entered: Some(entered), release: wait },
+        1, Duration::from_secs(60), [0; 16]).unwrap();
+    let caller = append_on_thread(log.clone(), b"pending", 1);
+    inside.recv_timeout(WAIT).unwrap();
+    assert!(log.healthy());
+    release.send(()).unwrap();
+    assert!(wait_until(WAIT, || log.thread.lock().unwrap().as_ref().unwrap().is_finished()));
+    // Worker death is detected by its exit, not by any caller's deadline (60 s here).
+    assert!(!log.healthy());
+    assert!(caller.join().unwrap().is_err());
+    assert!(log.clone().append(record(b"later", 2)).is_err());
+    assert_eq!(log.shutdown(Duration::from_secs(1)).unwrap_err().kind(), io::ErrorKind::Other);
+    assert!(log.thread.lock().unwrap().is_none());
 }
 
-#[tokio::test]
-async fn canceling_append_callers_does_not_release_queued_or_active_frame_credit() {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        let mut file = sink(); let syncs = file.syncs.clone(); let bytes = file.bytes.clone();
-        let (entered, started) = oneshot::channel(); let (release, wait) = blocking::channel();
-        file.gate = Some((entered, wait));
-        let mut log = DiskLog::start(file, 1, Duration::from_secs(30), [1; 16]).unwrap();
-        let mut first_log = log.clone(); let mut second_log = log.clone();
-        let first = tokio::spawn(async move { first_log.append(record(b"active", 1)).await });
-        started.await.unwrap();
-        let second = tokio::spawn(async move { second_log.append(record(b"queued", 2)).await });
-        while log.queued_for_test() != 1 { tokio::task::yield_now().await; }
-        first.abort(); second.abort();
-        assert!(first.await.err().unwrap().is_cancelled());
-        assert!(second.await.err().unwrap().is_cancelled());
-        // Aborting both callers must not free the slot occupied by their work.
-        // The active worker still owns its first frame, and the queued frame
-        // still owns the only channel credit even though both receipts will be lost.
-        assert_eq!(log.queued_for_test(), 1);
-        assert_eq!(syncs.load(Ordering::Relaxed), 1);
-        assert!(log.healthy());
-        // A further append waits behind the canceled callers' frames; it reserves
-        // nothing until the worker frees the slot they still occupy.
-        let mut excess_log = log.clone();
-        let excess = tokio::spawn(async move { excess_log.append(record(b"excess", 3)).await });
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        assert!(!excess.is_finished());
-        assert_eq!(log.queued_for_test(), 1);
-        assert_eq!(*bytes.lock().unwrap(), encode(record(b"active", 1)));
-        release.send(()).unwrap();
-        let receipt = excess.await.unwrap().unwrap();
-        assert!(receipt.matches_record(Header { payload: 6, tenant: 1, request: 2,
-            chunk: 3, kind: 1 }, b"excess"));
-        while log.queued_for_test() != 0 { tokio::task::yield_now().await; }
-        // The same worker continues. There is no retry of either canceled job;
-        // a later caller receives only its own receipt.
-        let receipt = log.append(record(b"later", 4)).await.unwrap();
-        assert!(receipt.matches_record(Header { payload: 5, tenant: 1, request: 2,
-            chunk: 4, kind: 1 }, b"later"));
-        log.shutdown(Duration::from_secs(1)).await.unwrap();
-        let mut expected = encode(record(b"active", 1));
-        expected.extend(encode(record(b"queued", 2)));
-        expected.extend(encode(record(b"excess", 3)));
-        expected.extend(encode(record(b"later", 4)));
-        assert_eq!(*bytes.lock().unwrap(), expected);
-        assert_eq!(syncs.load(Ordering::Relaxed), 4);
-    }).await.unwrap();
+#[test]
+fn callers_that_give_up_do_not_release_queued_or_active_frame_credit() {
+    // A caller whose deadline passes leaves its frame where it is: the active
+    // worker still owns the first frame and the queued frame still occupies the
+    // only slot. Giving up closes health, as any unacknowledged append does, so
+    // nothing new is admitted. The in-flight sync still completes durably; the
+    // queued frame is then refused rather than written into a log whose
+    // acknowledgments can no longer be trusted, and nothing is retried.
+    let (file, started, release) = gated_sink(); let syncs = file.syncs.clone(); let bytes = file.bytes.clone();
+    let log = DiskLog::start(file, 1, Duration::from_millis(60), [1; 16]).unwrap();
+    let first = append_on_thread(log.clone(), b"active", 1);
+    started.recv_timeout(WAIT).unwrap();
+    let second = append_on_thread(log.clone(), b"queued", 2);
+    assert!(wait_until(WAIT, || log.queued_for_test() == 1));
+    assert!(first.join().unwrap().is_err());
+    assert!(second.join().unwrap().is_err());
+    assert_eq!(log.queued_for_test(), 1);
+    assert_eq!(syncs.load(Ordering::Relaxed), 1);
+    assert!(!log.healthy());
+    assert!(log.clone().append(record(b"excess", 3)).is_err());
+    assert_eq!(log.queued_for_test(), 1);
+    assert_eq!(*bytes.lock().unwrap(), encode(record(b"active", 1)));
+    release.send(()).unwrap();
+    log.shutdown(Duration::from_secs(2)).unwrap();
+    assert_eq!(*bytes.lock().unwrap(), encode(record(b"active", 1)));
+    assert_eq!(syncs.load(Ordering::Relaxed), 1);
+    assert_eq!(log.queued_for_test(), 0);
 }
 
-#[tokio::test]
-async fn configured_record_limit_is_shared_by_clones_and_rejects_before_queueing() {
+#[test]
+fn configured_record_limit_is_shared_by_clones_and_rejects_before_queueing() {
     let dir = TempDir::new(); let path = dir.0.join("limited.log");
     for invalid in [0, MAX_RECORD_BYTES + 1] {
         assert!(matches!(DiskLog::create_with_payload_limit(&path, 1, Duration::from_secs(5), invalid),
@@ -476,12 +439,12 @@ async fn configured_record_limit_is_shared_by_clones_and_rejects_before_queueing
     }
     let log = DiskLog::create_with_payload_limit(&path, 1, Duration::from_secs(5), 3).unwrap();
     let mut clone = log.clone();
-    assert!(matches!(clone.append(record(b"four", 1)).await,
+    assert!(matches!(clone.append(record(b"four", 1)),
         Err(error) if error.kind() == io::ErrorKind::InvalidInput));
     assert_eq!(log.queued_for_test(), 0); assert!(log.healthy());
-    drop(clone.append(record(b"abc", 2)).await.unwrap());
+    drop(clone.append(record(b"abc", 2)).unwrap());
     drop(clone);
-    log.shutdown(Duration::from_secs(5)).await.unwrap();
+    log.shutdown(Duration::from_secs(5)).unwrap();
     let mut reader = LogReader::new(File::open(&path).unwrap()).unwrap();
     let recovered = reader.next_record().unwrap().unwrap();
     assert_eq!(recovered.chunk, 2); assert_eq!(recovered.bytes, b"abc");
@@ -505,17 +468,17 @@ fn resealed(mut frame: Vec<u8>, offset: usize, value: u8) -> Vec<u8> {
     frame[body_len..].copy_from_slice(&digest); frame
 }
 
-#[tokio::test]
-async fn metadata_records_roundtrip_through_disk_and_scanner() {
+#[test]
+fn metadata_records_roundtrip_through_disk_and_scanner() {
     use super::Metadata;
     let dir = TempDir::new(); let path = dir.0.join("metadata.log");
     let mut log = DiskLog::create_with_payload_limit(&path, 2, Duration::from_secs(5), 8210).unwrap();
     let (start, head, done) = (start_payload(), head_payload(), done_payload());
     for (kind, payload) in [(RecordKind::RequestStart, &start), (RecordKind::ResponseHead, &head), (RecordKind::Completion, &done)] {
-        let receipt = log.append(metadata_record(kind, 2, payload)).await.unwrap();
+        let receipt = log.append(metadata_record(kind, 2, payload)).unwrap();
         assert!(receipt.matches_record(Header { payload: payload.len() as u32, tenant: 1, request: 2, chunk: 0, kind: kind.id() }, payload));
     }
-    log.shutdown(Duration::from_secs(5)).await.unwrap();
+    log.shutdown(Duration::from_secs(5)).unwrap();
     let mut reader = LogReader::new(File::open(&path).unwrap()).unwrap();
     let records: Vec<_> = std::iter::from_fn(|| reader.next_record().unwrap()).collect();
     assert_eq!(records.iter().map(|r| (r.kind, r.chunk, r.direction())).collect::<Vec<_>>(),

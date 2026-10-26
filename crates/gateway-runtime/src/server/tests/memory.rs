@@ -1,7 +1,7 @@
 //! Opt-in process-isolated RSS evidence, not a whole-process memory proof.
 use super::*;
-use std::process::{Child, Command, Stdio};
-use tokio_rustls::rustls::pki_types::CertificateDer;
+use rustls::pki_types::CertificateDer;
+use std::{process::{Child, Command, Stdio}, sync::atomic::AtomicBool};
 
 const CLIENTS: usize = 8;
 const RESPONSE: usize = 1024 * 1024;
@@ -16,20 +16,22 @@ fn memory_child() {
     let availability = std::fs::read_to_string(directory.join("mode")).unwrap() == "availability";
     let mut roots = RootCertStore::empty();
     roots.add(CertificateDer::from(std::fs::read(directory.join("root.der")).unwrap())).unwrap();
-    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
-        let app = Gateway::new(config_with_limits(port, availability, CLIENTS, 16384),
-            HttpsTransport::with_roots(roots, Duration::from_secs(60)).unwrap(),
-            DiskLog::create(&directory.join("audit.log"), 16, Duration::from_secs(5)).unwrap());
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        std::fs::write(directory.join("port"), listener.local_addr().unwrap().port().to_string()).unwrap();
-        let stop = directory.join("stop");
-        serve(listener, app.clone(), 128, Duration::from_secs(65), async {
-            while !stop.exists() { tokio::time::sleep(Duration::from_millis(20)).await; }
-        }).await.unwrap();
-        assert_eq!(app.audit_gaps(), 0); assert_eq!(app.failed_exchanges(), 0);
-        assert_eq!(app.config.usage(), Some((0, CLIENTS)));
-        assert!(app.workers.is_empty());
+    let app = Gateway::new(config_with_limits(port, availability, CLIENTS, 16384),
+        HttpsTransport::with_roots(roots, Duration::from_secs(60)).unwrap(),
+        DiskLog::create(&directory.join("audit.log"), 16, Duration::from_secs(5)).unwrap());
+    let listener = StdListener::bind("127.0.0.1:0").unwrap();
+    std::fs::write(directory.join("port"), listener.local_addr().unwrap().port().to_string()).unwrap();
+    let stop = directory.join("stop");
+    let shutdown = Shutdown::new();
+    let signal = shutdown.clone();
+    std::thread::spawn(move || {
+        while !stop.exists() { std::thread::sleep(Duration::from_millis(20)); }
+        signal.trigger();
     });
+    serve(listener, app.clone(), 128, Duration::from_secs(65), &shutdown).unwrap();
+    assert_eq!(app.audit_gaps(), 0); assert_eq!(app.failed_exchanges(), 0);
+    assert_eq!(app.config.usage(), Some((0, CLIENTS)));
+    assert!(workers_idle(&app));
 }
 
 // Linux supplies a kernel high-water mark; macOS reports only sampled RSS.
@@ -49,26 +51,22 @@ fn memory(pid: u32) -> (u64, Option<u64>) {
     }
 }
 
-#[tokio::test]
+#[test]
 #[ignore = "isolated gateway RSS workload; run with --ignored --nocapture"]
-async fn isolated_gateway_memory_in_both_logging_modes() {
-    for availability in [false, true] {
-        tokio::time::timeout(Duration::from_secs(120), workload(availability, 3)).await.unwrap();
-    }
+fn isolated_gateway_memory_in_both_logging_modes() {
+    for availability in [false, true] { workload(availability, 3); }
 }
 
-#[tokio::test]
+#[test]
 #[ignore = "long isolated gateway RSS workload; run with --ignored --nocapture"]
-async fn isolated_gateway_memory_soak_in_both_logging_modes() {
-    for availability in [false, true] {
-        tokio::time::timeout(Duration::from_secs(600), workload(availability, 100)).await.unwrap();
-    }
+fn isolated_gateway_memory_soak_in_both_logging_modes() {
+    for availability in [false, true] { workload(availability, 100); }
 }
 
-async fn workload(availability: bool, waves: usize) {
-    let started = std::time::Instant::now();
+fn workload(availability: bool, waves: usize) {
+    let started = Instant::now();
     let (cert, acceptor, _) = self_signed();
-    let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream = StdListener::bind("127.0.0.1:0").unwrap();
     let dir = TempDir::new();
     std::fs::write(dir.0.join("root.der"), cert.cert.der()).unwrap();
     std::fs::write(dir.0.join("upstream"), upstream.local_addr().unwrap().port().to_string()).unwrap();
@@ -82,71 +80,66 @@ async fn workload(availability: bool, waves: usize) {
         if let Ok(text) = std::fs::read_to_string(dir.0.join("port")) {
             if let Ok(port) = text.parse::<u16>() { break port; }
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        std::thread::sleep(Duration::from_millis(10));
     };
     let pid = child.0.id();
     let baseline = memory(pid);
-    let (done, mut stopped) = oneshot::channel();
-    let sampler = tokio::spawn(async move {
+    let stop_sampling = Arc::new(AtomicBool::new(false));
+    let sampling = stop_sampling.clone();
+    let sampler = std::thread::spawn(move || {
         let mut peak = baseline.0; let mut kernel_peak = baseline.1; let mut samples = 0;
         loop {
             let (rss, hwm) = memory(pid); peak = peak.max(rss);
             kernel_peak = match (kernel_peak, hwm) { (Some(a), Some(b)) => Some(a.max(b)), _ => None };
             samples += 1;
-            tokio::select! {
-                _ = &mut stopped => break,
-                _ = tokio::time::sleep(Duration::from_millis(50)) => {},
-            }
+            if sampling.load(Ordering::Relaxed) { break; }
+            std::thread::sleep(Duration::from_millis(50));
         }
         (peak, kernel_peak, samples)
     });
-    let provider = tokio::spawn(async move {
-        let mut connections = JoinSet::new();
+    let provider = std::thread::spawn(move || {
+        let mut connections = Vec::new();
         for _ in 0..waves * CLIENTS {
-            let (socket, _) = upstream.accept().await.unwrap(); let acceptor = acceptor.clone();
-            connections.spawn(async move {
-                let mut socket = acceptor.accept(socket).await.unwrap();
-                let request = read_request(&mut socket).await.unwrap();
+            let mut socket = accept_tls(&upstream, &acceptor).unwrap();
+            connections.push(std::thread::spawn(move || {
+                let request = read_request(&mut socket).unwrap();
                 assert_eq!(request.header("x-api-key"), Some("provider-secret"));
                 assert_eq!(request.body, b"{\"stream\":true}");
-                let mut stream = start_streaming(socket, 200, &[]).await.unwrap();
+                let mut stream = start_streaming(socket, 200, &[]).unwrap();
                 for _ in 0..RESPONSE / 16384 {
-                    stream.send(&[29; 16384]).await.unwrap();
-                    tokio::time::sleep(Duration::from_millis(2)).await;
+                    stream.send(&[29; 16384]).unwrap();
+                    std::thread::sleep(Duration::from_millis(2));
                 }
-                stream.finish().await.unwrap();
-            });
+                stream.finish().unwrap();
+            }));
         }
-        while let Some(result) = connections.join_next().await { result.unwrap(); }
+        for connection in connections { connection.join().unwrap(); }
     });
     let mut settled = Vec::new();
     for _ in 0..waves {
-        let mut clients = JoinSet::new();
-        for _ in 0..CLIENTS {
-            clients.spawn(async move {
-                let (mut response, connection) = send(port, "/routes/7", "gateway", "POST").await;
-                assert_eq!(response.status, 200);
-                let mut received = 0;
-                while let Some(data) = response.chunk().await.unwrap() {
-                    assert!(data.iter().all(|b| *b == 29)); received += data.len();
-                    tokio::time::sleep(Duration::from_millis(3)).await;
-                }
-                assert_eq!(received, RESPONSE); connection.await.unwrap();
-            });
-        }
-        while let Some(result) = clients.join_next().await { result.unwrap(); }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        let clients: Vec<_> = (0..CLIENTS).map(|_| std::thread::spawn(move || {
+            let mut response = send(port, "/routes/7", "gateway", "POST");
+            assert_eq!(response.status, 200);
+            let mut received = 0;
+            while let Some(data) = response.chunk().unwrap() {
+                assert!(data.iter().all(|b| *b == 29)); received += data.len();
+                std::thread::sleep(Duration::from_millis(3));
+            }
+            assert_eq!(received, RESPONSE);
+        })).collect();
+        for client in clients { client.join().unwrap(); }
+        std::thread::sleep(Duration::from_millis(100));
         settled.push(memory(pid).0);
     }
-    provider.await.unwrap();
+    provider.join().unwrap();
     let final_memory = memory(pid);
-    done.send(()).unwrap(); let (peak, kernel_peak, samples) = sampler.await.unwrap();
+    stop_sampling.store(true, Ordering::Relaxed); let (peak, kernel_peak, samples) = sampler.join().unwrap();
     let peak = peak.max(final_memory.0);
     let kernel_peak = match (kernel_peak, final_memory.1) { (Some(a), Some(b)) => Some(a.max(b)), _ => None };
     std::fs::write(dir.0.join("stop"), b"stop").unwrap();
     let status = loop {
         if let Some(status) = child.0.try_wait().unwrap() { break status; }
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        std::thread::sleep(Duration::from_millis(10));
     };
     assert!(status.success(), "gateway did not drain cleanly");
     let mut reader = LogReader::new(File::open(dir.0.join("audit.log")).unwrap()).unwrap();

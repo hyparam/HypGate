@@ -1,11 +1,11 @@
 # DNS work ownership and shutdown
 
-Hostname resolution is blocking work, even when exposed through an async API.
-In pinned Tokio 1.54.1, `net/addr.rs` resolves a hostname with `spawn_blocking`.
-Dropping its waiting future does not stop a started system lookup, and runtime
-shutdown can wait for blocking tasks. Returning the request's credit at its
-network deadline therefore does not by itself bound DNS work across repeated
-timeouts. Production no longer passes hostname strings to Tokio's TCP connector.
+Hostname resolution is a blocking system call that no caller can interrupt.
+A connection thread that stops waiting at its exchange deadline does not stop
+a started lookup, so returning the request's credit at the deadline does not by
+itself bound DNS work across repeated timeouts. Production never resolves a
+hostname on the connection thread itself; it waits, under the deadline, for a
+lookup on the bounded pool below and connects only to the addresses it returns.
 
 ## Separate bounded lifetime
 
@@ -31,12 +31,13 @@ admitted request. `Request::adopt_background` locks that request's own registry
 and calls `TaskCredit::handoff_to` with its actual `OwnedStream`. The checked
 transition requires a completed-work reply credit and a live, non-closed admitted
 owner, records its exact ID, and only then permits background release. The adapter
-moves the unchanged result into the borrowing request before further asynchronous
+moves the unchanged result into the borrowing request before further network
 I/O. A canceled/poisoned request cannot adopt; the reply destroys the result under
 its original credit. Core keys remain scoped by private runtime registry owners.
 
-A canceled caller drops its reply receiver, not the queued/running job. Workers
-skip queued jobs whose receivers are closed. A lookup already started may finish
+A caller whose deadline passes drops its `Pending` receiver, not the
+queued/running job. Workers skip queued jobs whose requester has left. A lookup
+already started may finish
 and discard its result; it keeps its credit until actual completion. Lookup panics
 are caught after job cleanup, so they close the reply without permanently losing
 a pool worker. Process abort, stack overflow, and a permanently blocked system
@@ -50,8 +51,9 @@ socket addresses into a fresh vector and rejects a 65th; it does not retain a
 large backing allocation from the system iterator. The source iterator and its
 storage drop inside the worker. Empty results fail when TCP connection is tried.
 
-The bounded address vector is passed to `TcpStream::connect` as socket addresses,
-so Tokio cannot start a second hostname lookup. It is released after the TCP
+The bounded address vector is passed to `TcpStream::connect_timeout` one socket
+address at a time, each attempt bounded by the exchange deadline's remaining
+time, so no second hostname lookup can start. It is released after the TCP
 attempt, before TLS/body streaming. TLS still authenticates the original configured
 hostname and HTTP uses the same authorized Host and credential. This changes no
 root grants and adds no HTTP retry/replay. Trying multiple resolved socket addresses
@@ -84,30 +86,28 @@ Per transport instance, separately from per-request payloads:
   buffers and external resolver modules are not bounded by the 64-address output
   cap. This remains a dependency allocation assumption, not a whole-process theorem.
 
-Resolver workers are ordinary detached OS threads, not Tokio blocking tasks.
-Dropping the resolver closes its sender; workers exit once outstanding system calls
-return and remaining canceled jobs are discarded. A permanently blocked lookup can
-outlive server drain, but cannot hold Tokio runtime destruction or process exit
-open. Multiple transport instances multiply these budgets; repeatedly constructing
+Resolver workers are ordinary detached OS threads. Dropping the resolver closes
+its sender; workers exit once outstanding system calls return and remaining
+unwanted jobs are discarded. A permanently blocked lookup can outlive server
+drain, but cannot hold process exit open. Multiple transport instances multiply these budgets; repeatedly constructing
 new transports while abandoning stuck old instances is outside the executable's
 single-transport lifecycle and must be budgeted by library callers.
 
 ## Tests
 
 `transport::resolver::tests` exercises four started lookups plus one queued lookup,
-cancels every caller, rejects 16 additional jobs, confirms IPv6 literals still work,
-then releases the original workers and checks the canceled queued lookup was never
-executed and capacity is reusable. Deliberately returning lookup credit before
-executing the blocking operation makes this regression test fail. A separate test destroys a Tokio runtime while
-its lookup is still blocked, before unblocking the system-call stand-in. Further
-tests cover a panicking lookup followed by successful reuse of the same one-worker
-pool, exact 64-address acceptance, excess rejection, and detachment from an oversized
-source allocation. Existing TLS, deadline, cancellation, overload, and CLI tests
+lets every requester stop waiting, rejects 16 additional jobs, confirms IPv6
+literals still work, then releases the original workers and checks the queued
+lookup nobody waited for was never executed and capacity is reusable.
+Deliberately returning lookup credit before executing the blocking operation
+makes this regression test fail. Further tests cover a panicking lookup followed
+by successful reuse of the same one-worker pool, exact 64-address acceptance,
+excess rejection, and detachment from an oversized source allocation. Existing TLS, deadline, cancellation, overload, and CLI tests
 exercise the integrated transport. These are deterministic adapter tests, not a
 proof that every operating-system resolver terminates or bounds its own memory.
 
 Shared `credited_job` tests additionally cover unread/delivered reply retention,
-closed receivers, queued and reply destructor panics, and exact value adoption
+departed requesters, queued and reply destructor panics, and exact value adoption
 into live versus canceled requests. Core tests exercise absent/canceled target
 owners and repeated handoff. Four reply/handoff mutations reject missing target
 liveness, a wrong target ID, transfer before work finishes, and release of an
