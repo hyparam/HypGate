@@ -6,6 +6,7 @@
 use crate::admission::AdmissionError;
 use crate::config::{GatewayConfig, RoutedRequest};
 use gateway_core::headers::{self, Field, Rejection};
+use gateway_core::http1_exchange::{Refusal, refusal_status};
 use gateway_core::http1_head::{RequestHead, StatusHead};
 
 #[cfg(test)]
@@ -26,15 +27,17 @@ impl HttpError {
     pub(crate) fn close(self) -> gateway_core::exchange_lifecycle::Closed {
         gateway_core::exchange_lifecycle::Closed::without_request()
     }
-    pub fn status(&self) -> u16 {
+    /// The refusal the verified exchange machine answers for this error.
+    pub fn refusal(&self) -> Refusal {
         match self {
-            Self::BadRequest => 400,
-            Self::Unauthorized => 401,
-            Self::MethodNotAllowed => 405,
-            Self::HeadersTooLarge => 431,
-            Self::Unavailable => 503,
+            Self::BadRequest => Refusal::Malformed,
+            Self::Unauthorized => Refusal::Unauthorized,
+            Self::MethodNotAllowed => Refusal::MethodNotAllowed,
+            Self::HeadersTooLarge => Refusal::HeadTooLarge,
+            Self::Unavailable => Refusal::Unavailable,
         }
     }
+    pub fn status(&self) -> u16 { refusal_status(self.refusal()) }
 }
 
 /// The head the transport writes upstream: the resolved destination's

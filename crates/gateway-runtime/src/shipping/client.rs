@@ -6,7 +6,8 @@ use super::config::ShippingServer;
 use crate::http1;
 use gateway_core::egress::Egress;
 use gateway_core::headers::Field;
-use gateway_core::http1_framing::{Framing, framing};
+use gateway_core::http1_exchange::{UpstreamStatus, upstream_status};
+use gateway_core::http1_framing::Framing;
 use gateway_core::http1_write::{wire_ok, write_request_head};
 use std::{io, net::ToSocketAddrs, sync::Arc, time::Duration};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -82,13 +83,18 @@ impl Client {
         write_request_head(method.as_bytes(), path.as_bytes(), &fields, &mut head);
         head.extend_from_slice(&body);
         tls.write_all(&head).await.map_err(|_| ClientError::Http)?;
-        let (status_head, leftover) = http1::read_status_head(&mut tls, Vec::new()).await.map_err(|_| ClientError::Http)?;
+        let mut leftover = Vec::new();
+        let (status_head, leftover, reply_framing) = loop {
+            let (status_head, rest) = http1::read_status_head(&mut tls, leftover).await.map_err(|_| ClientError::Http)?;
+            match upstream_status(status_head.status, &status_head.fields) {
+                UpstreamStatus::Interim => { leftover = rest; }
+                UpstreamStatus::Refused => return Err(ClientError::Http),
+                UpstreamStatus::Bodiless => break (status_head, rest, Framing::Length(0)),
+                UpstreamStatus::Framed(framing) => break (status_head, rest, framing),
+            }
+        };
         let retry_after = status_head.fields.iter().find(|f| f.name == b"retry-after")
             .and_then(|f| std::str::from_utf8(&f.value).ok()).and_then(|v| v.trim().parse().ok());
-        let reply_framing = match status_head.status {
-            204 | 304 => Framing::Length(0),
-            _ => framing(&status_head.fields, false).map_err(|_| ClientError::Http)?,
-        };
         if let Framing::Length(n) = reply_framing { if n > MAX_REPLY_BYTES as u64 { return Err(ClientError::Http); } }
         let mut reader = http1::BodyReader::new(&mut tls, leftover, reply_framing);
         let mut bytes = Vec::new();

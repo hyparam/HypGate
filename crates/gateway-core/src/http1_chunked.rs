@@ -506,7 +506,7 @@ proof fn lemma_chunk_lengths(chunk: Seq<u8>, data: Seq<u8>)
         && crate::http1_head::crlf_at(chunk, e + 2 + data.len());
 }
 /// One chunk is a run of chunks.
-proof fn lemma_chunks_single(chunk: Seq<u8>, data: Seq<u8>)
+pub proof fn lemma_chunks_single(chunk: Seq<u8>, data: Seq<u8>)
     requires chunk_ok(chunk, data),
     ensures chunks_ok(chunk, data),
 {
@@ -521,7 +521,7 @@ proof fn lemma_chunks_single(chunk: Seq<u8>, data: Seq<u8>)
     assert(chunk_ok(chunk.subrange(0, k), data.subrange(0, n)));
 }
 /// Appending a chunk to a run of chunks gives a run of chunks.
-proof fn lemma_chunks_append(bytes: Seq<u8>, body: Seq<u8>, chunk: Seq<u8>, data: Seq<u8>)
+pub proof fn lemma_chunks_append(bytes: Seq<u8>, body: Seq<u8>, chunk: Seq<u8>, data: Seq<u8>)
     requires chunks_ok(bytes, body), chunk_ok(chunk, data),
     ensures chunks_ok(bytes + chunk, body + data),
     decreases bytes.len(),

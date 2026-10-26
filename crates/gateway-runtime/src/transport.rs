@@ -3,8 +3,8 @@
 use crate::{http1, http_body, http_boundary::{PreparedRequest, prepare_response_head}, transfer::{AuditLog, Direction, TransferError}};
 use gateway_core::headers::Field;
 use gateway_core::{body_copy::BodyCopy, exchange_lifecycle::Fault};
-use gateway_core::http1_framing::{Framing, framing};
-use gateway_core::http1_write::{wire_ok, write_request_head};
+use gateway_core::http1_exchange::{Upstream, UpstreamStatus, upstream_status};
+use gateway_core::http1_framing::Framing;
 use std::{future::Future, io, sync::Arc, time::Duration};
 use tokio::{io::{AsyncRead, AsyncWrite, AsyncWriteExt}, net::TcpStream};
 use tokio_rustls::{TlsConnector, rustls::{ClientConfig, RootCertStore, pki_types::ServerName}};
@@ -110,29 +110,30 @@ impl HttpsTransport {
             .adopt(prepared.stream()).map_err(|_| TransportError::Tls)?;
         let mut tls = crate::http_io::ReadLimited::new(tls_io::DrainBeforeWrite(tls));
 
-        // The head: the verified projection's fields plus the framing this
-        // transport generates from the body stream, written by the verified
-        // writer. Nothing in the head came from the client unfiltered.
-        let mut fields = upstream.fields;
-        fields.push(http1::field(b"transfer-encoding", b"chunked".to_vec()));
-        fields.push(http1::field(b"connection", b"close".to_vec()));
-        if !wire_ok(&fields) { return Err(TransportError::Metadata); }
-        let mut head = Vec::new();
-        write_request_head(b"POST", &upstream.path, &fields, &mut head);
+        // The head and its framing are the verified machine's: the projection's
+        // fields plus chunked framing and `Connection: close`. Nothing in the
+        // head came from the client unfiltered.
+        let mut machine = Upstream::new();
+        let (head, stream) = machine.request(&upstream.path, upstream.fields).ok_or(TransportError::Metadata)?;
         tls.write_all(&head).await.map_err(|_| TransportError::Http)?;
 
         // Upload: the body copy writes chunks straight to the connection.
-        let mut body_writer = http.upload_writer(http1::ChunkedWriter::new(&mut tls)).ok_or(TransportError::Http)?;
+        let mut body_writer = http.upload_writer(http1::ChunkedWriter::new(&mut tls, stream)).ok_or(TransportError::Http)?;
         let upload = prepared.copy_body(input, &mut body_writer, log, Direction::Upload)
             .await.map_err(|error| body_error(error, TransportError::Upload))?;
         body_writer.shutdown().await.map_err(|_| TransportError::Upload)?;
-        drop(body_writer);
+        machine.finish(body_writer.into_inner().into_stream());
 
-        // Response head, then the filtered fields and the framing it declares.
-        let (status_head, leftover) = http1::read_status_head(&mut tls, Vec::new()).await.map_err(|_| TransportError::Http)?;
-        let response_framing = match status_head.status {
-            204 | 304 => Framing::Length(0),
-            _ => framing(&status_head.fields, false).map_err(|_| TransportError::Metadata)?,
+        // Response heads until a final one; the machine classifies each.
+        let mut leftover = Vec::new();
+        let (status_head, leftover, response_framing) = loop {
+            let (status_head, rest) = http1::read_status_head(&mut tls, leftover).await.map_err(|_| TransportError::Http)?;
+            match upstream_status(status_head.status, &status_head.fields) {
+                UpstreamStatus::Interim => { leftover = rest; }
+                UpstreamStatus::Refused => return Err(TransportError::Metadata),
+                UpstreamStatus::Bodiless => break (status_head, rest, Framing::Length(0)),
+                UpstreamStatus::Framed(framing) => break (status_head, rest, framing),
+            }
         };
         let (status, fields) = prepare_response_head(status_head).map_err(|_| TransportError::Metadata)?;
         // Kind 3 before the head reaches the client. Strict mode stops here

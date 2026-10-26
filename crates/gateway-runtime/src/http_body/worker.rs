@@ -64,23 +64,30 @@ impl WorkerHttp {
     /// onto the upstream connection.
     pub(crate) fn upload_writer<W>(&self, writer: W) -> Option<Charged<W>> {
         let charge = self.issue(gateway_core::http_worker::UPLOAD_CHANNEL)?;
-        Some(Charged { inner: writer, charge: Some(charge) })
+        Some(Charged { inner: Some(writer), charge: Some(charge) })
     }
 }
 /// A writer holding one worker HTTP role for its lifetime.
-pub(crate) struct Charged<W> { inner: W, charge: Option<Charge> }
+pub(crate) struct Charged<W> { inner: Option<W>, charge: Option<Charge> }
+impl<W> Charged<W> {
+    /// The wrapped writer; the role is released here.
+    pub(crate) fn into_inner(mut self) -> W {
+        if let Some(charge) = self.charge.take() { charge.finish(); }
+        self.inner.take().expect("live charged writer")
+    }
+}
 impl<W> Drop for Charged<W> {
     fn drop(&mut self) { if let Some(charge) = self.charge.take() { charge.finish(); } }
 }
 impl<W: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for Charged<W> {
     fn poll_write(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>, bytes: &[u8]) -> std::task::Poll<std::io::Result<usize>> {
-        std::pin::Pin::new(&mut self.get_mut().inner).poll_write(cx, bytes)
+        std::pin::Pin::new(self.get_mut().inner.as_mut().expect("live charged writer")).poll_write(cx, bytes)
     }
     fn poll_flush(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
-        std::pin::Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+        std::pin::Pin::new(self.get_mut().inner.as_mut().expect("live charged writer")).poll_flush(cx)
     }
     fn poll_shutdown(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
-        std::pin::Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+        std::pin::Pin::new(self.get_mut().inner.as_mut().expect("live charged writer")).poll_shutdown(cx)
     }
 }
 impl Charge {

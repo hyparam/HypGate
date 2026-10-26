@@ -20,7 +20,7 @@ fn writes_a_status_head_with_and_without_a_reason() {
     assert_eq!(out, b"HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\n\r\n".to_vec());
     let mut out = Vec::new();
     write_status_head(503, b"", &vec![], &mut out);
-    assert_eq!(out, b"HTTP/1.1 503\r\n\r\n".to_vec());
+    assert_eq!(out, b"HTTP/1.1 503 \r\n\r\n".to_vec());
     let mut out = Vec::new();
     write_status_head(100, b"Continue", &vec![], &mut out);
     assert_eq!(&out[..12], b"HTTP/1.1 100");

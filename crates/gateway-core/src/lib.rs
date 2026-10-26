@@ -11,6 +11,7 @@ pub mod http1_head;
 pub mod http1_write;
 pub mod http1_framing;
 pub mod http1_chunked;
+pub mod http1_exchange;
 pub mod resource;
 pub mod stream;
 pub mod owned_stream;
@@ -71,3 +72,6 @@ mod http1_framing_tests;
 #[cfg(test)]
 #[path = "tests/http1_chunked.rs"]
 mod http1_chunked_tests;
+#[cfg(test)]
+#[path = "tests/http1_exchange.rs"]
+mod http1_exchange_tests;

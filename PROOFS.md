@@ -259,6 +259,12 @@ with what the server already holds.
 
 - Absence of panics, overflow, and out-of-bounds access in every core
   function, by construction of the verifier.
+- The gateway's HTTP decisions are verified: which status answers a refusal
+  or fault, when `100 Continue` is due, how an upstream status is classified,
+  and that a connection writes one well-formed response head with
+  `Connection: close` and matching framing, never a body after 204 or 304,
+  and a chunked body that ends cleanly only through its last chunk
+  (`http1_exchange.rs`, [codec](docs/http1-codec.md)).
 - Runtime entry is a typed permit: a thread's context is minted once at its
   birth and spent by the one runtime it enters, so the executable cannot
   build or block on a runtime from a thread that already has one, which is

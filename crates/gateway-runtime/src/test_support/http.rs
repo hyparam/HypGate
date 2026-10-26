@@ -56,7 +56,7 @@ pub(crate) async fn start_streaming<IO: AsyncWrite + Unpin>(mut io: IO, status: 
     write_status_head(status, http1::reason(status), &all, &mut bytes);
     io.write_all(&bytes).await?;
     io.flush().await?;
-    Ok(Streaming { io: ChunkedWriter::new(io) })
+    Ok(Streaming { io: ChunkedWriter::new(io, gateway_core::http1_exchange::ChunkStream::new()) })
 }
 impl<IO: AsyncWrite + Unpin> Streaming<IO> {
     pub(crate) async fn send(&mut self, chunk: &[u8]) -> io::Result<()> { self.io.write_all(chunk).await?; self.io.flush().await }
@@ -101,7 +101,13 @@ pub(crate) async fn send_request<IO: AsyncRead + AsyncWrite + Unpin>(mut io: IO,
 
 /// Read a response head from `io` and set up its body reader.
 pub(crate) async fn read_response<IO: AsyncRead + AsyncWrite + Unpin>(mut io: IO) -> io::Result<Answer<IO>> {
-    let (head, leftover) = read_status_head(&mut io, Vec::new()).await.map_err(|e| io::Error::other(format!("{e:?}")))?;
+    let mut leftover = Vec::new();
+    let head = loop {
+        let (head, rest) = read_status_head(&mut io, leftover).await.map_err(|e| io::Error::other(format!("{e:?}")))?;
+        if head.status < 200 && head.status != 101 { leftover = rest; continue; }
+        leftover = rest;
+        break head;
+    };
     let StatusHead { status, fields } = head;
     let no_body = status == 204 || status == 304;
     let body_framing = if no_body { Framing::Length(0) } else { framing(&fields, false).map_err(|_| io::Error::other("framing"))? };

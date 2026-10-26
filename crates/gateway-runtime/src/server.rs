@@ -4,11 +4,11 @@
 //! with the verified parsers and writes the response with the verified
 //! writers, and the worker runs the exchange.
 use crate::{config::GatewayConfig, disk_log::DiskLog, http1, http_body, http_boundary,
-    transport::{HttpsTransport, ResponseSink, TransportError}, transfer::{AuditLog, LogRecord}};
+    transport::{HttpsTransport, ResponseSink}, transfer::{AuditLog, LogRecord}};
 use gateway_core::headers::Field;
+use gateway_core::http1_exchange::{Connection, Refusal, failure_status, refusal_status, wants_continue};
 use gateway_core::http1_framing::framing;
 use gateway_core::http1_head::RequestHead;
-use gateway_core::http1_write::{wire_ok, write_status_head};
 use std::{future::Future, io, pin::Pin, sync::{Arc, atomic::{AtomicU64, Ordering}}, task::{Context, Poll}, time::Duration};
 use tokio::{io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt}, net::{TcpListener, TcpStream}, sync::oneshot, task::{JoinHandle, JoinSet}};
 use gateway_core::{exchange_lifecycle::{Closed, Fault, Lifecycle}, health::{GapObserver, Readiness}};
@@ -76,8 +76,8 @@ impl Gateway {
                     return match gateway_core::health::readiness(self.config.admission_healthy(), self.worker_slots.healthy(),
                         self.config.requires_audit(), self.log.healthy()) {
                         Readiness::Ready => fixed(200, b"ready\n".to_vec()),
-                        Readiness::AdmissionUnavailable => fixed(503, b"admission unavailable\n".to_vec()),
-                        Readiness::AuditUnavailable => fixed(503, b"audit unavailable\n".to_vec()),
+                        Readiness::AdmissionUnavailable => fixed(refusal_status(Refusal::Unavailable), b"admission unavailable\n".to_vec()),
+                        Readiness::AuditUnavailable => fixed(refusal_status(Refusal::Unavailable), b"audit unavailable\n".to_vec()),
                     };
                 }
                 _ => {}
@@ -85,15 +85,15 @@ impl Gateway {
         }
         let lease = match self.worker_slots.acquire(&self.workers) {
             Some(lease) => lease,
-            None => return fixed(503, b"workers unavailable\n".to_vec()),
+            None => return fixed(refusal_status(Refusal::Unavailable), b"workers unavailable\n".to_vec()),
         };
         let (head_sender, head_receiver) = oneshot::channel();
         let Some((writer, body)) = responses.channel(16 * 1024) else {
-            return fixed(503, b"response unavailable\n".to_vec());
+            return fixed(refusal_status(Refusal::Unavailable), b"response unavailable\n".to_vec());
         };
         let http = lease.http();
         let Some(writer) = http.response_writer(writer) else {
-            return fixed(503, b"workers unavailable\n".to_vec());
+            return fixed(refusal_status(Refusal::Unavailable), b"workers unavailable\n".to_vec());
         };
         let app = self.clone();
         // The client's response body owns this token: dropping the body before
@@ -128,7 +128,7 @@ impl Gateway {
         // If strict logging is already unavailable, do not even open an
         // upstream connection. Later failures still use the stream gate.
         if self.config.requires_audit() && !self.log.healthy() {
-            let _ = output.start(503, Vec::new()).await;
+            let _ = output.start(refusal_status(Refusal::Unavailable), Vec::new()).await;
             let _ = output.shutdown().await;
             life.failed(Fault::Log);
             return self.audit_completion(&mut prepared, &mut log, life).await;
@@ -137,7 +137,7 @@ impl Gateway {
         // acknowledgment before dispatch; availability mode marks the request
         // log-failed (the gap counter already incremented) and forwards.
         if prepared.audit_request_start(&mut log).await.is_err() && self.config.requires_audit() {
-            let _ = output.start(503, Vec::new()).await;
+            let _ = output.start(refusal_status(Refusal::Unavailable), Vec::new()).await;
             let _ = output.shutdown().await;
             life.failed(Fault::StartRefused);
             return self.audit_completion(&mut prepared, &mut log, life).await;
@@ -164,8 +164,7 @@ impl Gateway {
                 life.failed(e);
                 self.failed_exchanges.fetch_add(1, Ordering::Relaxed);
                 if output.head.is_some() {
-                    let status = if e == TransportError::Timeout { 504 } else { 502 };
-                    let _ = output.start(status, Vec::new()).await;
+                    let _ = output.start(failure_status(e), Vec::new()).await;
                     let _ = output.shutdown().await;
                 }
                 // After headers, dropping the writer makes the body fail;
@@ -201,17 +200,17 @@ async fn worker_response(headers: oneshot::Receiver<(u16, Vec<Field>)>,
             // an unpolled body aborts a successful worker.
             if status == 204 || status == 304 {
                 if body.next_frame().await.is_some() {
-                    return fixed(502, b"unexpected upstream body\n".to_vec());
+                    return fixed(failure_status(Fault::Download), b"unexpected upstream body\n".to_vec());
                 }
                 if let Some(task) = &mut guard.task {
-                    if task.await.is_err() { return fixed(502, b"upstream failed\n".to_vec()); }
+                    if task.await.is_err() { return fixed(failure_status(Fault::Download), b"upstream failed\n".to_vec()); }
                 }
                 guard.task.take();
                 return Response { status, fields, body: GatewayBody::Fixed(Vec::new()) };
             }
             Response { status, fields, body: GatewayBody::Stream { body, task: guard } }
         }
-        Err(_) => fixed(502, b"upstream failed\n".to_vec()),
+        Err(_) => fixed(failure_status(Fault::Http), b"upstream failed\n".to_vec()),
     }
 }
 
@@ -258,45 +257,35 @@ impl AsyncWrite for Output {
     }
 }
 
-/// Write a response head: the status, the given fields, `connection: close`,
-/// and the framing of the body that follows.
-async fn write_head<W: AsyncWrite + Unpin>(io: &mut W, status: u16, mut fields: Vec<Field>, framing: Field) -> io::Result<()> {
-    fields.push(http1::field(b"connection", b"close".to_vec()));
-    fields.push(framing);
-    if !wire_ok(&fields) || !(100..=599).contains(&status) { return Err(io::ErrorKind::InvalidData.into()); }
-    let mut head = Vec::new();
-    write_status_head(status, http1::reason(status), &fields, &mut head);
-    io.write_all(&head).await
+/// Answer a refusal with the verified machine's status and no body, then close.
+async fn refuse<W: AsyncWrite + Unpin>(io: &mut W, connection: &mut Connection, refusal: Refusal) -> io::Result<()> {
+    let status = refusal_status(refusal);
+    let bytes = connection.respond_fixed(status, http1::reason(status), Vec::new(), b"").ok_or(io::ErrorKind::InvalidData)?;
+    io.write_all(&bytes).await?;
+    io.shutdown().await
 }
 
 /// Serve one connection: one request, one response, then close. A head that
 /// does not arrive in time or does not parse gets no worker and no record.
 async fn serve_connection(socket: TcpStream, app: Arc<Gateway>, responses: http_body::ConnectionResponses) -> io::Result<()> {
     let (mut reader, mut writer) = socket.into_split();
+    // Every byte this connection writes is produced by the verified machine.
+    let mut connection = Connection::new();
     let head = tokio::time::timeout(HEAD_DEADLINE, http1::read_request_head(&mut reader, Vec::new())).await;
     let (head, leftover) = match head {
         Ok(Ok(parsed)) => parsed,
-        Ok(Err(http1::HeadError::TooLarge)) => {
-            write_head(&mut writer, 431, Vec::new(), http1::field(b"content-length", b"0".to_vec())).await?;
-            return writer.shutdown().await;
-        }
-        Ok(Err(http1::HeadError::Malformed)) => {
-            write_head(&mut writer, 400, Vec::new(), http1::field(b"content-length", b"0".to_vec())).await?;
-            return writer.shutdown().await;
-        }
+        Ok(Err(http1::HeadError::TooLarge)) => return refuse(&mut writer, &mut connection, Refusal::HeadTooLarge).await,
+        Ok(Err(http1::HeadError::Malformed)) => return refuse(&mut writer, &mut connection, Refusal::Malformed).await,
         Ok(Err(_)) | Err(_) => return Ok(()), // closed or silent before a complete head
     };
     let body_framing = match framing(&head.fields, true) {
         Ok(f) => f,
-        Err(_) => {
-            write_head(&mut writer, 400, Vec::new(), http1::field(b"content-length", b"0".to_vec())).await?;
-            return writer.shutdown().await;
-        }
+        Err(_) => return refuse(&mut writer, &mut connection, Refusal::Malformed).await,
     };
     // A client waiting for permission to send its body gets it; the body is
     // read whether or not the request is then admitted.
-    if head.fields.iter().any(|f| f.name == b"expect" && f.value.eq_ignore_ascii_case(b"100-continue")) {
-        writer.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").await?;
+    if wants_continue(&head.fields) {
+        if let Some(bytes) = connection.interim_continue() { writer.write_all(&bytes).await?; }
     }
     // The connection task keeps the socket. It pumps the framed request body
     // into the worker's bounded channel and, once the body is complete, keeps
@@ -337,25 +326,28 @@ async fn serve_connection(socket: TcpStream, app: Arc<Gateway>, responses: http_
         _ = client_gone.cancelled() => return Ok(()), // the client left before the response head
     };
     let write = async {
+        let status = response.status;
         match response.body {
             GatewayBody::Fixed(text) => {
-                write_head(&mut writer, response.status, response.fields, http1::field(b"content-length", text.len().to_string().into_bytes())).await?;
-                writer.write_all(&text).await?;
+                let bytes = connection.respond_fixed(status, http1::reason(status), response.fields, &text).ok_or(io::ErrorKind::InvalidData)?;
+                writer.write_all(&bytes).await?;
                 writer.shutdown().await
             }
             GatewayBody::Stream { mut body, task } => {
-                write_head(&mut writer, response.status, response.fields, http1::field(b"transfer-encoding", b"chunked".to_vec())).await?;
-                let mut chunked = http1::ChunkedWriter::new(&mut writer);
+                let (head, stream) = connection.respond_stream(status, http1::reason(status), response.fields).ok_or(io::ErrorKind::InvalidData)?;
+                writer.write_all(&head).await?;
+                let mut chunked = http1::ChunkedWriter::new(&mut writer, stream);
                 loop {
                     match body.next_frame().await {
                         Some(Ok(frame)) => { chunked.write_all(&frame).await?; chunked.flush().await?; }
                         // A failed body ends the connection without the last chunk:
                         // a truncated stream is never a clean end.
-                        Some(Err(e)) => return Err(e),
+                        Some(Err(e)) => { connection.abort(); return Err(e); }
                         None => break,
                     }
                 }
                 chunked.shutdown().await?;
+                connection.finish(chunked.into_stream());
                 // Clean EOF acknowledged the drained queue. Let the tracked worker
                 // finish accounting rather than canceling it.
                 let mut task = task;

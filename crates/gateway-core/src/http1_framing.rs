@@ -38,6 +38,19 @@ pub open spec fn some_bad_length(fields: Seq<Field>) -> bool {
     exists|i: int| 0 <= i < fields.len() && #[trigger] fields[i].name@ == CONTENT_LENGTH@ && (forall|n: u64| !value_is_length(fields, i, n))
 }
 pub open spec fn te_count(fields: Seq<Field>) -> nat { crate::headers::count_named(fields, TRANSFER_ENCODING@) }
+/// What `framing` establishes for a response head when it returns `f`.
+pub open spec fn framing_spec_ok(fields: Seq<Field>, f: Framing) -> bool {
+    match f {
+        Framing::Chunked => te_count(fields) == 1 && cl_count(fields) == 0 && some_chunked(fields),
+        Framing::Length(n) => cl_count(fields) == 1 && te_count(fields) == 0 && some_length(fields, n),
+        Framing::UntilClose => cl_count(fields) == 0 && te_count(fields) == 0,
+    }
+}
+/// What `framing` establishes when it refuses a head.
+pub open spec fn framing_spec_refused(fields: Seq<Field>) -> bool {
+    (te_count(fields) >= 1 && cl_count(fields) >= 1) || te_count(fields) > 1 || cl_count(fields) > 1
+        || some_other_coding(fields) || some_bad_length(fields)
+}
 pub open spec fn cl_count(fields: Seq<Field>) -> nat { crate::headers::count_named(fields, CONTENT_LENGTH@) }
 
 /// The framing a head's fields select, or a refusal.

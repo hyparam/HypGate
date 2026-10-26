@@ -6,7 +6,8 @@
 //! bytes the decoder names, and writes the bytes the encoders produce. It
 //! makes no decision about what a byte means.
 use gateway_core::headers::{Field, MAX_BYTES, Rejection};
-use gateway_core::http1_chunked::{ChunkDecoder, Step, write_chunk_end, write_chunk_header, write_last_chunk};
+use gateway_core::http1_chunked::{ChunkDecoder, Step};
+use gateway_core::http1_exchange::ChunkStream;
 use gateway_core::http1_framing::Framing;
 use gateway_core::http1_head::{RequestHead, RequestProgress, StatusHead, StatusProgress, parse_request, parse_status};
 use std::{io, pin::Pin, task::{Context, Poll}};
@@ -30,18 +31,13 @@ pub(crate) async fn read_request_head<R: AsyncRead + Unpin>(io: &mut R, leftover
         }
     }
 }
-/// Read from `io` until a status head parses, skipping interim 1xx heads
-/// other than 101. The bytes after the head are returned.
+/// Read from `io` until a status head parses. The bytes after the head are
+/// returned; what the status means is the exchange machine's decision.
 pub(crate) async fn read_status_head<R: AsyncRead + Unpin>(io: &mut R, leftover: Vec<u8>) -> Result<(StatusHead, Vec<u8>), HeadError> {
     let mut buffer = leftover;
     loop {
         match parse_status(&buffer) {
-            StatusProgress::Complete(head, len) => {
-                let rest = buffer.split_off(len);
-                if head.status == 101 { return Err(HeadError::Malformed); }
-                if head.status < 200 { buffer = rest; continue; }
-                return Ok((head, rest));
-            }
+            StatusProgress::Complete(head, len) => { let rest = buffer.split_off(len); return Ok((head, rest)); }
             StatusProgress::Rejected(Rejection::TooLarge) => return Err(HeadError::TooLarge),
             StatusProgress::Rejected(Rejection::BadRequest) => return Err(HeadError::Malformed),
             StatusProgress::Incomplete => fill(io, &mut buffer).await?,
@@ -147,12 +143,15 @@ impl<R: AsyncRead + Unpin> AsyncRead for BodyReader<R> {
     }
 }
 
-/// Writes a body to `io` as chunks: each `write` becomes one chunk, and
-/// `shutdown` writes the last chunk and flushes. The underlying stream is
-/// not closed; the caller decides what happens to the connection.
-pub(crate) struct ChunkedWriter<W> { io: W, pending: Vec<u8>, written: usize, claim: Option<usize>, ended: bool }
+/// Writes a body to `io` as chunks through a verified `ChunkStream`: each
+/// `write` becomes one chunk and `shutdown` writes the last chunk and
+/// flushes. The underlying stream is not closed; the caller decides what
+/// happens to the connection, and takes the stream back to finish its machine.
+pub(crate) struct ChunkedWriter<W> { io: W, stream: Option<ChunkStream>, pending: Vec<u8>, written: usize, claim: Option<usize> }
 impl<W> ChunkedWriter<W> {
-    pub(crate) fn new(io: W) -> Self { Self { io, pending: Vec::new(), written: 0, claim: None, ended: false } }
+    pub(crate) fn new(io: W, stream: ChunkStream) -> Self { Self { io, stream: Some(stream), pending: Vec::new(), written: 0, claim: None } }
+    /// The stream, for the machine that issued it; ended only if `shutdown` completed.
+    pub(crate) fn into_stream(mut self) -> ChunkStream { self.stream.take().expect("live stream") }
 }
 impl<W: AsyncWrite + Unpin> ChunkedWriter<W> {
     fn poll_drain(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -172,13 +171,13 @@ impl<W: AsyncWrite + Unpin> ChunkedWriter<W> {
 impl<W: AsyncWrite + Unpin> AsyncWrite for ChunkedWriter<W> {
     fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, bytes: &[u8]) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
-        if this.ended { return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into())); }
+        let Some(stream) = this.stream.as_mut() else { return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into())); };
+        if stream.is_ended() { return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into())); }
         if bytes.is_empty() { return Poll::Ready(Ok(0)); }
         if this.claim.is_none() {
             // A new chunk; a repeated poll of the same write keeps draining the old one.
-            write_chunk_header(bytes.len(), &mut this.pending);
-            this.pending.extend_from_slice(bytes);
-            write_chunk_end(&mut this.pending);
+            this.pending = stream.frame(bytes);
+            this.written = 0;
             this.claim = Some(bytes.len());
         }
         match this.poll_drain(cx) {
@@ -196,9 +195,10 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for ChunkedWriter<W> {
     }
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        if !this.ended && this.claim.is_none() {
-            write_last_chunk(&mut this.pending);
-            this.ended = true;
+        let Some(stream) = this.stream.as_mut() else { return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into())); };
+        if !stream.is_ended() && this.claim.is_none() {
+            this.pending = stream.end();
+            this.written = 0;
         }
         match this.poll_drain(cx) {
             Poll::Ready(Ok(())) => Pin::new(&mut this.io).poll_flush(cx),

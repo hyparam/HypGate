@@ -47,7 +47,7 @@ pub open spec fn digit_bytes(status: u16) -> Seq<u8> {
     seq![(48 + status / 100) as u8, (48 + (status / 10) % 10) as u8, (48 + status % 10) as u8]
 }
 pub open spec fn status_line_bytes(status: u16, reason: Seq<u8>) -> Seq<u8> {
-    crate::http1_head::version() + seq![SP] + digit_bytes(status) + (if reason.len() == 0 { Seq::<u8>::empty() } else { seq![SP] + reason }) + seq![CR, LF]
+    crate::http1_head::version() + seq![SP] + digit_bytes(status) + seq![SP] + reason + seq![CR, LF]
 }
 pub open spec fn request_head_bytes(method: Seq<u8>, target: Seq<u8>, fields: Seq<Field>) -> Seq<u8> {
     request_line_bytes(method, target) + field_lines_bytes(fields)
@@ -178,7 +178,7 @@ pub fn write_status_head(status: u16, reason: &[u8], fields: &Vec<Field>, out: &
     push_version(out); out.push(SP);
     out.push((48 + status / 100) as u8); out.push((48 + (status / 10) % 10) as u8); out.push((48 + status % 10) as u8);
     proof { assert(out@ =~= old(out)@ + crate::http1_head::version() + seq![SP] + digit_bytes(status)); }
-    if reason.len() > 0 { out.push(SP); push_all(out, reason); }
+    out.push(SP); push_all(out, reason);
     push_crlf(out);
     proof { assert(out@ =~= old(out)@ + status_line_bytes(status, reason@)); }
     write_fields(fields, out);
@@ -281,8 +281,7 @@ pub proof fn lemma_status_roundtrip(status: u16, reason: Seq<u8>, fields: Seq<Fi
     assert(bytes[e] == CR && bytes[e + 1] == LF);
     assert(crate::http1_head::crlf_at(bytes, e));
     let sub = bytes.subrange(0, e);
-    let tail: Seq<u8> = if reason.len() == 0 { Seq::<u8>::empty() } else { seq![SP] + reason };
-    assert(sub =~= crate::http1_head::version() + seq![SP] + digit_bytes(status) + tail);
+    assert(sub =~= crate::http1_head::version() + seq![SP] + digit_bytes(status) + seq![SP] + reason);
     lemma_version_bytes();
     assert forall|k: int| 0 <= k < sub.len() implies !crate::http1_head::is_break(#[trigger] sub[k]) by {
         if k < 8 { assert(sub[k] == crate::http1_head::version()[k]); }

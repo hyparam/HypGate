@@ -132,7 +132,7 @@ for provider configuration, scanning logs, and shutdown behavior.
 | [Storage crash contract](docs/storage-crash-contract.md) | Storage assumptions, process-death experiments, and the evidence behind the recovery claims |
 | [Resource accounting](docs/resource-accounting.md) | Source-level inventory of application buffers and queues |
 | [Resource composition](docs/resource-composition.md) | Budget ownership and the conditional requested-allocation bound |
-| [HTTP/1.1 codec](docs/http1-codec.md) | The verified head parser and writer, framing selection, and chunked coding; the adapter and what stays trusted |
+| [HTTP/1.1 codec](docs/http1-codec.md) | The verified head parser and writer, framing selection, chunked coding, and exchange machines; the adapter and what stays trusted |
 | [Dependency resources](docs/dependency-resources.md) | Pinned rustls/Tokio retained-allocation audit and the codec's own buffers |
 | [DNS resources](docs/dns-resources.md) | DNS lookup ownership, threads, and shutdown |
 
@@ -198,8 +198,8 @@ cargo test -p gateway-runtime --release --locked server::tests::benchmark -- --i
 LOGGATE_HAPROXY=/path/to/haproxy cargo test -p gateway-runtime --locked proxy_gateway_process_failover -- --ignored --nocapture
 ```
 
-Validation on 2026-10-25: 737 core verification checks passed, 303 workspace tests including seven compile-fail
-doctests passed, all 439 deliberate mutations failed their proof obligations, and the runtime passed its
+Validation on 2026-10-25: 782 core verification checks passed, 311 workspace tests including seven compile-fail
+doctests passed, all 448 deliberate mutations failed their proof obligations, and the runtime passed its
 panic and effect-site lints. The opt-in TLS proxy/gateway
 process-failover test and six load/fault workloads passed on 2026-10-23.
 Two ten-minute overload runs and the final 100-wave-per-mode isolated memory soak
