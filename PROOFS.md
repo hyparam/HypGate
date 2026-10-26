@@ -228,7 +228,10 @@ an assumption we take on; the proofs that could be written have been.
   having only been framed through, and a shut-down or timed-out socket makes
   the blocked call return. The framing the reader decodes and the writer
   encodes is the verified chunked coding, whose decoder accepts exactly the
-  grammar, and the Content-Length count ([codec](docs/http1-codec.md)).
+  grammar, and the Content-Length count; which buffered bytes are body,
+  when the body is complete, and what a close means are the verified body
+  decoder's answers, so the reader only copies what it is told
+  ([codec](docs/http1-codec.md)).
 - *Every admitted exchange reaches its completion record.* The lifecycle is a
   verified machine that is terminal after exactly one event, and the driver
   returns the `Closed` token only a terminal lifecycle produces, with its

@@ -40,7 +40,11 @@ decides nothing about what a byte means:
   by the limit is too large, not incomplete.
 - `BodyReader` yields only body bytes, delimited as the selected framing
   says; the end of the body is a clean EOF, and a body that stops early, a
-  chunk coding fault, or data missing after a fixed length is an error.
+  chunk coding fault, or data missing after a fixed length is an error. Which
+  buffered bytes are body, which are chunk framing, when the body is
+  complete, and what a closed connection means are the verified
+  `http1_body::BodyDecoder`'s answers; the reader owns the socket and the
+  buffer and copies only the bytes a data step names.
 - `ChunkedWriter` writes the bytes a verified `ChunkStream` yields for each
   write and for `finish`; it never closes the stream, the caller decides that.
 
@@ -67,9 +71,12 @@ request, over the same adapter on its own thread.
 ## Trusted
 
 - The adapter's byte movement: that a socket read lands in the buffer the
-  parser is handed, that the bytes the encoders produce are the bytes
-  written, and the plumbing of leftover bytes from the head read into the
-  body reader.
+  parser and the body decoder are handed, that the bytes a data step names
+  are the bytes copied to the caller, that the bytes the encoders produce
+  are the bytes written, and the plumbing of leftover bytes from the head
+  read into the body reader. The body reader's counting is no longer here:
+  the fixed-length count, the chunk framing, the room offered per read, and
+  the meaning of a close are the decoder's, and proved.
 - That each `Effects` method performs exactly the effect the driver named
   and reports truthfully: a head read is one head read, bytes handed to
   `write_client` reach the socket, `upload` and `download` return the chunk

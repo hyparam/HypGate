@@ -1,14 +1,15 @@
 //! The HTTP/1.1 wire adapter over the verified codec. Heads are parsed by
 //! `gateway_core::http1_head`, framing is chosen by `http1_framing`, chunk
-//! coding is `http1_chunked`, and heads are written by `http1_write`. This
-//! module only moves bytes between blocking sockets and those functions: it
-//! reads into bounded buffers, hands the buffer to the parser, copies the body
-//! bytes the decoder names, and writes the bytes the encoders produce. It
+//! coding is `http1_chunked`, bodies are delimited by `http1_body`, and heads
+//! are written by `http1_write`. This module only moves bytes between blocking
+//! sockets and those functions: it reads into bounded buffers, hands the
+//! buffer to the parser, copies the body bytes the decoder names, and writes
+//! the bytes the encoders produce. It
 //! makes no decision about what a byte means, and how long a read may take
 //! is the caller's stream's business (`net::Timed`).
 use crate::net::{read_uninterrupted, write_uninterrupted};
 use gateway_core::headers::{Field, MAX_BYTES, Rejection};
-use gateway_core::http1_chunked::{ChunkDecoder, Step};
+use gateway_core::http1_body::{BodyDecoder, Step};
 use gateway_core::http1_exchange::ChunkStream;
 use gateway_core::http1_framing::Framing;
 use gateway_core::http1_head::{RequestHead, RequestProgress, StatusHead, StatusProgress, parse_request, parse_status};
@@ -60,22 +61,18 @@ fn fill<R: Read>(io: &mut R, buffer: &mut Vec<u8>) -> Result<(), HeadError> {
 /// The body that follows a head, read from `io` after the head's leftover
 /// bytes and delimited as `framing` says. Reads yield only body bytes; the
 /// end of the body is a clean EOF, and a body that stops early, a chunk
-/// coding fault, or data missing after a fixed length is an error.
-pub(crate) struct BodyReader<R> { io: R, buffer: Vec<u8>, pos: usize, state: State }
-enum State { Length { remaining: u64 }, Chunked(ChunkDecoder), UntilClose, Done, Failed }
+/// coding fault, or data missing after a fixed length is an error. Which
+/// buffered bytes are body, which are framing, and when the body is complete
+/// are the verified `BodyDecoder`'s answers; this type owns the socket and
+/// the buffer and copies only the bytes a data step names.
+pub(crate) struct BodyReader<R> { io: R, buffer: Vec<u8>, pos: usize, decoder: BodyDecoder }
 
 impl<R> BodyReader<R> {
     pub(crate) fn new(io: R, leftover: Vec<u8>, framing: Framing) -> Self {
-        let state = match framing {
-            Framing::Length(0) => State::Done,
-            Framing::Length(n) => State::Length { remaining: n },
-            Framing::Chunked => State::Chunked(ChunkDecoder::new()),
-            Framing::UntilClose => State::UntilClose,
-        };
-        Self { io, buffer: leftover, pos: 0, state }
+        Self { io, buffer: leftover, pos: 0, decoder: BodyDecoder::new(framing) }
     }
     /// Whether the whole body was read and well framed.
-    pub(crate) fn is_complete(&self) -> bool { matches!(self.state, State::Done) }
+    pub(crate) fn is_complete(&self) -> bool { self.decoder.is_done() }
     /// The stream, once the body is complete; bytes read ahead are none, since reads stop at the body's end.
     #[cfg(test)]
     pub(crate) fn into_inner(self) -> R { self.io }
@@ -85,54 +82,27 @@ impl<R: Read> Read for BodyReader<R> {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
         if out.is_empty() { return Ok(0); }
         loop {
-            match &self.state {
-                State::Done => return Ok(0),
-                State::Failed => return Err(io::ErrorKind::InvalidData.into()),
-                _ => {}
-            }
+            if self.decoder.is_done() { return Ok(0); }
+            if self.decoder.is_failed() { return Err(io::ErrorKind::InvalidData.into()); }
             if self.pos < self.buffer.len() {
                 let available = &self.buffer[self.pos..];
-                match &mut self.state {
-                    State::Length { remaining } => {
-                        let n = (*remaining).min(available.len() as u64).min(out.len() as u64) as usize;
-                        out[..n].copy_from_slice(&available[..n]);
-                        self.pos += n;
-                        *remaining -= n as u64;
-                        if *remaining == 0 { self.state = State::Done; }
-                        return Ok(n);
-                    }
-                    State::UntilClose => {
-                        let n = available.len().min(out.len());
-                        out[..n].copy_from_slice(&available[..n]);
-                        self.pos += n;
-                        return Ok(n);
-                    }
-                    State::Chunked(decoder) => {
-                        // Offer at most what the caller can take, so a data step fits.
-                        let window = &available[..available.len().min(out.len())];
-                        match decoder.feed(window) {
-                            Step::Framing(n) => { self.pos += n; }
-                            Step::Data(n) => { out[..n].copy_from_slice(&window[..n]); self.pos += n; return Ok(n); }
-                            Step::Done(n) => { self.pos += n; self.state = State::Done; return Ok(0); }
-                            Step::Rejected => { self.state = State::Failed; return Err(io::ErrorKind::InvalidData.into()); }
-                        }
-                        continue;
-                    }
-                    State::Done | State::Failed => unreachable!("handled above"),
+                match self.decoder.step(available, out.len()) {
+                    Step::Framing(n) => { self.pos += n; }
+                    Step::Data(n) => { out[..n].copy_from_slice(&available[..n]); self.pos += n; return Ok(n); }
+                    Step::Done(n) => { self.pos += n; return Ok(0); }
+                    Step::Rejected => return Err(io::ErrorKind::InvalidData.into()),
                 }
+                continue;
             }
             // The buffer is spent: read more body bytes.
             self.buffer.clear();
             self.pos = 0;
             self.buffer.resize(READ_BYTES, 0);
             match read_uninterrupted(&mut self.io, &mut self.buffer) {
-                Err(e) => { self.buffer.clear(); self.state = State::Failed; return Err(e); }
+                Err(e) => { self.buffer.clear(); self.decoder.abandon(); return Err(e); }
                 Ok(0) => {
                     self.buffer.clear();
-                    return match self.state {
-                        State::UntilClose => { self.state = State::Done; Ok(0) }
-                        _ => { self.state = State::Failed; Err(io::ErrorKind::UnexpectedEof.into()) }
-                    };
+                    return if self.decoder.close() { Ok(0) } else { Err(io::ErrorKind::UnexpectedEof.into()) };
                 }
                 Ok(n) => self.buffer.truncate(n),
             }
