@@ -9,6 +9,7 @@ pub mod egress;
 pub mod thread_context;
 pub mod http1_head;
 pub mod http1_write;
+pub mod http1_framing;
 pub mod resource;
 pub mod stream;
 pub mod owned_stream;
@@ -63,3 +64,6 @@ mod http1_head_tests;
 #[cfg(test)]
 #[path = "tests/http1_write.rs"]
 mod http1_write_tests;
+#[cfg(test)]
+#[path = "tests/http1_framing.rs"]
+mod http1_framing_tests;

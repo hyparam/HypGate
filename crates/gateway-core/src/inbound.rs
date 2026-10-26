@@ -110,7 +110,7 @@ proof fn lemma_cancel_prefix(a: Seq<u8>, b: Seq<u8>, c: Seq<u8>)
     assert(c =~= (a + c).subrange(a.len() as int, (a + c).len() as int));
 }
 
-proof fn lemma_decimal_shape(n: nat)
+pub proof fn lemma_decimal_shape(n: nat)
     ensures decimal(n).len() >= 1, all_digits(decimal(n)), n >= 1 ==> decimal(n)[0] != 48,
         value_of(decimal(n)) == n,
     decreases n,
@@ -138,7 +138,7 @@ proof fn lemma_decimal_shape(n: nat)
 }
 
 // A digit string with a nonzero first digit spells its own value.
-proof fn lemma_digits_roundtrip(digits: Seq<u8>)
+pub proof fn lemma_digits_roundtrip(digits: Seq<u8>)
     requires digits.len() >= 1, all_digits(digits), digits[0] != 48,
     ensures value_of(digits) >= 1, decimal(value_of(digits)) == digits,
     decreases digits.len(),
@@ -165,7 +165,7 @@ proof fn lemma_digits_roundtrip(digits: Seq<u8>)
 }
 
 // The single digit "0" or a string with a nonzero first digit spells its own value.
-proof fn lemma_digits_canonical(digits: Seq<u8>)
+pub proof fn lemma_digits_canonical(digits: Seq<u8>)
     requires digits.len() >= 1, all_digits(digits), digits[0] == 48 ==> digits.len() == 1,
     ensures decimal(value_of(digits)) == digits,
 {
@@ -182,7 +182,7 @@ proof fn lemma_digits_canonical(digits: Seq<u8>)
 
 // Every prefix of a canonical spelling reads back as a value no larger than
 // the number spelled.
-proof fn lemma_prefix_value(n: nat, i: int)
+pub proof fn lemma_prefix_value(n: nat, i: int)
     requires 0 <= i <= decimal(n).len(),
     ensures value_of(decimal(n).subrange(0, i)) <= n,
     decreases n,
