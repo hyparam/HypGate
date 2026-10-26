@@ -55,6 +55,7 @@ pub mod serve_driver;
 pub mod json;
 pub mod utf8;
 pub mod projection;
+pub mod config_schema;
 
 #[cfg(test)]
 #[path = "tests/streaming.rs"]

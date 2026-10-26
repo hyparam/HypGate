@@ -1,10 +1,13 @@
 //! Configuration loading. The JSON is read by the verified `gateway_core::json`
-//! reader and the normalized grant relation is checked by the verified core,
-//! including selection of concrete destination/credential values; destinations
-//! are parsed by the verified core. The schema walk here (which keys, which
-//! kinds), hashing, and secret provisioning remain trusted.
+//! reader, its shape (which keys, once each, which kinds) by the verified
+//! `gateway_core::config_schema`, and the normalized grant relation is checked
+//! by the verified core, including selection of concrete destination/credential
+//! values; destinations are parsed by the verified core. The checks on values
+//! here (digests, secret names and values, UTF-8) and secret provisioning
+//! remain trusted.
 use crate::admission::{Admission, AdmissionError, Request};
-use gateway_core::json::{self, Member, Value};
+use gateway_core::config_schema as schema;
+use gateway_core::json;
 use gateway_core::policy::{Identity, Policy, Route};
 use sha2::{Digest, Sha256};
 
@@ -16,90 +19,42 @@ pub(crate) const MAX_CREDENTIAL_BYTES: usize = 8192;
 #[derive(Debug, PartialEq, Eq)]
 pub enum ConfigError { Syntax, Limits, Identity, Destination, Credential, Policy }
 
-/// The members of an object whose keys are all in `allowed`, each at most once.
-pub(crate) fn object<'a>(value: &'a Value, allowed: &[&str]) -> Result<&'a [Member], ConfigError> {
-    let members = value.as_object().ok_or(ConfigError::Syntax)?;
-    for (k, m) in members.iter().enumerate() {
-        if !allowed.iter().any(|a| a.as_bytes() == m.key.as_slice()) { return Err(ConfigError::Syntax); }
-        if members[..k].iter().any(|p| p.key == m.key) { return Err(ConfigError::Syntax); }
-    }
-    Ok(members)
-}
-pub(crate) fn optional<'a>(members: &'a [Member], name: &str) -> Option<&'a Value> {
-    members.iter().find(|m| m.key.as_slice() == name.as_bytes()).map(|m| &m.value)
-}
-pub(crate) fn field<'a>(members: &'a [Member], name: &str) -> Result<&'a Value, ConfigError> {
-    optional(members, name).ok_or(ConfigError::Syntax)
-}
-pub(crate) fn string(value: &Value) -> Result<String, ConfigError> {
-    String::from_utf8(value.as_str().ok_or(ConfigError::Syntax)?.clone()).map_err(|_| ConfigError::Syntax)
-}
-pub(crate) fn u64_of(value: &Value) -> Result<u64, ConfigError> { value.as_u64().ok_or(ConfigError::Syntax) }
-pub(crate) fn usize_of(value: &Value) -> Result<usize, ConfigError> { usize::try_from(u64_of(value)?).map_err(|_| ConfigError::Syntax) }
-fn array(value: &Value) -> Result<&[Value], ConfigError> { value.as_array().map(Vec::as_slice).ok_or(ConfigError::Syntax) }
+/// Text from the verified schema reader: the configuration's strings must be UTF-8.
+fn utf8(bytes: Vec<u8>) -> Result<String, ConfigError> { String::from_utf8(bytes).map_err(|_| ConfigError::Syntax) }
 
 struct Root {
     identities: Vec<IdentityInput>,
     destinations: Vec<String>,
     credentials: Vec<CredentialInput>,
-    grants: Vec<RouteInput>,
+    grants: Vec<Route>,
     limits: Limits,
     logging: Logging,
 }
 impl Root {
+    /// The root policy through the verified reader and schema. `shipping` is
+    /// read separately by `shipping::ShippingConfig`; the gateway's own
+    /// configuration never holds the cloud token or server.
     fn read(bytes: &[u8]) -> Result<Self, ConfigError> {
         let value = json::parse(bytes).ok_or(ConfigError::Syntax)?;
-        // `shipping` is read separately by `shipping::ShippingConfig`; the
-        // gateway's own configuration never holds the cloud token or server.
-        let root = object(&value, &["identities", "destinations", "credentials", "grants", "limits", "logging", "shipping"])?;
-        let identities = array(field(root, "identities")?)?.iter().map(|v| {
-            let m = object(v, &["tenant", "sha256"])?;
-            Ok(IdentityInput { tenant: u64_of(field(m, "tenant")?)?, sha256: string(field(m, "sha256")?)? })
-        }).collect::<Result<Vec<_>, _>>()?;
-        let destinations = array(field(root, "destinations")?)?.iter().map(string).collect::<Result<Vec<_>, _>>()?;
-        let credentials = array(field(root, "credentials")?)?.iter().map(|v| {
-            let m = object(v, &["tenant", "kind", "env"])?;
-            let kind = match string(field(m, "kind")?)?.as_str() {
-                "bearer" => CredentialKind::Bearer, "api_key" => CredentialKind::ApiKey, _ => return Err(ConfigError::Syntax),
-            };
-            Ok(CredentialInput { tenant: u64_of(field(m, "tenant")?)?, kind, env: string(field(m, "env")?)? })
-        }).collect::<Result<Vec<_>, _>>()?;
-        let grants = routes(field(root, "grants")?)?;
-        let limits = {
-            let m = object(field(root, "limits")?, &["requests", "chunk_bytes"])?;
-            Limits { requests: usize_of(field(m, "requests")?)?, chunk_bytes: usize_of(field(m, "chunk_bytes")?)? }
-        };
-        let logging = match string(field(root, "logging")?)?.as_str() {
-            "strict" => Logging::Strict, "availability" => Logging::Availability, _ => return Err(ConfigError::Syntax),
-        };
-        Ok(Root { identities, destinations, credentials, grants, limits, logging })
+        let root = schema::read_root(&value).ok_or(ConfigError::Syntax)?;
+        let identities = root.identities.into_iter().map(|i| Ok(IdentityInput { tenant: i.tenant, sha256: utf8(i.sha256)? }))
+            .collect::<Result<Vec<_>, ConfigError>>()?;
+        let destinations = root.destinations.into_iter().map(utf8).collect::<Result<Vec<_>, _>>()?;
+        let credentials = root.credentials.into_iter().map(|c| Ok(CredentialInput { tenant: c.tenant, kind: c.kind, env: utf8(c.env)? }))
+            .collect::<Result<Vec<_>, ConfigError>>()?;
+        Ok(Root { identities, destinations, credentials, grants: root.grants, limits: root.limits, logging: root.logging })
     }
 }
 struct IdentityInput { tenant: u64, sha256: String }
 struct CredentialInput { tenant: u64, kind: CredentialKind, env: String }
-enum CredentialKind { Bearer, ApiKey }
-struct RouteInput { tenant: u64, selector: u64, origin: usize, credential: usize }
-impl From<RouteInput> for Route {
-    fn from(input: RouteInput) -> Self {
-        Self { tenant: input.tenant, selector: input.selector, origin: input.origin, credential: input.credential }
-    }
-}
-fn routes(value: &Value) -> Result<Vec<RouteInput>, ConfigError> {
-    array(value)?.iter().map(|v| {
-        let m = object(v, &["tenant", "selector", "origin", "credential"])?;
-        Ok(RouteInput { tenant: u64_of(field(m, "tenant")?)?, selector: u64_of(field(m, "selector")?)?,
-            origin: usize_of(field(m, "origin")?)?, credential: usize_of(field(m, "credential")?)? })
-    }).collect()
-}
-struct Candidate { routes: Vec<RouteInput> }
+pub(crate) use schema::{CredentialKind, Limits, Logging};
+struct Candidate { routes: Vec<Route> }
 impl Candidate {
     fn read(bytes: &[u8]) -> Result<Self, ConfigError> {
         let value = json::parse(bytes).ok_or(ConfigError::Syntax)?;
-        Ok(Candidate { routes: routes(field(object(&value, &["routes"])?, "routes")?)? })
+        Ok(Candidate { routes: schema::read_candidate(&value).ok_or(ConfigError::Syntax)?.routes })
     }
 }
-struct Limits { requests: usize, chunk_bytes: usize }
-enum Logging { Strict, Availability }
 
 // Intentionally no Debug implementation: neither errors nor diagnostics should
 // accidentally format loaded credentials.
@@ -175,8 +130,7 @@ impl GatewayConfig {
         let destinations = root.destinations.into_iter().map(|s| destination(&s))
             .collect::<Result<Vec<_>, _>>()?;
         let owners = root.credentials.iter().map(|c| c.tenant).collect();
-        let policy = Policy::validate(identities, root.grants.into_iter().map(Route::from).collect(),
-            candidate.routes.into_iter().map(Route::from).collect(), destinations.len(), owners)
+        let policy = Policy::validate(identities, root.grants, candidate.routes, destinations.len(), owners)
             .ok_or(ConfigError::Policy)?;
         let mut credentials = Vec::new();
         for input in root.credentials {

@@ -1,7 +1,7 @@
 //! The optional `shipping` section of the root policy. Parsed on its own so the
 //! gateway configuration never carries the cloud server or its token.
-use crate::config::{destination, field, object, optional, string, u64_of, usize_of, ConfigError, MAX_CREDENTIAL_BYTES};
-use gateway_core::json;
+use crate::config::{destination, ConfigError, MAX_CREDENTIAL_BYTES};
+use gateway_core::{config_schema, json};
 use std::path::PathBuf;
 
 const MAX_CONFIG: usize = 1024 * 1024;
@@ -19,21 +19,14 @@ struct Section {
     max_exchange_bytes: usize,
     poll_ms: u64,
 }
-/// The `shipping` section of the root policy, if present and not null.
+/// The `shipping` section of the root policy, if present and not null,
+/// through the verified reader and schema.
 fn section(root: &[u8]) -> Result<Option<Section>, ConfigError> {
     let value = json::parse(root).ok_or(ConfigError::Syntax)?;
-    let members = value.as_object().ok_or(ConfigError::Syntax)?;
-    if members.iter().filter(|m| m.key.as_slice() == b"shipping").count() > 1 { return Err(ConfigError::Syntax); }
-    let Some(section) = optional(members, "shipping").filter(|v| !v.is_null()) else { return Ok(None); };
-    let m = object(section, &["server", "token_env", "state_dir", "max_open_exchanges", "max_exchange_bytes", "poll_ms"])?;
-    Ok(Some(Section {
-        server: string(field(m, "server")?)?,
-        token_env: string(field(m, "token_env")?)?,
-        state_dir: string(field(m, "state_dir")?)?,
-        max_open_exchanges: optional(m, "max_open_exchanges").map(usize_of).transpose()?.unwrap_or(64),
-        max_exchange_bytes: optional(m, "max_exchange_bytes").map(usize_of).transpose()?.unwrap_or(1024 * 1024),
-        poll_ms: optional(m, "poll_ms").map(u64_of).transpose()?.unwrap_or(1000),
-    }))
+    let Some(s) = config_schema::read_shipping(&value).map_err(|()| ConfigError::Syntax)? else { return Ok(None); };
+    let utf8 = |bytes: Vec<u8>| String::from_utf8(bytes).map_err(|_| ConfigError::Syntax);
+    Ok(Some(Section { server: utf8(s.server)?, token_env: utf8(s.token_env)?, state_dir: utf8(s.state_dir)?,
+        max_open_exchanges: s.max_open_exchanges, max_exchange_bytes: s.max_exchange_bytes, poll_ms: s.poll_ms }))
 }
 
 /// The configured HypAware server. Only `ShippingConfig::from_root_json`

@@ -91,9 +91,10 @@ zeros, or lone low surrogates would make the reader incomplete).
 
 ## Where it is used
 
-`config.rs` reads the root policy and routes through it and walks the
-schema (allowed keys, once each, required kinds); `shipping/config.rs` reads
-the `shipping` section; `shipping/state.rs` reads and writes the identity
+`config.rs` reads the root policy and routes through it and the verified
+schema reader (`gateway_core::config_schema`: allowed keys, once each,
+required kinds); `shipping/config.rs` reads the `shipping` section the same
+way; `shipping/state.rs` reads and writes the identity
 and checkpoint files and reads the claims of the gateway credential;
 `shipping/client.rs` reads error replies; the verified projection
 (`gateway_core::projection`) reads provider request and response bodies and

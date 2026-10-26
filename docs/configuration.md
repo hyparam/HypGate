@@ -70,8 +70,12 @@ Messages and OpenAI Responses exchanges, JSON and SSE, passed through these
 bindings on 2026-10-25; the [HypAware setup](hypaware.md#smoke-test-record)
 records the run.
 
-JSON parsing, hashing, secret resolution, and the runtime mapping are trusted and
-tested, not formally verified; destination validation is verified. The core theorem still concerns
+JSON parsing is verified (`gateway_core::json`), and so is the schema walk
+(`gateway_core::config_schema`: which keys each object may hold, once each,
+which are required, and of what kind; the reader accepts exactly that shape and
+returns the fields the file holds). Hashing, secret resolution, the UTF-8 check
+on strings, and the runtime mapping are trusted and tested, not formally
+verified; destination validation is verified. The core theorem still concerns
 normalized route handles. The HTTP adapter consumes `RoutedRequest`; the verified
 header projection strips client credential headers and constructs Host from the
 fixed destination, while disabling redirects/proxies/retries and retaining request
