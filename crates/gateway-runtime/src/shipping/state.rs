@@ -1,9 +1,9 @@
 //! Shipper state on disk: the enrollment identity and the progress checkpoint.
-//! Both are small JSON documents written to a private temporary file and
+//! Both are small JSON documents, written by the verified writer to a private temporary file and
 //! renamed into place, mode 0600 on Unix. The identity file holds the server's
 //! gateway credential and a fingerprint of the operator token, never the token.
 use gateway_core::json::{self, Value};
-use serde::Serialize;
+use crate::json_build::{self, object, size, write};
 use sha2::{Digest, Sha256};
 use std::{fs, io::{self, Write}, path::Path};
 
@@ -11,7 +11,7 @@ pub const IDENTITY_FILE: &str = "identity.json";
 pub const CHECKPOINT_FILE: &str = "checkpoint.json";
 const MAX_STATE_BYTES: u64 = 64 * 1024;
 
-#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Identity {
     pub jwt: String,
     pub expires_at: u64,
@@ -22,7 +22,7 @@ pub struct Identity {
 
 /// Progress is a count of emitted exchanges resolved on the server, plus the
 /// assembler limits that make exchange numbering reproducible from the file.
-#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Checkpoint {
     pub session: String,
     pub resolved: u64,
@@ -65,7 +65,10 @@ pub fn load_identity(dir: &Path) -> Option<Identity> {
         server: text(&value, "server")?, token_fingerprint: text(&value, "token_fingerprint")? })
 }
 pub fn save_identity(dir: &Path, identity: &Identity) -> io::Result<()> {
-    write_private(&dir.join(IDENTITY_FILE), &serde_json::to_vec(identity)?)
+    let value = object(vec![("jwt", json_build::text(&identity.jwt)), ("expires_at", json_build::number(identity.expires_at)),
+        ("gateway_id", json_build::text(&identity.gateway_id)), ("server", json_build::text(&identity.server)),
+        ("token_fingerprint", json_build::text(&identity.token_fingerprint))]);
+    write_private(&dir.join(IDENTITY_FILE), &write(&value))
 }
 pub fn load_checkpoint(dir: &Path) -> Option<Checkpoint> {
     let value = read_bounded(&dir.join(CHECKPOINT_FILE))?;
@@ -74,7 +77,10 @@ pub fn load_checkpoint(dir: &Path) -> Option<Checkpoint> {
         max_exchange_bytes: usize::try_from(number(&value, "max_exchange_bytes")?).ok()? })
 }
 pub fn save_checkpoint(dir: &Path, checkpoint: &Checkpoint) -> io::Result<()> {
-    write_private(&dir.join(CHECKPOINT_FILE), &serde_json::to_vec(checkpoint)?)
+    let value = object(vec![("session", json_build::text(&checkpoint.session)), ("resolved", json_build::number(checkpoint.resolved)),
+        ("poisoned", json_build::number(checkpoint.poisoned)), ("max_open_exchanges", size(checkpoint.max_open_exchanges)),
+        ("max_exchange_bytes", size(checkpoint.max_exchange_bytes))]);
+    write_private(&dir.join(CHECKPOINT_FILE), &write(&value))
 }
 
 /// The `sub` and `exp` claims of a compact JWS, read without verifying the

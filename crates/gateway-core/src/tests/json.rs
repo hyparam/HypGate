@@ -116,3 +116,45 @@ fn accessors_answer_only_for_their_kind() {
     assert!(value.get(b"o").unwrap().as_object().is_some_and(Vec::is_empty));
     assert!(Value::Null.get(b"x").is_none());
 }
+
+#[test]
+fn writes_compact_documents_the_reader_reads_back() {
+    let value = parse(br#" { "Image" : { "Width" : 800 , "Title" : "View" , "Animated" : false , "IDs" : [ 116 , 943 ] , "Thumb" : { } , "None" : null , "Empty" : [ ] } } "#).unwrap();
+    let bytes = write(&value).unwrap();
+    assert_eq!(bytes, br#"{"Image":{"Width":800,"Title":"View","Animated":false,"IDs":[116,943],"Thumb":{},"None":null,"Empty":[]}}"#);
+    assert_eq!(parse(&bytes), Some(parse(&bytes).unwrap()));
+    assert_eq!(round_trip(&value), Some(value));
+    assert_eq!(write(&Value::Null), Some(b"null".to_vec()));
+    assert_eq!(write(&Value::Bool(true)), Some(b"true".to_vec()));
+    assert_eq!(write(&Value::Array(vec![Value::Array(vec![]), Value::Object(vec![member("a", Value::Array(vec![Value::Null, Value::Bool(true), Value::Bool(false)]))])])),
+        Some(br#"[[],{"a":[null,true,false]}]"#.to_vec()));
+    assert_eq!(write(&Value::Object(vec![member("a", num("1")), member("a", num("2"))])), Some(br#"{"a":1,"a":2}"#.to_vec()), "duplicate keys are written in order");
+}
+
+#[test]
+fn escapes_strings_when_writing() {
+    let value = Value::Str(b"\" \\ / \x08 \x0c \n \r \t \x01 \x1f raw \xc3\xa9 \xf0\x9f\x98\x80 \x7f".to_vec());
+    let expected = [&b"\"\\\" \\\\ / \\b \\f \\n \\r \\t "[..], &esc("0001"), b" ", &esc("001f"), " raw é 😀 \x7f\"".as_bytes()].concat();
+    assert_eq!(write(&value), Some(expected));
+    assert_eq!(round_trip(&value), Some(value));
+    let key = Value::Object(vec![member("line\nbreak \"q\"", Value::Null)]);
+    assert_eq!(write(&key), Some(br#"{"line\nbreak \"q\"":null}"#.to_vec()));
+    assert!(!write(&Value::Str(b"a\nb".to_vec())).unwrap().contains(&b'\n'), "no raw newline survives, so a row is one line");
+}
+
+#[test]
+fn from_u64_round_trips_and_malformed_numbers_are_refused() {
+    for n in [0u64, 7, 10, 1_000_000, u64::MAX] {
+        let value = Value::from_u64(n);
+        assert_eq!(value.as_u64(), Some(n));
+        assert_eq!(write(&value), Some(n.to_string().into_bytes()));
+    }
+    for lexeme in ["-0", "1.5", "-2.5e-10", "1E+3", "18446744073709551616"] {
+        assert_eq!(write(&num(lexeme)), Some(lexeme.as_bytes().to_vec()), "{lexeme}");
+    }
+    for bad in ["", "01", "-", "1.", ".5", "1e", "abc", "1 ", " 1"] {
+        assert_eq!(write(&num(bad)), None, "{bad:?}");
+        assert_eq!(write(&Value::Array(vec![num("1"), num(bad)])), None, "{bad:?}");
+        assert_eq!(write(&Value::Object(vec![member("k", num(bad))])), None, "{bad:?}");
+    }
+}

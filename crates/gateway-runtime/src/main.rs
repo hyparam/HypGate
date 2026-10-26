@@ -3,7 +3,8 @@
 #[allow(unsafe_code)]
 mod signal;
 use gateway_runtime::{config::GatewayConfig, disk_log::{DiskLog, LogReader, Metadata, ScanError, StoredRecord}, server::{self, Gateway, Shutdown},
-    shipping::{self, Shipper, ShippingConfig}, transport::HttpsTransport};
+    json_build::{number, object, size, text, write}, shipping::{self, Shipper, ShippingConfig}, transport::HttpsTransport};
+use gateway_core::json::Value;
 use std::{io::{self, Read, Write}, net::{SocketAddr, TcpListener}, path::Path, time::Duration};
 
 // Effect site: secrets come only from the environment variables the root
@@ -110,7 +111,7 @@ fn scan(path: &str) -> Result<(), &'static str> {
         match reader.next_record() {
             Ok(Some(record)) => {
                 records = records.checked_add(1).ok_or("record count exhausted")?;
-                writeln!(output, "{}", scan_row(&session, &record, reader.valid_end())).map_err(|_| "cannot write scan output")?;
+                write_line(&mut output, &scan_row(&session, &record, reader.valid_end()))?;
             }
             Ok(None) => break None,
             Err(error) => break Some(error),
@@ -118,41 +119,46 @@ fn scan(path: &str) -> Result<(), &'static str> {
     };
     let status = match error { None => "complete", Some(ScanError::Incomplete) => "incomplete",
         Some(ScanError::Corrupt) => "corrupt", Some(ScanError::Io) => "io_error" };
-    writeln!(output, "{}", serde_json::json!({"type":"summary", "session":session,
-        "records":records, "valid_end":reader.valid_end(), "status":status})).map_err(|_| "cannot write scan output")?;
+    let summary = object(vec![("type", text("summary")), ("session", text(&session)), ("records", number(records)),
+        ("valid_end", number(reader.valid_end())), ("status", text(status))]);
+    write_line(&mut output, &summary)?;
     if error.is_some() { Err("scan stopped at invalid tail; file unchanged") } else { Ok(()) }
+}
+
+fn write_line(output: &mut impl Write, row: &Value) -> Result<(), &'static str> {
+    output.write_all(&write(row)).and_then(|()| output.write_all(b"\n")).map_err(|_| "cannot write scan output")
 }
 
 // Body payloads are never printed; metadata fields are decoded with the
 // verified codecs, and a metadata payload that does not decode is reported as such.
-fn scan_row(session: &str, record: &StoredRecord, valid_end: u64) -> serde_json::Value {
-    let mut row = serde_json::json!({"type":"record", "session":session,
-        "tenant":record.tenant, "request":record.request, "chunk":record.chunk,
-        "kind":record.kind.name(), "payload_bytes":record.bytes.len(), "valid_end":valid_end});
+fn scan_row(session: &str, record: &StoredRecord, valid_end: u64) -> Value {
+    let mut row = vec![("type", text("record")), ("session", text(session)),
+        ("tenant", number(record.tenant)), ("request", number(record.request)), ("chunk", number(record.chunk)),
+        ("kind", text(record.kind.name())), ("payload_bytes", size(record.bytes.len())), ("valid_end", number(valid_end))];
     if let Some(direction) = record.direction() {
-        row["direction"] = serde_json::json!(match direction {
+        row.push(("direction", text(match direction {
             gateway_runtime::transfer::Direction::Upload => "upload",
             gateway_runtime::transfer::Direction::Download => "download",
-        });
-        return row;
+        })));
+        return object(row);
     }
     match record.metadata() {
         Some(Metadata::RequestStart(start)) => {
-            row["time_ms"] = serde_json::json!(start.time_ms);
-            row["selector"] = serde_json::json!(start.selector);
-            row["destination"] = serde_json::json!(String::from_utf8_lossy(&start.destination));
+            row.push(("time_ms", number(start.time_ms)));
+            row.push(("selector", number(start.selector)));
+            row.push(("destination", text(String::from_utf8_lossy(&start.destination))));
         }
         Some(Metadata::ResponseHead(head)) => {
-            row["time_ms"] = serde_json::json!(head.time_ms);
-            row["status"] = serde_json::json!(head.status);
+            row.push(("time_ms", number(head.time_ms)));
+            row.push(("status", number(u64::from(head.status))));
         }
         Some(Metadata::Completion(done)) => {
-            row["time_ms"] = serde_json::json!(done.time_ms);
-            row["outcome"] = serde_json::json!(done.outcome);
-            row["upload_bytes"] = serde_json::json!(done.upload_bytes);
-            row["download_bytes"] = serde_json::json!(done.download_bytes);
+            row.push(("time_ms", number(done.time_ms)));
+            row.push(("outcome", number(u64::from(done.outcome))));
+            row.push(("upload_bytes", number(done.upload_bytes)));
+            row.push(("download_bytes", number(done.download_bytes)));
         }
-        None => { row["metadata"] = serde_json::json!("invalid"); }
+        None => { row.push(("metadata", text("invalid"))); }
     }
-    row
+    object(row)
 }

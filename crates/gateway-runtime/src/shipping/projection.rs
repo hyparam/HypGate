@@ -3,11 +3,12 @@
 //! text and token usage. Provider bodies are parsed best effort for Anthropic
 //! Messages and OpenAI Responses; anything else ships as raw text. Headers and
 //! raw frames are never included. Provider bodies are read by the verified
-//! JSON reader; the projection itself is trusted, tested code.
+//! JSON reader and rows are written by the verified writer; the projection
+//! itself is trusted, tested code.
 use gateway_core::exchange_assembler::Exchange;
 use gateway_core::json::{self, Value as Json};
 use gateway_core::shipping_identity::{exchange_key, message_key, part_key};
-use serde_json::{json, Map, Value};
+use crate::json_build::{array, boolean, number, object, option, text};
 use super::state::hex;
 
 pub const SCHEMA_VERSION: u32 = 7;
@@ -16,10 +17,10 @@ const MAX_SESSION_HINT: usize = 256;
 #[derive(Default, Debug, PartialEq, Eq, Clone)]
 pub struct Usage { pub input: u64, pub cache_read: u64, pub cache_write: u64, pub output: u64 }
 impl Usage {
-    fn json(&self) -> Value {
-        json!({"input_tokens": self.input, "cache_read_tokens": self.cache_read, "cache_write_tokens": self.cache_write,
-            "output_tokens": self.output,
-            "total_tokens": self.input.saturating_add(self.cache_read).saturating_add(self.cache_write).saturating_add(self.output)})
+    fn json(&self) -> Json {
+        object(vec![("input_tokens", number(self.input)), ("cache_read_tokens", number(self.cache_read)), ("cache_write_tokens", number(self.cache_write)),
+            ("output_tokens", number(self.output)),
+            ("total_tokens", number(self.input.saturating_add(self.cache_read).saturating_add(self.cache_write).saturating_add(self.output)))])
     }
 }
 
@@ -173,7 +174,7 @@ pub fn iso_timestamp(ms: u64) -> String {
 }
 
 /// Two rows per exchange. `max_text` caps each `content_text`.
-pub fn rows(session: &[u8; 16], exchange: &Exchange, max_text: usize) -> Vec<Value> {
+pub fn rows(session: &[u8; 16], exchange: &Exchange, max_text: usize) -> Vec<Json> {
     let (host, path) = destination_parts(exchange);
     let request = parse_request(&exchange.upload);
     let (response, sse) = parse_response(&exchange.download);
@@ -186,53 +187,53 @@ pub fn rows(session: &[u8; 16], exchange: &Exchange, max_text: usize) -> Vec<Val
     let session_id = request.session_hint.clone().unwrap_or_else(|| exchange_id.clone());
     let model = request.model.clone().or(response.model.clone());
     let is_error = status.is_some_and(|s| s >= 400) || outcome.is_some_and(|o| o != 0) || exchange.incomplete;
-    let gateway = json!({
-        "exchange_id": exchange_id, "upstream": host, "method": "POST", "path": path,
-        "status_code": status, "outcome": outcome.map(outcome_name), "outcome_code": outcome,
-        "request_bytes": exchange.upload_total, "response_bytes": exchange.download_total,
-        "truncated": exchange.truncated, "incomplete": exchange.incomplete, "orphan": exchange.orphan,
-        "is_sse": sse, "tenant": exchange.tenant.to_string(),
-    });
-    let base = |index: u32| -> Map<String, Value> {
-        let mut row = Map::new();
-        row.insert("schema_version".into(), json!(SCHEMA_VERSION));
-        row.insert("session_id".into(), json!(session_id));
-        row.insert("conversation_id".into(), json!(session_id));
-        row.insert("user_id".into(), json!(exchange.tenant.to_string()));
-        row.insert("provider".into(), json!(provider(&host)));
-        row.insert("model".into(), json!(model));
-        row.insert("conversation_started_at".into(), json!(iso_timestamp(started)));
-        row.insert("conversation_source".into(), json!("loggate"));
-        row.insert("client_name".into(), json!("loggate"));
-        row.insert("message_id".into(), json!(hex(&message_key(session, exchange.request, index))));
-        row.insert("message_index".into(), json!(index));
-        row.insert("part_id".into(), json!(hex(&part_key(session, exchange.request, index, 0))));
-        row.insert("part_index".into(), json!(0));
-        row.insert("part_type".into(), json!("text"));
-        row.insert("date".into(), json!(iso_date(started)));
-        row.insert("request_id".into(), json!(exchange_id));
-        row.insert("is_error".into(), json!(is_error));
-        row.insert("status".into(), json!({"code": status, "outcome": outcome}));
-        row
+    let gateway = || object(vec![
+        ("exchange_id", text(&exchange_id)), ("upstream", text(&host)), ("method", text("POST")), ("path", text(&path)),
+        ("status_code", option(status, |s| number(u64::from(s)))), ("outcome", option(outcome, |o| text(outcome_name(o)))),
+        ("outcome_code", option(outcome, |o| number(u64::from(o)))),
+        ("request_bytes", number(exchange.upload_total)), ("response_bytes", number(exchange.download_total)),
+        ("truncated", boolean(exchange.truncated)), ("incomplete", boolean(exchange.incomplete)), ("orphan", boolean(exchange.orphan)),
+        ("is_sse", boolean(sse)), ("tenant", text(exchange.tenant.to_string())),
+    ]);
+    let base = |index: u32| -> Vec<(&str, Json)> {
+        vec![
+            ("schema_version", number(u64::from(SCHEMA_VERSION))),
+            ("session_id", text(&session_id)),
+            ("conversation_id", text(&session_id)),
+            ("user_id", text(exchange.tenant.to_string())),
+            ("provider", text(provider(&host))),
+            ("model", option(model.as_deref(), text)),
+            ("conversation_started_at", text(iso_timestamp(started))),
+            ("conversation_source", text("loggate")),
+            ("client_name", text("loggate")),
+            ("message_id", text(hex(&message_key(session, exchange.request, index)))),
+            ("message_index", number(u64::from(index))),
+            ("part_id", text(hex(&part_key(session, exchange.request, index, 0)))),
+            ("part_index", number(0)),
+            ("part_type", text("text")),
+            ("date", text(iso_date(started))),
+            ("request_id", text(&exchange_id)),
+            ("is_error", boolean(is_error)),
+            ("status", object(vec![("code", option(status, |s| number(u64::from(s)))), ("outcome", option(outcome, |o| number(u64::from(o))))])),
+        ]
     };
     let mut user = base(0);
-    user.insert("role".into(), json!("user"));
-    user.insert("message_created_at".into(), json!(iso_timestamp(started)));
-    user.insert("content_text".into(), json!(match request.user_text {
-        Some(text) => cap(text, max_text), None => truncated_utf8(&exchange.upload, max_text) }));
-    user.insert("attributes".into(), json!({"gateway": gateway}));
+    user.push(("role", text("user")));
+    user.push(("message_created_at", text(iso_timestamp(started))));
+    user.push(("content_text", text(match request.user_text {
+        Some(text) => cap(text, max_text), None => truncated_utf8(&exchange.upload, max_text) })));
+    user.push(("attributes", object(vec![("gateway", gateway())])));
     let mut assistant = base(1);
-    assistant.insert("role".into(), json!("assistant"));
-    assistant.insert("message_created_at".into(), json!(iso_timestamp(finished)));
-    assistant.insert("previous_message_id".into(), json!([hex(&message_key(session, exchange.request, 0))]));
+    assistant.push(("role", text("assistant")));
+    assistant.push(("message_created_at", text(iso_timestamp(finished))));
+    assistant.push(("previous_message_id", array(vec![text(hex(&message_key(session, exchange.request, 0)))])));
     // Nothing recognizable parsed: ship the raw response text instead of nothing.
     let unparsed = response.text.is_empty() && response.usage.is_none() && !exchange.download.is_empty();
-    assistant.insert("content_text".into(), json!(if unparsed { truncated_utf8(&exchange.download, max_text) } else { cap(response.text, max_text) }));
-    let mut attributes = Map::new();
-    attributes.insert("gateway".into(), gateway);
-    if let Some(usage) = response.usage { attributes.insert("usage".into(), usage.json()); }
-    assistant.insert("attributes".into(), Value::Object(attributes));
-    vec![Value::Object(user), Value::Object(assistant)]
+    assistant.push(("content_text", text(if unparsed { truncated_utf8(&exchange.download, max_text) } else { cap(response.text, max_text) })));
+    let mut attributes = vec![("gateway", gateway())];
+    if let Some(usage) = response.usage { attributes.push(("usage", usage.json())); }
+    assistant.push(("attributes", object(attributes)));
+    vec![object(user), object(assistant)]
 }
 
 pub fn outcome_name(code: u8) -> &'static str {

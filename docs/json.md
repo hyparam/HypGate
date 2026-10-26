@@ -1,10 +1,12 @@
-# Verified JSON reader
+# Verified JSON reader and writer
 
-`gateway_core::json` reads a byte string into a `Value` tree or refuses it.
-It is what the gateway reads its root policy, its routes, the shipper's
-state files, the HypAware server's replies, and provider bodies with. It
-depends only on `vstd` and two small helpers in this crate (the hex digit
-specification from the chunked decoder and the canonical decimal parser), so
+`gateway_core::json` reads a byte string into a `Value` tree or refuses it,
+and writes a `Value` tree back out as one compact document. It is what the
+gateway reads its root policy, its routes, the shipper's state files, the
+HypAware server's replies, and provider bodies with, and what it writes the
+state files, the shipped rows, and the scan output with. It depends only on
+`vstd` and three small helpers in this crate (the hex digit specification
+from the chunked decoder and the canonical decimal parser and encoder), so
 it can be lifted out on its own.
 
 ## What is proved
@@ -45,14 +47,32 @@ member with the key and `None` only when no member has it; `as_u64` returns
 `n` only for the lexeme that is the canonical decimal of `n`; the other
 accessors answer only for their kind.
 
+`write` is proved against the same grammar. A value is well formed
+(`well_formed`) when every number lexeme in it satisfies `number_ok`; values
+the reader returns are, by soundness, and so is `Value::from_u64`, whose
+lexeme is the canonical decimal (`lemma_decimal_number_ok`). `write(v)` is
+`Some(bytes)` exactly when `v` is well formed, and then
+`encodes(bytes, 0, bytes.len(), v)`: the bytes are `v` and nothing else, no
+whitespace, strings escaped. Composed with the reader's completeness this
+gives `round_trip`: for a well-formed `v` within the depth limit,
+`parse(write(v))` is `Some` of a value the same as `v`. The writer appends
+to one buffer; the proof rests on `extends`, which says that what the
+grammar establishes about a span is kept when bytes are appended after it,
+proved for every predicate of the grammar by one induction over the value.
+Strings are written with the quote, the backslash, and the five named
+controls as two-character escapes and every other control byte as `\u00XX`;
+every other byte stands for itself, so a row never contains a raw newline.
+
 Executable tests pin the RFC example, every value kind, escapes and
-surrogate pairs, number forms, the depth limit, and a table of malformed
-inputs. Ten deliberate defects fail their proof obligations: seven in the
+surrogate pairs, number forms, the depth limit, a table of malformed
+inputs, and the writer's output, escapes, round trips, and refusals.
+Sixteen deliberate defects fail their proof obligations: seven in the
 reader (a leading zero, a control byte, a lone low surrogate, trailing
-bytes, a misread literal, a dropped escape byte, a trailing comma) and three
-in the specification that completeness catches (a grammar admitting control
-bytes, leading zeros, or lone low surrogates would make the reader
-incomplete).
+bytes, a misread literal, a dropped escape byte, a trailing comma), six in
+the writer (a raw quote, a raw control byte, a wrong hex digit, an unchecked
+number, a missing comma, a missing colon), and three in the specification
+that completeness catches (a grammar admitting control bytes, leading
+zeros, or lone low surrogates would make the reader incomplete).
 
 ## What is not proved, and other limits
 
@@ -73,8 +93,12 @@ incomplete).
 
 `config.rs` reads the root policy and routes through it and walks the
 schema (allowed keys, once each, required kinds); `shipping/config.rs` reads
-the `shipping` section; `shipping/state.rs` reads the identity and
-checkpoint files and the claims of the gateway credential;
+the `shipping` section; `shipping/state.rs` reads and writes the identity
+and checkpoint files and reads the claims of the gateway credential;
 `shipping/client.rs` reads error replies; `shipping/projection.rs` reads
-provider request and response bodies and SSE events. Writing JSON still goes
-through `serde_json`.
+provider request and response bodies and SSE events and builds the rows the
+shipper writes; `main.rs` writes the scan output. The runtime's `json_build`
+module arranges values for the writer (text, numbers from `u64`, objects
+from key-value lists); it holds no logic of its own. `serde_json` is no
+longer a dependency of the gateway binary; the tests still use it to read
+back what the writer emits.

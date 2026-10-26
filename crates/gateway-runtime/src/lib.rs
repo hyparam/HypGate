@@ -10,6 +10,7 @@ mod http1;
 mod net;
 pub mod transfer;
 pub mod disk_log;
+pub mod json_build;
 pub mod transport;
 mod http_body;
 mod credited_job;

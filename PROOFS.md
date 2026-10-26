@@ -8,7 +8,7 @@ forwarded, what is written to the audit log, what is shipped to the cloud and
 when. Verus checks that crate against written contracts, so its functions
 cannot panic, overflow, index out of bounds, or violate their stated
 postconditions on any input. `crates/gateway-runtime` holds the plain Rust
-that touches the world: sockets, TLS, files, threads, clocks, JSON. It is
+that touches the world: sockets, TLS, files, threads, clocks. It is
 tested, audited, and kept as thin as we can make it, but it is not verified.
 
 A guarantee in this document is therefore always a theorem about the core
@@ -258,8 +258,10 @@ an assumption we take on; the proofs that could be written have been.
   clock, session uniqueness, and the one-registry-per-log mapping remain
   trusted.
 - *Shipping trusts its edges.* The machine and driver are proved; the HTTPS
-  client, JSON and SSE parsing, the projection into HypAware rows, and the
-  server's dedup ledger are not, and the projection is lossy by design.
+  client, SSE line splitting, the projection into HypAware rows, and the
+  server's dedup ledger are not, and the projection is lossy by design;
+  the JSON the projection reads and the rows it writes go through the
+  verified reader and writer.
   Mostly assumption: the server and TLS stack are outside the process. The
   projection could be removed from the trusted set by shipping raw record
   bytes and parsing server side, which is a design choice rather than a proof.

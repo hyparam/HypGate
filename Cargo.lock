@@ -186,7 +186,6 @@ dependencies = [
  "getrandom 0.3.4",
  "rcgen",
  "rustls",
- "serde",
  "serde_json",
  "sha2",
  "webpki-roots",

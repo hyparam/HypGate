@@ -256,7 +256,7 @@ impl Effects for Engine {
         let session = self.session.unwrap_or([0; 16]);
         let rows = projection::rows(&session, exchange, self.config.max_exchange_bytes);
         let mut body = Vec::new();
-        for row in &rows { body.extend_from_slice(&serde_json::to_vec(row).unwrap_or_default()); body.push(b'\n'); }
+        for row in &rows { body.extend_from_slice(&crate::json_build::write(row)); body.push(b'\n'); }
         Projected { body, rows: rows.len() }
     }
 

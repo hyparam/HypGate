@@ -1,21 +1,24 @@
-//! Verified JSON reader. `parse` turns a byte string into a `Value` tree, or
-//! refuses it. The specification is the RFC 8259 grammar written out as
+//! Verified JSON reader and writer. `parse` turns a byte string into a
+//! `Value` tree, or refuses it; `write` turns a `Value` tree into one compact
+//! document. The specification is the RFC 8259 grammar written out as
 //! predicates over byte positions (`document`, `encodes`, `string_body`,
-//! `number_ok`), and the theorem on `parse` is soundness: a value it returns
-//! is encoded by exactly the bytes it was given, whitespace aside. Nothing is
-//! guessed at: a string with a bad escape, a lone surrogate, or a control
-//! byte, a number with a leading zero or a dangling point or exponent, a
-//! trailing comma, trailing bytes, or nesting past `MAX_DEPTH` is refused.
-//! Numbers keep their lexeme; `as_u64` reads the canonical decimals the
-//! gateway uses. Strings decode to UTF-8 bytes: `\u` escapes become the
-//! code point's UTF-8, surrogate pairs become one code point. Raw bytes in
-//! strings are passed through as written and not checked for UTF-8 validity.
-//! Duplicate keys are kept in order; `get` finds the first.
+//! `number_ok`). The reader is sound (a value it returns is encoded by
+//! exactly the bytes it was given, whitespace aside) and complete (every
+//! document of the grammar within the depth limit is accepted, with the
+//! same value). Nothing is guessed at: a string with a bad escape, a lone
+//! surrogate, or a control byte, a number with a leading zero or a dangling
+//! point or exponent, a trailing comma, trailing bytes, or nesting past
+//! `MAX_DEPTH` is refused. Numbers keep their lexeme; `as_u64` reads the
+//! canonical decimals the gateway uses and `Value::from_u64` makes them.
+//! Strings decode to UTF-8 bytes: `\u` escapes become the code point's
+//! UTF-8, surrogate pairs become one code point. Raw bytes in strings are
+//! passed through as written and not checked for UTF-8 validity. Duplicate
+//! keys are kept in order; `get` finds the first. The writer emits exactly
+//! its value (`encodes`) whenever every number in it is a number of the
+//! grammar, and `round_trip` composes the two.
 //!
 //! This module depends only on `vstd` and the hex and decimal helpers in
-//! this crate, so it can stand on its own. Soundness and completeness (every document
-//! of the grammar within the depth limit is accepted, with the same value)
-//! are both proved; see `docs/json.md`.
+//! this crate, so it can stand on its own; see `docs/json.md`.
 use vstd::prelude::*;
 use vstd::slice::{slice_index_get, slice_subrange, slice_to_vec};
 
@@ -1846,5 +1849,596 @@ fn bytes_eq(a: &[u8], b: &[u8]) -> (out: bool)
     }
     proof { assert(a@ =~= b@); }
     true
+}
+
+// ---- writing ------------------------------------------------------------------------------
+
+/// Every number lexeme in `v` satisfies the number grammar. Values the reader
+/// returns are well formed (soundness), as are the numbers `Value::from_u64`
+/// builds; the writer refuses any other number.
+pub open spec fn well_formed(v: Value) -> bool
+    decreases v, 0int,
+{
+    match v {
+        Value::Number(lex) => number_ok(lex@),
+        Value::Array(items) => well_formed_items(items@),
+        Value::Object(ms) => well_formed_members(ms@),
+        _ => true,
+    }
+}
+pub open spec fn well_formed_items(items: Seq<Value>) -> bool
+    decreases items, 1int,
+{
+    items.len() == 0 || (well_formed(items.last()) && well_formed_items(items.drop_last()))
+}
+pub open spec fn well_formed_members(ms: Seq<Member>) -> bool
+    decreases ms, 1int,
+{
+    ms.len() == 0 || (well_formed(ms.last().value) && well_formed_members(ms.drop_last()))
+}
+proof fn lemma_well_formed_item(items: Seq<Value>, k: int)
+    requires well_formed_items(items), 0 <= k < items.len(),
+    ensures well_formed(items[k]),
+    decreases items.len(),
+{
+    if k < items.len() - 1 {
+        lemma_well_formed_item(items.drop_last(), k);
+        assert(items.drop_last()[k] == items[k]);
+    }
+}
+proof fn lemma_well_formed_member(ms: Seq<Member>, k: int)
+    requires well_formed_members(ms), 0 <= k < ms.len(),
+    ensures well_formed(ms[k].value),
+    decreases ms.len(),
+{
+    if k < ms.len() - 1 {
+        lemma_well_formed_member(ms.drop_last(), k);
+        assert(ms.drop_last()[k] == ms[k]);
+    }
+}
+
+/// `t` begins with `s`. The grammar only looks at bytes inside the span it
+/// is asked about, so what holds of a span of `s` holds of the same span of
+/// `t`; the writer appends and keeps what it has already established.
+pub open spec fn extends(s: Seq<u8>, t: Seq<u8>) -> bool {
+    s.len() <= t.len() && forall|k: int| 0 <= k < s.len() ==> #[trigger] t[k] == s[k]
+}
+proof fn lemma_extends_trans(a: Seq<u8>, b: Seq<u8>, c: Seq<u8>)
+    requires extends(a, b), extends(b, c),
+    ensures extends(a, c),
+{
+    assert forall|k: int| 0 <= k < a.len() implies #[trigger] c[k] == a[k] by { assert(b[k] == a[k]); }
+}
+proof fn lemma_ws_extends(s: Seq<u8>, t: Seq<u8>, i: int, j: int)
+    requires extends(s, t), ws(s, i, j),
+    ensures ws(t, i, j),
+{
+    assert forall|k: int| i <= k < j implies is_ws(#[trigger] t[k]) by { assert(t[k] == s[k]); }
+}
+proof fn lemma_string_at_extends(s: Seq<u8>, t: Seq<u8>, i: int, j: int, text: Seq<u8>)
+    requires extends(s, t), string_at(s, i, j, text),
+    ensures string_at(t, i, j, text),
+{
+    assert(t.subrange(i + 1, j - 1) =~= s.subrange(i + 1, j - 1));
+}
+proof fn lemma_encodes_extends(s: Seq<u8>, t: Seq<u8>, i: int, j: int, v: Value)
+    requires extends(s, t), encodes(s, i, j, v),
+    ensures encodes(t, i, j, v),
+    decreases v, 0int,
+{
+    assert(t.subrange(i, j) =~= s.subrange(i, j));
+    match v {
+        Value::Str(text) => lemma_string_at_extends(s, t, i, j, text@),
+        Value::Array(items) => lemma_elements_extends(s, t, i + 1, j - 1, items@),
+        Value::Object(ms) => lemma_members_extends(s, t, i + 1, j - 1, ms@),
+        _ => {}
+    }
+}
+proof fn lemma_padded_extends(s: Seq<u8>, t: Seq<u8>, i: int, j: int, v: Value)
+    requires extends(s, t), padded(s, i, j, v),
+    ensures padded(t, i, j, v),
+    decreases v, 1int,
+{
+    let d = choose|d: int| #[trigger] ws(s, i, d) && encodes(s, d, j, v);
+    lemma_ws_extends(s, t, i, d);
+    lemma_encodes_extends(s, t, d, j, v);
+    assert(ws(t, i, d) && encodes(t, d, j, v));
+}
+proof fn lemma_items_ok_extends(s: Seq<u8>, t: Seq<u8>, i: int, j: int, items: Seq<Value>)
+    requires extends(s, t), items_ok(s, i, j, items),
+    ensures items_ok(t, i, j, items),
+    decreases items, 3int,
+{
+    if items.len() == 1 {
+        lemma_padded_extends(s, t, i, j, items[0]);
+    } else {
+        let (c, a) = choose|c: int, a: int| items_ok(s, i, c, items.drop_last()) && #[trigger] ws(s, c, a) && a < s.len() && s[a] == COMMA
+            && padded(s, a + 1, j, items.last());
+        lemma_items_ok_extends(s, t, i, c, items.drop_last());
+        lemma_ws_extends(s, t, c, a);
+        lemma_padded_extends(s, t, a + 1, j, items.last());
+        assert(t[a] == s[a]);
+        assert(items_ok(t, i, c, items.drop_last()) && ws(t, c, a) && a < t.len() && t[a] == COMMA && padded(t, a + 1, j, items.last()));
+    }
+}
+proof fn lemma_elements_extends(s: Seq<u8>, t: Seq<u8>, i: int, j: int, items: Seq<Value>)
+    requires extends(s, t), elements(s, i, j, items),
+    ensures elements(t, i, j, items),
+    decreases items, 4int,
+{
+    if items.len() == 0 {
+        lemma_ws_extends(s, t, i, j);
+    } else {
+        let b = choose|b: int| items_ok(s, i, b, items) && #[trigger] ws(s, b, j);
+        lemma_items_ok_extends(s, t, i, b, items);
+        lemma_ws_extends(s, t, b, j);
+        assert(items_ok(t, i, b, items) && ws(t, b, j));
+    }
+}
+proof fn lemma_colon_then_extends(s: Seq<u8>, t: Seq<u8>, b: int, j: int, v: Value)
+    requires extends(s, t), colon_then(s, b, j, v),
+    ensures colon_then(t, b, j, v),
+    decreases v, 2int,
+{
+    let c = choose|c: int| #[trigger] ws(s, b, c) && c < s.len() && s[c] == COLON && padded(s, c + 1, j, v);
+    lemma_ws_extends(s, t, b, c);
+    lemma_padded_extends(s, t, c + 1, j, v);
+    assert(t[c] == s[c]);
+    assert(ws(t, b, c) && c < t.len() && t[c] == COLON && padded(t, c + 1, j, v));
+}
+proof fn lemma_key_then_extends(s: Seq<u8>, t: Seq<u8>, a: int, j: int, m: Member)
+    requires extends(s, t), key_then(s, a, j, m),
+    ensures key_then(t, a, j, m),
+    decreases m, 2int,
+{
+    let b = choose|b: int| #[trigger] string_at(s, a, b, m.key@) && colon_then(s, b, j, m.value);
+    lemma_string_at_extends(s, t, a, b, m.key@);
+    lemma_colon_then_extends(s, t, b, j, m.value);
+    assert(string_at(t, a, b, m.key@) && colon_then(t, b, j, m.value));
+}
+proof fn lemma_member_ok_extends(s: Seq<u8>, t: Seq<u8>, i: int, j: int, m: Member)
+    requires extends(s, t), member_ok(s, i, j, m),
+    ensures member_ok(t, i, j, m),
+    decreases m, 3int,
+{
+    let a = choose|a: int| #[trigger] ws(s, i, a) && key_then(s, a, j, m);
+    lemma_ws_extends(s, t, i, a);
+    lemma_key_then_extends(s, t, a, j, m);
+    assert(ws(t, i, a) && key_then(t, a, j, m));
+}
+proof fn lemma_members_ok_extends(s: Seq<u8>, t: Seq<u8>, i: int, j: int, ms: Seq<Member>)
+    requires extends(s, t), members_ok(s, i, j, ms),
+    ensures members_ok(t, i, j, ms),
+    decreases ms, 4int,
+{
+    if ms.len() == 1 {
+        lemma_member_ok_extends(s, t, i, j, ms[0]);
+    } else {
+        let (c, a) = choose|c: int, a: int| members_ok(s, i, c, ms.drop_last()) && #[trigger] ws(s, c, a) && a < s.len() && s[a] == COMMA
+            && member_ok(s, a + 1, j, ms.last());
+        lemma_members_ok_extends(s, t, i, c, ms.drop_last());
+        lemma_ws_extends(s, t, c, a);
+        lemma_member_ok_extends(s, t, a + 1, j, ms.last());
+        assert(t[a] == s[a]);
+        assert(members_ok(t, i, c, ms.drop_last()) && ws(t, c, a) && a < t.len() && t[a] == COMMA && member_ok(t, a + 1, j, ms.last()));
+    }
+}
+proof fn lemma_members_extends(s: Seq<u8>, t: Seq<u8>, i: int, j: int, ms: Seq<Member>)
+    requires extends(s, t), members(s, i, j, ms),
+    ensures members(t, i, j, ms),
+    decreases ms, 5int,
+{
+    if ms.len() == 0 {
+        lemma_ws_extends(s, t, i, j);
+    } else {
+        let b = choose|b: int| members_ok(s, i, b, ms) && #[trigger] ws(s, b, j);
+        lemma_members_ok_extends(s, t, i, b, ms);
+        lemma_ws_extends(s, t, b, j);
+        assert(members_ok(t, i, b, ms) && ws(t, b, j));
+    }
+}
+
+/// The canonical decimal of any `n` is a number of the grammar.
+pub proof fn lemma_decimal_number_ok(n: nat)
+    ensures number_ok(crate::inbound::decimal(n)),
+{
+    crate::inbound::lemma_decimal_shape(n);
+    let s = crate::inbound::decimal(n);
+    let len = s.len() as int;
+    assert(s.subrange(0, len) =~= s);
+    assert forall|k: int| 0 <= k < s.len() implies is_digit(#[trigger] s[k]) by { assert(crate::inbound::is_digit(s[k])); }
+    assert(all_digits(s));
+    assert(s[0] != MINUS);
+    if n == 0 { assert(s =~= seq![48u8]); }
+    assert(int_ok(s));
+    assert(s.subrange(len, len).len() == 0);
+    assert(frac_ok(s.subrange(len, len)));
+    assert(exp_ok(s.subrange(len, len)));
+    assert(int_ok(s.subrange(0, len)) && frac_ok(s.subrange(len, len)) && exp_ok(s.subrange(len, len)));
+}
+/// `00XY` in hex, for two nibbles.
+proof fn lemma_two_nibbles(h: Seq<u8>, d1: nat, d0: nat)
+    requires d1 < 16, d0 < 16, h == seq![ZERO, ZERO, crate::http1_chunked::hex_digit(d1), crate::http1_chunked::hex_digit(d0)],
+    ensures crate::http1_chunked::all_hex(h), crate::http1_chunked::hex_value(h) == d1 * 16 + d0,
+{
+    let h3 = seq![ZERO, ZERO, crate::http1_chunked::hex_digit(d1)];
+    let h2 = seq![ZERO, ZERO];
+    let h1 = seq![ZERO];
+    assert(h.drop_last() =~= h3);
+    assert(h3.drop_last() =~= h2);
+    assert(h2.drop_last() =~= h1);
+    assert(h1.drop_last() =~= Seq::<u8>::empty());
+    assert(crate::http1_chunked::hex_value(Seq::<u8>::empty()) == 0);
+    assert(h1.last() == ZERO && crate::http1_chunked::hex_val(ZERO) == 0);
+    assert(crate::http1_chunked::hex_value(h1) == 0);
+    assert(crate::http1_chunked::hex_value(h2) == 0);
+    assert(crate::http1_chunked::hex_val(crate::http1_chunked::hex_digit(d1)) == d1);
+    assert(crate::http1_chunked::hex_val(crate::http1_chunked::hex_digit(d0)) == d0);
+    assert(crate::http1_chunked::hex_value(h3) == d1);
+    assert forall|k: int| 0 <= k < h.len() implies crate::http1_chunked::is_hex(#[trigger] h[k]) by {}
+}
+
+fn hex_digit_exec(d: u8) -> (out: u8)
+    requires d < 16,
+    ensures out == crate::http1_chunked::hex_digit(d as nat),
+{
+    if d < 10 { 48 + d } else { 87 + d }
+}
+/// Whether `lex` is a number of the grammar, decided by the reader's scanner.
+fn number_ok_exec(lex: &[u8]) -> (out: bool)
+    ensures out == number_ok(lex@),
+{
+    if lex.len() == 0 {
+        proof {
+            assert forall|a: int| 0 <= a <= lex@.len() implies !int_ok(#[trigger] lex@.subrange(0, a)) by {
+                assert(lex@.subrange(0, a).len() == 0);
+            }
+        }
+        return false;
+    }
+    let scanned = number(lex, 0);
+    proof {
+        assert(lex@.subrange(0, lex@.len() as int) =~= lex@);
+        assert(boundary(lex@, lex@.len() as int));
+    }
+    match scanned { Some(j) => j == lex.len(), None => false }
+}
+
+/// A decoded body extended by one plain byte.
+proof fn lemma_push_plain(s: Seq<u8>, start: int, before: Seq<u8>, text: Seq<u8>, k: int, b: u8)
+    requires 0 <= start, start + 1 <= before.len(), s == before.push(b), plain(b), 0 <= k < text.len(), text[k] == b,
+        string_body(before.subrange(start + 1, before.len() as int), text.subrange(0, k)),
+    ensures string_body(s.subrange(start + 1, s.len() as int), text.subrange(0, k + 1)),
+{
+    lemma_plain_body(b);
+    lemma_body_append(before.subrange(start + 1, before.len() as int), text.subrange(0, k), seq![b], seq![b]);
+    assert(s.subrange(start + 1, s.len() as int) =~= before.subrange(start + 1, before.len() as int) + seq![b]);
+    assert(text.subrange(0, k + 1) =~= text.subrange(0, k) + seq![b]);
+}
+/// A decoded body extended by one escape sequence standing for `b`.
+proof fn lemma_push_escape(s: Seq<u8>, start: int, before: Seq<u8>, esc: Seq<u8>, text: Seq<u8>, k: int, b: u8)
+    requires 0 <= start, start + 1 <= before.len(), s == before + esc, escape(esc, seq![b]), 0 <= k < text.len(), text[k] == b,
+        string_body(before.subrange(start + 1, before.len() as int), text.subrange(0, k)),
+    ensures string_body(s.subrange(start + 1, s.len() as int), text.subrange(0, k + 1)),
+{
+    lemma_escape_body(esc, seq![b]);
+    lemma_body_append(before.subrange(start + 1, before.len() as int), text.subrange(0, k), esc, seq![b]);
+    assert(s.subrange(start + 1, s.len() as int) =~= before.subrange(start + 1, before.len() as int) + esc);
+    assert(text.subrange(0, k + 1) =~= text.subrange(0, k) + seq![b]);
+}
+
+/// One string, quoted and escaped: plain bytes as themselves, the quote,
+/// backslash, and the five named controls as two-character escapes, other
+/// control bytes as `\u00XX`.
+#[verifier::loop_isolation(false)]
+#[verifier::rlimit(100)]
+fn emit_string(text: &[u8], out: &mut Vec<u8>)
+    ensures extends(old(out)@, final(out)@), string_at(final(out)@, old(out)@.len() as int, final(out)@.len() as int, text@),
+{
+    let ghost start = old(out)@.len() as int;
+    out.push(QUOTE);
+    let mut k: usize = 0;
+    proof {
+        assert(out@.subrange(start + 1, out@.len() as int).len() == 0);
+        assert(text@.subrange(0, 0).len() == 0);
+    }
+    while k < text.len()
+        invariant k <= text.len(), extends(old(out)@, out@), out@.len() >= start + 1, out@[start] == QUOTE,
+            string_body(out@.subrange(start + 1, out@.len() as int), text@.subrange(0, k as int)),
+        decreases text.len() - k,
+    {
+        let b = text[k];
+        let ghost before = out@;
+        if b >= 0x20 && b != QUOTE && b != BSLASH {
+            out.push(b);
+            proof { lemma_push_plain(out@, start, before, text@, k as int, b); }
+        } else if b == QUOTE || b == BSLASH || b == LF || b == CR || b == TAB || b == 8 || b == 12 {
+            let second = if b == QUOTE { QUOTE } else if b == BSLASH { BSLASH } else if b == LF { LOWER_N } else if b == CR { LOWER_R }
+                else if b == TAB { LOWER_T } else if b == 8 { LOWER_B } else { LOWER_F };
+            out.push(BSLASH);
+            out.push(second);
+            proof {
+                let esc = seq![BSLASH, second];
+                assert(out@ =~= before + esc);
+                assert(simple_escape(second) == Some(b));
+                assert(escape(esc, seq![b]));
+                lemma_push_escape(out@, start, before, esc, text@, k as int, b);
+            }
+        } else {
+            let high = hex_digit_exec(b / 16);
+            let low = hex_digit_exec(b % 16);
+            out.push(BSLASH);
+            out.push(LOWER_U);
+            out.push(ZERO);
+            out.push(ZERO);
+            out.push(high);
+            out.push(low);
+            proof {
+                let esc = seq![BSLASH, LOWER_U, ZERO, ZERO, high, low];
+                assert(out@ =~= before + esc);
+                let h = esc.subrange(2, 6);
+                assert(h =~= seq![ZERO, ZERO, crate::http1_chunked::hex_digit((b / 16) as nat), crate::http1_chunked::hex_digit((b % 16) as nat)]);
+                lemma_two_nibbles(h, (b / 16) as nat, (b % 16) as nat);
+                assert(unit(esc, 2) == b as nat);
+                assert(utf8(b as nat) =~= seq![b]);
+                assert(escape(esc, seq![b]));
+                lemma_push_escape(out@, start, before, esc, text@, k as int, b);
+            }
+        }
+        proof { lemma_extends_trans(old(out)@, before, out@); }
+        k = k + 1;
+    }
+    let ghost before = out@;
+    out.push(QUOTE);
+    proof {
+        assert(text@.subrange(0, text@.len() as int) =~= text@);
+        assert(out@.subrange(start + 1, out@.len() - 1) =~= before.subrange(start + 1, before.len() as int));
+        lemma_extends_trans(old(out)@, before, out@);
+    }
+}
+
+/// Append `v`. `ok` exactly when `v` is well formed; then the appended bytes
+/// encode `v`.
+#[verifier::rlimit(100)]
+fn emit(v: &Value, out: &mut Vec<u8>) -> (ok: bool)
+    ensures ok == well_formed(*v), extends(old(out)@, final(out)@),
+        ok ==> encodes(final(out)@, old(out)@.len() as int, final(out)@.len() as int, *v),
+    decreases *v, 0int,
+{
+    let ghost start = old(out)@.len() as int;
+    match v {
+        Value::Null => {
+            let w = null_word_bytes();
+            crate::framing::append(out, w.as_slice());
+            proof { assert(out@.subrange(start, out@.len() as int) =~= null_word()); }
+            true
+        }
+        Value::Bool(b) => {
+            let w = if *b { true_word_bytes() } else { false_word_bytes() };
+            crate::framing::append(out, w.as_slice());
+            proof { assert(out@.subrange(start, out@.len() as int) =~= if *b { true_word() } else { false_word() }); }
+            true
+        }
+        Value::Number(lex) => {
+            if !number_ok_exec(lex.as_slice()) { return false; }
+            crate::framing::append(out, lex.as_slice());
+            proof { assert(out@.subrange(start, out@.len() as int) =~= lex@); }
+            true
+        }
+        Value::Str(text) => { emit_string(text.as_slice(), out); true }
+        Value::Array(items) => { proof { assert(*v == Value::Array(*items)); } emit_array(items, out) }
+        Value::Object(ms) => { proof { assert(*v == Value::Object(*ms)); } emit_object(ms, out) }
+    }
+}
+fn null_word_bytes() -> (out: Vec<u8>) ensures out@ == null_word() {
+    let mut w: Vec<u8> = Vec::new(); w.push(LOWER_N); w.push(LOWER_U); w.push(108); w.push(108);
+    proof { assert(w@ =~= null_word()); }
+    w
+}
+fn true_word_bytes() -> (out: Vec<u8>) ensures out@ == true_word() {
+    let mut w: Vec<u8> = Vec::new(); w.push(LOWER_T); w.push(LOWER_R); w.push(LOWER_U); w.push(LOWER_E);
+    proof { assert(w@ =~= true_word()); }
+    w
+}
+fn false_word_bytes() -> (out: Vec<u8>) ensures out@ == false_word() {
+    let mut w: Vec<u8> = Vec::new(); w.push(LOWER_F); w.push(97); w.push(108); w.push(115); w.push(LOWER_E);
+    proof { assert(w@ =~= false_word()); }
+    w
+}
+
+#[verifier::loop_isolation(false)]
+#[verifier::rlimit(300)]
+fn emit_array(items: &Vec<Value>, out: &mut Vec<u8>) -> (ok: bool)
+    ensures ok == well_formed_items(items@), extends(old(out)@, final(out)@),
+        ok ==> encodes(final(out)@, old(out)@.len() as int, final(out)@.len() as int, Value::Array(*items)),
+    decreases items@, 1int,
+{
+    let ghost start = old(out)@.len() as int;
+    out.push(LBRACKET);
+    let mut k: usize = 0;
+    while k < items.len()
+        invariant k <= items.len(), extends(old(out)@, out@), out@.len() >= start + 1, out@[start] == LBRACKET,
+            k == 0 ==> out@.len() == start + 1,
+            k >= 1 ==> items_ok(out@, start + 1, out@.len() as int, items@.subrange(0, k as int)),
+            well_formed_items(items@.subrange(0, k as int)),
+        decreases items.len() - k,
+    {
+        let ghost b0 = out@;
+        if k > 0 { out.push(COMMA); }
+        let ghost b1 = out@;
+        let slice = items.as_slice();
+        let item = slice_index_get(slice, k);
+        proof { assert(*item == items@[k as int]); }
+        let ok = emit(item, out);
+        proof {
+            lemma_extends_trans(old(out)@, b0, b1);
+            lemma_extends_trans(old(out)@, b1, out@);
+        }
+        if !ok {
+            proof { if well_formed_items(items@) { lemma_well_formed_item(items@, k as int); } }
+            return false;
+        }
+        proof {
+            let p = b1.len() as int;
+            let q = out@.len() as int;
+            let next = items@.subrange(0, k + 1);
+            assert(next.drop_last() =~= items@.subrange(0, k as int));
+            assert(next.last() == items@[k as int]);
+            assert(ws(out@, p, p));
+            assert(padded(out@, p, q, items@[k as int]));
+            if k == 0 {
+                assert(next.len() == 1 && next[0] == items@[0]);
+                assert(items_ok(out@, start + 1, q, next));
+            } else {
+                let c = b0.len() as int;
+                lemma_items_ok_extends(b0, out@, start + 1, c, items@.subrange(0, k as int));
+                assert(ws(out@, c, c));
+                assert(out@[c] == COMMA);
+                assert(items_ok(out@, start + 1, q, next));
+            }
+        }
+        k = k + 1;
+    }
+    let ghost b2 = out@;
+    out.push(RBRACKET);
+    proof {
+        let j = out@.len() as int;
+        assert(items@.subrange(0, items@.len() as int) =~= items@);
+        lemma_extends_trans(old(out)@, b2, out@);
+        if items.len() == 0 {
+            assert(ws(out@, start + 1, j - 1));
+        } else {
+            lemma_items_ok_extends(b2, out@, start + 1, j - 1, items@);
+            assert(ws(out@, j - 1, j - 1));
+            assert(elements(out@, start + 1, j - 1, items@));
+        }
+    }
+    true
+}
+
+#[verifier::loop_isolation(false)]
+#[verifier::rlimit(300)]
+fn emit_object(ms: &Vec<Member>, out: &mut Vec<u8>) -> (ok: bool)
+    ensures ok == well_formed_members(ms@), extends(old(out)@, final(out)@),
+        ok ==> encodes(final(out)@, old(out)@.len() as int, final(out)@.len() as int, Value::Object(*ms)),
+    decreases ms@, 1int,
+{
+    let ghost start = old(out)@.len() as int;
+    out.push(LBRACE);
+    let mut k: usize = 0;
+    while k < ms.len()
+        invariant k <= ms.len(), extends(old(out)@, out@), out@.len() >= start + 1, out@[start] == LBRACE,
+            k == 0 ==> out@.len() == start + 1,
+            k >= 1 ==> members_ok(out@, start + 1, out@.len() as int, ms@.subrange(0, k as int)),
+            well_formed_members(ms@.subrange(0, k as int)),
+        decreases ms.len() - k,
+    {
+        let ghost b0 = out@;
+        if k > 0 { out.push(COMMA); }
+        let ghost b1 = out@;
+        let slice = ms.as_slice();
+        let m = slice_index_get(slice, k);
+        proof { assert(*m == ms@[k as int]); }
+        emit_string(m.key.as_slice(), out);
+        let ghost b2 = out@;
+        out.push(COLON);
+        let ghost b3 = out@;
+        let ok = emit(&m.value, out);
+        proof {
+            lemma_extends_trans(old(out)@, b0, b1);
+            lemma_extends_trans(b1, b2, b3);
+            lemma_extends_trans(b1, b3, out@);
+            lemma_extends_trans(old(out)@, b1, out@);
+        }
+        if !ok {
+            proof { if well_formed_members(ms@) { lemma_well_formed_member(ms@, k as int); } }
+            return false;
+        }
+        proof {
+            let i = b1.len() as int;
+            let bpos = b2.len() as int;
+            let q = out@.len() as int;
+            lemma_extends_trans(b2, b3, out@);
+            lemma_string_at_extends(b2, out@, i, bpos, m.key@);
+            assert(out@[bpos] == COLON);
+            assert(ws(out@, bpos + 1, bpos + 1));
+            assert(padded(out@, bpos + 1, q, m.value));
+            assert(ws(out@, bpos, bpos));
+            assert(colon_then(out@, bpos, q, m.value));
+            assert(key_then(out@, i, q, *m));
+            assert(ws(out@, i, i));
+            assert(member_ok(out@, i, q, *m));
+            let next = ms@.subrange(0, k + 1);
+            assert(next.drop_last() =~= ms@.subrange(0, k as int));
+            assert(next.last() == ms@[k as int]);
+            if k == 0 {
+                assert(next.len() == 1 && next[0] == ms@[0]);
+                assert(members_ok(out@, start + 1, q, next));
+            } else {
+                let c = b0.len() as int;
+                lemma_members_ok_extends(b0, out@, start + 1, c, ms@.subrange(0, k as int));
+                assert(ws(out@, c, c));
+                assert(out@[c] == COMMA);
+                assert(members_ok(out@, start + 1, q, next));
+            }
+        }
+        k = k + 1;
+    }
+    let ghost b2 = out@;
+    out.push(RBRACE);
+    proof {
+        let j = out@.len() as int;
+        assert(ms@.subrange(0, ms@.len() as int) =~= ms@);
+        lemma_extends_trans(old(out)@, b2, out@);
+        if ms.len() == 0 {
+            assert(ws(out@, start + 1, j - 1));
+        } else {
+            lemma_members_ok_extends(b2, out@, start + 1, j - 1, ms@);
+            assert(ws(out@, j - 1, j - 1));
+            assert(members(out@, start + 1, j - 1, ms@));
+        }
+    }
+    true
+}
+
+/// Write `v` as one compact document: no whitespace, strings escaped,
+/// numbers as their lexeme. `Some` exactly when `v` is well formed, and
+/// then the bytes are `v` and nothing else, so the reader gives `v` back
+/// (`round_trip`).
+pub fn write(v: &Value) -> (out: Option<Vec<u8>>)
+    ensures out is Some <==> well_formed(*v),
+        match out { Some(s) => encodes(s@, 0, s@.len() as int, *v) && document(s@, *v), None => true },
+{
+    let mut bytes: Vec<u8> = Vec::new();
+    if emit(v, &mut bytes) {
+        proof {
+            assert(ws(bytes@, 0, 0));
+            assert(ws(bytes@, bytes@.len() as int, bytes@.len() as int));
+        }
+        Some(bytes)
+    } else {
+        None
+    }
+}
+
+/// Writing then reading gives the value back: the writer's theorem and the
+/// reader's completeness, composed.
+pub fn round_trip(v: &Value) -> (out: Option<Value>)
+    requires well_formed(*v), depth(*v) <= MAX_DEPTH,
+    ensures match out { Some(w) => same(w, *v), None => false },
+{
+    match write(v) { Some(bytes) => parse(bytes.as_slice()), None => None }
+}
+
+impl Value {
+    /// The number whose lexeme is the canonical decimal of `n`; `as_u64`
+    /// reads it back and the writer accepts it.
+    pub fn from_u64(n: u64) -> (out: Value)
+        ensures out is Number, out->Number_0@ == crate::inbound::decimal(n as nat), well_formed(out),
+    {
+        let lex = crate::http1_exchange::decimal_bytes(n);
+        proof { lemma_decimal_number_ok(n as nat); }
+        Value::Number(lex)
+    }
 }
 } // verus!

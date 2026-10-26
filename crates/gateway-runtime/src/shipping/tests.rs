@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 use super::*;
 use super::config::ShippingConfig;
-use super::projection::{civil, iso_date, iso_timestamp, rows as project};
+use super::projection::{civil, iso_date, iso_timestamp};
 use super::state::{base64url_encode, jwt_claims, load_checkpoint, load_identity, save_checkpoint, save_identity};
 use crate::disk_log::DiskLog;
 use crate::test_support::{self_signed, wait_until, TempDir};
@@ -12,6 +12,12 @@ use crate::test_support::http::{read_request, write_response, Received};
 use rustls::{RootCertStore, ServerConfig, ServerConnection, StreamOwned};
 use serde_json::{json, Value};
 use std::{collections::HashSet, io::{self, Write}, net::{SocketAddr, TcpListener, TcpStream}, sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}}, thread, time::Duration};
+
+/// The projected rows, written by the verified writer and read back by serde_json for the assertions.
+fn project(session: &[u8; 16], exchange: &gateway_core::exchange_assembler::Exchange, max_text: usize) -> Vec<Value> {
+    super::projection::rows(session, exchange, max_text).iter()
+        .map(|row| serde_json::from_slice(&crate::json_build::write(row)).expect("the writer emits a document")).collect()
+}
 
 // ---- fake HypAware server -------------------------------------------------
 
