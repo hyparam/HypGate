@@ -91,7 +91,9 @@ jobs:
         # re-verify it from source on every run.
         run: verus crates/gateway-core/src/lib.rs --crate-type lib --triggers-mode silent
       - name: Reject deliberate defects
-        run: python3 scripts/check_mutations.py
+        run: |
+          python3 -m unittest discover -s scripts -p test_check_mutations.py
+          python3 scripts/check_mutations.py
 
   proxy:
     name: Proxy failover policy

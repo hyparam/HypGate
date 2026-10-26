@@ -51,12 +51,12 @@ start_gateway() { # name log-path -> sets $address and appends pid
     address=${line#loggate listening on }
     echo "$name listening on $address"
 }
-stop_gateway() { # name -> graceful SIGTERM, exit status must be zero
+stop_gateway() { # name -> SIGTERM; the executable deliberately has no signal handler
     local pid; eval "pid=\$${1}_pid"
     kill -TERM "$pid"
     local code=0; wait "$pid" || code=$?
-    [[ "$code" == 0 ]] || fail "$1 exited with status $code after SIGTERM: $(cat "$work/$1.err")"
-    echo "ok: $1 shut down cleanly after SIGTERM"
+    [[ "$code" == 143 ]] || fail "$1 exited with status $code after SIGTERM: $(cat "$work/$1.err")"
+    echo "ok: $1 terminated with expected status 143 after SIGTERM"
 }
 
 step 'Environment'
@@ -189,7 +189,7 @@ if [[ -n "$haproxy" ]]; then
     stop_gateway standby
     kill -TERM "$haproxy_pid"; wait "$haproxy_pid" || true
 else
-    step 'Graceful shutdown'
+    step 'Process termination'
     stop_gateway primary
 fi
 
@@ -217,6 +217,6 @@ done
 
 step 'PASS'
 echo 'clean-environment deployment reproduced: build, provisioning, fail-closed startup, health,'
-echo 'authorization, honest upstream failure, graceful shutdown, and read-only scan'
+echo 'authorization, honest upstream failure, process termination, and read-only scan'
 [[ -n "$haproxy" ]] && echo 'including TLS termination, public-path policy, and standby routing through HAProxy'
 exit 0

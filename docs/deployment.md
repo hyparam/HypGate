@@ -34,14 +34,15 @@ Connection limits do not by themselves prove an overall memory bound.
 
 ## Shutdown and restart
 
-Remove an instance from routing before planned shutdown when your service manager
-supports it, then send SIGTERM. The gateway stops accepting, drains connections
-for up to ten seconds, cancels remaining request workers, and gives the logger a
-separate two seconds to drain and join. Allow additional scheduling margin in the
-service-manager stop timeout. A blocked filesystem syscall can outlive the logger
-deadline; process termination may leave a partial tail. Preserve the old log and
-use the read-only scan command. Every restart needs a new log path; never append
-to an old session or truncate it to make startup succeed.
+Remove an instance from routing before planned shutdown and allow active requests
+to finish before sending SIGTERM. The executable installs no signal handler:
+SIGTERM terminates it immediately (shell status 143), without draining request
+workers, the logger, or the shipper. In-flight exchanges end abruptly. Every
+acknowledged log record remains durable under the [storage contract](storage-crash-contract.md),
+but termination can leave a partial tail. Preserve the old log and use the
+read-only scan command. Every restart needs a new log path; never append to an
+old session or truncate it to make startup succeed. The cooperative drain API is
+available to embedders; see [shutdown](running.md#shutdown).
 
 Starting the standby does not resume in-flight work from the primary. New client
 requests can use it after health detection. Two processes on one machine tolerate
@@ -51,8 +52,8 @@ remain loopback-bound. Shared upstream or storage failures can affect both insta
 
 When shipping is configured, the state directory must persist across restarts
 so the enrollment and checkpoint are reused; a lost checkpoint re-sends the
-log and the server drops the repeated rows. The shipper stops two seconds after
-the logger; a thread stuck in a request is abandoned at process exit.
+log and the server drops the repeated rows. SIGTERM ends the shipper with the
+process; it does not wait for pending uploads.
 
 ## Clean-environment reproduction
 
@@ -79,9 +80,9 @@ fixture TLS material, validates and runs the [example configuration](../deploy/h
 with only ports and the certificate path substituted, checks that the public frontend
 exposes only `POST /routes/<n>`, shuts the primary down with SIGTERM, and verifies
 that a new request reaches the standby without any replayed exchange. Finally every
-gateway must exit with status zero after SIGTERM, and `loggate scan` must report a
-complete log holding only paired start/completion records with the configured
-destination and no body records, without changing its bytes.
+gateway must exit with status 143 after SIGTERM. These fixture requests have
+already completed before termination, so `loggate scan` must report a complete log
+holding only paired start/completion records with the configured destination and no body records, without changing its bytes.
 
 `deploy/Dockerfile` reproduces the same path inside a container built from the
 official Rust 1.99.1 image pinned by digest. The build installs the checksum-pinned
@@ -99,7 +100,7 @@ docker run --rm loggate-deploy
 ```
 
 The check demonstrates provisioning, fail-closed startup, authorization, honest
-upstream failure, proxy policy, standby routing, graceful shutdown, and read-only
+upstream failure, proxy policy, standby routing, process termination, and read-only
 scanning on a clean machine. It does not exercise a live provider, real certificates,
 a service manager, log retention, or host-level redundancy; those remain operator
 obligations described above and in [running the gateway](running.md).

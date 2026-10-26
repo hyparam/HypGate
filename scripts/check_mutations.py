@@ -516,12 +516,16 @@ MUTATIONS = [
 ]
 
 
-MARKERS = ["postcondition not satisfied", "precondition not satisfied", "error: requires not satisfied", "assertion failed", "invariant not satisfied"]
+MARKERS = ["postcondition not satisfied", "precondition not satisfied", "requires not satisfied", "assertion failed", "invariant not satisfied", "possible arithmetic underflow/overflow"]
 LOG = ["--log", "vir-simple", "--log", "vir-option=no_span+no_type"]
 
 
-def command(source, modules=(), log_dir=None, lifetime=True):
+def command(source, modules=(), log_dir=None, lifetime=True, mutation=False):
     args = [VERUS, str(source / "lib.rs"), "--crate-type", "lib", "--triggers-mode", "silent"]
+    if mutation:
+        # One genuine proof failure per function suffices. The outer pool owns
+        # parallelism; nested verifier pools only compete for the same CPUs.
+        args += ["--multiple-errors", "0", "--no-auto-recommends-check", "--num-threads", "1"]
     for module in modules:
         args += ["--verify-module", module]
     if log_dir:
@@ -663,7 +667,7 @@ def check(workdir, filename, name, before, after):
     """
     target, _clean = apply(workdir, name, [(filename, before, after)])
     for modules in ([Path(filename).stem], []):
-        result = subprocess.run(command(target, modules), capture_output=True, text=True)
+        result = subprocess.run(command(target, modules, mutation=True), capture_output=True, text=True)
         output = result.stdout + result.stderr
         if result.returncode != 0:
             if not any(marker in output for marker in MARKERS):
@@ -681,7 +685,7 @@ def check_batch(workdir, baseline, index, batch, attempt=0):
     target, clean = apply(workdir, name, [(m[0], m[2], m[3]) for m, _ in batch])
     modules = sorted({Path(m[0]).stem for m, _ in batch})
     log_dir = workdir / name / "vir"
-    result = subprocess.run(command(target, modules, log_dir, lifetime=False), capture_output=True, text=True)
+    result = subprocess.run(command(target, modules, log_dir, lifetime=False, mutation=True), capture_output=True, text=True)
     output = result.stdout + result.stderr
     expected = {key: m for m, key in batch}
     reason = None
@@ -710,17 +714,27 @@ def check_batch(workdir, baseline, index, batch, attempt=0):
                 if not locations:
                     continue  # "aborting due to N previous errors"
                 owner = item_at(spans, *locations[0])
-                if owner not in expected:
-                    reason = f"error outside the mutated functions: {message} at {locations[0]}"
-                    break
-                if any(marker in message for marker in MARKERS):
+                if owner in expected and any(marker in message for marker in MARKERS):
                     refuted.add(owner)
-            if reason is None and (missing := set(expected) - refuted):
-                reason = f"not refuted in their own functions: {sorted(expected[k][1] for k in missing)}"
+            # VIR established that every edit is an independent exec/proof body.
+            # An unrelated error (e.g. a solver resource limit) cannot invalidate
+            # a genuine proof failure in one of those bodies. Never count that
+            # unrelated error as evidence; individually check only missing owners.
+            missing = set(expected) - refuted
+            if missing:
+                print(f"{name}: {len(refuted)} mutations refuted independently; checking the remaining {len(missing)} individually", flush=True)
+                return [f"{m[1]}: rejected by proof" if key in refuted else check(workdir, *m)
+                        for m, key in batch]
     if reason is None:
         return [f"{m[1]}: rejected by proof" for m, _ in batch]
-    print(f"{name}: {reason}; checking its {len(batch)} mutations one at a time", flush=True)
-    return [check(workdir, *m) for m, _ in batch]
+    if len(batch) == 1:
+        return [check(workdir, *batch[0][0])]
+    # Isolate structural/specification changes instead of throwing away batching
+    # for every independent mutation that happened to share their verifier run.
+    print(f"{name}: {reason}; splitting its {len(batch)} mutations", flush=True)
+    middle = len(batch) // 2
+    return (check_batch(workdir, baseline, f"{index}-{attempt}L", batch[:middle])
+            + check_batch(workdir, baseline, f"{index}-{attempt}R", batch[middle:]))
 
 
 def plan(baseline, baseline_spans):
@@ -754,21 +768,22 @@ def plan(baseline, baseline_spans):
     return batches, singles
 
 
-# Optional focused reruns after changing one proof module; default remains all.
-if selected := os.environ.get("MUTATION_FILTER"):
-    MUTATIONS = [m for m in MUTATIONS if selected in m[0] or selected in m[1]]
-    if not MUTATIONS:
-        raise SystemExit(f"no mutations match {selected!r}")
+if __name__ == "__main__":
+    # Optional focused reruns after changing one proof module; default remains all.
+    if selected := os.environ.get("MUTATION_FILTER"):
+        MUTATIONS = [m for m in MUTATIONS if selected in m[0] or selected in m[1]]
+        if not MUTATIONS:
+            raise SystemExit(f"no mutations match {selected!r}")
 
-with tempfile.TemporaryDirectory(prefix="gateway-mutations-") as temporary:
-    workdir = Path(temporary)
-    subprocess.run(command(SOURCE, log_dir=workdir / "baseline"), check=True)
-    baseline, baseline_spans = parse_vir(workdir / "baseline" / "crate-simple.vir")
-    batches, singles = plan(baseline, baseline_spans)
-    jobs = [lambda i=i, b=b: check_batch(workdir, baseline, i, b) for i, b in enumerate(batches)]
-    jobs += [lambda m=m: [check(workdir, *m)] for m in singles]
-    # Each job verifies its own copy, so the independent runs share the machine.
-    with ThreadPoolExecutor(max_workers=os.cpu_count() or 1) as pool:
-        for reports in pool.map(lambda job: job(), jobs):
-            print("\n".join(reports), flush=True)
-print(f"{len(MUTATIONS)} mutations rejected by proof ({len(batches)} batched runs, {len(singles)} single runs)", flush=True)
+    with tempfile.TemporaryDirectory(prefix="gateway-mutations-") as temporary:
+        workdir = Path(temporary)
+        subprocess.run(command(SOURCE, log_dir=workdir / "baseline"), check=True)
+        baseline, baseline_spans = parse_vir(workdir / "baseline" / "crate-simple.vir")
+        batches, singles = plan(baseline, baseline_spans)
+        jobs = [lambda i=i, b=b: check_batch(workdir, baseline, i, b) for i, b in enumerate(batches)]
+        jobs += [lambda m=m: [check(workdir, *m)] for m in singles]
+        # Each job verifies its own copy, so the independent runs share the machine.
+        with ThreadPoolExecutor(max_workers=os.cpu_count() or 1) as pool:
+            for reports in pool.map(lambda job: job(), jobs):
+                print("\n".join(reports), flush=True)
+    print(f"{len(MUTATIONS)} mutations rejected by proof ({len(batches)} batched runs, {len(singles)} single runs)", flush=True)
