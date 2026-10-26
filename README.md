@@ -6,6 +6,8 @@ exchange to an audit log on disk, and optionally ships that log to
 [HypAware](https://hypaware.ai) for analysis. No provider API translation, no
 plugins, no other network destinations.
 
+![LogGate forwards requests and responses between an AI client and provider, records exchanges in a local audit log, and optionally ships logs to HypAware Cloud.](docs/images/loggate-flow.png)
+
 What makes it different: the code that decides what the gateway does is
 proved correct with [Verus](https://github.com/verus-lang/verus). Other
 gateways are tested on examples. LogGate's core is proved for every input, and

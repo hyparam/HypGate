@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 .env
+.DS_Store
 
 # Local audit logs from the README quick start contain request/response bodies.
 /logs/
