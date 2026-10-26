@@ -2,10 +2,11 @@
 //! reader, its shape (which keys, once each, which kinds) by the verified
 //! `gateway_core::config_schema`, and the normalized grant relation is checked
 //! by the verified core, including selection of concrete destination/credential
-//! values; destinations are parsed by the verified core; digests, secret
-//! names and values, and the credential header value follow the verified
-//! rules in `gateway_core::config_values`. The UTF-8 check on strings, the
-//! IPv6 literal check, and secret provisioning remain trusted.
+//! values; destinations are parsed by the verified core and a bracketed host
+//! checked by the verified IPv6 grammar; strings are checked by the verified
+//! UTF-8 predicate; digests, secret names and values, and the credential
+//! header value follow the verified rules in `gateway_core::config_values`.
+//! Hashing and secret provisioning remain trusted.
 use crate::admission::{Admission, AdmissionError, Request};
 use gateway_core::config_schema as schema;
 use gateway_core::config_values as values;
@@ -21,8 +22,12 @@ pub(crate) use gateway_core::config_values::MAX_CREDENTIAL_BYTES;
 #[derive(Debug, PartialEq, Eq)]
 pub enum ConfigError { Syntax, Limits, Identity, Destination, Credential, Policy }
 
-/// Text from the verified schema reader: the configuration's strings must be UTF-8.
-fn utf8(bytes: Vec<u8>) -> Result<String, ConfigError> { String::from_utf8(bytes).map_err(|_| ConfigError::Syntax) }
+/// Text from the verified schema reader: the configuration's strings must be
+/// UTF-8, decided by the verified check; the conversion then cannot fail.
+pub(crate) fn utf8(bytes: Vec<u8>) -> Result<String, ConfigError> {
+    if !gateway_core::utf8::is_valid(&bytes) { return Err(ConfigError::Syntax); }
+    String::from_utf8(bytes).map_err(|_| ConfigError::Syntax)
+}
 
 struct Root {
     identities: Vec<IdentityInput>,
@@ -90,9 +95,8 @@ fn ascii(bytes: &[u8]) -> &str { std::str::from_utf8(bytes).expect("verified des
 /// runtime connects to, names in TLS, writes as Host, and uses as the request target.
 pub(crate) fn destination(text: &str) -> Result<Destination, ConfigError> {
     let parts = gateway_core::destination::parse(text.as_bytes()).ok_or(ConfigError::Destination)?;
-    // A bracketed literal must also be a real IPv6 address, not just IPv6 characters.
-    if parts.authority.first() == Some(&b'[')
-        && std::str::from_utf8(&parts.host).ok().and_then(|h| h.parse::<std::net::Ipv6Addr>().ok()).is_none() {
+    // A bracketed literal must also be a real IPv6 address, not just IPv6 characters (verified grammar).
+    if parts.authority.first() == Some(&b'[') && !gateway_core::ipv6::literal_ok(&parts.host) {
         return Err(ConfigError::Destination);
     }
     Ok(parts)

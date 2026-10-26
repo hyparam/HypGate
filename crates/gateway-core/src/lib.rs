@@ -59,6 +59,7 @@ pub mod config_schema;
 pub mod config_values;
 pub mod calendar;
 pub mod body_reader;
+pub mod ipv6;
 
 #[cfg(test)]
 #[path = "tests/streaming.rs"]
@@ -111,3 +112,6 @@ mod calendar_tests;
 #[cfg(test)]
 #[path = "tests/body_reader.rs"]
 mod body_reader_tests;
+#[cfg(test)]
+#[path = "tests/ipv6.rs"]
+mod ipv6_tests;

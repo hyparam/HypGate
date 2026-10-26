@@ -32,6 +32,17 @@ fn every_ill_formed_byte_becomes_a_replacement_character() {
 }
 
 #[test]
+fn validity_agrees_with_the_standard_library() {
+    for text in ["", "plain", "é€😀", "\u{10ffff}"] { assert!(is_valid(text.as_bytes())); }
+    let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+    for _ in 0..100_000 {
+        x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+        let bytes: Vec<u8> = (0..(x % 8) as usize).map(|i| (x >> (8 * i)) as u8).collect();
+        assert_eq!(is_valid(&bytes), std::str::from_utf8(&bytes).is_ok(), "{bytes:?}");
+    }
+}
+
+#[test]
 fn cap_cuts_only_at_character_boundaries() {
     let text = "aé€😀b".as_bytes(); // 1 + 2 + 3 + 4 + 1 bytes
     let expect = |limit: usize, s: &str| assert_eq!(cap(text, limit), s.as_bytes(), "limit {limit}");

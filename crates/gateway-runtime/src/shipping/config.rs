@@ -1,6 +1,6 @@
 //! The optional `shipping` section of the root policy. Parsed on its own so the
 //! gateway configuration never carries the cloud server or its token.
-use crate::config::{destination, ConfigError};
+use crate::config::{destination, utf8, ConfigError};
 use gateway_core::{config_schema, config_values as values, json};
 use std::path::PathBuf;
 
@@ -20,7 +20,6 @@ struct Section {
 fn section(root: &[u8]) -> Result<Option<Section>, ConfigError> {
     let value = json::parse(root).ok_or(ConfigError::Syntax)?;
     let Some(s) = config_schema::read_shipping(&value).map_err(|()| ConfigError::Syntax)? else { return Ok(None); };
-    let utf8 = |bytes: Vec<u8>| String::from_utf8(bytes).map_err(|_| ConfigError::Syntax);
     Ok(Some(Section { server: utf8(s.server)?, token_env: utf8(s.token_env)?, state_dir: utf8(s.state_dir)?,
         max_open_exchanges: s.max_open_exchanges, max_exchange_bytes: s.max_exchange_bytes, poll_ms: s.poll_ms }))
 }

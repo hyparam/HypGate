@@ -244,6 +244,28 @@ pub fn sanitize(bytes: &[u8]) -> (out: Vec<u8>)
     out
 }
 
+/// Whether `bytes` is well-formed UTF-8.
+#[verifier::loop_isolation(false)]
+pub fn is_valid(bytes: &[u8]) -> (out: bool)
+    ensures out == valid(bytes@),
+{
+    let mut p: usize = 0;
+    proof { assert(bytes@.subrange(0, bytes@.len() as int) =~= bytes@); }
+    while p < bytes.len()
+        invariant p <= bytes.len(), valid(bytes@) == valid(bytes@.subrange(p as int, bytes@.len() as int)),
+        decreases bytes.len() - p,
+    {
+        let ghost rest = bytes@.subrange(p as int, bytes@.len() as int);
+        let n = char_len_exec(bytes, p);
+        proof { lemma_char_len_suffix(bytes@, p as int); }
+        if n == 0 { return false; }
+        proof { assert(rest.subrange(n as int, rest.len() as int) =~= bytes@.subrange(p + n, bytes@.len() as int)); }
+        p = p + n;
+    }
+    proof { assert(bytes@.subrange(p as int, bytes@.len() as int).len() == 0); }
+    true
+}
+
 /// The longest prefix of a well-formed `text` within `limit` bytes that ends
 /// at a character boundary: `text` itself when it fits.
 #[verifier::loop_isolation(false)]

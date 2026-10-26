@@ -79,10 +79,12 @@ bytes, a secret name is 1 to 128 alphanumeric or underscore bytes, a
 credential or token is visible ASCII within its limit, and the header value
 built from a credential, with its `Bearer ` prefix, holds no control byte, so
 no line break can enter a request head; the shipping limits and state
-directory are within their ranges). Hashing, secret resolution, the UTF-8
-check on strings, the IPv6 literal check, and the runtime mapping are trusted
-and tested, not formally verified; destination validation is verified. The
-core theorem still concerns
+directory are within their ranges). Destination validation is verified, as is
+the check that a bracketed host is an IPv6 address (`gateway_core::ipv6`, the
+RFC 4291 text grammar as the standard library reads it) and the check that
+every configuration string is UTF-8 (`gateway_core::utf8::is_valid`). Hashing,
+secret resolution, and the runtime mapping are trusted and tested, not
+formally verified. The core theorem still concerns
 normalized route handles. The HTTP adapter consumes `RoutedRequest`; the verified
 header projection strips client credential headers and constructs Host from the
 fixed destination, while disabling redirects/proxies/retries and retaining request
