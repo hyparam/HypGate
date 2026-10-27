@@ -341,3 +341,8 @@ the shipper reads the complete session from its original path and skips resolved
 exchanges using the existing checkpoint. Keep all segments in place until shipping
 and required replay finish; shipping an individual middle segment is not a
 replacement for shipping the complete session. No segments are deleted by shipping.
+
+Drain mode (`hypgate ship`) exits with an error if the session header cannot be
+opened or validated, or a record is corrupt or unreadable. Follow mode continues
+to expose read failures through its metrics. A torn final record remains a
+recoverable crash tail: only complete records are shipped.

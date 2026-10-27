@@ -578,3 +578,37 @@ fn checkpoint_is_scoped_to_server_and_token_and_legacy_progress_is_replayed() {
     assert_eq!(b.lock().unwrap().batches.len(), 1);
     assert!(!std::fs::read_to_string(state_dir.join("checkpoint.json")).unwrap().contains(next_token));
 }
+
+
+#[test]
+fn drain_returns_errors_for_corrupt_records_and_unreadable_session_headers() {
+    for problem in ["record", "header", "incomplete_header", "missing"] {
+        let dir = TempDir::new();
+        let path = dir.0.join("audit.log");
+        let mut log = DiskLog::create(&path, 4, Duration::from_secs(2)).unwrap();
+        write_exchange(&mut log, 1, "https://api.anthropic.com/v1/messages", ANTHROPIC_REQUEST.as_bytes(), 200, &[ANTHROPIC_RESPONSE.as_bytes()], 0);
+        log.shutdown(Duration::from_secs(2)).unwrap();
+        let mut bytes = std::fs::read(&path).unwrap();
+        match problem {
+            "record" => { let last = bytes.len() - 1; bytes[last] ^= 1; }
+            "header" => bytes[0] ^= 1,
+            "incomplete_header" => bytes.truncate(20),
+            _ => {}
+        }
+        std::fs::write(&path, bytes).unwrap();
+        if problem == "missing" { std::fs::remove_file(&path).unwrap(); }
+        let (port, roots, _state, _server) = fake_server(TOKEN);
+        let config = shipping_config(port, &dir.0, json!({}));
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        let (tx, rx) = mpsc::channel();
+        let task = thread::spawn(move || {
+            tx.send(Engine::new(config, path, Some(roots), flag, Arc::new(Metrics::default())).run(Mode::Drain)).unwrap();
+        });
+        let result = rx.recv_timeout(Duration::from_secs(2));
+        // Stop and join even if this regresses, rather than leaking a stuck test worker.
+        stop.store(true, Ordering::Relaxed);
+        task.join().unwrap();
+        assert!(result.expect("drain must terminate on read failure").is_err(), "{problem}");
+    }
+}

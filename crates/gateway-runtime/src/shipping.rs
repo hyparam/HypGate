@@ -190,11 +190,15 @@ impl Engine {
                         drive(&mut machine, &mut self, mode)
                     };
                     return match halt {
+                        Halt::ReadFailed => Err("shipping stopped: cannot read audit log"),
                         Halt::Revoked => Err("shipping stopped: token revoked or account disabled"),
                         Halt::StopRequested | Halt::Drained => Ok(()),
                     };
                 }
-                None => { if !self.idle() { return Ok(()); } }
+                None => {
+                    if mode == Mode::Drain { return Err("shipping stopped: cannot open or validate audit log"); }
+                    if !self.idle() { return Ok(()); }
+                }
             }
         }
     }

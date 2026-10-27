@@ -24,7 +24,7 @@ pub enum Event { RecordRead, ExchangeEmitted, Replied(Outcome), PoisonedUnsent, 
 pub enum Mode { Follow, Drain }
 
 #[derive(PartialEq, Eq, Structural, Clone, Copy, Debug)]
-pub enum Halt { StopRequested, Drained, Revoked }
+pub enum Halt { StopRequested, Drained, Revoked, ReadFailed }
 
 /// Idle polls with nothing read before a drain run flushes open exchanges.
 pub const DRAIN_IDLE_POLLS: u32 = 5;
@@ -163,6 +163,8 @@ fn drive_step<E: Effects>(machine: &mut Machine, effects: &mut E, mode: Mode, id
 {
     proof { machine.valid_bounds(); }
     if effects.stop_requested() { return Some(Halt::StopRequested); }
+    // A failed reader cannot produce further records or make drain progress.
+    if mode == Mode::Drain && machine.has_read_failed() { return Some(Halt::ReadFailed); }
     let now = effects.now();
     match machine.next(now) {
         Action::Stopped => {
