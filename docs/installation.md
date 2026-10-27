@@ -34,7 +34,8 @@ docker build --file deploy/Dockerfile.runtime --tag loggate .
 docker run --rm loggate --version
 ```
 
-The image runs as UID/GID 10001. Mount configuration read-only, provide credentials
+The image runs as UID/GID 10001. Mount configuration read-only and readable by
+that UID, provide credentials
 through your deployment's secret mechanism, and mount a private writable log
 directory owned by that UID. Each start needs a new log filename. The image
 contains the binary and license; retention runs on the host against closed logs.
