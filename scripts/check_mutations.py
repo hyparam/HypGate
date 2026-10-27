@@ -455,7 +455,8 @@ MUTATIONS = [
     # its reply, and checkpoints carry the machine's own progress.
     ("shipping_driver.rs", "driver_drops_token", "                        Some(token) => settle(machine, effects, token),", "                        Some(_) => {}"),
     ("shipping_driver.rs", "driver_admits_unchecked_header", "if header_ok(&header, payload.len()) {", "if true {"),
-    ("shipping_driver.rs", "driver_reads_when_unwanted", "    while machine.wants_records()\n", "    while true\n"),
+    ("shipping_driver.rs", "driver_reads_when_unwanted", "    while count < PUMP_BATCH && machine.wants_records()\n", "    while count < PUMP_BATCH\n"),
+    ("shipping_driver.rs", "driver_pump_ignores_batch_cap", "    while count < PUMP_BATCH && machine.wants_records()\n", "    while machine.wants_records()\n"),
     ("shipping_driver.rs", "driver_flushes_without_room", "while machine.open_exchanges() > 0 && machine.has_room()", "while machine.open_exchanges() > 0"),
     ("shipping_driver.rs", "driver_ignores_reply", "let outcome = machine.reply(replied_at, reply);", "let outcome = Outcome::Nothing;"),
     ("exchange_assembler.rs", "emission_spec_evicts_newest", "else if open.len() == max_open { (open.drop_first().push(request), Some(open[0])) }", "else if open.len() == max_open { (open.drop_first().push(request), Some(open[open.len() - 1])) }"),
@@ -623,7 +624,7 @@ MUTATIONS = [
     ("exchange_lifecycle.rs", "lifecycle_records_counts_for_failed_exchange", "let (upload, download) = if self.outcome == metadata::OUTCOME_SUCCESS { (self.upload, self.download) } else { (0, 0) };", "let (upload, download) = (self.upload, self.download);"),
     ("exchange_lifecycle.rs", "lifecycle_drops_download_count", "self.download = copy.accepted_bytes();", "self.download = 0;"),
     ("exchange_lifecycle.rs", "lifecycle_fault_leaves_exchange_open", "        self.outcome = outcome_code(fault);\n        self.state = State::Terminal;", "        self.outcome = outcome_code(fault);"),
-    ("shipping_driver.rs", "driver_checkpoints_stale_progress", "                let (resolved, poisoned) = machine.progress();\n                effects.checkpoint(machine, resolved, poisoned);\n                effects.observe(Event::PoisonedUnsent, machine);", "                let (resolved, poisoned) = machine.progress();\n                effects.checkpoint(machine, 0, poisoned);\n                effects.observe(Event::PoisonedUnsent, machine);"),
+    ("shipping_driver.rs", "driver_checkpoints_stale_progress", "            let (resolved, poisoned) = machine.progress();\n            effects.checkpoint(machine, resolved, poisoned);\n            effects.observe(Event::PoisonedUnsent, machine);", "            let (resolved, poisoned) = machine.progress();\n            effects.checkpoint(machine, 0, poisoned);\n            effects.observe(Event::PoisonedUnsent, machine);"),
 ]
 
 

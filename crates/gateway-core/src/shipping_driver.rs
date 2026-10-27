@@ -73,20 +73,27 @@ fn settle<E: Effects>(machine: &mut Machine, effects: &mut E, token: crate::ship
     }
 }
 
-/// Read while the machine wants records. Returns the number of records read.
-#[verifier::exec_allows_no_decreases_clause]
-fn pump<E: Effects>(machine: &mut Machine, effects: &mut E) -> (count: u64)
+/// The most records one `pump` reads before returning to the drive loop, so
+/// a stop request is seen within a bounded batch and the read loop terminates
+/// whatever the log holds.
+pub const PUMP_BATCH: u32 = 1024;
+
+/// Read while the machine wants records, at most `PUMP_BATCH` of them.
+/// Returns the number of records read.
+fn pump<E: Effects>(machine: &mut Machine, effects: &mut E) -> (count: u32)
     requires old(machine).valid(), old(machine).outstanding() == 0, old(machine).awaiting().is_none(),
     ensures final(machine).valid(), final(machine).outstanding() == 0, final(machine).awaiting().is_none(),
+        count <= PUMP_BATCH,
 {
-    let mut count: u64 = 0;
-    while machine.wants_records()
-        invariant machine.valid(), machine.outstanding() == 0, machine.awaiting().is_none(),
+    let mut count: u32 = 0;
+    while count < PUMP_BATCH && machine.wants_records()
+        invariant machine.valid(), machine.outstanding() == 0, machine.awaiting().is_none(), count <= PUMP_BATCH,
+        decreases PUMP_BATCH - count,
     {
         proof { machine.valid_bounds(); }
         match effects.read() {
             Read::Record(header, payload) => {
-                if count < u64::MAX { count = count + 1; }
+                count = count + 1;
                 effects.observe(Event::RecordRead, machine);
                 if header_ok(&header, payload.len()) {
                     match machine.admit(header, payload.as_slice()) {
@@ -97,8 +104,9 @@ fn pump<E: Effects>(machine: &mut Machine, effects: &mut E) -> (count: u64)
                     machine.log_failed();
                 }
             }
-            Read::End => machine.end_of_log(),
-            Read::Failed => machine.log_failed(),
+            // The machine stops wanting records; leave without another round.
+            Read::End => { machine.end_of_log(); break; }
+            Read::Failed => { machine.log_failed(); break; }
         }
         proof { machine.valid_bounds(); }
     }
@@ -126,10 +134,72 @@ fn flush<E: Effects>(machine: &mut Machine, effects: &mut E) -> (remaining: bool
     emitted || machine.queue_len() > 0 || machine.open_exchanges() > 0
 }
 
+/// One round of the drive loop: a stop check, then the machine's next action
+/// performed against the effects. `Some` when the loop is over. Every round
+/// terminates: the read and flush loops inside it are measured.
+fn drive_step<E: Effects>(machine: &mut Machine, effects: &mut E, mode: Mode, idle_polls: &mut u32) -> (out: Option<Halt>)
+    requires old(machine).valid(), old(machine).awaiting().is_none(), old(machine).outstanding() == 0,
+    ensures final(machine).valid(), final(machine).awaiting().is_none(), final(machine).outstanding() == 0,
+        out == Some(Halt::Revoked) ==> final(machine).stopped(),
+{
+    proof { machine.valid_bounds(); }
+    if effects.stop_requested() { return Some(Halt::StopRequested); }
+    let now = effects.now();
+    match machine.next(now) {
+        Action::Stopped => {
+            effects.observe(Event::Stopped, machine);
+            if mode == Mode::Drain { return Some(Halt::Revoked); }
+            if !effects.idle() { return Some(Halt::StopRequested); }
+        }
+        Action::Sleep(seconds) => {
+            effects.observe(Event::Waiting, machine);
+            if !effects.sleep(seconds) { return Some(Halt::StopRequested); }
+        }
+        Action::Read => {
+            let read = pump(machine, effects);
+            *idle_polls = if read == 0 { if *idle_polls < u32::MAX { *idle_polls + 1 } else { *idle_polls } } else { 0 };
+        }
+        Action::Idle => {
+            if mode == Mode::Drain && *idle_polls >= DRAIN_IDLE_POLLS {
+                if !flush(machine, effects) { return Some(Halt::Drained); }
+                *idle_polls = 0;
+            } else {
+                effects.observe(Event::Waiting, machine);
+                if !effects.idle() { return Some(Halt::StopRequested); }
+            }
+        }
+        Action::Poisoned => {
+            let (resolved, poisoned) = machine.progress();
+            effects.checkpoint(machine, resolved, poisoned);
+            effects.observe(Event::PoisonedUnsent, machine);
+        }
+        Action::Send(request) => {
+            let reply = effects.send(request);
+            let replied_at = effects.now();
+            let outcome = machine.reply(replied_at, reply);
+            match outcome {
+                Outcome::Acknowledged(_) | Outcome::Poisoned => {
+                    let (resolved, poisoned) = machine.progress();
+                    effects.checkpoint(machine, resolved, poisoned);
+                }
+                _ => {}
+            }
+            effects.observe(Event::Replied(outcome), machine);
+        }
+    }
+    None
+}
+
 /// Run the machine against the effects until a stop is requested, a drain
 /// finishes, or the credential is revoked. The machine is always valid, never
 /// holds a token across iterations, and has no request outstanding between
 /// a send and its reply.
+///
+/// This is a service loop: each round is the verified, terminating
+/// `drive_step`, and the loop ends when a round reports a halt. A round that
+/// sees `stop_requested` halts at once, so the loop ends within one round of
+/// a stop request; that the effects eventually report one is the liveness
+/// assumption on the environment, not a theorem here.
 #[verifier::exec_allows_no_decreases_clause]
 pub fn drive<E: Effects>(machine: &mut Machine, effects: &mut E, mode: Mode) -> (out: Halt)
     requires old(machine).valid(), old(machine).awaiting().is_none(), old(machine).outstanding() == 0,
@@ -140,50 +210,9 @@ pub fn drive<E: Effects>(machine: &mut Machine, effects: &mut E, mode: Mode) -> 
     loop
         invariant machine.valid(), machine.awaiting().is_none(), machine.outstanding() == 0,
     {
-        proof { machine.valid_bounds(); }
-        if effects.stop_requested() { return Halt::StopRequested; }
-        let now = effects.now();
-        match machine.next(now) {
-            Action::Stopped => {
-                effects.observe(Event::Stopped, machine);
-                if mode == Mode::Drain { return Halt::Revoked; }
-                if !effects.idle() { return Halt::StopRequested; }
-            }
-            Action::Sleep(seconds) => {
-                effects.observe(Event::Waiting, machine);
-                if !effects.sleep(seconds) { return Halt::StopRequested; }
-            }
-            Action::Read => {
-                let read = pump(machine, effects);
-                idle_polls = if read == 0 { if idle_polls < u32::MAX { idle_polls + 1 } else { idle_polls } } else { 0 };
-            }
-            Action::Idle => {
-                if mode == Mode::Drain && idle_polls >= DRAIN_IDLE_POLLS {
-                    if !flush(machine, effects) { return Halt::Drained; }
-                    idle_polls = 0;
-                } else {
-                    effects.observe(Event::Waiting, machine);
-                    if !effects.idle() { return Halt::StopRequested; }
-                }
-            }
-            Action::Poisoned => {
-                let (resolved, poisoned) = machine.progress();
-                effects.checkpoint(machine, resolved, poisoned);
-                effects.observe(Event::PoisonedUnsent, machine);
-            }
-            Action::Send(request) => {
-                let reply = effects.send(request);
-                let replied_at = effects.now();
-                let outcome = machine.reply(replied_at, reply);
-                match outcome {
-                    Outcome::Acknowledged(_) | Outcome::Poisoned => {
-                        let (resolved, poisoned) = machine.progress();
-                        effects.checkpoint(machine, resolved, poisoned);
-                    }
-                    _ => {}
-                }
-                effects.observe(Event::Replied(outcome), machine);
-            }
+        match drive_step(machine, effects, mode, &mut idle_polls) {
+            Some(halt) => return halt,
+            None => {}
         }
     }
 }
