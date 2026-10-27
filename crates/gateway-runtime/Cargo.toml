@@ -1,7 +1,10 @@
 [package]
 name = "gateway-runtime"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Blocking network and disk runtime for the LogGate AI gateway"
 publish = false
 
 [[bin]]
@@ -18,3 +21,6 @@ webpki-roots = "1"
 sha2 = "0.10"
 rcgen = "0.14"
 serde_json = "1"
+
+[lints]
+workspace = true

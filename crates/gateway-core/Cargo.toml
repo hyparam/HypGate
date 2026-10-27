@@ -1,7 +1,10 @@
 [package]
 name = "gateway-core"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Verified policy, HTTP codecs, and audit state machines for LogGate"
 publish = false
 
 [dependencies]
