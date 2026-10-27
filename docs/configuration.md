@@ -66,7 +66,7 @@ categories, never input strings or secret values. Secret memory is not zeroized.
 Six configuration unit tests cover native provider endpoint/credential bindings,
 invalid authentication, forbidden routes, hostile destinations, invalid limits and
 digests, cross-tenant credentials, malformed schemas, and secret/header injection.
-Workspace test totals are maintained in the [README](../README.md). Live Anthropic
+See [contributing](../CONTRIBUTING.md) for validation commands. Live Anthropic
 Messages and OpenAI Responses exchanges, JSON and SSE, passed through these
 bindings on 2026-10-25; the [HypAware setup](hypaware.md#smoke-test-record)
 records the run.
@@ -83,8 +83,9 @@ no line break can enter a request head; the shipping limits and state
 directory are within their ranges). Destination validation is verified, as is
 the check that a bracketed host is an IPv6 address (`gateway_core::ipv6`, the
 RFC 4291 text grammar as the standard library reads it) and the check that
-every configuration string is UTF-8 (`gateway_core::utf8::is_valid`). Hashing,
-secret resolution, and the runtime mapping are trusted and tested, not
+every configuration string is UTF-8 (`gateway_core::utf8::is_valid`). SHA-256
+hashing is verified against the core FIPS 180-4 specification.
+Secret resolution and the runtime mapping are trusted and tested, not
 formally verified. The core theorem still concerns
 normalized route handles. The HTTP adapter consumes `RoutedRequest`; the verified
 header projection strips client credential headers and constructs Host from the

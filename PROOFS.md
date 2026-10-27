@@ -7,8 +7,8 @@ every decision the gateway makes: who may send what where, which bytes are
 forwarded, what is written to the audit log, what is shipped to the cloud and
 when. Verus checks that crate against written contracts, so its functions
 cannot panic, overflow, index out of bounds, or violate their stated
-postconditions on any input. `crates/gateway-runtime` holds the plain Rust
-that touches the world: sockets, TLS, files, threads, clocks. It is
+postconditions when their stated preconditions hold. `crates/gateway-runtime`
+holds the plain Rust that touches the world: sockets, TLS, files, threads, clocks. It is
 tested, audited, and kept as thin as we can make it, but it is not verified.
 
 A guarantee in this document is therefore always a theorem about the core
@@ -268,10 +268,11 @@ an assumption we take on; the proofs that could be written have been.
   tests rather than proved.
   Mostly assumption: the server and TLS stack are outside the process.
 
-## Guarantee 3: there is no crash state
+## Guarantee 3: core safety and crash recovery
 
-**Statement.** The verified core cannot panic. Every reachable shipper state
-has a next action, and every wait it asks for is between one second and five
+**Statement.** Verified core operations do not panic when their preconditions
+hold. This does not establish process-wide crash freedom. Every reachable
+shipper state has a next action, and every wait it asks for is between one second and five
 minutes; the single terminal state is a revoked credential, and it is
 reported. The shipper shares no executor, pool, or handle with request
 handling, so its failure changes metrics and nothing else. A process kill at

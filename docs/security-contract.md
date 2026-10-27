@@ -19,10 +19,10 @@ establish that an arbitrary administrator-supplied root policy expresses the
 administrator's intended security policy. Root-policy provisioning, authentication
 evidence, and secret loading need explicit trust assumptions.
 
-Start with static policy snapshots, fixed routes, no redirects, no fallback, and
+The gateway uses static policy snapshots, fixed routes, no redirects, no fallback, and
 no automatic request replay. No general RBAC system or provider-body interpretation
-is required to enforce a simple principal-to-route permission relation. The identity
-and credential ownership mechanism must be settled before exposing an endpoint.
+is required to enforce a simple principal-to-route permission relation. Digest
+authentication binds each gateway token to a tenant; granted routes bind that tenant to a destination and provider credential.
 
 ## Required properties
 
@@ -34,7 +34,7 @@ and credential ownership mechanism must be settled before exposing an endpoint.
 | Routing integrity | Effective scheme, host, port, and route template come from validated policy, not arbitrary request fields, provider response headers, ambient proxy settings, or unvalidated configuration. | Normalized origin handles confined to root grants; the destination grammar and the host, port, and path it yields are proved (`destination::parse`); socket/TLS naming derives from those verified parts, with DNS and TLS name checks trusted. |
 | Security failure is closed | Authentication, authorization, destination validation, and credential selection failures never permit upstream dispatch. | Invalid core authentication/configuration cannot yield authority; dispatch mediation is audited at the source level in the end-to-end audit. Distinct from logging policy. |
 | Logging policy | Strict mode gates write ranges on durable acknowledgments. Availability-first mode may forward without complete audit coverage but still requires all security checks. | Exact durable receipts gate stream bytes; ordered recovery is proved under explicit storage/read/checksum assumptions. Linux ext4 failure/process-death tests passed; physical persistence remains trusted. |
-| Configuration confinement | For every candidate configuration, validation either rejects it or constructs routes whose tenant, origin, and credential bindings satisfy the root grants. | Proved for normalized tenant, selector, origin, and credential handles; textual configuration parsing is implemented and tested, not proved. |
+| Configuration confinement | For every candidate configuration, validation either rejects it or constructs routes whose tenant, origin, and credential bindings satisfy the root grants. | Proved for normalized tenant, selector, origin, and credential handles; JSON parsing, schema validation, and value checks are proved; secret resolution and runtime binding remain trusted. |
 
 These properties cover gateway-controlled effects. An opaque body may contain a
 user-supplied secret, and an upstream may echo data it received. Preserving and
