@@ -58,6 +58,26 @@ process; it does not wait for pending uploads.
 
 ## Clean-environment reproduction
 
+### Executable reproducibility
+
+Run `bash scripts/check_reproducible_build.sh` with Docker available to build the
+runtime Dockerfile's build stage twice for `linux/amd64`, with layer caching
+disabled for both builds. The check compares the extracted `hypgate` executables
+byte for byte, fails on a mismatch, and prints their SHA-256 hashes. CI runs this
+check separately from the Verus proof job. Temporary containers and build images
+are removed when the check exits.
+
+This checks repeatability for the same source, pinned build image, locked
+dependencies, target architecture, and container paths. It does not establish
+reproducibility across different toolchains or platforms, or compare whole
+container images. To check a distributed executable, rerun the proofs on its
+claimed source revision, rebuild using this environment, and compare the printed
+hash with that executable's SHA-256 hash. Matching bytes establish correspondence
+to the rebuild, not a machine-code proof: the compiler, dependencies, and runtime
+adapters remain trusted.
+
+### Deployment checks
+
 `scripts/check_deployment.sh` performs the documented operator path from a fresh
 checkout with nothing but bash, the pinned Rust toolchain, curl, and openssl. It
 builds the release executable with locked dependencies, generates a 32-byte gateway

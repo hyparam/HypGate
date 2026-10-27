@@ -469,7 +469,7 @@ MUTATIONS = [
     ("enrollment.rs", "enrollment_accepts_expired_token", "if matches!(self.state, State::Stopped) || now >= expires_at { return false; }", "if matches!(self.state, State::Stopped) { return false; }"),
     ("enrollment.rs", "enrollment_revoke_not_absorbing", "    { self.state = State::Stopped; }", "    { self.state = State::Unenrolled; }"),
     ("enrollment.rs", "enrollment_rejected_ignores_stop", "        if matches!(self.state, State::Stopped) { return Recovery::Stop; }\n", ""),
-    ("enrollment.rs", "enrollment_refresh_window_only_after_expiry", "State::Enrolled { expires_at } => expires_at <= now || expires_at - now <= RENEWAL_WINDOW_SECONDS,", "State::Enrolled { expires_at } => expires_at <= now,"),
+    ("enrollment.rs", "enrollment_refresh_window_only_after_expiry", "State::Enrolled { expires_at } => expires_at <= now || (!self.fresh && expires_at - now <= RENEWAL_WINDOW_SECONDS),", "State::Enrolled { expires_at } => expires_at <= now,"),
     ("enrollment.rs", "throttle_delay_unbounded", "if seconds > MAX_DELAY_SECONDS { MAX_DELAY_SECONDS } else { seconds }", "seconds"),
     ("enrollment.rs", "transport_delay_can_be_zero", "if attempt < 3 { 2 * (attempt as u64 + 1) }", "if attempt < 3 { 2 * (attempt as u64) }"),
 
