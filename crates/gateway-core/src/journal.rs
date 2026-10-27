@@ -16,6 +16,12 @@ impl Append {
 // frame so consumers can check exact bytes without a collision assumption.
 pub struct DurableFrame { session: u128, frame: RecordFrame, #[allow(dead_code)] prefix: Ghost<Seq<u8>> }
 impl DurableFrame {
+    pub fn into_receipt(self) -> (out: crate::audit_receipt::AuditReceipt)
+        requires self.valid(),
+        ensures out.valid(), out.durable(), out.session() == self.session(), out.record() == self.record(),
+            out.prefix() == self.prefix(),
+    { crate::audit_receipt::AuditReceipt::from_durable_parts(self.session, self.frame, self.prefix) }
+
     pub closed spec fn session(&self) -> u128 { self.session }
     pub fn session_id(&self) -> (out: u128) ensures out == self.session(), { self.session }
     pub closed spec fn valid(&self) -> bool { self.frame.valid() }

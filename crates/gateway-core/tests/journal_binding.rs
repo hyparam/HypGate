@@ -1,10 +1,10 @@
-use gateway_core::{journal_binding::JournalBinding, journal::{Journal, DurableFrame}, framing::{Header, RecordBody}};
-fn receipt(session: u128) -> DurableFrame {
+use gateway_core::{journal_binding::JournalBinding, journal::Journal, audit_receipt::AuditReceipt, framing::{Header, RecordBody}};
+fn receipt(session: u128) -> AuditReceipt {
     let frame = RecordBody::new(Header { payload: 3, tenant: 1, request: 2, chunk: 3, kind: 0 }, b"abc")
         .unwrap().seal(&[0; 32]);
     let mut journal = Journal::new(session);
     let ticket = journal.begin(frame.bytes().len() as u64).unwrap();
-    journal.commit_frame(&ticket, frame).unwrap()
+    journal.commit_frame(&ticket, frame).unwrap().into_receipt()
 }
 #[test]
 fn designation_is_required_and_cannot_change() {

@@ -155,7 +155,7 @@ fn gated_sink() -> (Sink, blocking::Receiver<()>, blocking::Sender<()>) {
     (file, started, release)
 }
 /// Run an append on its own thread, returning a handle to its result.
-fn append_on_thread(mut log: DiskLog, bytes: &'static [u8], chunk: u64) -> thread::JoinHandle<io::Result<DurableFrame>> {
+fn append_on_thread(mut log: DiskLog, bytes: &'static [u8], chunk: u64) -> thread::JoinHandle<io::Result<AuditReceipt>> {
     thread::spawn(move || log.append(record(bytes, chunk)))
 }
 
@@ -698,4 +698,37 @@ fn shared_sync_spans_rotations_and_recovers_every_exact_frame() {
     }
     assert!(scanner.next_record().unwrap().is_none());
     assert_eq!(scanner.segment(), 8);
+}
+
+#[test]
+fn buffered_runtime_skips_sync_and_still_poison_on_write_failure() {
+    for fail_write in [false, true] {
+        let mut file = sink(); file.fail_write = fail_write; file.fail_sync = true;
+        let bytes = file.bytes.clone(); let syncs = file.syncs.clone();
+        let mut log = DiskLog::start_storage_with_durability(Storage(file), 16, WAIT, [1; 16], 4096, Durability::Buffered).unwrap();
+        assert_eq!(log.durability(), Durability::Buffered);
+        for id in 1..=20 {
+            let result = log.append(record(b"written", id));
+            if fail_write { assert!(result.is_err()); assert!(!log.healthy()); }
+            else { assert!(!result.unwrap().is_durable()); }
+        }
+        assert_eq!(syncs.load(Ordering::Relaxed), 0);
+        if !fail_write { assert!(!bytes.lock().unwrap().is_empty()); }
+        log.shutdown(WAIT).unwrap();
+    }
+}
+
+#[test]
+fn buffered_rotation_recovers_all_written_records_after_clean_shutdown() {
+    let dir = TempDir::new(); let path = dir.0.join("buffered-rotation.log");
+    let rotation = Rotation { max_bytes: 56 + 2 * 68, max_age: Duration::from_secs(60) };
+    let mut log = DiskLog::create_rotating_with_durability(&path, 16, WAIT, 3, rotation, Durability::Buffered).unwrap();
+    for chunk in 0..17 { assert!(!log.append(record(b"abc", chunk)).unwrap().is_durable()); }
+    log.shutdown(WAIT).unwrap();
+    let mut scanner = SessionReader::open(&path).unwrap();
+    for chunk in 0..17 {
+        let recovered = scanner.next_record().unwrap().unwrap();
+        assert_eq!(recovered.chunk, chunk); assert_eq!(recovered.bytes, b"abc");
+    }
+    assert!(scanner.next_record().unwrap().is_none()); assert_eq!(scanner.segment(), 8);
 }

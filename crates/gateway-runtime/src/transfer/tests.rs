@@ -8,7 +8,7 @@ type Events = Arc<Mutex<Vec<Event>>>;
 struct Log { events: Events, fail: bool, panics: bool }
 impl AuditLog for Log {
     fn session_id(&self) -> u128 { 0 }
-    fn append(&mut self, record: LogRecord<'_>) -> io::Result<crate::transfer::DurableFrame> {
+    fn append(&mut self, record: LogRecord<'_>) -> io::Result<crate::transfer::AuditReceipt> {
         assert_eq!(record.tenant, 1);
         assert!(record.request != 0);
         if self.panics { panic!("injected logger failure mid-append"); }

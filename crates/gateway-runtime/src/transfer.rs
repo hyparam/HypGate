@@ -3,7 +3,7 @@
 //! external contracts; which of them happens next is the machine's decision.
 use crate::admission::{CancelOnDrop, Request};
 use crate::net::{read_uninterrupted, write_uninterrupted};
-pub use gateway_core::journal::DurableFrame;
+pub use gateway_core::audit_receipt::AuditReceipt;
 use gateway_core::{body_copy::{Action, BodyCopy, Failure}, resolved_route::ResolvedRoute};
 use std::io::{self, Read, Write};
 
@@ -64,7 +64,7 @@ pub trait AuditLog {
     /// the logger's documented crash model. Implementations must bound their
     /// work: this blocks the calling thread. The receipt retains its frame
     /// until consumed or dropped. DiskLog supplies this implementation.
-    fn append(&mut self, record: LogRecord<'_>) -> io::Result<DurableFrame>;
+    fn append(&mut self, record: LogRecord<'_>) -> io::Result<AuditReceipt>;
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -136,14 +136,14 @@ where R: Read, W: Write, L: AuditLog {
 }
 
 #[cfg(test)]
-pub(crate) fn receipt_for_test(record: LogRecord<'_>) -> DurableFrame {
+pub(crate) fn receipt_for_test(record: LogRecord<'_>) -> AuditReceipt {
     let frame = gateway_core::framing::RecordBody::new(gateway_core::framing::Header {
         payload: record.bytes.len() as u32, tenant: record.tenant, request: record.request,
         chunk: record.chunk, kind: record.kind.id(),
     }, record.bytes).unwrap().seal(&[0; 32]);
     let mut journal = gateway_core::journal::Journal::new(0);
     let ticket = journal.begin(frame.bytes().len() as u64).unwrap();
-    journal.commit_frame(&ticket, frame).unwrap()
+    journal.commit_frame(&ticket, frame).unwrap().into_receipt()
 }
 
 #[cfg(test)]

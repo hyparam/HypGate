@@ -1,5 +1,10 @@
 # What is proved
 
+Durable crash-survival claims assume the default `"durability": "durable"`.
+Buffered mode proves exact writes and receipt gating but permits loss of
+acknowledged records after system failure; see the
+[durability contract](docs/disk-logging.md#audit-durability-policy).
+
 ## Overview
 
 The gateway is a small Rust program in two parts. `crates/gateway-core` holds

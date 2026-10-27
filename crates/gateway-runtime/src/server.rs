@@ -110,7 +110,7 @@ fn fixed(status: u16, text: Vec<u8>) -> FixedResponse { FixedResponse { status, 
 struct ObservedLog<'a> { log: DiskLog, gaps: &'a AtomicU64, observer: GapObserver }
 impl AuditLog for ObservedLog<'_> {
     fn session_id(&self) -> u128 { self.log.session_id() }
-    fn append(&mut self, record: LogRecord<'_>) -> io::Result<crate::transfer::DurableFrame> {
+    fn append(&mut self, record: LogRecord<'_>) -> io::Result<crate::transfer::AuditReceipt> {
         let result = self.log.append(record);
         if self.observer.observe(result.is_err()) { self.gaps.fetch_add(1, Ordering::Relaxed); }
         result

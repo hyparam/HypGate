@@ -32,7 +32,7 @@ impl AuthorizedWrite {
                     && !final(stream).state().closed()
                     && final(stream).state().end() > final(stream).state().position()
                     && final(stream).state().end() - final(stream).state().position() <= max
-                    && (final(stream).state().strict() ==> final(stream).state().end() <= final(stream).state().durable()
+                    && (final(stream).state().strict() ==> final(stream).state().end() <= final(stream).state().logged()
                         && final(stream).audited_for(authority, journal) && final(stream).audit_direction() == direction),
                 None => final(stream).state() == old(stream).state(),
             },
@@ -54,7 +54,7 @@ impl AuthorizedWrite {
             && authority.grants(self.route()) && self.request() == owner.state().owner()
             && owner.state().matches(&self.ticket()) && !owner.state().closed()
             && bytes == owner.state().body().subrange(owner.state().position() as int, owner.state().end() as int)
-            && (owner.state().strict() ==> owner.state().end() <= owner.state().durable()
+            && (owner.state().strict() ==> owner.state().end() <= owner.state().logged()
                 && owner.audited_for(authority, journal) && owner.receipt().is_some()
                 && owner.receipt().unwrap().valid()
                 && journal.session() == Some(owner.receipt().unwrap().session())

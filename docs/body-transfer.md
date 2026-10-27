@@ -1,5 +1,11 @@
 # Body transfer
 
+Durability scope: sync and acknowledged crash-survival claims below apply to the
+default `"durability": "durable"` policy. With `"durability": "buffered"`,
+receipts prove writes only; strict forwarding still checks those receipts. See
+[audit durability policy](disk-logging.md#audit-durability-policy) for the exact
+guarantees, receipt proofs, and remaining startup/rotation syncs.
+
 The body copy is a verified machine, `body_copy::BodyCopy` in the core. It
 names the next effect (read a chunk into the stream's buffer, append that
 chunk's record, write the gated bytes, flush), and the runtime loop in

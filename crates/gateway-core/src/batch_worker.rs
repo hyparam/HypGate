@@ -1,10 +1,14 @@
-//! Bounded group commit. Frames stay separate for rotation and share one sync.
+//! Bounded group commit. Frames stay separate for rotation; durable batches share one sync.
 use vstd::prelude::*;
-use crate::{audit_journal::AuditJournal, disk_worker::{Storage, Completion},
-    frame_queue::FrameQueue, framing::RecordFrame, journal::DurableFrame};
+use crate::{audit_receipt::{AuditReceipt, BatchJournal}, disk_worker::Storage,
+    frame_queue::FrameQueue, framing::RecordFrame};
 
 verus! {
 pub const MAX_BATCH: usize = 16;
+pub trait Completion: Sized {
+    fn complete(self, receipt: Option<AuditReceipt>)
+        requires match receipt { Some(r) => r.valid(), None => true };
+}
 
 pub open spec fn bytes<C>(jobs: Seq<(RecordFrame, C)>) -> Seq<u8>
     decreases jobs.len(),
@@ -15,20 +19,20 @@ pub open spec fn bytes<C>(jobs: Seq<(RecordFrame, C)>) -> Seq<u8>
 pub open spec fn prefix(a: Seq<u8>, b: Seq<u8>) -> bool {
     a.len() <= b.len() && b.take(a.len() as int) == a
 }
-pub open spec fn replies_match<C>(jobs: Seq<(RecordFrame, C)>, replies: Seq<(Option<DurableFrame>, C)>,
-    session: u128, stable: Seq<u8>) -> bool
+pub open spec fn replies_match<C>(jobs: Seq<(RecordFrame, C)>, replies: Seq<(Option<AuditReceipt>, C)>,
+    session: u128, acknowledged: Seq<u8>) -> bool
 {
     jobs.len() == replies.len() && forall|i: int| 0 <= i < jobs.len() ==>
         (#[trigger] replies[i]).1 == jobs[i].1 && match replies[i].0 {
             Some(r) => r.valid() && r.session() == session && r.record() == jobs[i].0.contents()
-                && prefix(r.acknowledged(), stable),
+                && prefix(r.acknowledged(), acknowledged),
             None => true,
         }
 }
 
 pub struct BatchWorker { busy: bool, next: u64, session: u128, limit: usize, active: Ghost<Seq<RecordFrame>> }
 pub struct ActiveBatch<C> { jobs: Vec<(RecordFrame, C)>, generation: u64, session: u128 }
-pub struct FinishedBatch<C> { replies: Vec<(Option<DurableFrame>, C)>, failed: bool, generation: u64, session: u128 }
+pub struct FinishedBatch<C> { replies: Vec<(Option<AuditReceipt>, C)>, failed: bool, generation: u64, session: u128 }
 /// Only synchronous delivery of the entire batch returns its credit.
 pub struct ReleasedBatch { generation: u64, session: u128 }
 
@@ -101,26 +105,32 @@ impl BatchWorker {
         self.active = Ghost(jobs@.map(|i: int, job: (RecordFrame, C)| job.0));
         Some(ActiveBatch { jobs, generation, session: self.session })
     }
-    pub fn run<C, S: Storage>(&self, batch: ActiveBatch<C>, journal: &mut AuditJournal,
+    pub fn run<C, S: Storage>(&self, batch: ActiveBatch<C>, journal: &mut BatchJournal,
         storage: &mut S, enabled: bool) -> (out: FinishedBatch<C>)
         requires self.valid(), self.owns(&batch), batch.valid(), old(journal).valid(), old(storage).valid(),
             !old(journal).failed() ==> old(storage).written() == old(journal).history(),
         ensures final(journal).valid(), final(storage).valid(), out.valid(),
             final(journal).session() == old(journal).session(),
             out.generation() == batch.generation(), out.session() == batch.session(),
-            replies_match(batch.jobs(), out.replies(), batch.session(), final(storage).stable()),
+            replies_match(batch.jobs(), out.replies(), batch.session(), final(storage).written()),
+            final(journal).requires_sync() == old(journal).requires_sync(),
+            forall|i: int| 0 <= i < out.replies().len() ==> match (#[trigger] out.replies()[i]).0 {
+                Some(r) => r.durable() == old(journal).requires_sync()
+                    && (r.durable() ==> prefix(r.acknowledged(), final(storage).stable())),
+                None => true,
+            },
             !final(journal).failed() ==> final(storage).written() == final(journal).history(),
             out.has_failed() == final(journal).failed(),
             (!enabled || old(journal).failed() || batch.session() != old(journal).session()) ==> *final(storage) == *old(storage),
     {
         let ghost original_jobs = batch.jobs@;
         proof { assert(original_jobs.skip(0) =~= original_jobs); }
-        let mut synced = false;
+        let mut accepted = false;
         if enabled && journal.session_id() == batch.session && !journal.is_failed() {
-            if write_frames(&batch.jobs, 0, storage) { synced = storage.sync(); }
+            if write_frames(&batch.jobs, 0, storage) { accepted = !journal.sync_required() || storage.sync(); }
         }
-        if !synced { journal.fail(); }
-        let replies = finish(batch.jobs, journal, Ghost(storage.stable()), synced);
+        if !accepted { journal.fail(); }
+        let replies = finish(batch.jobs, journal, Ghost(storage.written()), accepted);
         proof {
             if batch.session != journal.session() {
                 assert forall|i: int| 0 <= i < replies.len() implies (#[trigger] replies@[i]).0.is_none() by {}
@@ -183,17 +193,21 @@ fn write_frames<C, S: Storage>(jobs: &Vec<(RecordFrame, C)>, at: usize, storage:
     ok
 }
 
-// The storage has already synced the entire group. Advancing the journal one
-// frame at a time issues receipts for prefixes of that same durable byte string.
-fn finish<C>(mut jobs: Vec<(RecordFrame, C)>, journal: &mut AuditJournal, stable: Ghost<Seq<u8>>, _synced: bool)
-    -> (out: Vec<(Option<DurableFrame>, C)>)
+// The storage has already written the group and, in durable mode, synced it. Advancing the journal one
+// frame at a time issues receipts for prefixes of that same acknowledged byte string.
+fn finish<C>(mut jobs: Vec<(RecordFrame, C)>, journal: &mut BatchJournal, stable: Ghost<Seq<u8>>, _accepted: bool)
+    -> (out: Vec<(Option<AuditReceipt>, C)>)
     requires old(journal).valid(), crate::frame_queue::items_bounded(jobs@, 1048576),
-        _synced ==> stable@ == old(journal).history() + bytes(jobs@),
-        !_synced ==> old(journal).failed(),
+        _accepted ==> stable@ == old(journal).history() + bytes(jobs@),
+        !_accepted ==> old(journal).failed(),
     ensures final(journal).valid(), final(journal).session() == old(journal).session(),
         replies_match(jobs@, out@, old(journal).session(), stable@),
         !final(journal).failed() ==> final(journal).history() == stable@,
         old(journal).failed() ==> final(journal).failed(),
+        final(journal).requires_sync() == old(journal).requires_sync(),
+        forall|i: int| 0 <= i < out.len() ==> match (#[trigger] out@[i]).0 {
+            Some(r) => r.durable() == old(journal).requires_sync(), None => true,
+        },
         old(journal).failed() ==> forall|i: int| 0 <= i < out.len() ==> (#[trigger] out@[i]).0.is_none(),
     decreases jobs.len(),
 {
@@ -209,9 +223,7 @@ fn finish<C>(mut jobs: Vec<(RecordFrame, C)>, journal: &mut AuditJournal, stable
     }
     let mut receipt = None;
     if !journal.is_failed() {
-        if let Some(ticket) = journal.begin(frame.bytes().len() as u64) {
-            receipt = journal.commit_frame(&ticket, frame);
-        }
+        receipt = journal.commit(frame);
     }
     if receipt.is_none() { journal.fail(); }
     let ghost head_receipt = receipt;
@@ -239,7 +251,7 @@ fn finish<C>(mut jobs: Vec<(RecordFrame, C)>, journal: &mut AuditJournal, stable
     tail
 }
 impl<C> FinishedBatch<C> {
-    pub closed spec fn replies(&self) -> Seq<(Option<DurableFrame>, C)> { self.replies@ }
+    pub closed spec fn replies(&self) -> Seq<(Option<AuditReceipt>, C)> { self.replies@ }
     pub closed spec fn generation(&self) -> u64 { self.generation }
     pub closed spec fn session(&self) -> u128 { self.session }
     pub closed spec fn has_failed(&self) -> bool { self.failed }

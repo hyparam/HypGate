@@ -31,7 +31,7 @@ fn submission_binds_request_route_and_exact_audited_range() {
                 .unwrap().seal(&[0; 32]);
             let mut journal = Journal::new(17);
             let ticket = journal.begin(frame.bytes().len() as u64).unwrap();
-            let receipt = journal.commit_frame(&ticket, frame).unwrap();
+            let receipt = journal.commit_frame(&ticket, frame).unwrap().into_receipt();
             assert!(stream.acknowledge_receipt(&authority, &binding, 0, &receipt));
         }
         let mut foreign = JournalBinding::new();

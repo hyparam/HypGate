@@ -41,6 +41,10 @@ impl Profile {
 }
 
 fn benchmark(availability: bool, profile: Profile) {
+    benchmark_with_durability(availability, profile, gateway_core::audit_receipt::Durability::Durable);
+}
+
+fn benchmark_with_durability(availability: bool, profile: Profile, durability: gateway_core::audit_receipt::Durability) {
     let Profile { workload, requests, concurrency, upload, download, provider_pace_ms, client_pace_ms, timeout_secs, .. } = profile;
     assert!(requests % concurrency == 0 && download % PIECE == 0);
     let failed_log = workload == Workload::FailedLog;
@@ -51,12 +55,13 @@ fn benchmark(availability: bool, profile: Profile) {
         "destinations":[format!("https://localhost:{}/v1/messages", upstream.local_addr().unwrap().port())],
         "credentials":[{"tenant":1,"kind":"api_key","env":"KEY"}],"grants":routes,
         "limits":{"requests":concurrency,"chunk_bytes":16384},
+        "durability":if matches!(durability, gateway_core::audit_receipt::Durability::Durable) { "durable" } else { "buffered" },
         "logging":if availability { "availability" } else { "strict" }});
     let config = GatewayConfig::from_json(&serde_json::to_vec(&root).unwrap(),
         |_| Some("fixture-key".into())).unwrap();
     let dir = TempDir::new(); let path = dir.0.join("benchmark.log");
     let app = Gateway::new(config, HttpsTransport::with_roots(roots, Duration::from_secs(300)).unwrap(),
-        DiskLog::create(&path, 16, Duration::from_secs(2)).unwrap());
+        DiskLog::create_with_durability(&path, 16, Duration::from_secs(2), durability).unwrap());
     let gateway = spawn_gateway(&app, 128, Duration::from_secs(310));
     let port = gateway.port;
     let provider = std::thread::spawn(move || {
@@ -164,6 +169,7 @@ fn benchmark(availability: bool, profile: Profile) {
     let payload = completed as f64 * (upload + download) as f64;
     let percentile_or_zero = |values: &[f64], percent: usize| if values.is_empty() { 0. } else { percentile(values, percent) };
     println!("{}", json!({"benchmark":"local_tls_disk", "workload":workload.name(), "repeat":profile.repeat,
+        "durability":format!("{durability:?}"),
         "mode":if availability { "availability" } else { "strict" },
         "requests":requests, "concurrency":concurrency, "upload_bytes":upload, "download_bytes":download,
         "provider_pace_ms":provider_pace_ms, "client_pace_ms":client_pace_ms, "forwarded":forwarded, "rejected":rejected,
@@ -256,3 +262,18 @@ fn strict_large_uploads() { large_uploads(false); }
 #[test]
 #[ignore = "local workload; run in release mode with --ignored --nocapture --test-threads=1"]
 fn availability_large_uploads() { large_uploads(true); }
+
+#[test]
+#[ignore = "release performance comparison with real writes and configured durability"]
+fn durability_comparison() {
+    use gateway_core::audit_receipt::Durability;
+    for repeat in 0..3 {
+        for concurrency in [1, 8, 32] {
+            for durability in [Durability::Durable, Durability::Buffered] {
+                benchmark_with_durability(false, Profile { workload: Workload::ConcurrencySweep,
+                    requests: 4 * concurrency, concurrency, upload: UPLOAD, download: DOWNLOAD,
+                    provider_pace_ms: 0, client_pace_ms: 0, repeat, timeout_secs: 120 }, durability);
+            }
+        }
+    }
+}

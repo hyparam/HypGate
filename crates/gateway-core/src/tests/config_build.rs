@@ -20,7 +20,7 @@ fn root() -> Root {
             CredentialInput { tenant: 2, kind: CredentialKind::ApiKey, env: b"ANTHROPIC_KEY".to_vec() }],
         grants: vec![Route { tenant: 1, selector: 7, origin: 0, credential: 0 }, Route { tenant: 2, selector: 8, origin: 1, credential: 1 }],
         limits: Limits { requests: 2, chunk_bytes: 4096 },
-        logging: Logging::Strict,
+        logging: Logging::Strict, durability: crate::audit_receipt::Durability::Durable,
     }
 }
 fn candidate() -> Candidate { Candidate { routes: root().grants } }

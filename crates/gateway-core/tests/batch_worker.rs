@@ -1,5 +1,5 @@
-use gateway_core::{audit_journal::AuditJournal, disk_worker::{Completion, Storage}, batch_worker::BatchWorker as DiskWorker,
-    frame_queue::FrameQueue, framing::{Header, RecordBody, RecordFrame}, journal::DurableFrame};
+use gateway_core::{audit_receipt::BatchJournal as AuditJournal, disk_worker::Storage, batch_worker::{Completion, BatchWorker as DiskWorker},
+    frame_queue::FrameQueue, framing::{Header, RecordBody, RecordFrame}, audit_receipt::AuditReceipt};
 use std::sync::{Arc, Mutex};
 
 #[derive(Default)]
@@ -16,10 +16,10 @@ impl Storage for Disk {
         self.stable = self.bytes.clone(); true
     }
 }
-type Replies = Arc<Mutex<Vec<(u64, Option<DurableFrame>)>>>;
+type Replies = Arc<Mutex<Vec<(u64, Option<AuditReceipt>)>>>;
 struct Reply { id: u64, replies: Replies }
 impl Completion for Reply {
-    fn complete(self, receipt: Option<DurableFrame>) { self.replies.lock().unwrap().push((self.id, receipt)); }
+    fn complete(self, receipt: Option<AuditReceipt>) { self.replies.lock().unwrap().push((self.id, receipt)); }
 }
 fn frame(id: u64) -> RecordFrame {
     RecordBody::new(Header { tenant: 1, request: 1, chunk: id, kind: 0, payload: 3 }, b"abc")
@@ -152,7 +152,7 @@ fn mismatched_journal_session_fails_before_any_storage_effect() {
     assert_eq!((disk.writes, disk.syncs), (0, 0));
     assert!(worker.release(finished.deliver()));
     assert!(replies.lock().unwrap()[0].1.is_none());
-    assert!(journal.begin(68).is_none());
+    assert!(journal.is_failed());
 }
 
 #[test]
@@ -207,5 +207,43 @@ fn failed_batch_rejects_every_record_and_never_retries_partial_writes() {
         let replies = replies.lock().unwrap();
         assert_eq!(replies.len(), 20);
         assert!(replies.iter().all(|(_, r)| r.is_none()));
+    }
+}
+
+#[test]
+fn buffered_batches_require_writes_but_never_claim_durability() {
+    use gateway_core::{audit_receipt::Durability, journal_binding::JournalBinding};
+    for fail_write_at in [None, Some(1), Some(8), Some(16)] {
+        let replies = Replies::default();
+        let mut queue = FrameQueue::with_payload_limit(20, 3);
+        let mut worker = DiskWorker::new(3, 1);
+        let mut journal = AuditJournal::with_durability(1, Durability::Buffered);
+        let mut disk = Disk { fail_write_at, fail_sync: true, ..Disk::default() };
+        for id in 1..=20 { push(&mut queue, id, &replies); }
+        while let Some(batch) = worker.take(&mut queue) {
+            let finished = worker.run(batch, &mut journal, &mut disk, true);
+            assert_eq!(finished.failed(), fail_write_at.is_some());
+            assert!(worker.release(finished.deliver()));
+        }
+        assert_eq!(disk.syncs, 0);
+        assert!(disk.stable.is_empty());
+        assert_eq!(disk.writes, fail_write_at.unwrap_or(20));
+        let mut durable = JournalBinding::new();
+        let mut buffered = JournalBinding::with_durability(Durability::Buffered);
+        assert!(durable.bind(1)); assert!(buffered.bind(1));
+        let replies = replies.lock().unwrap();
+        assert_eq!(replies.len(), 20);
+        for (id, receipt) in replies.iter() {
+            if fail_write_at.is_some() { assert!(receipt.is_none()); }
+            else {
+                let receipt = receipt.as_ref().unwrap();
+                assert!(!receipt.is_durable());
+                assert!(!durable.accepts(receipt)); assert!(buffered.accepts(receipt));
+                assert!(receipt.matches_record(Header { tenant: 1, request: 1, chunk: *id, kind: 0, payload: 3 }, b"abc"));
+            }
+        }
+        if fail_write_at.is_none() {
+            assert_eq!(disk.bytes, (1..=20).flat_map(|id| frame(id).bytes().clone()).collect::<Vec<_>>());
+        }
     }
 }

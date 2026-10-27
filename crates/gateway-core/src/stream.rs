@@ -14,7 +14,7 @@ pub struct StreamChunk {
     chunk: u64,
     prefix: Ghost<Seq<u8>>,
     sent: usize,
-    durable: usize,
+    logged: usize,
     offered: usize,
     generation: u64,
     pending: bool,
@@ -35,7 +35,7 @@ pub struct Model {
     pub completed: Seq<u8>,
     pub position: nat,
     pub end: nat,
-    pub durable: nat,
+    pub logged: nat,
     pub generation: u64,
     pub pending: bool,
     pub closed: bool,
@@ -104,8 +104,8 @@ impl StreamChunk {
     pub closed spec fn valid(&self) -> bool {
         self.sent <= self.offered <= self.bytes.len()
         && self.bytes.len() <= self.capacity
-        && self.durable <= self.bytes.len()
-        && (self.strict ==> self.offered <= self.durable)
+        && self.logged <= self.bytes.len()
+        && (self.strict ==> self.offered <= self.logged)
         && (!self.pending ==> self.offered == self.sent)
         && (self.strict && self.failed ==> self.closed)
     }
@@ -113,13 +113,13 @@ impl StreamChunk {
     pub proof fn payload_within_capacity(&self)
         requires self.valid(),
         ensures self.body().len() <= self.capacity(), self.position() <= self.end() <= self.body().len(),
-            self.strict() ==> self.end() <= self.durable(),
+            self.strict() ==> self.end() <= self.logged(),
     {}
 
     pub closed spec fn model(&self) -> Model {
         Model { owner: self.owner, capacity: self.capacity as nat, strict: self.strict, chunk: self.chunk,
             body: self.bytes@, input: self.prefix@ + self.bytes@, completed: self.prefix@ + self.bytes@.subrange(0, self.sent as int),
-            position: self.sent as nat, end: self.offered as nat, durable: self.durable as nat,
+            position: self.sent as nat, end: self.offered as nat, logged: self.logged as nat,
             generation: self.generation, pending: self.pending, closed: self.closed, failed: self.failed }
     }
     pub open spec fn chunk(&self) -> u64 { self.model().chunk }
@@ -129,7 +129,7 @@ impl StreamChunk {
     pub open spec fn body(&self) -> Seq<u8> { self.model().body }
     pub open spec fn position(&self) -> nat { self.model().position }
     pub open spec fn end(&self) -> nat { self.model().end }
-    pub open spec fn durable(&self) -> nat { self.model().durable }
+    pub open spec fn logged(&self) -> nat { self.model().logged }
     pub open spec fn owner(&self) -> u64 { self.model().owner }
     pub open spec fn generation(&self) -> u64 { self.model().generation }
     pub open spec fn pending(&self) -> bool { self.model().pending }
@@ -159,16 +159,16 @@ impl StreamChunk {
     // Transition relations shared by this core and the owning wrapper.
     pub open spec fn acknowledged(pre: Self, post: Self, owner: u64, chunk: u64, end: nat, ok: bool) -> bool {
         ok == (!pre.closed() && !pre.failed() && owner == pre.owner() && chunk == pre.chunk()
-            && pre.durable() <= end <= pre.body().len())
-        && if ok { post.model() == Model { durable: end, ..pre.model() } } else { post == pre }
+            && pre.logged() <= end <= pre.body().len())
+        && if ok { post.model() == Model { logged: end, ..pre.model() } } else { post == pre }
     }
     pub open spec fn receipt_acknowledged(pre: Self, post: Self, authority: &AuthorizedRequest,
-        journal: &crate::journal_binding::JournalBinding, direction: u8, receipt: &crate::journal::DurableFrame, ok: bool) -> bool
+        journal: &crate::journal_binding::JournalBinding, direction: u8, receipt: &crate::audit_receipt::AuditReceipt, ok: bool) -> bool
     {
-        ok == (journal.session() == Some(receipt.session()) && pre.auditable(authority, direction)
+        ok == (journal.accepts_receipt(receipt) && pre.auditable(authority, direction)
             && receipt.record() == pre.audit_frame(authority.tenant(), direction, receipt.checksum()))
         && if ok {
-            post.model() == Model { durable: pre.body().len(), ..pre.model() }
+            post.model() == Model { logged: pre.body().len(), ..pre.model() }
                 && receipt.acknowledged() == receipt.prefix() + pre.audit_frame(authority.tenant(), direction, receipt.checksum())
         } else { post == pre }
     }
@@ -178,7 +178,7 @@ impl StreamChunk {
                 && pre.position() < post.end() <= pre.position() + max
                 && post.model() == Model { end: post.end(), generation: (pre.generation() + 1) as u64, pending: true, ..pre.model() },
             None => post == pre && (pre.closed() || pre.pending() || max == 0 || pre.generation() == u64::MAX
-                || pre.position() == (if pre.strict() { pre.durable() } else { pre.body().len() })),
+                || pre.position() == (if pre.strict() { pre.logged() } else { pre.body().len() })),
         }
     }
     pub open spec fn completed_write(pre: Self, post: Self, t: &Ticket, count: usize, ok: bool) -> bool {
@@ -194,14 +194,14 @@ impl StreamChunk {
             Some(chunk) => !pre.pending() && !pre.closed() && pre.position() == pre.body().len()
                 && chunk == pre.chunk() + 1
                 && post.model() == Model { chunk, body: bytes, input: pre.input() + bytes,
-                    position: 0, end: 0, durable: 0, ..pre.model() },
+                    position: 0, end: 0, logged: 0, ..pre.model() },
             None => post == pre && (pre.closed() || pre.pending() || pre.position() != pre.body().len()
                 || bytes.len() > pre.capacity() || pre.chunk() == u64::MAX),
         }
     }
     pub open spec fn discarded(pre: Self, post: Self, ok: bool) -> bool {
         ok == (!pre.closed() && !pre.pending() && pre.position() == pre.body().len())
-        && if ok { post.model() == Model { body: Seq::empty(), position: 0, end: 0, durable: 0, ..pre.model() } }
+        && if ok { post.model() == Model { body: Seq::empty(), position: 0, end: 0, logged: 0, ..pre.model() } }
         else { post == pre }
     }
     pub open spec fn cancelled(pre: Self, post: Self) -> bool {
@@ -214,14 +214,14 @@ impl StreamChunk {
     pub(crate) fn new(owner: u64, bytes: Vec<u8>, capacity: usize, strict: bool) -> (out: Option<Self>)
         ensures match out {
             Some(s) => s.valid() && s.model() == Model { owner, capacity: capacity as nat, strict, chunk: 0,
-                body: bytes@, input: bytes@, completed: Seq::empty(), position: 0, end: 0, durable: 0,
+                body: bytes@, input: bytes@, completed: Seq::empty(), position: 0, end: 0, logged: 0,
                 generation: 0, pending: false, closed: false, failed: false },
             None => bytes.len() > capacity,
         },
     {
         if bytes.len() > capacity { return None; }
         proof { assert(bytes@.subrange(0, 0) =~= Seq::<u8>::empty()); }
-        Some(StreamChunk { owner, bytes, capacity, chunk: 0, prefix: Ghost(Seq::empty()), sent: 0, durable: 0, offered: 0,
+        Some(StreamChunk { owner, bytes, capacity, chunk: 0, prefix: Ghost(Seq::empty()), sent: 0, logged: 0, offered: 0,
             generation: 0, pending: false, strict, failed: false, closed: false })
     }
 
@@ -231,13 +231,13 @@ impl StreamChunk {
         ensures final(self).valid(), Self::acknowledged(*old(self), *final(self), owner, chunk, end as nat, ok),
     {
         if self.closed || self.failed || owner != self.owner || chunk != self.chunk
-            || end < self.durable || end > self.bytes.len() { return false; }
-        self.durable = end;
+            || end < self.logged || end > self.bytes.len() { return false; }
+        self.logged = end;
         true
     }
 
     pub fn acknowledge_receipt(&mut self, authority: &AuthorizedRequest, journal: &crate::journal_binding::JournalBinding, direction: u8,
-        receipt: &crate::journal::DurableFrame) -> (ok: bool)
+        receipt: &crate::audit_receipt::AuditReceipt) -> (ok: bool)
         requires old(self).valid(), authority.valid(), receipt.valid(),
         ensures final(self).valid(),
             Self::receipt_acknowledged(*old(self), *final(self), authority, journal, direction, receipt, ok),
@@ -262,7 +262,7 @@ impl StreamChunk {
         if self.closed || self.pending || max == 0 || self.generation == u64::MAX {
             return None;
         }
-        let limit = if self.strict { self.durable } else { self.bytes.len() };
+        let limit = if self.strict { self.logged } else { self.bytes.len() };
         let available = limit - self.sent;
         if available == 0 { return None; }
         let count = if max < available { max } else { available };
@@ -321,7 +321,7 @@ impl StreamChunk {
         self.bytes = bytes;
         self.sent = 0;
         self.offered = 0;
-        self.durable = 0;
+        self.logged = 0;
         self.chunk = self.chunk + 1;
         Some(self.chunk)
     }
@@ -337,7 +337,7 @@ impl StreamChunk {
         self.bytes = Vec::new();
         self.sent = 0;
         self.offered = 0;
-        self.durable = 0;
+        self.logged = 0;
         true
     }
 

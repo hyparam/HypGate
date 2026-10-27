@@ -30,7 +30,7 @@ impl ResponseSink for Output {
 struct Log { upload: Vec<u8>, download: Vec<u8> }
 impl AuditLog for Log {
     fn session_id(&self) -> u128 { 0 }
-    fn append(&mut self, r: LogRecord<'_>) -> io::Result<crate::transfer::DurableFrame> {
+    fn append(&mut self, r: LogRecord<'_>) -> io::Result<crate::transfer::AuditReceipt> {
         match r.kind.direction() {
             Some(Direction::Upload) => self.upload.extend_from_slice(r.bytes),
             Some(Direction::Download) => self.download.extend_from_slice(r.bytes),

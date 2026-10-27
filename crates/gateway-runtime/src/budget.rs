@@ -2,7 +2,7 @@
 //! `docs/resource-composition.md`. The figure is conditional on the assumptions
 //! listed there; it is not an allocator, kernel, or RSS theorem. Constants are
 //! the documented per-owner bounds, so a changed audit must change this file.
-use gateway_core::{framing::RecordFrame, journal::DurableFrame, resource::validate_limits};
+use gateway_core::{framing::RecordFrame, audit_receipt::AuditReceipt, resource::validate_limits};
 use std::{mem::size_of, net::SocketAddr};
 use rustls::pki_types::TrustAnchor;
 
@@ -39,10 +39,10 @@ const SESSION_CACHE_CONTENT: u64 = 33 * 9 * 131_119;
 const DNS_JOBS: u64 = 32 * DNS_REPLY;
 const CONFIGURATION_CONTENT: u64 = 2 * 1024 * 1024;
 const POOL_SLOTS: u64 = 32; // DNS registry entries
-type ReplySlot = (Option<DurableFrame>, std::sync::mpsc::Sender<Option<DurableFrame>>);
+type ReplySlot = (Option<AuditReceipt>, std::sync::mpsc::Sender<Option<AuditReceipt>>);
 const BATCH_DESCRIPTORS: u64 = gateway_core::batch_worker::MAX_BATCH as u64
     * (size_of::<QueueSlot>() + size_of::<ReplySlot>()) as u64;
-type QueueSlot = Option<(RecordFrame, std::sync::mpsc::Sender<Option<DurableFrame>>)>;
+type QueueSlot = Option<(RecordFrame, std::sync::mpsc::Sender<Option<AuditReceipt>>)>;
 
 /// Returns `None` for limits the gateway refuses or sums that overflow `u64`.
 pub fn compose(limits: Limits) -> Option<Budget> {

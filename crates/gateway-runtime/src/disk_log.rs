@@ -1,11 +1,12 @@
 //! Bounded disk logging. Filesystem effects and checksum security are trusted,
 //! not verified. A single worker owns the file; requests never choose its path.
 use crate::transfer::{AuditLog, Direction, LogRecord, RecordKind};
-use gateway_core::{audit_journal::AuditJournal as Journal, journal::DurableFrame};
+use gateway_core::{audit_receipt::BatchJournal as Journal, audit_receipt::AuditReceipt};
 use gateway_core::framing::{Header, RecordBody, RecordFrame};
 use gateway_core::sha256;
 use std::{fs::File, io::{self, Read, Write}, path::Path,
     sync::{Arc, Mutex, mpsc, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
+pub use gateway_core::audit_receipt::Durability;
 mod queue;
 mod rotation;
 pub use rotation::{Rotation, SessionReader};
@@ -20,9 +21,9 @@ pub const MAX_RECORD_BYTES: usize = 1024 * 1024;
 // pages, and thread-local/kernel storage remain separate resource categories.
 const WORKER_STACK_BYTES: usize = 2 * 1024 * 1024;
 
-struct Completion(mpsc::Sender<Option<DurableFrame>>);
-impl gateway_core::disk_worker::Completion for Completion {
-    fn complete(self, receipt: Option<DurableFrame>) {
+struct Completion(mpsc::Sender<Option<AuditReceipt>>);
+impl gateway_core::batch_worker::Completion for Completion {
+    fn complete(self, receipt: Option<AuditReceipt>) {
         // Ownership goes to the request's reply channel, or the unsent value is
         // destroyed here. No worker-owned payload survives this synchronous call.
         let _ = self.0.send(receipt);
@@ -30,7 +31,7 @@ impl gateway_core::disk_worker::Completion for Completion {
 }
 #[cfg(test)]
 impl Completion {
-    fn send(self, receipt: Option<DurableFrame>) -> Result<(), Option<DurableFrame>> { self.0.send(receipt).map_err(|e| e.0) }
+    fn send(self, receipt: Option<AuditReceipt>) -> Result<(), Option<AuditReceipt>> { self.0.send(receipt).map_err(|e| e.0) }
 }
 type Job = (RecordFrame, Completion);
 
@@ -44,6 +45,7 @@ pub struct DiskLog {
     deadline: Duration,
     session: [u8; 16],
     payload_limit: usize,
+    durability: Durability,
 }
 
 // Dropping the last clone closes admission so the worker exits once drained.
@@ -73,9 +75,15 @@ impl DiskLog {
     pub fn create(path: &Path, queue_capacity: usize, deadline: Duration) -> io::Result<Self> {
         Self::create_with_payload_limit(path, queue_capacity, deadline, MAX_RECORD_BYTES)
     }
+    pub fn create_with_durability(path: &Path, queue_capacity: usize, deadline: Duration, durability: Durability) -> io::Result<Self> {
+        Self::create_limited(path, queue_capacity, deadline, MAX_RECORD_BYTES, durability)
+    }
 
     /// Enforce the gateway's chunk budget before encoding any audit payload.
     pub fn create_with_payload_limit(path: &Path, queue_capacity: usize, deadline: Duration, payload_limit: usize) -> io::Result<Self> {
+        Self::create_limited(path, queue_capacity, deadline, payload_limit, Durability::Durable)
+    }
+    fn create_limited(path: &Path, queue_capacity: usize, deadline: Duration, payload_limit: usize, durability: Durability) -> io::Result<Self> {
         if payload_limit == 0 || payload_limit > MAX_RECORD_BYTES
             || queue_capacity == 0 || queue_capacity > 1024 || deadline.is_zero()
             || deadline > Duration::from_secs(300) {
@@ -84,12 +92,17 @@ impl DiskLog {
         let mut session = [0u8; 16];
         getrandom::fill(&mut session).map_err(|_| io::ErrorKind::Other)?;
         let file = rotation::create_segment(path, &session)?;
-        Self::start_limited(file, queue_capacity, deadline, session, payload_limit)
+        Self::start_storage_with_durability(Storage(file), queue_capacity, deadline, session, payload_limit, durability)
     }
 
     /// Create a logical journal split into numbered files by the same worker.
     pub fn create_rotating(path: &Path, queue_capacity: usize, deadline: Duration,
         payload_limit: usize, rotation: Rotation) -> io::Result<Self>
+    {
+        Self::create_rotating_with_durability(path, queue_capacity, deadline, payload_limit, rotation, Durability::Durable)
+    }
+    pub fn create_rotating_with_durability(path: &Path, queue_capacity: usize, deadline: Duration,
+        payload_limit: usize, rotation: Rotation, durability: Durability) -> io::Result<Self>
     {
         rotation.validate()?;
         if payload_limit == 0 || payload_limit > MAX_RECORD_BYTES
@@ -101,7 +114,7 @@ impl DiskLog {
         getrandom::fill(&mut session).map_err(|_| io::ErrorKind::Other)?;
         let file = rotation::RotatingFile::create(path, session, rotation)?;
         let storage = gateway_core::log_rotation::RotatingStorage::new(file, u128::from_le_bytes(session), rotation.max_bytes);
-        Self::start_storage(storage, queue_capacity, deadline, session, payload_limit)
+        Self::start_storage_with_durability(storage, queue_capacity, deadline, session, payload_limit, durability)
     }
 
     #[cfg(test)]
@@ -109,12 +122,19 @@ impl DiskLog {
         Self::start_limited(file, capacity, deadline, session, MAX_RECORD_BYTES)
     }
 
+    #[cfg(test)]
     fn start_limited<W: DurableWrite>(file: W, capacity: usize, deadline: Duration, session: [u8; 16], payload_limit: usize) -> io::Result<Self> {
         Self::start_storage(Storage(file), capacity, deadline, session, payload_limit)
     }
 
-    fn start_storage<S: gateway_core::disk_worker::Storage + Send + 'static>(mut storage: S, capacity: usize,
+    #[cfg(test)]
+    fn start_storage<S: gateway_core::disk_worker::Storage + Send + 'static>(storage: S, capacity: usize,
         deadline: Duration, session: [u8; 16], payload_limit: usize) -> io::Result<Self>
+    {
+        Self::start_storage_with_durability(storage, capacity, deadline, session, payload_limit, Durability::Durable)
+    }
+    fn start_storage_with_durability<S: gateway_core::disk_worker::Storage + Send + 'static>(mut storage: S, capacity: usize,
+        deadline: Duration, session: [u8; 16], payload_limit: usize, durability: Durability) -> io::Result<Self>
     {
         if payload_limit == 0 || payload_limit > MAX_RECORD_BYTES || capacity == 0 || capacity > 1024 { return Err(io::ErrorKind::InvalidInput.into()); }
         let queue = Arc::new(Queue::with_payload_limit(capacity, payload_limit));
@@ -123,7 +143,7 @@ impl DiskLog {
         let worker_health = healthy.clone();
         let thread = std::thread::Builder::new().name("hypgate-audit".into()).stack_size(WORKER_STACK_BYTES).spawn(move || {
             let _health_on_exit = UnhealthyOnExit(worker_health.clone(), receiver.clone());
-            let mut journal = Journal::new(u128::from_le_bytes(session));
+            let mut journal = Journal::with_durability(u128::from_le_bytes(session), durability);
             let mut owner = gateway_core::batch_worker::BatchWorker::new(payload_limit, u128::from_le_bytes(session));
             while let Some(job) = receiver.recv(&mut owner) {
                 let finished = owner.run(job, &mut journal, &mut storage, worker_health.load(Ordering::Acquire));
@@ -135,8 +155,10 @@ impl DiskLog {
             }
         })?;
         Ok(Self { queue: Arc::new(SharedQueue(queue)), thread: Arc::new(Mutex::new(Some(thread))),
-            healthy, deadline, session, payload_limit })
+            healthy, deadline, session, payload_limit, durability })
     }
+
+    pub fn durability(&self) -> Durability { self.durability }
 
     pub fn healthy(&self) -> bool {
         self.healthy.load(Ordering::Acquire) && self.queue.0.is_open()
@@ -211,7 +233,7 @@ impl DiskLog {
 
 impl AuditLog for DiskLog {
     fn session_id(&self) -> u128 { u128::from_le_bytes(self.session) }
-    fn append(&mut self, record: LogRecord<'_>) -> io::Result<DurableFrame> {
+    fn append(&mut self, record: LogRecord<'_>) -> io::Result<AuditReceipt> {
         if !self.healthy() { return Err(io::ErrorKind::BrokenPipe.into()); }
         if record.bytes.len() > self.payload_limit || record.request == 0 {
             return Err(io::ErrorKind::InvalidInput.into());

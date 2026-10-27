@@ -98,12 +98,13 @@ fn serve(
     let payload_limit = config
         .chunk_bytes()
         .max(gateway_core::metadata::MAX_PAYLOAD);
-    let log = DiskLog::create_rotating(
+    let log = DiskLog::create_rotating_with_durability(
         Path::new(log_path),
         AUDIT_QUEUE_CAPACITY,
         AUDIT_TIMEOUT,
         payload_limit,
         rotation,
+        config.durability(),
     )
     .map_err(|_| "cannot create and sync new audit log")?;
     // One extra thread that only ever reads this session’s segments.
@@ -132,7 +133,7 @@ fn serve(
     })
     .ok_or("allocation budget overflow")?;
     // Informational only: a closed stderr must not stop the server.
-    let _ = writeln!(io::stderr().lock(), "hypgate requested-allocation budget {} bytes under docs/resource-composition.md assumptions", budget.total);
+    let _ = writeln!(io::stderr().lock(), "hypgate requested-allocation budget {} bytes under docs/resource-composition.md assumptions; audit durability: {:?}", budget.total, config.durability());
     if let Some((open, bytes)) = shipping_limits {
         let extra =
             gateway_runtime::budget::shipping(open, bytes).ok_or("shipping budget overflow")?;

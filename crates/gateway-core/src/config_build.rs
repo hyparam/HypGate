@@ -94,6 +94,7 @@ pub struct Built {
     pub credentials: Vec<Credential>,
     pub limits: Limits,
     pub logging: Logging,
+    pub durability: crate::audit_receipt::Durability,
     pub fetched: Ghost<Seq<(Seq<u8>, Seq<u8>)>>,
 }
 
@@ -195,7 +196,7 @@ pub fn build<S: Secrets>(root: Root, candidate: Candidate, secrets: &mut S) -> (
         Ok(b) => {
             &&& 0 < root.limits.requests <= 65536 && 0 < root.limits.chunk_bytes <= 1048576
             &&& (root.limits.requests as int) * (root.limits.chunk_bytes as int) <= 134217728
-            &&& b.limits == root.limits && b.logging == root.logging
+            &&& b.limits == root.limits && b.logging == root.logging && b.durability == root.durability
             &&& b.policy.valid() && b.policy.roots() == root.grants@ && b.policy.configured() == candidate.routes@
             &&& identities_match(root.identities@, b.policy.identities())
             &&& destinations_match(root.destinations@, b.destinations@) && b.policy.origins() == root.destinations@.len()
@@ -206,7 +207,7 @@ pub fn build<S: Secrets>(root: Root, candidate: Candidate, secrets: &mut S) -> (
         Err(_) => true,
     },
 {
-    let Root { identities, destinations, credentials, grants, limits, logging } = root;
+    let Root { identities, destinations, credentials, grants, limits, logging, durability } = root;
     if !crate::resource::validate_limits(limits.requests, limits.chunk_bytes) { return Err(BuildError::Limits); }
     let identities = match build_identities(&identities) { Some(v) => v, None => return Err(BuildError::Identity) };
     let destinations = match build_destinations(&destinations) { Some(v) => v, None => return Err(BuildError::Destination) };
@@ -215,7 +216,7 @@ pub fn build<S: Secrets>(root: Root, candidate: Candidate, secrets: &mut S) -> (
         Some(p) => p, None => return Err(BuildError::Policy),
     };
     let (credentials, fetched) = match build_credentials(&credentials, secrets) { Some(v) => v, None => return Err(BuildError::Credential) };
-    Ok(Built { policy, destinations, credentials, limits, logging, fetched })
+    Ok(Built { policy, destinations, credentials, limits, logging, durability, fetched })
 }
 
 } // verus!

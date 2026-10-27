@@ -2,7 +2,7 @@
 //! queue/task lifetimes, and completeness of the snapshot remain adapter contracts.
 use vstd::prelude::*;
 use crate::framing::RecordFrame;
-use crate::journal::DurableFrame;
+use crate::audit_receipt::AuditReceipt;
 use crate::batch_worker::MAX_BATCH;
 
 verus! {
@@ -47,8 +47,8 @@ pub open spec fn budget(requests: nat, chunk: nat, connections: nat, queue: nat)
 pub open spec fn frame_bytes(frames: Seq<RecordFrame>) -> Seq<Seq<u8>> {
     frames.map(|i: int, frame: RecordFrame| frame.contents())
 }
-pub open spec fn receipt_bytes(receipts: Seq<DurableFrame>) -> Seq<Seq<u8>> {
-    receipts.map(|i: int, receipt: DurableFrame| receipt.record())
+pub open spec fn receipt_bytes(receipts: Seq<AuditReceipt>) -> Seq<Seq<u8>> {
+    receipts.map(|i: int, receipt: AuditReceipt| receipt.record())
 }
 
 pub proof fn bounded_frames(frames: Seq<RecordFrame>, count: nat, chunk: nat)
@@ -65,7 +65,7 @@ pub proof fn bounded_frames(frames: Seq<RecordFrame>, count: nat, chunk: nat)
     }
 }
 
-pub proof fn bounded_receipts(receipts: Seq<DurableFrame>, count: nat, chunk: nat)
+pub proof fn bounded_receipts(receipts: Seq<AuditReceipt>, count: nat, chunk: nat)
     requires receipts.len() <= count,
         forall|i: int| 0 <= i < receipts.len() ==> #[trigger] receipts[i].valid() && receipts[i].payload_len() <= chunk,
     ensures bounded(receipt_bytes(receipts), count, chunk + 65),
@@ -88,7 +88,7 @@ pub struct Buffers {
     pub output_queues: Seq<Seq<u8>>,
     pub queued_log: Seq<RecordFrame>,
     pub active_log: Seq<RecordFrame>,
-    pub receipts: Seq<DurableFrame>,
+    pub receipts: Seq<AuditReceipt>,
     pub headers: Seq<Seq<u8>>,
 }
 impl Buffers {

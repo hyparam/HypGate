@@ -19,6 +19,7 @@ pub struct Admission {
     registry: Mutex<ResourceAdmission>,
     policy: Policy,
     strict: bool,
+    durability: gateway_core::audit_receipt::Durability,
     requests: usize,
 }
 
@@ -85,7 +86,11 @@ impl Admission {
     }
     pub(crate) fn requires_audit(&self) -> bool { self.strict }
     pub fn new(policy: Policy, requests: usize, chunk_bytes: usize, strict: bool) -> Self {
-        Self { registry: Mutex::new(ResourceAdmission::new(requests, chunk_bytes)), policy, strict, requests }
+        Self::with_durability(policy, requests, chunk_bytes, strict, gateway_core::audit_receipt::Durability::Durable)
+    }
+    pub fn with_durability(policy: Policy, requests: usize, chunk_bytes: usize, strict: bool,
+        durability: gateway_core::audit_receipt::Durability) -> Self {
+        Self { registry: Mutex::new(ResourceAdmission::new(requests, chunk_bytes)), policy, strict, requests, durability }
     }
     pub fn request_limit(&self) -> usize { self.requests }
 
@@ -115,7 +120,7 @@ impl Admission {
                 }
             }
         }
-        Ok(Request { authorized, capacity, journal: gateway_core::journal_binding::JournalBinding::new(), lease })
+        Ok(Request { authorized, capacity, journal: gateway_core::journal_binding::JournalBinding::with_durability(self.durability), lease })
     }
 }
 

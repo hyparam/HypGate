@@ -1,5 +1,9 @@
 # Audit-buffer ownership and cancellation
 
+Receipts carry explicit durability: buffered mode proves writes, while durable
+mode additionally proves stable-prefix membership. Ownership bounds apply to both;
+see [durability policy](disk-logging.md#audit-durability-policy).
+
 This is a source-level correspondence argument for the audit terms in
 `Buffers::accounted_payload_bound`, checked against the production DiskLog path
 and the verified fixed FIFO with `std::sync::mpsc` completion channels. It does
@@ -14,7 +18,7 @@ supply up to `MAX_RECORD_BYTES` and must account for retained receipts separatel
 | Encoding | `Queue::enqueue` uses private `push_with` to call verified `FrameQueue::reserve` while holding the queue mutex before invoking the encoding callback. That callback builds a `RecordBody` through verified `FrameQueue::encode_reserved`. The mutex excludes insertion and shutdown until the constructed Job is installed. | One of Q encoding/queued slots |
 | Queued | Verified `FrameQueue::finish_reserved` transfers the immutable frame and receipt sender into a fixed slot. The caller retains only the receipt receiver. | One of Q encoding/queued slots |
 | Writing/syncing/committing | Verified `BatchWorker::take` moves up to 16 exact queued frame/sender pairs into a private `ActiveBatch` and charges the independent active slot. `BatchWorker::run` owns it across synchronous write and sync calls. Dequeue returns queue credit, allowing another producer to encode. | Up to 16 active frames in addition to Q |
-| Delivering | `commit_frame` moves the same frame into `DurableFrame`; no payload clone is made. `FinishedBatch::deliver` consumes the receipt/sender into the caller's oneshot or destroys the undeliverable value, then returns a private release token. | Active-frame term until transfer, then receipt term |
+| Delivering | `commit_frame` moves the same frame into `AuditReceipt`; no payload clone is made. `FinishedBatch::deliver` consumes the receipt/sender into the caller's oneshot or destroys the undeliverable value, then returns a private release token. | Active-frame term until transfer, then receipt term |
 | Delivered, awaiting consumption | The body-copy loop retains exclusive request ownership across the append, and `BodyCopy::finish_audit` checks the exact receipt before dropping it. | At most one receipt per live production request, hence R |
 | Dropped/canceled | The frame is dropped at its current owner; a caller whose deadline passed cannot drop a queued Job or interrupt its syscall. | Credit follows the surviving frame, not the caller's thread |
 
@@ -165,7 +169,7 @@ With `std::sync::mpsc`, sending to a channel whose receiver is gone returns the
 unsent value. DiskLog immediately drops that result, including the receipt's
 frame. If delivery wins the race, receiver Drop closes the channel and drops
 the delivered value. The receipt is
-moved, not cloned; `DurableFrame` has no cloning API. These channel/drop semantics
+moved, not cloned; `AuditReceipt` has no cloning API. These channel/drop semantics
 are trusted obligations supporting the count hypotheses, not Verus-checked code.
 
 ## Cancellation and failure evidence

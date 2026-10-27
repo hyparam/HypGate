@@ -23,10 +23,13 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
-    ('batch_worker.rs', 'batch_skips_sync', 'synced = storage.sync();', 'synced = true;'),
+    ("config_schema.rs", "buffered_default_weakens_durability", "None => Durability::Durable,", "None => Durability::Buffered,"),
+    ("journal_binding.rs", "buffered_receipt_under_durable_policy", "!self.require_sync || durable", "true"),
+    ("audit_receipt.rs", "buffered_receipt_claims_durable", "durable: self.sync_required()", "durable: true"),
+    ('batch_worker.rs', 'batch_skips_sync', 'accepted = !journal.sync_required() || storage.sync();', 'accepted = true;'),
     ('batch_worker.rs', 'batch_skips_write', 'if write_frames(&batch.jobs, 0, storage)', 'if true'),
     ('batch_worker.rs', 'batch_ignores_write_failure', 'if !storage.write_all(jobs[at].0.bytes()) { return false; }', 'let _ = storage.write_all(jobs[at].0.bytes());'),
-    ('batch_worker.rs', 'batch_ignores_sync_failure', 'if !synced { journal.fail(); }', 'if false { journal.fail(); }'),
+    ('batch_worker.rs', 'batch_ignores_sync_failure', 'if !accepted { journal.fail(); }', 'if false { journal.fail(); }'),
     ('batch_worker.rs', 'batch_foreign_journal', 'enabled && journal.session_id() == batch.session && !journal.is_failed()', 'enabled && !journal.is_failed()'),
     ('batch_worker.rs', 'batch_disabled_io', 'enabled && journal.session_id() == batch.session && !journal.is_failed()', 'journal.session_id() == batch.session && !journal.is_failed()'),
     ('batch_worker.rs', 'batch_dequeues_while_busy', '!self.busy && self.next < u64::MAX', 'self.next < u64::MAX'),
@@ -171,7 +174,7 @@ MUTATIONS = [
     ("submission.rs", "submission_accepts_another_tenant", "self.route.tenant != authority.tenant_id() || ", ""),
 
     ("journal_binding.rs", "binding_replaces_designated_session", "Some(current) => current == session,", "Some(current) => { self.session = Some(session); true },"),
-    ("journal_binding.rs", "binding_accepts_foreign_receipt", "Some(session) => session == receipt.session_id(),", "Some(session) => true,"),
+    ("journal_binding.rs", "binding_accepts_foreign_receipt", "Some(session) => session == receipt.session_id() && self.accepts_durability(receipt.is_durable()),", "Some(session) => true,"),
     ("journal_binding.rs", "binding_accepts_undesignated_receipt", "None => false,", "None => true,"),
     ("stream.rs", "binding_receipt_session_check_omitted", "if !journal.accepts(receipt) { return false; }", ""),
 
@@ -314,7 +317,7 @@ MUTATIONS = [
     ("resource.rs", "allow_zero_request_budget", "requests == 0 || ", ""),
     ("resource.rs", "hide_active_requests", "(active, self.slots.len())", "(0, self.slots.len())"),
     ("resource.rs", "count_empty_slots", "if self.slots[i] != 0 { active = active + 1; }", "if self.slots[i] == 0 { active = active + 1; }"),
-    ("stream.rs", "deny_valid_ack", "if self.closed || self.failed || owner != self.owner || chunk != self.chunk\n            || end < self.durable || end > self.bytes.len() { return false; }", "if true { return false; }"),
+    ("stream.rs", "deny_valid_ack", "if self.closed || self.failed || owner != self.owner || chunk != self.chunk\n            || end < self.logged || end > self.bytes.len() { return false; }", "if true { return false; }"),
     ("stream.rs", "deny_ready_write", "if self.closed || self.pending || max == 0 || self.generation == u64::MAX", "if true"),
     ("stream.rs", "deny_valid_completion", GUARD, "if true"),
     ("stream.rs", "deny_ready_chunk", "if self.closed || self.pending || self.sent != self.bytes.len()\n            || bytes.len() > self.capacity || self.chunk == u64::MAX { return None; }", "if true { return None; }"),
@@ -344,7 +347,7 @@ MUTATIONS = [
     ("stream.rs", "hide_closed_stream", "ensures out == self.closed(),\n    { self.closed }", "ensures out == self.closed(),\n    { false }"),
     ("stream.rs", "replace_unfinished", "self.sent != self.bytes.len()", "false"),
     ("stream.rs", "stale_log_ack", " || chunk != self.chunk", ""),
-    ("stream.rs", "before_durable", "let limit = if self.strict { self.durable } else { self.bytes.len() };", "let limit = self.bytes.len();"),
+    ("stream.rs", "before_durable", "let limit = if self.strict { self.logged } else { self.bytes.len() };", "let limit = self.bytes.len();"),
     ("stream.rs", "wrong_owner", GUARD, GUARD.replace(" || t.owner != self.owner", "")),
     ("stream.rs", "stale_completion", GUARD, GUARD.replace(" || t.generation != self.generation", "")),
     ("stream.rs", "pretend_full_write", "self.sent = self.sent + count;", "self.sent = self.offered;"),

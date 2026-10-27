@@ -1,5 +1,11 @@
 # Resource composition
 
+Durability scope: sync and acknowledged crash-survival claims below apply to the
+default `"durability": "durable"` policy. With `"durability": "buffered"`,
+receipts prove writes only; strict forwarding still checks those receipts. See
+[audit durability policy](disk-logging.md#audit-durability-policy) for the exact
+guarantees, receipt proofs, and remaining startup/rotation syncs.
+
 This document composes the separate resource inventories into one conditional
 bound. It states which object owns
 each budget, how the production owners correspond to the categories of the
@@ -59,7 +65,7 @@ the mechanism that keeps the count hypothesis true.
 | `queued_log`: at most Q, each at most A = max(K, 8,210) | `FrameQueue<Completion>` slots in `disk_log::queue::Queue` | `enqueue` through the verified reservation and `finish_reserved` | Worker `recv` pops under the queue mutex | Verified fixed-queue occupancy; the executable binds the payload limit to A so metadata records fit; the theorem is instantiated at A, which bounds K |
 | Encoding snapshot: at most one, within A + 65 | `RecordBody`/`RecordFrame` built by the single-use `EncodingPermit` | `FrameQueue::reserve` under the queue mutex | `finish_reserved` or construction panic (poisoned, still charged) | Verified reservation bit; the permit is non-cloneable and consumed |
 | `active_log`: at most 16, each within A | `ActiveBatch` / `FinishedBatch` matched to the disk worker's retained frame snapshot | Verified `BatchWorker::take` inside `recv` returns credit to Q and charges the active slot | Verified run commits or drops the frame; consuming delivery and a matching session/generation token permit release | Verified busy gate and `queued_and_active_bound`; one worker per `DiskLog`, never replaced |
-| `receipts`: at most R, each within K | `DurableFrame` delivered through the job oneshot to the body-copy loop (`BodyCopy::finish_audit`) | `commit_frame` and oneshot send | Exact receipt validation drops it; cancellation drops it with the receiver | One outstanding append per request; the worker can run ahead by one job, which is the active-frame term |
+| `receipts`: at most R, each within K | `AuditReceipt` delivered through the job oneshot to the body-copy loop (`BodyCopy::finish_audit`) | `BatchJournal::commit` and oneshot send | Exact receipt validation drops it; cancellation drops it with the receiver | One outstanding append per request; the worker can run ahead by one job, which is the active-frame term |
 | `headers`: at most R + 1, each 33 bytes | Canonical header scratch in `encode_payload` and in receipt comparison | Encoding entry | Function return | One per encoding logger plus one per validating request |
 
 Cancellation tails are the only places where a snapshot entry survives its
@@ -163,7 +169,7 @@ checks this over 3,000 rounds.
 | Queued DNS jobs, 32 × (253 + 2,048) | 73,632 | DNS inventory |
 | Retained configuration content, bounded by both one-MiB input documents | 2,097,152 | [Configuration storage](configuration.md#validation-and-scope) |
 | Disk queue slot vector | Q × size of `Option<(RecordFrame, Sender)>` | [Audit ownership](audit-buffer-lifetimes.md#verified-fixed-queue-and-synchronization-obligations) |
-| Batch descriptor vectors (payloads charged in V) | 16 × (size of `Option<(RecordFrame, Sender)>` + size of `(Option<DurableFrame>, Sender)`) | `budget::BATCH_DESCRIPTORS`; bounded recursion uses the existing worker stack |
+| Batch descriptor vectors (payloads charged in V) | 16 × (size of `Option<(RecordFrame, Sender)>` + size of `(Option<AuditReceipt>, Sender)`) | `budget::BATCH_DESCRIPTORS`; bounded recursion uses the existing worker stack |
 | Root store trust-anchor descriptors | root count × size of `TrustAnchor` | `webpki-roots` static table, cloned descriptors over static DER |
 | Optional shipper thread (only with a `shipping` section): its stack, `O × E` assembler bytes, `O × 2 × (E + 16,384)` queued rows, one scanned record, one 4 MiB batch and its request copy, a 64 KiB reply, 128 KiB S3 credential/signing/header scratch | 2,097,152 + O × E + O × 2 × (E + 16,384) + 1,048,641 + 8,388,608 + 65,536 + 131,072 | [Cloud shipping](cloud-shipping.md#resources); `budget::shipping`, printed separately at startup |
 

@@ -1,6 +1,6 @@
 use super::*;
 use crate::test_support::admission;
-use crate::transfer::{DurableFrame, receipt_for_test as receipt};
+use crate::transfer::{AuditReceipt, receipt_for_test as receipt};
 
 #[test]
 fn authorization_failures_return_capacity_and_drop_reclaims_it() {
@@ -43,7 +43,7 @@ fn strict_logging_and_cancellation_keep_the_lease_until_drop() {
     struct Log;
     impl AuditLog for Log {
         fn session_id(&self) -> u128 { 0 }
-        fn append(&mut self, record: LogRecord<'_>) -> std::io::Result<DurableFrame> {
+        fn append(&mut self, record: LogRecord<'_>) -> std::io::Result<AuditReceipt> {
             assert_eq!((record.tenant, record.request, record.chunk), (1, 1, 1));
             assert_eq!(record.bytes, &[1, 2]);
             Ok(receipt(record))
@@ -133,7 +133,7 @@ fn abandoned_audit_cannot_authorize_or_reuse_the_chunk() {
     struct PanickingLog;
     impl AuditLog for PanickingLog {
         fn session_id(&self) -> u128 { 0 }
-        fn append(&mut self, record: LogRecord<'_>) -> std::io::Result<DurableFrame> {
+        fn append(&mut self, record: LogRecord<'_>) -> std::io::Result<AuditReceipt> {
             assert_eq!(record.bytes, &[7, 8]);
             panic!("injected logger failure mid-append");
         }
@@ -159,7 +159,7 @@ fn mismatched_durable_receipts_never_authorize_forwarding() {
     struct WrongLog(u8);
     impl AuditLog for WrongLog {
         fn session_id(&self) -> u128 { if self.0 == 6 { 1 } else { 0 } }
-        fn append(&mut self, mut record: LogRecord<'_>) -> std::io::Result<DurableFrame> {
+        fn append(&mut self, mut record: LogRecord<'_>) -> std::io::Result<AuditReceipt> {
             match self.0 {
                 0 => record.tenant += 1,
                 1 => record.request += 1,
@@ -193,7 +193,7 @@ fn request_refuses_logger_session_switch_before_append() {
     struct SwitchingLog { session: u128, calls: usize }
     impl AuditLog for SwitchingLog {
         fn session_id(&self) -> u128 { self.session }
-        fn append(&mut self, record: LogRecord<'_>) -> std::io::Result<DurableFrame> {
+        fn append(&mut self, record: LogRecord<'_>) -> std::io::Result<AuditReceipt> {
             self.calls += 1;
             Ok(receipt(record))
         }
@@ -220,7 +220,7 @@ fn strict_submission_requires_receipt_for_the_transfer_direction() {
     struct Log;
     impl AuditLog for Log {
         fn session_id(&self) -> u128 { 0 }
-        fn append(&mut self, record: LogRecord<'_>) -> std::io::Result<DurableFrame> { Ok(receipt(record)) }
+        fn append(&mut self, record: LogRecord<'_>) -> std::io::Result<AuditReceipt> { Ok(receipt(record)) }
     }
     for strict in [true, false] {
         let a = admission(1, 4, strict);
@@ -245,7 +245,7 @@ fn metadata_records_use_chunk_zero_and_never_authorize_body_writes() {
     struct Log { seen: Arc<Mutex<Vec<(u64, RecordKind, Vec<u8>)>>>, fail: bool }
     impl AuditLog for Log {
         fn session_id(&self) -> u128 { 0 }
-        fn append(&mut self, record: LogRecord<'_>) -> std::io::Result<DurableFrame> {
+        fn append(&mut self, record: LogRecord<'_>) -> std::io::Result<AuditReceipt> {
             self.seen.lock().unwrap().push((record.chunk, record.kind, record.bytes.to_vec()));
             if self.fail { Err(std::io::ErrorKind::Other.into()) } else { Ok(receipt(record)) }
         }

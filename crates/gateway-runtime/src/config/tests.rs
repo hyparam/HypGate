@@ -119,3 +119,44 @@ fn destination_size_is_bounded_before_secret_loading() {
     assert!(matches!(result, Err(ConfigError::Destination)));
     assert_eq!(secret_calls, 0);
 }
+
+#[test]
+fn durability_is_explicit_optional_and_independent_of_failure_policy() {
+    use gateway_core::audit_receipt::Durability;
+    assert_eq!(load(&root()).unwrap().durability(), Durability::Durable);
+    for logging in ["strict", "availability"] {
+        for (name, expected) in [("durable", Durability::Durable), ("buffered", Durability::Buffered)] {
+            let mut r = root(); r["logging"] = json!(logging); r["durability"] = json!(name);
+            assert_eq!(load(&r).unwrap().durability(), expected);
+        }
+    }
+    for invalid in [json!(null), json!(true), json!(1), json!(""), json!("async"), json!("Durable")] {
+        let mut r = root(); r["durability"] = invalid;
+        assert!(load(&r).is_err());
+    }
+    let raw = serde_json::to_string(&root()).unwrap();
+    let duplicate = raw.replacen('{', "{\"durability\":\"durable\",\"durability\":\"buffered\",", 1);
+    assert!(GatewayConfig::from_json(duplicate.as_bytes(), |_| Some("secret".into())).is_err());
+}
+
+#[test]
+fn configured_request_checks_real_logger_receipt_strength() {
+    use crate::{disk_log::{DiskLog, Durability}, transfer::Direction, test_support::TempDir};
+    use std::time::Duration;
+    for logging in ["strict", "availability"] {
+        for configured in ["durable", "buffered"] {
+            for actual in [Durability::Durable, Durability::Buffered] {
+                let mut r = root(); r["logging"] = json!(logging); r["durability"] = json!(configured);
+                let config = load(&r).unwrap();
+                let dir = TempDir::new();
+                let mut log = DiskLog::create_with_durability(&dir.0.join("audit.log"), 16, Duration::from_secs(2), actual).unwrap();
+                let mut request = config.admit(b"test-gateway-token", 7).unwrap();
+                request.stream().advance(vec![7, 8]).unwrap();
+                let accepted = configured == "buffered" || actual == Durability::Durable;
+                assert_eq!(request.stream().audit_current(&mut log, Direction::Upload).is_ok(), accepted);
+                assert_eq!(request.stream().prepare(2, Direction::Upload).is_some(), accepted);
+                log.shutdown(Duration::from_secs(2)).unwrap();
+            }
+        }
+    }
+}

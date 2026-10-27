@@ -64,6 +64,7 @@ pub(crate) type Destination = gateway_core::destination::Parts;
 
 pub struct GatewayConfig {
     chunk_bytes: usize,
+    durability: gateway_core::audit_receipt::Durability,
     admission: Admission,
     destinations: Vec<Destination>,
     credentials: Vec<Credential>,
@@ -93,6 +94,7 @@ pub(crate) fn destination(text: &str) -> Result<Destination, ConfigError> {
 }
 
 impl GatewayConfig {
+    pub fn durability(&self) -> gateway_core::audit_receipt::Durability { self.durability }
     pub fn chunk_bytes(&self) -> usize { self.chunk_bytes }
     /// Configured request slots, independent of registry health.
     pub fn request_limit(&self) -> usize { self.admission.request_limit() }
@@ -122,8 +124,8 @@ impl GatewayConfig {
             build::BuildError::Credential => ConfigError::Credential,
             build::BuildError::Policy => ConfigError::Policy,
         })?;
-        Ok(Self { chunk_bytes: built.limits.chunk_bytes,
-            admission: Admission::new(built.policy, built.limits.requests, built.limits.chunk_bytes, matches!(built.logging, Logging::Strict)),
+        Ok(Self { chunk_bytes: built.limits.chunk_bytes, durability: built.durability,
+            admission: Admission::with_durability(built.policy, built.limits.requests, built.limits.chunk_bytes, matches!(built.logging, Logging::Strict), built.durability),
             destinations: built.destinations, credentials: built.credentials })
     }
 

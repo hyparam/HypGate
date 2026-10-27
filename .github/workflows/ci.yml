@@ -80,7 +80,7 @@ jobs:
   verify:
     name: Verus proofs and mutations
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       VERUS_RELEASE: 0.2026.10.18.7d82994
       VERUS_ARCHIVE_SHA256: e9af03732d4bdd32b93a8fcf471706739c24c1473fa5086618d96c47237845dd

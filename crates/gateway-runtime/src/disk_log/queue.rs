@@ -1,5 +1,5 @@
 //! Trusted mutex/condvar wrapper around the verified fixed-slot FIFO.
-use super::{Job, Completion, DurableFrame, LogRecord};
+use super::{Job, Completion, AuditReceipt, LogRecord};
 use gateway_core::frame_queue::FrameQueue;
 use std::{io, sync::{Condvar, Mutex, MutexGuard, mpsc}, time::Instant};
 
@@ -13,7 +13,7 @@ struct EncodingPermit<'a> { state: &'a FrameQueue<Completion> }
 impl EncodingPermit<'_> {
     /// `None` when the verified encoder refuses the record (over the payload
     /// limit or an invalid header); the caller then gives the reservation back.
-    fn encode(self, record: LogRecord<'_>) -> Option<(Job, mpsc::Receiver<Option<DurableFrame>>)> {
+    fn encode(self, record: LogRecord<'_>) -> Option<(Job, mpsc::Receiver<Option<AuditReceipt>>)> {
         let body = self.state.encode_reserved(super::record_header(&record), record.bytes)?;
         let frame = super::seal_record(body);
         let (done, receive) = mpsc::channel();
@@ -37,7 +37,7 @@ impl Queue {
     // A full queue parks the caller until the worker frees a slot or the
     // deadline passes. Nothing is allocated or encoded while waiting, and a
     // caller that gives up leaves no reservation behind.
-    pub(super) fn enqueue(&self, record: LogRecord<'_>, deadline: Instant) -> io::Result<mpsc::Receiver<Option<DurableFrame>>> {
+    pub(super) fn enqueue(&self, record: LogRecord<'_>, deadline: Instant) -> io::Result<mpsc::Receiver<Option<AuditReceipt>>> {
         // If construction panics, wake the worker after the mutex is poisoned
         // so it can observe failure instead of sleeping until shutdown.
         let _wake = WakeOnDrop(&self.ready);
@@ -147,7 +147,7 @@ mod tests {
     fn soon() -> Instant { Instant::now() + Duration::from_millis(50) }
     #[test]
     fn production_dequeue_requires_active_credit_and_delivery_returns_it() {
-        use gateway_core::{batch_worker::BatchWorker, audit_journal::AuditJournal};
+        use gateway_core::{batch_worker::BatchWorker, audit_receipt::BatchJournal as AuditJournal};
         let queue = Queue::with_payload_limit(1, 3);
         let mut owner = BatchWorker::new(3, 1);
         let mut journal = AuditJournal::new(0);

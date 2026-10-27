@@ -1,5 +1,11 @@
 # Storage crash contract and experiments
 
+Durability scope: sync and acknowledged crash-survival claims below apply to the
+default `"durability": "durable"` policy. With `"durability": "buffered"`,
+receipts prove writes only; strict forwarding still checks those receipts. See
+[audit durability policy](disk-logging.md#audit-durability-policy) for the exact
+guarantees, receipt proofs, and remaining startup/rotation syncs.
+
 The journal theorem is conditional on this external storage contract:
 
 1. One worker exclusively owns an append-only regular file in an operator-controlled,

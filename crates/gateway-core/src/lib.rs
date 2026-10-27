@@ -171,3 +171,5 @@ mod session_recovery_tests;
 mod snapshot_tests;
 
 pub mod batch_worker;
+
+pub mod audit_receipt;

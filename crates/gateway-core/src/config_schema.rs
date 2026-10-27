@@ -11,6 +11,7 @@ use vstd::prelude::*;
 use vstd::slice::slice_to_vec;
 use crate::json::{Member, Value};
 use crate::policy::Route;
+use crate::audit_receipt::Durability;
 
 verus! {
 
@@ -19,6 +20,9 @@ pub const K_DESTINATIONS: [u8; 12] = *b"destinations";
 pub const K_CREDENTIALS: [u8; 11] = *b"credentials";
 pub const K_GRANTS: [u8; 6] = *b"grants";
 pub const K_LIMITS: [u8; 6] = *b"limits";
+pub const K_DURABILITY: [u8; 10] = *b"durability";
+pub const V_DURABLE: [u8; 7] = *b"durable";
+pub const V_BUFFERED: [u8; 8] = *b"buffered";
 pub const K_LOGGING: [u8; 7] = *b"logging";
 pub const K_SHIPPING: [u8; 8] = *b"shipping";
 pub const K_TENANT: [u8; 6] = *b"tenant";
@@ -70,6 +74,7 @@ pub struct Root {
     pub grants: Vec<Route>,
     pub limits: Limits,
     pub logging: Logging,
+    pub durability: Durability,
 }
 pub struct Candidate { pub routes: Vec<Route> }
 pub struct Shipping {
@@ -88,7 +93,7 @@ pub struct Shipping {
 
 pub open spec fn allowed_keys(schema: Schema) -> Seq<Seq<u8>> {
     match schema {
-        Schema::Root => seq![K_IDENTITIES@, K_DESTINATIONS@, K_CREDENTIALS@, K_GRANTS@, K_LIMITS@, K_LOGGING@, K_SHIPPING@],
+        Schema::Root => seq![K_IDENTITIES@, K_DESTINATIONS@, K_CREDENTIALS@, K_GRANTS@, K_LIMITS@, K_LOGGING@, K_SHIPPING@, K_DURABILITY@],
         Schema::Identity => seq![K_TENANT@, K_SHA256@],
         Schema::Credential => seq![K_TENANT@, K_KIND@, K_ENV@],
         Schema::Route => seq![K_TENANT@, K_SELECTOR@, K_ORIGIN@, K_CREDENTIAL@],
@@ -142,6 +147,10 @@ pub open spec fn limits_ok(v: Value) -> bool {
 pub open spec fn logging_ok(v: Value) -> bool { v is Str && (text_of(v) == V_STRICT@ || text_of(v) == V_AVAILABILITY@) }
 /// The root policy: six required sections of the right kinds, and an
 /// optional `shipping` section that `read_shipping` reads on its own.
+pub open spec fn durability_ok(v: Value) -> bool { v is Str && (text_of(v) == V_DURABLE@ || text_of(v) == V_BUFFERED@) }
+pub open spec fn durability_of(v: Value) -> Durability {
+    if !has_key(v, K_DURABILITY@) || text_of(at(v, K_DURABILITY@)) == V_DURABLE@ { Durability::Durable } else { Durability::Buffered }
+}
 pub open spec fn root_ok(v: Value) -> bool {
     object_ok(v, Schema::Root)
         && has_key(v, K_IDENTITIES@) && at(v, K_IDENTITIES@) is Array
@@ -153,6 +162,7 @@ pub open spec fn root_ok(v: Value) -> bool {
         && has_key(v, K_GRANTS@) && routes_ok(at(v, K_GRANTS@))
         && has_key(v, K_LIMITS@) && limits_ok(at(v, K_LIMITS@))
         && has_key(v, K_LOGGING@) && logging_ok(at(v, K_LOGGING@))
+        && (!has_key(v, K_DURABILITY@) || durability_ok(at(v, K_DURABILITY@)))
 }
 pub open spec fn candidate_ok(v: Value) -> bool { object_ok(v, Schema::Candidate) && has_key(v, K_ROUTES@) && routes_ok(at(v, K_ROUTES@)) }
 /// The `shipping` section: three required strings and three optional numbers.
@@ -201,6 +211,7 @@ pub open spec fn reads_root(v: Value, out: Root) -> bool {
         && out.limits.requests == u64_of(at(at(v, K_LIMITS@), K_REQUESTS@)) as usize
         && out.limits.chunk_bytes == u64_of(at(at(v, K_LIMITS@), K_CHUNK_BYTES@)) as usize
         && out.logging == logging_of(at(v, K_LOGGING@))
+        && out.durability == durability_of(v)
 }
 pub open spec fn reads_section(s: Value, out: Shipping) -> bool {
     out.s3_region@ == (if has_key(s, K_S3_REGION@) { text_of(at(s, K_S3_REGION@)) } else { Seq::empty() }) &&
@@ -265,7 +276,7 @@ fn key_allowed_exec(schema: Schema, key: &[u8]) -> (out: bool)
 {
     let found = match schema {
         Schema::Root => bytes_eq(key, K_IDENTITIES.as_slice()) || bytes_eq(key, K_DESTINATIONS.as_slice()) || bytes_eq(key, K_CREDENTIALS.as_slice())
-            || bytes_eq(key, K_GRANTS.as_slice()) || bytes_eq(key, K_LIMITS.as_slice()) || bytes_eq(key, K_LOGGING.as_slice()) || bytes_eq(key, K_SHIPPING.as_slice()),
+            || bytes_eq(key, K_GRANTS.as_slice()) || bytes_eq(key, K_LIMITS.as_slice()) || bytes_eq(key, K_LOGGING.as_slice()) || bytes_eq(key, K_SHIPPING.as_slice()) || bytes_eq(key, K_DURABILITY.as_slice()),
         Schema::Identity => bytes_eq(key, K_TENANT.as_slice()) || bytes_eq(key, K_SHA256.as_slice()),
         Schema::Credential => bytes_eq(key, K_TENANT.as_slice()) || bytes_eq(key, K_KIND.as_slice()) || bytes_eq(key, K_ENV.as_slice()),
         Schema::Route => bytes_eq(key, K_TENANT.as_slice()) || bytes_eq(key, K_SELECTOR.as_slice()) || bytes_eq(key, K_ORIGIN.as_slice()) || bytes_eq(key, K_CREDENTIAL.as_slice()),
@@ -281,7 +292,7 @@ fn key_allowed_exec(schema: Schema, key: &[u8]) -> (out: bool)
         match schema {
             Schema::Root => {
                 assert(keys[0] == K_IDENTITIES@); assert(keys[1] == K_DESTINATIONS@); assert(keys[2] == K_CREDENTIALS@); assert(keys[3] == K_GRANTS@);
-                assert(keys[4] == K_LIMITS@); assert(keys[5] == K_LOGGING@); assert(keys[6] == K_SHIPPING@);
+                assert(keys[4] == K_LIMITS@); assert(keys[5] == K_LOGGING@); assert(keys[6] == K_SHIPPING@); assert(keys[7] == K_DURABILITY@);
             }
             Schema::Identity => { assert(keys[0] == K_TENANT@); assert(keys[1] == K_SHA256@); }
             Schema::Credential => { assert(keys[0] == K_TENANT@); assert(keys[1] == K_KIND@); assert(keys[2] == K_ENV@); }
@@ -501,7 +512,17 @@ pub fn read_root(v: &Value) -> (out: Option<Root>)
     let logging = if bytes_eq(logging_text.as_slice(), V_STRICT.as_slice()) { Logging::Strict }
         else if bytes_eq(logging_text.as_slice(), V_AVAILABILITY.as_slice()) { Logging::Availability }
         else { return None };
-    Some(Root { identities, destinations, credentials, grants, limits, logging })
+    let durability = match field(v, K_DURABILITY.as_slice()) {
+        None => Durability::Durable,
+        Some(value) => {
+            let text = match str_exec(value) { Some(t) => t, None => return None };
+            if bytes_eq(text.as_slice(), V_DURABLE.as_slice()) { Durability::Durable }
+            else if bytes_eq(text.as_slice(), V_BUFFERED.as_slice()) { Durability::Buffered }
+            else { return None; }
+        },
+    };
+    proof { assert(durability == durability_of(*v)); assert(root_ok(*v)); }
+    Some(Root { identities, destinations, credentials, grants, limits, logging, durability })
 }
 /// The candidate routes file, when it has the shape `candidate_ok`.
 pub fn read_candidate(v: &Value) -> (out: Option<Candidate>)

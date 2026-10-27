@@ -1,5 +1,11 @@
 # Running the gateway
 
+Durability scope: sync and acknowledged crash-survival claims below apply to the
+default `"durability": "durable"` policy. With `"durability": "buffered"`,
+receipts prove writes only; strict forwarding still checks those receipts. See
+[audit durability policy](disk-logging.md#audit-durability-policy) for the exact
+guarantees, receipt proofs, and remaining startup/rotation syncs.
+
 Build with the pinned Rust toolchain: `cargo build --locked --bin hypgate`.
 Run `target/debug/hypgate CONFIG.json NEW_LOG [127.0.0.1:8080]`.
 The log path must not exist; its parent directory must already exist and be private

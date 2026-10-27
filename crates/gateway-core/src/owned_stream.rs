@@ -40,21 +40,22 @@ verus! {
 ///     buffer[0] = 7;
 /// }
 /// ```
-pub struct OwnedStream { key: RequestKey, stream: StreamChunk, read_buffer: Vec<u8>, audit_session: Option<u128>, audit_tenant: u64, audit_direction: u8, audit: Ghost<Option<crate::journal::DurableFrame>> }
+pub struct OwnedStream { key: RequestKey, stream: StreamChunk, read_buffer: Vec<u8>, audit_session: Option<u128>, audit_tenant: u64, audit_direction: u8, audit_durable: bool, audit: Ghost<Option<crate::audit_receipt::AuditReceipt>> }
 impl OwnedStream {
+    pub closed spec fn audit_durable(&self) -> bool { self.audit_durable }
     pub closed spec fn audit_session(&self) -> Option<u128> { self.audit_session }
     pub closed spec fn audit_tenant(&self) -> u64 { self.audit_tenant }
     pub fn recorded_direction(&self) -> (out: u8)
         ensures out == self.audit_direction(),
     { self.audit_direction }
     pub closed spec fn audit_direction(&self) -> u8 { self.audit_direction }
-    pub closed spec fn receipt(&self) -> Option<crate::journal::DurableFrame> { self.audit@ }
+    pub closed spec fn receipt(&self) -> Option<crate::audit_receipt::AuditReceipt> { self.audit@ }
     pub closed spec fn audit_valid(&self) -> bool {
         match self.audit_session {
             None => self.audit@.is_none(),
             Some(session) => self.audit@.is_some() && {
                 let r = self.audit@.unwrap();
-                r.valid() && r.session() == session && self.audit_direction <= 1
+                r.valid() && r.durable() == self.audit_durable && r.session() == session && self.audit_direction <= 1
                 && self.state().body().len() <= 1048576
                 && r.record() == self.state().audit_frame(self.audit_tenant, self.audit_direction, r.checksum())
             },
@@ -62,7 +63,7 @@ impl OwnedStream {
     }
     pub open spec fn audited_for(&self, authority: &AuthorizedRequest, journal: &crate::journal_binding::JournalBinding) -> bool {
         self.audit_session().is_some() && self.audit_session() == journal.session() && self.audit_tenant() == authority.tenant()
-            && self.state().owner() == authority.request()
+            && self.state().owner() == authority.request() && (!journal.requires_sync() || self.audit_durable())
     }
     pub fn is_audited_for(&self, authority: &AuthorizedRequest, journal: &crate::journal_binding::JournalBinding) -> (ok: bool)
         requires self.valid(), authority.valid(),
@@ -70,7 +71,12 @@ impl OwnedStream {
     {
         self.audit_session.is_some() && journal.matches_session(self.audit_session)
             && self.audit_tenant == authority.tenant_id() && self.stream.owner_id() == authority.request_id()
+            && journal.accepts_durability(self.audit_durable)
     }
+    pub proof fn durable_receipt_evidence(&self, authority: &AuthorizedRequest, journal: &crate::journal_binding::JournalBinding)
+        requires self.valid(), self.audited_for(authority, journal), journal.requires_sync(),
+        ensures self.receipt().is_some(), self.receipt().unwrap().durable(),
+    {}
     pub proof fn receipt_evidence(&self)
         requires self.valid(), self.audit_session().is_some(),
         ensures self.receipt().is_some(), self.receipt().unwrap().valid(), self.state().body().len() <= 1048576,
@@ -112,7 +118,7 @@ impl OwnedStream {
     }
     pub open spec fn same_audit(&self, prior: &Self) -> bool {
         self.audit_session() == prior.audit_session() && self.audit_tenant() == prior.audit_tenant()
-            && self.audit_direction() == prior.audit_direction() && self.receipt() == prior.receipt()
+            && self.audit_durable() == prior.audit_durable() && self.audit_direction() == prior.audit_direction() && self.receipt() == prior.receipt()
     }
     pub open spec fn unaudited(&self) -> bool { self.audit_session().is_none() && self.receipt().is_none() }
     // The stream state after a successful reservation of `ticket`.
@@ -153,7 +159,7 @@ impl OwnedStream {
         match registry.authorized_stream(&mut key, authority, strict) {
             Some(stream) => {
                 proof { stream.payload_within_capacity(); }
-                let owned = OwnedStream { key, stream, read_buffer: Vec::new(), audit_session: None, audit_tenant: 0, audit_direction: 0, audit: Ghost(None) };
+                let owned = OwnedStream { key, stream, read_buffer: Vec::new(), audit_session: None, audit_tenant: 0, audit_direction: 0, audit_durable: false, audit: Ghost(None) };
                 proof {
                     assert forall|owners: Seq<Option<OwnedStream>>|
                         #[trigger] crate::owned_accounting::owners_match(registry.entries(), owners, registry.per_request())
@@ -295,7 +301,7 @@ impl OwnedStream {
             StreamChunk::log_failed(old(self).state(), final(self).state()),
     { self.stream.fail_log() }
 
-    pub fn acknowledge_receipt(&mut self, authority: &AuthorizedRequest, journal: &crate::journal_binding::JournalBinding, direction: u8, receipt: &crate::journal::DurableFrame) -> (ok: bool)
+    pub fn acknowledge_receipt(&mut self, authority: &AuthorizedRequest, journal: &crate::journal_binding::JournalBinding, direction: u8, receipt: &crate::audit_receipt::AuditReceipt) -> (ok: bool)
         requires old(self).valid(), authority.valid(), receipt.valid(),
         ensures final(self).valid(), final(self).same_owner(old(self)),
             StreamChunk::receipt_acknowledged(old(self).state(), final(self).state(), authority, journal, direction, receipt, ok),
@@ -308,6 +314,7 @@ impl OwnedStream {
             self.audit_session = Some(receipt.session_id());
             self.audit_tenant = authority.tenant_id();
             self.audit_direction = direction;
+            self.audit_durable = receipt.is_durable();
             self.audit = Ghost(Some(*receipt));
         }
         ok

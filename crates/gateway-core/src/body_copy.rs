@@ -8,7 +8,7 @@
 //! unless the log already failed, to close the stream on every failure, and to
 //! finish only on a clean end of input with nothing pending.
 use vstd::prelude::*;
-use crate::{framing::Header, journal::DurableFrame, journal_binding::JournalBinding, owned_stream::OwnedStream,
+use crate::{framing::Header, audit_receipt::AuditReceipt, journal_binding::JournalBinding, owned_stream::OwnedStream,
     policy::AuthorizedRequest, resolved_route::ResolvedRoute, stream::Ticket, submission::AuthorizedWrite};
 
 verus! {
@@ -229,7 +229,7 @@ impl BodyCopy {
     /// copy, availability mode continues unaudited. A receipt that does not
     /// match the chunk is an invalid state.
     pub fn finish_audit(&mut self, stream: &mut OwnedStream, authority: &AuthorizedRequest,
-        journal: &JournalBinding, receipt: Option<&DurableFrame>)
+        journal: &JournalBinding, receipt: Option<&AuditReceipt>)
         requires old(self).valid(old(stream)), old(self).auditing(), authority.valid(),
             match receipt { Some(r) => r.valid(), None => true },
         ensures final(self).valid(final(stream)), final(self).accepted() == old(self).accepted(),
@@ -242,7 +242,7 @@ impl BodyCopy {
             },
             final(self).audited() && receipt.is_some() ==> final(stream).audited_for(authority, journal)
                 && final(stream).audit_direction() == old(self).direction()
-                && final(stream).state().durable() == final(stream).state().body().len(),
+                && final(stream).state().logged() == final(stream).state().body().len(),
     {
         match receipt {
             None => {
@@ -261,7 +261,7 @@ impl BodyCopy {
     /// authorization gate: the resolved route's `write_bytes` in production,
     /// or the ticket alone for an embedder with no route. The bytes are
     /// exactly the reserved range of this request's stream, in strict mode
-    /// covered by a matching durable receipt. The ticket comes back with the
+    /// covered by a matching logged receipt. The ticket comes back with the
     /// bytes and must be returned to `finish_write`.
     pub fn write_bytes<'a, D, C>(&mut self, stream: &'a mut OwnedStream, authority: &AuthorizedRequest,
         journal: &JournalBinding, route: Option<&ResolvedRoute<'_, D, C>>) -> (out: Option<(AuthorizedWrite, &'a [u8])>)

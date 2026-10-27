@@ -27,8 +27,11 @@ streaming responses. The gateway filters headers and supplies the provider
 credential. Audit records tie the forwarded bytes and request outcome to the
 authenticated tenant and request.
 
-In **strict mode**, each byte is logged and synced before it is forwarded.
-Up to 16 queued audit records share a sync, with no timer delay to fill a batch.
+In **strict mode**, each byte is logged before it is forwarded. By default,
+logging also waits for disk sync. Set root configuration `"durability": "buffered"`
+to wait only for writes: acknowledged records can then be lost on a system crash
+or power loss. `"durability": "durable"` is the default.
+In durable mode, up to 16 queued audit records share a sync, with no timer delay to fill a batch.
 If logging fails, the request fails instead of going unrecorded. Availability
 mode keeps forwarding after a log failure and counts unrecorded requests as gaps.
 Provider errors, timeouts, and truncated streams are reported as failures.

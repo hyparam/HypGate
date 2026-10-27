@@ -1,6 +1,6 @@
 # Bounded disk logger and recovery scanner
 
-The disk worker runs the verified [journal acknowledgment state machine](journal-proof.md).
+The disk worker runs the verified `BatchJournal` and `BatchWorker` state machines.
 The [framing core](framing-proof.md) verifies header encoding and decoding, frame
 extents, and recovery cursor transitions. Filesystem operations, checksums, and the
 complete scanner loop are tested rather than verified. The production HTTP server
@@ -14,9 +14,34 @@ must already exist and be operator-controlled. Startup itself is synchronous.
 Directory syncing makes the current implementation a Unix-oriented prototype;
 supported deployment filesystems and their crash guarantees still need validation.
 
+## Audit durability policy
+
+The optional root field `"durability"` accepts `"durable"` (the default) or
+`"buffered"`. It is independent of `"logging": "strict" | "availability"`.
+Both durability modes wait for complete writes; only durable mode waits for a
+per-batch sync before returning receipts. Strict mode requires a successful
+receipt under the configured policy before forwarding body bytes; availability
+mode continues with counted gaps after logging failure. Buffered mode does not
+ignore write failures or turn logging into a background enqueue acknowledgment.
+
+Buffered receipts establish exact written bytes, session identity, and ordering,
+but do not establish stable storage. A system crash or power loss may discard
+acknowledged records, including records for already-forwarded traffic. There is
+no periodic-sync interval or bounded loss window, and shutdown does not promise
+a final sync. Startup headers and directory entries, and rotation predecessor
+sealing and successor creation, still sync in both modes.
+
+`AuditReceipt` explicitly records its strength. `BatchJournal` preserves the
+selected policy; `BatchWorker::run` proves written-prefix membership for all
+successful receipts and stable-prefix membership for durable receipts only.
+`JournalBinding` rejects buffered receipts for durable requests, even when session
+and bytes match. `OwnedStream::durable_receipt_evidence` ties accepted evidence
+to this requirement. The older `Journal` and `AuditJournal` crash theorems remain
+durable-only models; they do not give buffered acknowledgments crash survival.
+
 ## Automatic rotation
 
-The executable uses `DiskLog::create_rotating`. It starts at the supplied path
+The executable uses `DiskLog::create_rotating_with_durability`. It starts at the supplied path
 and creates `PATH.000001`, `PATH.000002`, and so on. Each segment has the same
 56-byte format header and immutable session ID. The original library constructors
 remain single-file APIs. No existing file is overwritten, renamed, or deleted.
@@ -32,7 +57,7 @@ plus the 56-byte header. Requests may span segments, but individual frames never
 
 The same worker closes the old file only after syncing it and durably creating
 the next header and parent directory entry. The record is then written and
-synced before acknowledgment, under the existing append deadline. A collision,
+synced before acknowledgment in durable mode, under the existing append deadline. A collision,
 creation, write, or sync failure permanently poisons logging health, with the
 existing strict/availability behavior; there is no fallback, retry, or replacement
 worker. At rotation there are at most two open audit segment files plus a
@@ -78,9 +103,10 @@ set, including the original path, until shipping and any required replay finish.
 
 One worker thread owns the active file. Cloned logger handles share its bounded queue.
 Each append reserves a queue slot before copying its record. The worker takes
-up to 16 records already queued, writes each intact record, then calls `sync_all`
-once for the group before returning any positive acknowledgment. It never waits
-to fill a batch, so an isolated record is synced immediately. A write or sync
+up to 16 records already queued and writes each intact record. Durable mode then
+calls `sync_all` once for the group before returning any positive acknowledgment;
+buffered mode acknowledges complete writes without this sync. It never waits
+to fill a batch, so an isolated durable record is synced immediately. A write or sync
 failure rejects the whole group. Rotation can add predecessor-sealing syncs.
 The production `BatchWorker` core verifies that sequence and retains an independent
 active credit from dequeue through completion delivery. Only a private token
