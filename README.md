@@ -8,112 +8,56 @@ plugins, no other network destinations.
 
 ![HypGate forwards requests and responses between an AI client and provider, records exchanges in a local audit log, and optionally ships logs to HypAware Cloud.](docs/images/hypgate-flow.png)
 
-What makes it different: the code that decides what the gateway does is
-proved correct with [Verus](https://github.com/verus-lang/verus). The proofs
-check the core against explicit contracts; the thin code that moves bytes
-between sockets, files, and the core is tested, audited, and lint-checked
-panic-free.
+The gateway's decision-making core is proved correct with
+[Verus](https://github.com/verus-lang/verus). The network and disk adapters
+around it are tested and audited.
 
 ## Three guarantees
 
 ### 1. Data only goes where you configured
 
-Requests go to the provider you set up, using the key you set up. Logs go to
-the log file on disk. If you turn on shipping, logs go to your configured HypAware or S3 endpoint
-and nowhere else. There is no other network connection in the binary.
+Requests go to your configured provider using your configured credential.
+Audit logs stay on disk unless you enable shipping to HypAware or S3.
+There are no other network destinations.
 
-### 2. Correctness
+### 2. Faithful forwarding and audit records
 
-The gateway is a faithful pass-through with a faithful record.
+Request and response bodies pass through byte for byte, in order, including
+streaming responses. The gateway filters headers and supplies the provider
+credential. Audit records tie the forwarded bytes and request outcome to the
+authenticated tenant and request.
 
-- **Bodies pass through unchanged.** The provider gets the client's request body
-  byte for byte, and the client gets the provider's response byte for byte, in
-  order. The gateway filters headers, swaps in the provider credential,
-  and sets Host.
-- **Every exchange is recorded completely.** Each request gets a start record
-  with the time, route, and destination; every request body chunk; the response
-  status; every response body chunk; and a completion record with the outcome
-  and byte counts. The logged bytes are the forwarded bytes.
-- **Records are ordered and attributed.** Within a request, records appear in
-  the order the bytes flowed, with chunks numbered from one. Every record names
-  the authenticated tenant and the request, and chunks cannot cross requests.
-- **Nothing is forwarded before it is on disk.** In strict mode a byte reaches
-  the provider or the client only after its record is written and synced. If
-  the log cannot be written, the request fails instead of going unrecorded.
-- **A crash loses nothing that was acknowledged.** Kill the process at any
-  point and every synced record is still there. Recovery reports only complete
-  records and never rewrites or truncates the file.
-- **Failures are reported honestly.** A provider error, timeout, or client
-  disconnect ends the request with a completion record naming the cause. A
-  truncated stream is an error, never a clean completion.
-- **The whole log reaches HypAware once, in order.** An upload counts only when
-  the server confirms the exact batch. After a restart the gateway resends only
-  what was unconfirmed, with the same identities, so the server stores each
-  exchange once.
-
-S3 uploads projected NDJSON batches using [verified SigV4 signing](docs/cloud-shipping.md#s3-destination),
-without new dependencies. Identical retries overwrite the same object; consumers
-can deduplicate overlapping batches by row identity.
-
-Strict mode is the guarantee. Availability mode is an opt-out that keeps
-forwarding after the log fails and counts each unrecorded request as a gap.
+In **strict mode**, each byte is logged and synced before it is forwarded.
+If logging fails, the request fails instead of going unrecorded. Availability
+mode keeps forwarding after a log failure and counts unrecorded requests as gaps.
+Provider errors, timeouts, and truncated streams are reported as failures.
 
 ### 3. Core safety and crash recovery
 
 Under its stated preconditions, the verified core cannot panic, overflow, or
-read out of bounds. The runtime around it is lint-checked panic-free: no
-unwrap, expect, panic, unreachable, indexing, or unchecked arithmetic in
-production code, so a bookkeeping fault refuses a request or strands a slot
-instead of crashing. Allocation failure and the internals of the standard
-library and rustls are the remaining ways the process can die; after a
-process kill or guest power cut, the scanner recovers the valid log prefix under
-the [storage contract](docs/storage-crash-contract.md). Shipping runs on its own
-thread, so if it fails, the gateway keeps serving requests.
+read out of bounds. The surrounding runtime is lint-checked to reject common
+panic sources and unchecked arithmetic in production code. Allocation failures
+and failures inside dependencies remain outside that guarantee.
 
-These are theorems about the verified core, plus a short list of things we
-trust and do not prove: rustls, the OS, DNS, TLS certificates, the
-filesystem under power loss, the HypAware server, and
-that each socket, file, and log effect the core asks for is performed as
-asked. The HTTP/1.1 parser and writer are verified core code; no HTTP library
-is linked ([codec](docs/http1-codec.md)), and the order of every connection,
-from the head read to the completion record, is a verified driver's
-([proof index](docs/proof-index.md)). [PROOFS.md](PROOFS.md) states each guarantee exactly and lists every
-assumption.
+After a crash, the gateway recovers complete log records without rewriting or
+truncating the log. Synced records survive provided your storage stack honors
+successful sync calls.
 
-## Why verify an AI gateway?
+HypAware shipping retries unconfirmed batches with stable identities so the
+server stores each exchange once. S3 retries overwrite the same object;
+consumers can deduplicate overlapping batches by row identity. Shipping runs
+separately from request handling, so a shipping failure does not stop serving.
 
-The gateway sits in the path of every AI request and sees your most sensitive
-data: proprietary code, customer information, internal prompts, and provider
-credentials. If it goes down, AI work stops. If it is compromised, that data
-leaks, and a shared gateway becomes a path across tenant boundaries.
-
-This has happened. LiteLLM documented a
-[March 2026 supply-chain compromise](https://docs.litellm.ai/blog/security-townhall-updates)
-of its published Python packages, and a
-[second compromise on October 21, 2026](https://docs.litellm.ai/blog/security-incident-oct-21-2026)
-that shipped credential-stealing malware through PyPI and official container
-registries.
-
-Tests check the examples someone thought of. Proofs cover every input the model
-describes. Keeping the gateway small is what makes the proofs practical. Proofs
-do not replace fault testing, redundancy, or secure builds, and they cannot stop
-a compromised release pipeline from shipping different code.
+These guarantees have a defined scope: the verified core relies on the runtime
+adapters, TLS, the OS, storage, and the destination server behaving as specified.
+[PROOFS.md](PROOFS.md) documents the exact contracts and assumptions.
 
 ## Status
 
-A runnable prototype. The core's authorization, configuration, streaming,
-shipping, HTTP/1.1 codec, exchange sequencing, and resource invariants are
-Verus-checked. The network and disk adapters are tested, and live exchanges with Anthropic and
-OpenAI, streamed and not, have been run through the gateway and shipped to
-HypAware Cloud ([smoke record](docs/hypaware.md#smoke-test-record)). Six abrupt
-QEMU guest power-cut trials on ext4 preserved every observed acknowledgment
-([results](docs/storage-crash-contract.md#guest-power-cut-experiment)). Software
-crash validation is complete for this tested configuration. Physical storage
-durability is a deployment assumption: the storage stack must honor successful
-sync calls. Every loop in the verified core terminates by proof except the
-two service loops, each a verified step that ends its loop within one round of
-the stop signal; that the signal arrives and that blocking calls return are
-environment assumptions ([liveness scope](docs/liveness-scope.md)).
+HypGate is a runnable prototype. Live OpenAI and Anthropic requests, including
+streaming responses, have been tested through the gateway with HypAware shipping.
+Crash recovery has been tested with process failures and guest power cuts;
+physical storage durability remains a deployment assumption.
 
 ## Run it
 
@@ -136,57 +80,15 @@ contain request and response bodies. Remote access needs a
 [TLS reverse proxy](docs/deployment.md). See [running the gateway](docs/running.md)
 for provider configuration, scanning logs, and shutdown behavior.
 
-## Documentation
+## Operating the gateway
 
-[PROOFS.md](PROOFS.md) states the guarantees. These pages back them up:
-
-| Document | Purpose |
-| --- | --- |
-| [Proof index](docs/proof-index.md) | Maps each advertised guarantee to its source contracts and composition assumptions |
-| [End-to-end audit](docs/end-to-end-audit.md) | One request traced through every effect site, failure exit, and shutdown |
-| [Ownership composition](docs/ownership-composition.md) | How the ownership and submission proofs compose through the runtime, and the trusted joins |
-| [Security contract](docs/security-contract.md) | Threat boundary, required properties and their status, trusted computing base |
-| [Authorization core](docs/authorization-core.md) | Digest authentication, tenant-scoped tokens, configuration confinement |
-| [Framing proof](docs/framing-proof.md) | Header roundtrips, bounded payloads, frame extents in the serializer and scanner |
-| [Journal proof](docs/journal-proof.md) | Acknowledgment ordering and conditional synced-prefix survival |
-| [Recovery proof](docs/recovery-proof.md) | Scanner cursor transitions and acknowledged-prefix reconstruction |
-| [Shutdown proof](docs/shutdown-proof.md) | Verified drain rank and the conditional shutdown/resource release argument |
-| [Storage crash contract](docs/storage-crash-contract.md) | Storage assumptions, process-death and guest power-cut experiments, and the evidence behind the recovery claims |
-| [Resource accounting](docs/resource-accounting.md) | Source-level inventory of application buffers and queues |
-| [Resource composition](docs/resource-composition.md) | Budget ownership and the conditional requested-allocation bound |
-| [HTTP/1.1 codec](docs/http1-codec.md) | The verified head parser and writer, framing selection, chunked coding, and exchange machines; the adapter and what stays trusted |
-| [Dependency resources](docs/dependency-resources.md) | Pinned rustls retained-allocation audit and the codec's own buffers |
-| [DNS resources](docs/dns-resources.md) | DNS lookup ownership, threads, and shutdown |
-
-Runtime and adapters:
-
-| Document | Purpose |
-| --- | --- |
-| [Runtime ownership](docs/runtime-ownership.md) | Binding authorized requests to capacity leases and owned streams |
-| [Worker lifetimes](docs/worker-lifetimes.md) | Worker credits and the order in which a thread's work and its credit are destroyed |
-| [Configuration](docs/configuration.md) | Root policy and candidate route parsing, credential loading, endpoint binding |
-| [HTTP boundary](docs/http-boundary.md) | Inbound authentication and fixed upstream request preparation |
-| [Body transfer](docs/body-transfer.md) | Blocking body driver and the durable-log contract |
-| [HTTPS transport](docs/https-transport.md) | Upstream TLS exchange on the connection thread, deadlines, and cancellation |
-| [Disk logging](docs/disk-logging.md) | Bounded disk worker, sync acknowledgments, recovery scanner |
-| [Cloud shipping](docs/cloud-shipping.md) | HypAware and S3 shipping: protocol, configuration, proved and trusted parts |
-| [HypAware setup](docs/hypaware.md) | Operator walkthrough: tokens, shipping config, checking rows on the server, live smoke test record |
-| [HTTP ownership](docs/http-ownership.md) | HTTP owner counts derived from the worker and connection registries |
-| [HTTP buffer lifetimes](docs/http-buffer-lifetimes.md) | HTTP body buffers, role credit, and cancellation |
-| [Audit buffer lifetimes](docs/audit-buffer-lifetimes.md) | Audit queue credit, worker ownership, and receipt delivery |
-
-Operations:
-
-| Document | Purpose |
-| --- | --- |
-| [Installation](docs/installation.md) | Local installer and unprivileged runtime container |
-| [Provider SDKs](docs/sdks.md) | OpenAI and Anthropic clients, endpoint binding, and streaming checks |
-| [Audit retention](docs/retention.md) | Preview and delete expired, closed archive logs |
-| [Running the gateway](docs/running.md) | Configuration example, provider setup, log scanning, shutdown |
-| [Deployment](docs/deployment.md) | TLS termination, standby routing, clean-environment reproduction |
-| [Operational limits](docs/operational-limits.md) | Every fixed and configurable limit and what happens when it is reached |
-| [Benchmarks](docs/benchmarks.md) | Latency, throughput, overload, and memory measurements |
-| [JSON reader and writer](docs/json.md) | The verified reader for configuration, state, and provider bodies and the verified writer for state, rows, and scan output: what is proved and what is not |
+- [Installation](docs/installation.md): local installer and runtime container.
+- [Provider SDKs](docs/sdks.md): connect OpenAI and Anthropic clients.
+- [Deployment](docs/deployment.md): TLS termination and standby routing.
+- [Log shipping](docs/cloud-shipping.md): configure HypAware or S3;
+  [HypAware setup](docs/hypaware.md) walks through tokens and checking uploads.
+- [Operational limits](docs/operational-limits.md) and
+  [benchmarks](docs/benchmarks.md): capacity, overload behavior, and performance.
 
 Audit logs rotate automatically at 128 MiB or 24 hours, on the next record.
 Use `--log-max-bytes N` and `--log-max-age-seconds N` after the serving arguments
@@ -210,52 +112,11 @@ cargo clippy -p gateway-runtime --locked
 bash scripts/check_effect_sites.sh
 ```
 
-The clippy run enforces the panic-free standard on the whole runtime crate:
-unwrap, expect, panic, unreachable, indexing, and unchecked arithmetic are
-denied outside tests. It also denies every
-socket, name lookup, listener, file write, and secret read outside the
-audited effect sites (`clippy.toml`); the script fails if that set of sites
-changes.
-
-Opt-in load, memory, benchmark, and failover workloads (the last needs HAProxy and
-OpenSSL on PATH; results are discussed in the [benchmarks](docs/benchmarks.md)
-and [deployment](docs/deployment.md) notes):
-
-```sh
-cargo test -p gateway-runtime --locked --lib sustained_overload -- --ignored --nocapture
-cargo test -p gateway-runtime --locked --lib isolated_gateway_memory_in_both_logging_modes -- --ignored --nocapture
-cargo test -p gateway-runtime --locked --lib isolated_gateway_memory_soak -- --ignored --nocapture
-cargo test -p gateway-runtime --release --locked server::tests::benchmark -- --ignored --nocapture --test-threads=1
-HYPGATE_HAPROXY=/path/to/haproxy cargo test -p gateway-runtime --locked proxy_gateway_process_failover -- --ignored --nocapture
-```
-
-Additional rotation-effect validation on 2026-10-26: 1416 core verification checks
-and 393 workspace tests passed (21 opt-in tests ignored). All eight rotation and
-eight snapshot mutations were rejected by proof, along with three related
-snapshot mutations selected by the runner. The runtime passed its effect-site
-and panic-free lint checks. The new proofs cover writer sealing order and the
-bounded snapshot adapter; filesystem visibility and naming, clock sampling, CLI
-parsing, and missing-file detection remain outside those guarantees.
-
-Rotation and recovery validation after rebase on 2026-10-26: 1400 core verification
-checks passed, 387 workspace tests passed (21 opt-in tests ignored), all six rotation
-and seventeen recovery mutations were rejected by proof, and the eight pinned
-effect sites passed their check. The Linux storage and deployment workloads were
-not rerun for this change.
-
-Previous baseline validation on 2026-10-26: 1376 core verification checks passed, 363 workspace tests passed, all fourteen opt-in benchmark workloads passed on the blocking runtime, all 539
-deliberate mutations failed their proof obligations, and the runtime passed its panic-free and effect-site
-lints with no async executor linked. The opt-in TLS proxy/gateway
-process-failover test and six load/fault workloads passed on 2026-10-23.
-Two ten-minute overload runs and the final 100-wave-per-mode isolated memory soak
-also passed; measurements and limits are in the benchmark notes.
-These counts are checks, not a count of independent security guarantees.
-
-[Automated checks](.github/workflows/ci.yml) reproduce the tests and proofs on Linux
-for every pull request and every push to `master`.
-`bash scripts/check_deployment.sh` reproduces the documented deployment from a clean
-checkout, and `deploy/Dockerfile` repeats the build, tests, proofs, and that check in
-a digest-pinned container; see [clean-environment reproduction](docs/deployment.md#clean-environment-reproduction).
+[Automated checks](.github/workflows/ci.yml) run tests and proofs on Linux for
+every pull request and every push to `master`. See the
+[proof index](docs/proof-index.md) for verification details and
+[deployment guide](docs/deployment.md#clean-environment-reproduction) for
+clean-environment reproduction.
 
 ## License
 
