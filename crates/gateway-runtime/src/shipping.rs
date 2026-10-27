@@ -212,10 +212,18 @@ impl Engine {
         Some(session)
     }
 
+    // Keep destination and account scope in the checkpoint itself: identity.json
+    // can be replaced by enrollment before a new checkpoint is successfully saved.
+    // Hex components cannot contain the separator; the token is never persisted.
+    fn checkpoint_identity(&self, session: &[u8; 16]) -> Vec<u8> {
+        format!("hypaware-v2:{}:{}:{}", hex(self.config.server.url().as_bytes()),
+            state::fingerprint(self.config.token()), hex(session)).into_bytes()
+    }
+
     fn hypaware_machine(&mut self, session: [u8; 16]) -> Machine {
-        let checkpoint = state::load_checkpoint(&self.config.state_dir).filter(|c| c.session == hex(&session).as_bytes()
-            && c.max_open_exchanges == self.config.max_open_exchanges && c.max_exchange_bytes == self.config.max_exchange_bytes);
-        let (resolved, poisoned) = checkpoint.map(|c| (c.resolved, c.poisoned)).unwrap_or((0, 0));
+        let checkpoint = state::load_checkpoint(&self.config.state_dir);
+        let (resolved, poisoned) = gateway_core::shipping_checkpoint::select(&checkpoint,
+            &self.checkpoint_identity(&session), self.config.max_open_exchanges, self.config.max_exchange_bytes);
         let mut machine = Machine::new(self.config.token().to_vec(), session, self.config.max_open_exchanges,
             self.config.max_exchange_bytes, resolved, poisoned);
         if let Some(identity) = state::load_identity(&self.config.state_dir) {
@@ -278,7 +286,7 @@ impl Effects for Engine {
 
     fn checkpoint(&mut self, _machine: &Machine, resolved: u64, poisoned: u64) {
         let Some(session) = self.session else { return; };
-        let _ = state::save_checkpoint(&self.config.state_dir, &Checkpoint { session: hex(&session).into_bytes(), resolved, poisoned,
+        let _ = state::save_checkpoint(&self.config.state_dir, &Checkpoint { session: self.checkpoint_identity(&session), resolved, poisoned,
             max_open_exchanges: self.config.max_open_exchanges, max_exchange_bytes: self.config.max_exchange_bytes });
     }
 

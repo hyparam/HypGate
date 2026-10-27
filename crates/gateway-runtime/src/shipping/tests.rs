@@ -245,7 +245,7 @@ fn shipping_resume(rotate: bool) {
         assert_eq!(std::fs::metadata(state_dir.join("checkpoint.json")).unwrap().permissions().mode() & 0o777, 0o600); }
     let checkpoint = load_checkpoint(&state_dir).expect("checkpoint persisted");
     assert_eq!((checkpoint.resolved, checkpoint.poisoned), (2, 0));
-    assert_eq!(checkpoint.session, hex(&log.session()).as_bytes());
+    assert!(String::from_utf8(checkpoint.session).unwrap().starts_with("hypaware-v2:"));
 
     let batches = state.lock().unwrap().batches.clone();
     assert_eq!(batches.len(), 2);
@@ -544,3 +544,37 @@ event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
 }
 
 mod s3_tests;
+
+
+#[test]
+fn checkpoint_is_scoped_to_server_and_token_and_legacy_progress_is_replayed() {
+    let dir = TempDir::new();
+    let state_dir = dir.0.join("state"); std::fs::create_dir(&state_dir).unwrap();
+    let path = dir.0.join("audit.log");
+    let mut log = DiskLog::create(&path, 4, Duration::from_secs(2)).unwrap();
+    write_exchange(&mut log, 1, "https://api.anthropic.com/v1/messages", ANTHROPIC_REQUEST.as_bytes(), 200, &[ANTHROPIC_RESPONSE.as_bytes()], 0);
+    let session = log.session();
+    log.shutdown(Duration::from_secs(2)).unwrap();
+    let (port_a, roots_a, a, _a) = fake_server(TOKEN);
+    // A legacy checkpoint cannot establish which destination acknowledged it.
+    save_checkpoint(&state_dir, &Checkpoint { session: hex(&session).into_bytes(), resolved: 1, poisoned: 0,
+        max_open_exchanges: 64, max_exchange_bytes: 4096 }).unwrap();
+    let config = || shipping_config(port_a, &state_dir, json!({"max_open_exchanges":64,"max_exchange_bytes":4096}));
+    ship_to_end_with_roots(config(), path.clone(), Some(roots_a.clone())).unwrap();
+    assert_eq!(a.lock().unwrap().batches.len(), 1);
+    // Unchanged scope resumes without resending.
+    assert_eq!(ship_to_end_with_roots(config(), path.clone(), Some(roots_a.clone())).unwrap().batches_acknowledged(), 0);
+    // Changing only the account token must replay, even at the same endpoint.
+    let next_token = "another-account-token";
+    { let mut fake = a.lock().unwrap(); fake.expected_token = next_token.into(); fake.seen_ids.clear(); fake.seen_parts.clear(); }
+    let changed = ShippingConfig::from_root_json(&shipping_json(port_a, &state_dir,
+        json!({"max_open_exchanges":64,"max_exchange_bytes":4096})), |_| Some(next_token.into())).unwrap().unwrap();
+    assert_eq!(ship_to_end_with_roots(changed, path.clone(), Some(roots_a)).unwrap().batches_acknowledged(), 1);
+    // Changing the endpoint also replays the complete log.
+    let (port_b, roots_b, b, _b) = fake_server(next_token);
+    let changed = ShippingConfig::from_root_json(&shipping_json(port_b, &state_dir,
+        json!({"max_open_exchanges":64,"max_exchange_bytes":4096})), |_| Some(next_token.into())).unwrap().unwrap();
+    assert_eq!(ship_to_end_with_roots(changed, path, Some(roots_b)).unwrap().batches_acknowledged(), 1);
+    assert_eq!(b.lock().unwrap().batches.len(), 1);
+    assert!(!std::fs::read_to_string(state_dir.join("checkpoint.json")).unwrap().contains(next_token));
+}

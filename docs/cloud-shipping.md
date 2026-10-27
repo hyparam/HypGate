@@ -75,7 +75,10 @@ Add to the root policy (all fields but the first three optional):
 - `state_dir` must exist and be private to the operator. The shipper writes
   `identity.json` and `checkpoint.json` there, mode 0600, by temporary file
   and rename. `identity.json` holds the server's gateway credential and a
-  SHA-256 fingerprint of the operator token, not the token.
+  SHA-256 fingerprint of the operator token, not the token. Checkpoint progress
+  is bound to the server URL, token fingerprint, log session, and assembler
+  limits. Changing any of these replays the log; legacy unscoped checkpoints
+  are also replayed. Token rotation may replay rows, which the server deduplicates.
 - `max_open_exchanges` (1 to 65,536) bounds both the assembler's open
   exchanges and the queue of projected rows; when the queue is full the
   shipper stops reading until a batch resolves, so the log file is the buffer.
