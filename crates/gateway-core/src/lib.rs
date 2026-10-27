@@ -169,3 +169,5 @@ mod session_recovery_tests;
 #[cfg(test)]
 #[path = "tests/snapshot.rs"]
 mod snapshot_tests;
+
+pub mod batch_worker;

@@ -3,6 +3,7 @@
 use vstd::prelude::*;
 use crate::framing::RecordFrame;
 use crate::journal::DurableFrame;
+use crate::batch_worker::MAX_BATCH;
 
 verus! {
 pub open spec fn byte_sum(buffers: Seq<Seq<u8>>) -> nat
@@ -39,7 +40,7 @@ pub proof fn bounded_sum(buffers: Seq<Seq<u8>>, count: nat, size: nat)
 // active plus receipt frames with 65 bytes of framing each, and one header apiece.
 pub open spec fn budget(requests: nat, chunk: nat, connections: nat, queue: nat) -> nat {
     requests * chunk + 2 * requests * 32768
-        + (connections + 2 * requests) * 16384 + (queue + requests + 1) * (chunk + 65)
+        + (connections + 2 * requests) * 16384 + (queue + requests + MAX_BATCH as nat) * (chunk + 65)
         + (requests + 1) * 33
 }
 
@@ -101,7 +102,7 @@ impl Buffers {
             && bounded(self.readers, 2 * requests, 32768)
             // Client receivers + sender-only cleanup tails + provider queues.
             && bounded(self.output_queues, connections + 2 * requests, 16384)
-            && self.active_log.len() <= 1 && self.receipts.len() <= requests
+            && self.active_log.len() <= MAX_BATCH && self.receipts.len() <= requests
             && (forall|i: int| 0 <= i < self.active_log.len() ==> #[trigger] self.active_log[i].valid()
                 && self.active_log[i].payload().len() <= chunk)
             && (forall|i: int| 0 <= i < self.receipts.len() ==> #[trigger] self.receipts[i].valid()
@@ -133,16 +134,16 @@ impl Buffers {
         bounded_sum(self.chunks, requests, chunk);
         bounded_sum(self.readers, 2 * requests, 32768);
         bounded_sum(self.output_queues, connections + 2 * requests, 16384);
-        bounded_frames(self.active_log, 1, chunk);
+        bounded_frames(self.active_log, MAX_BATCH as nat, chunk);
         bounded_receipts(self.receipts, requests, chunk);
-        bounded_sum(frame_bytes(self.active_log), 1, chunk + 65);
+        bounded_sum(frame_bytes(self.active_log), MAX_BATCH as nat, chunk + 65);
         bounded_sum(receipt_bytes(self.receipts), requests, chunk + 65);
         bounded_sum(self.headers, requests + 1, 33);
         assert(queue.capacity() * (queue.payload_limit() + 65)
             <= queue.capacity() * (chunk + 65)) by(nonlinear_arith)
             requires queue.payload_limit() <= chunk;
-        assert(queue.capacity() * (chunk + 65) + (chunk + 65) + requests * (chunk + 65)
-            == (queue.capacity() + requests + 1) * (chunk + 65)) by(nonlinear_arith);
+        assert(queue.capacity() * (chunk + 65) + MAX_BATCH * (chunk + 65) + requests * (chunk + 65)
+            == (queue.capacity() + requests + MAX_BATCH as nat) * (chunk + 65)) by(nonlinear_arith);
     }
 
     // Guard against accidentally dropping a category from the modeled total.
@@ -161,14 +162,14 @@ impl Buffers {
         bounded_sum(self.readers, 2 * requests, 32768);
         bounded_sum(self.output_queues, connections + 2 * requests, 16384);
         bounded_frames(self.queued_log, queue, chunk);
-        bounded_frames(self.active_log, 1, chunk);
+        bounded_frames(self.active_log, MAX_BATCH as nat, chunk);
         bounded_receipts(self.receipts, requests, chunk);
         bounded_sum(frame_bytes(self.queued_log), queue, chunk + 65);
-        bounded_sum(frame_bytes(self.active_log), 1, chunk + 65);
+        bounded_sum(frame_bytes(self.active_log), MAX_BATCH as nat, chunk + 65);
         bounded_sum(receipt_bytes(self.receipts), requests, chunk + 65);
         bounded_sum(self.headers, requests + 1, 33);
-        assert(queue * (chunk + 65) + (chunk + 65) + requests * (chunk + 65)
-            == (queue + requests + 1) * (chunk + 65)) by(nonlinear_arith);
+        assert(queue * (chunk + 65) + MAX_BATCH * (chunk + 65) + requests * (chunk + 65)
+            == (queue + requests + MAX_BATCH as nat) * (chunk + 65)) by(nonlinear_arith);
     }
 }
 }

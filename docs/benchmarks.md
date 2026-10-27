@@ -565,3 +565,55 @@ Samples measure only the gateway child; macOS does not supply the Linux kernel
 high-water metric. The final availability samples plateaued, while strict samples
 still varied. These finite observations establish neither leak freedom nor a
 universal RSS bound. The sustained-overload latency results are reported separately.
+
+## Bounded group commit, 2026-10-27
+
+The production worker now takes up to 16 records already waiting in FIFO order,
+writes each intact record, and syncs once before delivering any receipts. There
+is no timer delay to fill a batch. Rotation can add predecessor-sealing syncs.
+Both logging modes use this path while the log is healthy.
+
+All 14 release workloads passed on the same local macOS 27.0.1 machine with Rust
+1.99.1. Every expected response and recovered payload was exact; there were no
+failed exchanges and no audit gaps except the 24 deliberately injected in the
+availability failure workload. The concurrency sweep repeats each level three
+times; the table reports the median throughput and median per-run p95 latency.
+The before run used the same fixture at `7478197`, with timing counters around
+record syncs, immediately preceding the batching implementation. These are
+sequential local observations, not interleaved trials or deployment guarantees.
+
+| Strict-mode concurrency | Before requests/s | Batched requests/s | Before first byte p95 ms | Batched first byte p95 ms | Batched completion p95 ms |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 25.2 | 24.0 | 20.8 | 22.5 | 36.4 |
+| 2 | 26.5 | 26.0 | 37.3 | 35.8 | 65.7 |
+| 4 | 27.6 | 50.0 | 73.1 | 39.0 | 67.7 |
+| 8 | 26.4 | 95.9 | 149.8 | 39.7 | 70.1 |
+| 16 | 27.6 | 190.5 | 291.6 | 44.6 | 74.4 |
+| 32 | 27.8 | 363.8 | 587.4 | 48.3 | 74.0 |
+
+An isolated request still performs its own syncs, so batching primarily improves
+concurrent traffic. At 32 concurrent requests, strict throughput improved about
+13 times; this is not the no-sync diagnostic, and durable acknowledgment ordering
+is unchanged. Small closed-loop batches include worker cleanup and do not establish
+an open-loop saturation rate or stable request p99.
+
+| Workload | Mode | Elapsed s | Payload MiB/s | First byte p95 ms | Completion p95 ms | Frame gap p99 ms |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| large_uploads | availability | 2.47 | 13.18 | 621.06 | 621.13 | 0.00 |
+| long_streams | availability | 40.98 | 6.25 | 48.26 | 40968.54 | 27.14 |
+| queue_contention | availability | 0.36 | 24.77 | 48.21 | 77.85 | 11.61 |
+| slow_peers | availability | 9.60 | 13.36 | 37.78 | 2556.55 | 12.68 |
+| healthy | availability | 0.33 | 6.82 | 44.09 | 70.71 | 11.35 |
+| large_uploads | strict | 2.42 | 13.41 | 601.61 | 601.67 | 0.00 |
+| long_streams | strict | 40.91 | 6.26 | 46.95 | 40896.03 | 27.07 |
+| queue_contention | strict | 0.34 | 26.66 | 43.59 | 70.88 | 10.71 |
+| slow_peers | strict | 9.84 | 13.03 | 38.38 | 2889.48 | 11.40 |
+| healthy | strict | 0.31 | 7.26 | 36.32 | 65.03 | 10.56 |
+
+Validation: 1,527 core verification checks, 423 workspace tests (21 opt-in tests
+ignored), all 14 opt-in release benchmark tests, 12 batch-worker mutations and
+five buffer-accounting mutations rejected by proof, nine mutation-runner tests,
+and the runtime effect-site/panic and blocking-site checks. Targeted runtime
+tests block the shared sync to reject premature receipt delivery and recover a
+batch across eight segment boundaries. Storage-call truth and persistence remain
+the assumptions in the [storage contract](storage-crash-contract.md).

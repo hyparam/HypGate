@@ -87,8 +87,8 @@ impl Queue {
         }
         Ok(())
     }
-    pub(super) fn recv(&self, owner: &mut gateway_core::disk_worker::DiskWorker)
-        -> Option<gateway_core::disk_worker::ActiveAppend<Completion>>
+    pub(super) fn recv(&self, owner: &mut gateway_core::batch_worker::BatchWorker)
+        -> Option<gateway_core::batch_worker::ActiveBatch<Completion>>
     {
         if !owner.can_take() { return None; }
         let job = {
@@ -101,8 +101,8 @@ impl Queue {
                 state = self.ready.wait(state).ok()?;
             }
         };
-        // Every pop frees exactly one slot, announced after the lock is released.
-        self.space.notify_one();
+        // A bounded dequeue frees several slots; wake their waiting producers.
+        self.space.notify_all();
         Some(job)
     }
     #[cfg(test)]
@@ -147,9 +147,9 @@ mod tests {
     fn soon() -> Instant { Instant::now() + Duration::from_millis(50) }
     #[test]
     fn production_dequeue_requires_active_credit_and_delivery_returns_it() {
-        use gateway_core::{disk_worker::DiskWorker, audit_journal::AuditJournal};
+        use gateway_core::{batch_worker::BatchWorker, audit_journal::AuditJournal};
         let queue = Queue::with_payload_limit(1, 3);
-        let mut owner = DiskWorker::new(3, 1);
+        let mut owner = BatchWorker::new(3, 1);
         let mut journal = AuditJournal::new(0);
         // Disabled logging exercises ownership/delivery without a filesystem.
         struct Unused;

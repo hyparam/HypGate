@@ -28,6 +28,7 @@ credential. Audit records tie the forwarded bytes and request outcome to the
 authenticated tenant and request.
 
 In **strict mode**, each byte is logged and synced before it is forwarded.
+Up to 16 queued audit records share a sync, with no timer delay to fill a batch.
 If logging fails, the request fails instead of going unrecorded. Availability
 mode keeps forwarding after a log failure and counts unrecorded requests as gaps.
 Provider errors, timeouts, and truncated streams are reported as failures.

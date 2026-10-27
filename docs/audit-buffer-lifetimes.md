@@ -5,7 +5,7 @@ This is a source-level correspondence argument for the audit terms in
 and the verified fixed FIFO with `std::sync::mpsc` completion channels. It does
 not formally verify synchronization, channels, or Rust destruction.
 Let Q be disk queue capacity, R the request limit, and K the request chunk size.
-The production log-frame payload is at most K; independent library callers can
+The production log-frame payload is at most A = max(K, 8210); independent library callers can
 supply up to `MAX_RECORD_BYTES` and must account for retained receipts separately.
 
 | Stage | Owner and credit | Frame count charged |
@@ -13,12 +13,12 @@ supply up to `MAX_RECORD_BYTES` and must account for retained receipts separatel
 | Before reservation | `LogRecord` borrows the request's existing payload. No copied frame exists. | Already in the request chunk term |
 | Encoding | `Queue::enqueue` uses private `push_with` to call verified `FrameQueue::reserve` while holding the queue mutex before invoking the encoding callback. That callback builds a `RecordBody` through verified `FrameQueue::encode_reserved`. The mutex excludes insertion and shutdown until the constructed Job is installed. | One of Q encoding/queued slots |
 | Queued | Verified `FrameQueue::finish_reserved` transfers the immutable frame and receipt sender into a fixed slot. The caller retains only the receipt receiver. | One of Q encoding/queued slots |
-| Writing/syncing/committing | Verified `DiskWorker::take` moves the exact queued frame/sender into a private `ActiveAppend` and charges the independent active slot. `DiskWorker::run` owns it across synchronous write and sync calls. Dequeue returns queue credit, allowing another producer to encode. | One active frame in addition to Q |
-| Delivering | `commit_frame` moves the same frame into `DurableFrame`; no payload clone is made. `FinishedAppend::deliver` consumes the receipt/sender into the caller's oneshot or destroys the undeliverable value, then returns a private release token. | Active-frame term until transfer, then receipt term |
+| Writing/syncing/committing | Verified `BatchWorker::take` moves up to 16 exact queued frame/sender pairs into a private `ActiveBatch` and charges the independent active slot. `BatchWorker::run` owns it across synchronous write and sync calls. Dequeue returns queue credit, allowing another producer to encode. | Up to 16 active frames in addition to Q |
+| Delivering | `commit_frame` moves the same frame into `DurableFrame`; no payload clone is made. `FinishedBatch::deliver` consumes the receipt/sender into the caller's oneshot or destroys the undeliverable value, then returns a private release token. | Active-frame term until transfer, then receipt term |
 | Delivered, awaiting consumption | The body-copy loop retains exclusive request ownership across the append, and `BodyCopy::finish_audit` checks the exact receipt before dropping it. | At most one receipt per live production request, hence R |
 | Dropped/canceled | The frame is dropped at its current owner; a caller whose deadline passed cannot drop a queued Job or interrupt its syscall. | Credit follows the surviving frame, not the caller's thread |
 
-The resulting frame term is `(Q + 1 + R) * (A + 65)` with `A = max(K, 8210)`, the
+The resulting frame term is `(Q + 16 + R) * (A + 65)` with `A = max(K, 8210)`, the
 audit payload limit that also admits metadata records. The checked production
 encoding derives 65 bytes of header/checksum overhead. The journal's byte history
 and canonical-frame sequence are erased ghost state, not retained old payloads.
@@ -26,7 +26,9 @@ Header encoding/comparison scratch is accounted separately and now requests
 33 bytes up front; the [allocation inventory](dependency-resources.md#audit-encoding-allocation-requests)
 records simultaneous header/body requests and the sealing-capacity regression. Channel nodes,
 oneshot state, allocator slack, and thread stacks are outside the frame-payload term.
-The worker explicitly requests a 2 MiB stack rather than inheriting the
+The active and finished vectors each request 16 descriptors, with no payload
+copy. The write and commit helpers recurse at most 16 levels; their stack
+frames are covered by the dedicated worker stack. The worker explicitly requests a 2 MiB stack rather than inheriting the
 environment-dependent Rust default; reservation, committed pages, and OS overhead
 remain distinct. The [control-storage inventory](dependency-resources.md#channel-control-storage)
 counts completion oneshots separately; both HTTP body channels and the audit
@@ -34,25 +36,28 @@ queue now use fixed-slot storage.
 
 ## Verified active-worker ownership
 
-`gateway-core/src/disk_worker.rs` owns the production worker protocol. Its
+`gateway-core/src/batch_worker.rs` owns the production worker protocol. Its
 `take` transition runs under the queue mutex, refuses an already busy worker,
 generation exhaustion, or an incompatible payload limit, and atomically moves
-the oldest exact frame/completion pair into `ActiveAppend`. The queue and active
+up to 16 oldest exact frame/completion pairs into `ActiveBatch`. The queue and active
 slot have independent credits. `queued_and_active_bound` derives the actual
-queue plus encoding plus active-frame bound of `(Q + 1) * (A + 65)` from the
+queue plus encoding plus active-frame bound of `(Q + 16) * (A + 65)` from the
 queue invariant and the retained active-frame snapshot. The private active and
 finished handles preserve that snapshot's bytes and completion association.
 
-`DiskWorker::run` borrows its owner while consuming the active handle. The verified
-sequence begins the journal append, calls `Storage::write_all` on that exact
-frame, calls `Storage::sync` only after successful writing, and commits only
-after successful sync. Successful output binds the exact record to both the
+`BatchWorker::run` borrows its owner while consuming the active handle. The verified
+sequence calls `Storage::write_all` separately for each frame, calls
+`Storage::sync` once after all writes succeed, then advances the journal and
+issues each frame receipt. There is no timer or wait to fill a batch. Writes
+stay separate so rotation seals each predecessor before creating its successor;
+rotation may therefore add syncs. All receipts refer to prefixes of the same
+synced history. Write or sync failure rejects every record in the batch. Successful output binds the exact record to both the
 acknowledged journal prefix and the storage model's stable bytes. Failure marks
 the journal permanently failed; later queued frames are discarded without new
 writes, even if the external fault recovers. A disabled worker performs no I/O.
 
-The worker stays busy through `FinishedAppend` delivery. Only its consuming
-`deliver` method constructs `ReleasedAppend`; there is no public constructor,
+The worker stays busy through `FinishedBatch` delivery. Only its consuming
+`deliver` method constructs `ReleasedBatch`; there is no public constructor,
 clone, or raw frame extraction. `release` checks both the file session and the
 monotonic generation before enabling another dequeue. Dropping an active or
 finished handle without delivery strands the active credit instead of silently
@@ -63,7 +68,7 @@ The remaining adapter contracts are narrow: `Storage` truthfully appends the
 supplied bytes and reports sync under the storage crash model; `Completion`
 transfers its sole receipt to the request-owned channel or destroys it before
 returning. Production implementations are `Write::write_all`, `sync_all`, and
-one consuming `mpsc` send. They neither retain application payload copies nor
+one consuming `mpsc` send per frame. They neither retain application payload copies nor
 spawn replacement/delivery threads. Rust destruction, mutex/channel behavior, one
 worker per logger, and the fresh file-session binding remain explicit assumptions.
 Receipt-to-request accounting joins the separate composition proof; this does
@@ -74,7 +79,7 @@ finished handles, mismatched payload limits, closed-queue drain, write/sync
 failure, permanent failure without retry, exact reply association, and rejecting
 another session's completion token. The real queue regression cancels the first
 caller while retaining its active credit. Existing stalled-sync, process-kill,
-disk-error, and shutdown tests run through this verified protocol. Eleven deliberate
+disk-error, and shutdown tests run through this verified protocol. Twelve batch-specific deliberate
 mutations test early dequeue/release, wrong session/generation, lost active charge,
 omitted active bytes, ignored limits, disabled/failed-state I/O, and write/sync bypasses.
 

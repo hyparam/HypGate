@@ -606,7 +606,7 @@ their surviving owners; they do not add another copy of message payloads.
 | Control object | Conservative simultaneous count | Owner argument |
 | --- | ---: | --- |
 | HTTP body channels | 0 | Removed: the connection thread copies bodies directly |
-| Audit completion `mpsc` channels | Q + 1 + R | Encoding/queued jobs, sole active worker, and live request receivers |
+| Audit completion `mpsc` channels | Q + 16 + R | Encoding/queued jobs, sole active worker, and live request receivers |
 | DNS completion `mpsc` channels | 32 + R | Credited lookup jobs or live request receivers after result handoff |
 
 The connection thread copies body bytes directly from the body reader to the

@@ -30,6 +30,8 @@ impl AuditJournal {
             out.history() == Seq::<u8>::empty(), !out.failed(),
     { AuditJournal { inner: Journal::new(session), frames: Ghost(Seq::empty()) } }
 
+    pub fn is_failed(&self) -> (out: bool) ensures out == self.failed(), { self.inner.is_failed() }
+
     pub fn begin(&mut self, length: u64) -> (out: Option<Append>)
         requires old(self).valid(),
         ensures final(self).session() == old(self).session(), final(self).valid(), final(self).frames() == old(self).frames(),

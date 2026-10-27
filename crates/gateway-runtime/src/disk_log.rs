@@ -124,14 +124,14 @@ impl DiskLog {
         let thread = std::thread::Builder::new().name("hypgate-audit".into()).stack_size(WORKER_STACK_BYTES).spawn(move || {
             let _health_on_exit = UnhealthyOnExit(worker_health.clone(), receiver.clone());
             let mut journal = Journal::new(u128::from_le_bytes(session));
-            let mut owner = gateway_core::disk_worker::DiskWorker::new(payload_limit, u128::from_le_bytes(session));
+            let mut owner = gateway_core::batch_worker::BatchWorker::new(payload_limit, u128::from_le_bytes(session));
             while let Some(job) = receiver.recv(&mut owner) {
                 let finished = owner.run(job, &mut journal, &mut storage, worker_health.load(Ordering::Acquire));
                 if finished.failed() { worker_health.store(false, Ordering::Release); }
                 // A canceled caller may leave a durable but unsent record. It must
                 // never cause the worker to retry or the gateway to replay traffic.
                 let released = finished.deliver();
-                assert!(owner.release(released), "completed disk job owns active credit");
+                assert!(owner.release(released), "completed disk batch owns active credit");
             }
         })?;
         Ok(Self { queue: Arc::new(SharedQueue(queue)), thread: Arc::new(Mutex::new(Some(thread))),
@@ -217,7 +217,7 @@ impl AuditLog for DiskLog {
             return Err(io::ErrorKind::InvalidInput.into());
         }
         // Reserve queue space before allocating/copying a payload. Queued frames
-        // plus the worker's one active frame bound retained log payloads.
+        // plus the worker's bounded active batch bound retained log payloads.
         // The queue lock serializes construction/insertion with shutdown.
         // Unlike an mpsc sender clone, this Arc cannot keep admission open
         // after Queue::close.

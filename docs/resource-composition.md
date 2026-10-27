@@ -34,7 +34,7 @@ of each; library callers that construct more instances multiply the budgets.
 | `Gateway` | Until the last `Arc` drops | R worker slots, C connection slots (fixed by the first `serve`), the table of live exchanges' cancel handles, counters | An exchange keeps R credit until its work returns and drops its captures after a client disconnect; a connection keeps C credit until its thread's work returns |
 | One `serve` invocation | From listener bind to drained shutdown | Listener, one just-accepted socket | Connection threads it started that are still finishing their work, bounded by C |
 | `HttpsTransport` | Until dropped | TLS client config and root store, session cache (32 servers, 33 during insertion), DNS pool (4 threads, 32 credits) | DNS jobs and unread replies keep verified credit until cleanup or checked adoption by a live request; the cache survives when no request is live |
-| `DiskLog` | Until the last clone drops and the worker exits | Q fixed frame slots, one encoding reservation, one active frame, one worker thread stack | The active frame stays owned through a stuck syscall; queued jobs survive caller cancellation; poisoned storage stays charged until destruction |
+| `DiskLog` | Until the last clone drops and the worker exits | Q fixed frame slots, one encoding reservation, up to 16 active frames, one worker thread stack | The active frame stays owned through a stuck syscall; queued jobs survive caller cancellation; poisoned storage stays charged until destruction |
 | Admitted exchange (`PreparedRequest` → `HttpsTransport::connect` and the `Session` effects, under the verified driver) | From admission to retirement of the owned stream | One K chunk/read owner, one upstream connection and its TLS state, one chunked upload writer, two 32 KiB body read buffers, one receipt | HTTP cleanup precedes request credit return; the TLS handshake runs on the same thread and leaves nothing behind |
 | Inbound connection thread | From accept to the thread's work returning | One 512 KiB thread stack and one 64 KiB watcher stack, one 32 KiB head buffer, one chunked response writer, one cancel handle | A client disconnect cancels the exchange through the watcher; the thread finishes its completion record before its credit returns |
 
@@ -58,7 +58,7 @@ the mechanism that keeps the count hypothesis true.
 | `output_queues`: at most C + 2R, each at most 16 KiB | None: the runtime has no body queue; the connection thread writes each copied frame as a chunk before accepting the next | The chunked writers under `WorkerHttp::upload_writer` and `WorkerHttp::response_writer` | Dropped with the work | The theorem's term is kept and over-approximates; the framed chunk in flight is charged under [chunk framing buffers](dependency-resources.md#chunk-framing-buffers). See [HTTP ownership](http-ownership.md) for the runtime mapping |
 | `queued_log`: at most Q, each at most A = max(K, 8,210) | `FrameQueue<Completion>` slots in `disk_log::queue::Queue` | `enqueue` through the verified reservation and `finish_reserved` | Worker `recv` pops under the queue mutex | Verified fixed-queue occupancy; the executable binds the payload limit to A so metadata records fit; the theorem is instantiated at A, which bounds K |
 | Encoding snapshot: at most one, within A + 65 | `RecordBody`/`RecordFrame` built by the single-use `EncodingPermit` | `FrameQueue::reserve` under the queue mutex | `finish_reserved` or construction panic (poisoned, still charged) | Verified reservation bit; the permit is non-cloneable and consumed |
-| `active_log`: at most one, within K | `ActiveAppend` / `FinishedAppend` matched to the disk worker's retained frame snapshot | Verified `DiskWorker::take` inside `recv` returns credit to Q and charges the active slot | Verified run commits or drops the frame; consuming delivery and a matching session/generation token permit release | Verified busy gate and `queued_and_active_bound`; one worker per `DiskLog`, never replaced |
+| `active_log`: at most 16, each within A | `ActiveBatch` / `FinishedBatch` matched to the disk worker's retained frame snapshot | Verified `BatchWorker::take` inside `recv` returns credit to Q and charges the active slot | Verified run commits or drops the frame; consuming delivery and a matching session/generation token permit release | Verified busy gate and `queued_and_active_bound`; one worker per `DiskLog`, never replaced |
 | `receipts`: at most R, each within K | `DurableFrame` delivered through the job oneshot to the body-copy loop (`BodyCopy::finish_audit`) | `commit_frame` and oneshot send | Exact receipt validation drops it; cancellation drops it with the receiver | One outstanding append per request; the worker can run ahead by one job, which is the active-frame term |
 | `headers`: at most R + 1, each 33 bytes | Canonical header scratch in `encode_payload` and in receipt comparison | Encoding entry | Function return | One per encoding logger plus one per validating request |
 
@@ -90,7 +90,7 @@ assumption listed below.
 
 The visible payload subtotal is the verified theorem's conclusion:
 
-    V(R, K, C, Q) = R × K + 2R × 32,768 + (C + 2R) × 16,384 + (Q + R + 1) × (A + 65) + (R + 1) × 33
+    V(R, K, C, Q) = R × K + 2R × 32,768 + (C + 2R) × 16,384 + (Q + R + 16) × (A + 65) + (R + 1) × 33
 
 where A = max(K, 8,210) is the audit payload limit the executable passes to the
 logger: metadata records (at most 8,210 bytes) share the queue with body chunks.
@@ -163,6 +163,7 @@ checks this over 3,000 rounds.
 | Queued DNS jobs, 32 × (253 + 2,048) | 73,632 | DNS inventory |
 | Retained configuration content, bounded by both one-MiB input documents | 2,097,152 | [Configuration storage](configuration.md#configuration-storage-and-startup-scratch) |
 | Disk queue slot vector | Q × size of `Option<(RecordFrame, Sender)>` | [Audit ownership](audit-buffer-lifetimes.md#verified-fixed-queue-and-synchronization-obligations) |
+| Batch descriptor vectors (payloads charged in V) | 16 × (size of `Option<(RecordFrame, Sender)>` + size of `(Option<DurableFrame>, Sender)`) | `budget::BATCH_DESCRIPTORS`; bounded recursion uses the existing worker stack |
 | Root store trust-anchor descriptors | root count × size of `TrustAnchor` | `webpki-roots` static table, cloned descriptors over static DER |
 | Optional shipper thread (only with a `shipping` section): its stack, `O × E` assembler bytes, `O × 2 × (E + 16,384)` queued rows, one scanned record, one 4 MiB batch and its request copy, a 64 KiB reply, 128 KiB S3 credential/signing/header scratch | 2,097,152 + O × E + O × 2 × (E + 16,384) + 1,048,641 + 8,388,608 + 65,536 + 131,072 | [Cloud shipping](cloud-shipping.md#resources); `budget::shipping`, printed separately at startup |
 
@@ -173,7 +174,7 @@ The composed bound is:
 where the per-connection term is the 512 KiB connection stack, the 64 KiB
 watcher stack, and the retained 933,901-byte adapter allowance. For the
 executable example (R = 32, K = 16,384, C = 128, Q = 16), V is
-6,574,258 bytes and B is about 380.7 MB; `budget::tests` pins the exact value
+6,820,993 bytes and B is about 380.9 MB; `budget::tests` pins the exact value
 from the sizes computed at build time. The isolated-process workload measured a
 kernel peak of 14,168,064 bytes on Linux with R = 8 ([benchmarks](benchmarks.md#isolated-gateway-process-memory)).
 The gap is expected: the bound charges every owner at its replacement peak

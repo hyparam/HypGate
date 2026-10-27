@@ -39,6 +39,9 @@ const SESSION_CACHE_CONTENT: u64 = 33 * 9 * 131_119;
 const DNS_JOBS: u64 = 32 * DNS_REPLY;
 const CONFIGURATION_CONTENT: u64 = 2 * 1024 * 1024;
 const POOL_SLOTS: u64 = 32; // DNS registry entries
+type ReplySlot = (Option<DurableFrame>, std::sync::mpsc::Sender<Option<DurableFrame>>);
+const BATCH_DESCRIPTORS: u64 = gateway_core::batch_worker::MAX_BATCH as u64
+    * (size_of::<QueueSlot>() + size_of::<ReplySlot>()) as u64;
 type QueueSlot = Option<(RecordFrame, std::sync::mpsc::Sender<Option<DurableFrame>>)>;
 
 /// Returns `None` for limits the gateway refuses or sums that overflow `u64`.
@@ -52,13 +55,13 @@ pub fn compose(limits: Limits) -> Option<Budget> {
     let visible_payload = r.checked_mul(k)?
         .checked_add(r.checked_mul(2 * 32_768)?)?
         .checked_add(c.checked_add(r.checked_mul(2)?)?.checked_mul(16_384)?)?
-        .checked_add(q.checked_add(r)?.checked_add(1)?.checked_mul(a.checked_add(65)?)?)?
+        .checked_add(q.checked_add(r)?.checked_add(gateway_core::batch_worker::MAX_BATCH as u64)?.checked_mul(a.checked_add(65)?)?)?
         .checked_add(r.checked_add(1)?.checked_mul(33)?)?;
     let inbound_connections = c.checked_mul(PER_INBOUND_CONNECTION)?;
     let admitted_exchanges = r.checked_mul(PER_ADMITTED_EXCHANGE)?;
     let instance = r.checked_mul(2)?.checked_add(c)?.checked_add(POOL_SLOTS)?.checked_mul(8)?.checked_add(DEDICATED_STACKS)?
         .checked_add(SESSION_CACHE_CONTENT)?.checked_add(DNS_JOBS)?.checked_add(CONFIGURATION_CONTENT)?
-        .checked_add(q.checked_mul(size_of::<QueueSlot>() as u64)?)?
+        .checked_add(BATCH_DESCRIPTORS)?.checked_add(q.checked_mul(size_of::<QueueSlot>() as u64)?)?
         .checked_add((webpki_roots::TLS_SERVER_ROOTS.len() as u64).checked_mul(size_of::<TrustAnchor<'static>>() as u64)?)?;
     let total = visible_payload.checked_add(inbound_connections)?.checked_add(admitted_exchanges)?.checked_add(instance)?;
     Some(Budget { visible_payload, inbound_connections, admitted_exchanges, instance, total })
@@ -94,16 +97,16 @@ mod tests {
         assert_eq!(PER_INBOUND_CONNECTION, 589_824 + 933_901);
         assert_eq!(PER_ADMITTED_EXCHANGE, 3_984_134);
         let budget = compose(EXAMPLE).unwrap();
-        assert_eq!(budget.visible_payload, 6_574_258);
+        assert_eq!(budget.visible_payload, 6_820_993);
         assert_eq!(budget.inbound_connections, 128 * 1_523_725);
         assert_eq!(budget.admitted_exchanges, 32 * 3_984_134);
-        let fixed = 8 * (64 + 128 + 32) + 10_551_296 + 38_942_343 + 73_632 + 2_097_152;
+        let fixed = BATCH_DESCRIPTORS + 8 * (64 + 128 + 32) + 10_551_296 + 38_942_343 + 73_632 + 2_097_152;
         let sized = 16 * size_of::<QueueSlot>() as u64
             + webpki_roots::TLS_SERVER_ROOTS.len() as u64 * size_of::<TrustAnchor<'static>>() as u64;
         assert_eq!(budget.instance, fixed + sized);
         assert!(sized < 65_536, "{sized}");
-        assert_eq!(budget.total, 6_574_258 + 128 * 1_523_725 + 32 * 3_984_134 + fixed + sized);
-        assert!((380_600_000..380_800_000).contains(&budget.total), "{}", budget.total);
+        assert_eq!(budget.total, 6_820_993 + 128 * 1_523_725 + 32 * 3_984_134 + fixed + sized);
+        assert!((380_800_000..381_100_000).contains(&budget.total), "{}", budget.total);
     }
 
     #[test]

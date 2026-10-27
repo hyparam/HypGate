@@ -606,3 +606,96 @@ fn malformed_metadata_payloads_scan_as_frames_but_do_not_decode() {
         assert!(LogReader::new(Cursor::new(file)).unwrap().next_record().unwrap().unwrap().metadata().is_some());
     }
 }
+
+#[test]
+fn queued_batch_waits_for_shared_sync_and_closed_queue_drains() {
+    struct Controlled {
+        writes: Arc<std::sync::atomic::AtomicUsize>,
+        entered: blocking::Sender<usize>, release: blocking::Receiver<()>,
+    }
+    impl Write for Controlled {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.writes.fetch_add(1, Ordering::Relaxed); Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> { Ok(()) }
+    }
+    impl DurableWrite for Controlled {
+        fn sync(&mut self) -> io::Result<()> {
+            self.entered.send(self.writes.load(Ordering::Relaxed)).unwrap();
+            self.release.recv_timeout(WAIT).unwrap(); Ok(())
+        }
+    }
+    let (entered, syncing) = blocking::channel();
+    let (release, wait) = blocking::channel();
+    let writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let log = DiskLog::start(Controlled { writes, entered, release: wait }, 20, WAIT, [1; 16]).unwrap();
+    let first = log.queue.0.enqueue(record(b"first", 0), Instant::now() + WAIT).unwrap();
+    assert_eq!(syncing.recv_timeout(WAIT).unwrap(), 1);
+    let mut replies = Vec::new();
+    for id in 1..=20 { replies.push((id, log.queue.0.enqueue(record(b"batch", id), Instant::now() + WAIT).unwrap())); }
+    log.queue.0.close();
+    assert!(first.try_recv().is_err());
+    release.send(()).unwrap();
+    assert!(first.recv_timeout(WAIT).unwrap().is_some());
+    assert_eq!(syncing.recv_timeout(WAIT).unwrap(), 17);
+    // All sixteen writes have finished, but none has a durable receipt yet.
+    assert!(replies.iter().all(|(_, rx)| matches!(rx.try_recv(), Err(blocking::TryRecvError::Empty))));
+    // A canceled receiver cannot strand the batch or shift receipt identities.
+    drop(replies.remove(0));
+    release.send(()).unwrap();
+    for (id, rx) in replies.drain(..15) {
+        let receipt = rx.recv_timeout(WAIT).unwrap().unwrap();
+        assert!(receipt.matches_record(record_header(&record(b"batch", id)), b"batch"));
+    }
+    assert_eq!(syncing.recv_timeout(WAIT).unwrap(), 21);
+    assert!(replies.iter().all(|(_, rx)| matches!(rx.try_recv(), Err(blocking::TryRecvError::Empty))));
+    release.send(()).unwrap();
+    for (id, rx) in replies {
+        let receipt = rx.recv_timeout(WAIT).unwrap().unwrap();
+        assert!(receipt.matches_record(record_header(&record(b"batch", id)), b"batch"));
+    }
+    log.shutdown(WAIT).unwrap();
+}
+
+#[test]
+fn shared_sync_spans_rotations_and_recovers_every_exact_frame() {
+    use gateway_core::{disk_worker::Storage as StorageTrait, log_rotation::RotatingStorage};
+    struct GatedRotation {
+        inner: RotatingStorage<rotation::RotatingFile>,
+        gate: Option<(blocking::Sender<()>, blocking::Receiver<()>)>,
+        syncs: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl StorageTrait for GatedRotation {
+        fn write_all(&mut self, bytes: &Vec<u8>) -> bool { self.inner.write_all(bytes) }
+        fn sync(&mut self) -> bool {
+            self.syncs.fetch_add(1, Ordering::Relaxed);
+            if let Some((entered, release)) = self.gate.take() {
+                entered.send(()).unwrap(); release.recv_timeout(WAIT).unwrap();
+            }
+            self.inner.sync()
+        }
+    }
+    let dir = TempDir::new(); let path = dir.0.join("batched-rotation.log");
+    let rotation = Rotation { max_bytes: 56 + 2 * 68, max_age: Duration::from_secs(60) };
+    let session = [3; 16];
+    let inner = RotatingStorage::new(rotation::RotatingFile::create(&path, session, rotation).unwrap(), u128::from_le_bytes(session), rotation.max_bytes);
+    let (entered, syncing) = blocking::channel(); let (release, wait) = blocking::channel();
+    let syncs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let log = DiskLog::start_storage(GatedRotation { inner, gate: Some((entered, wait)), syncs: syncs.clone() }, 16, WAIT, session, 3).unwrap();
+    let first = log.queue.0.enqueue(record(b"abc", 0), Instant::now() + WAIT).unwrap();
+    syncing.recv_timeout(WAIT).unwrap();
+    let replies: Vec<_> = (1..=16).map(|id| log.queue.0.enqueue(record(b"abc", id), Instant::now() + WAIT).unwrap()).collect();
+    log.queue.0.close(); release.send(()).unwrap();
+    assert!(first.recv_timeout(WAIT).unwrap().is_some());
+    for reply in replies { assert!(reply.recv_timeout(WAIT).unwrap().is_some()); }
+    log.shutdown(WAIT).unwrap();
+    // Segment sealing adds its own syncs; these are the two group-commit syncs.
+    assert_eq!(syncs.load(Ordering::Relaxed), 2);
+    let mut scanner = SessionReader::open(&path).unwrap();
+    for chunk in 0..=16 {
+        let recovered = scanner.next_record().unwrap().unwrap();
+        assert_eq!(recovered.chunk, chunk); assert_eq!(recovered.bytes, b"abc");
+    }
+    assert!(scanner.next_record().unwrap().is_none());
+    assert_eq!(scanner.segment(), 8);
+}

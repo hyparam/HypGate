@@ -141,7 +141,7 @@ under the shared C-credit bound. Stopping one listener does not claim to destroy
 another caller's listener. A graceful shutdown permanently closes this Gateway;
 restart requires a fresh Gateway/logger.
 
-A blocked disk worker keeps one active frame and at most Q queued/reserved frames.
+A blocked disk worker keeps up to 16 active frames and at most Q queued/reserved frames.
 DNS has four fixed threads and 32 retained job credits per transport. Cancellation
 returns request/worker slots without reclaiming those independent credits. A stuck
 call cannot create replacement work beyond these limits. All captured state is

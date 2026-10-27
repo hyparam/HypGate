@@ -23,6 +23,19 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ('batch_worker.rs', 'batch_skips_sync', 'synced = storage.sync();', 'synced = true;'),
+    ('batch_worker.rs', 'batch_skips_write', 'if write_frames(&batch.jobs, 0, storage)', 'if true'),
+    ('batch_worker.rs', 'batch_ignores_write_failure', 'if !storage.write_all(jobs[at].0.bytes()) { return false; }', 'let _ = storage.write_all(jobs[at].0.bytes());'),
+    ('batch_worker.rs', 'batch_ignores_sync_failure', 'if !synced { journal.fail(); }', 'if false { journal.fail(); }'),
+    ('batch_worker.rs', 'batch_foreign_journal', 'enabled && journal.session_id() == batch.session && !journal.is_failed()', 'enabled && !journal.is_failed()'),
+    ('batch_worker.rs', 'batch_disabled_io', 'enabled && journal.session_id() == batch.session && !journal.is_failed()', 'journal.session_id() == batch.session && !journal.is_failed()'),
+    ('batch_worker.rs', 'batch_dequeues_while_busy', '!self.busy && self.next < u64::MAX', 'self.next < u64::MAX'),
+    ('batch_worker.rs', 'batch_wrong_release_session', ' || token.session != self.session', ''),
+    ('batch_worker.rs', 'batch_wrong_release_generation', ' || token.generation != self.next - 1', ''),
+    ('batch_worker.rs', 'batch_lifo_receipts', 'let (frame, completion) = jobs.remove(0);', 'let (frame, completion) = jobs.pop().unwrap();'),
+    ('batch_worker.rs', 'batch_ignores_payload_limit', ' || queue.payload_capacity() > self.limit', ''),
+    ('batch_worker.rs', 'batch_omits_active_budget', '<= (queue.capacity() + MAX_BATCH) * (self.limit() + 65),', '<= queue.capacity() * (self.limit() + 65),'),
+
     ("s3_delivery.rs", "s3_date_uses_month_as_day", "push_two(&mut out, c.day as u64)", "push_two(&mut out, c.month as u64)"),
     ("s3_delivery.rs", "s3_omits_signed_date_header", 'headers.push(field(b"x-amz-date", date, false));', 'headers.push(field(b"wrong-header", date, false));'),
     ("s3_delivery.rs", "s3_fabricates_success_without_put", "let response = io.put(put);", "let response = Response { status: 200, retry_after: None };"),
@@ -244,8 +257,8 @@ MUTATIONS = [
     ("owned_stream.rs", "read_changes_filled_prefix", "bytes.truncate(length);", "bytes.truncate(0);"),
     ("owned_stream.rs", "read_denies_valid_completion", "self.stream.advance(bytes).is_some()", "false"),
     ("buffer_accounting.rs", "omit_receipt_storage", "+ byte_sum(receipt_bytes(self.receipts)) + byte_sum(self.headers)", "+ byte_sum(self.headers)"),
-    ("buffer_accounting.rs", "underbudget_output_cleanup", "+ (connections + 2 * requests) * 16384 + (queue + requests + 1) * (chunk + 65)", "+ (connections + requests) * 16384 + (queue + requests + 1) * (chunk + 65)"),
-    ("buffer_accounting.rs", "underbudget_receipts", "+ (connections + 2 * requests) * 16384 + (queue + requests + 1) * (chunk + 65)", "+ (connections + 2 * requests) * 16384 + (queue + 1) * (chunk + 65)"),
+    ("buffer_accounting.rs", "underbudget_output_cleanup", "+ (connections + 2 * requests) * 16384 + (queue + requests + MAX_BATCH as nat) * (chunk + 65)", "+ (connections + requests) * 16384 + (queue + requests + MAX_BATCH as nat) * (chunk + 65)"),
+    ("buffer_accounting.rs", "underbudget_receipts", "+ (connections + 2 * requests) * 16384 + (queue + requests + MAX_BATCH as nat) * (chunk + 65)", "+ (connections + 2 * requests) * 16384 + (queue + MAX_BATCH as nat) * (chunk + 65)"),
     ("journal.rs", "receipt_frame_overhead_too_small", "ensures self.record().len() == self.payload_len() + 65,", "ensures self.record().len() == self.payload_len() + 64,"),
     ("owned_stream.rs", "owned_retirement_skips_release", "{ registry.release_stream(&self.key, self.stream) }", "{ true }"),
     ("owned_stream.rs", "owned_advance_changes_bytes", "let out = self.stream.advance(bytes);", "let out = self.stream.advance(Vec::new());"),

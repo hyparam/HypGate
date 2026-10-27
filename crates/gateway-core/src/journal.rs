@@ -92,6 +92,8 @@ impl Journal {
         Journal { session, written: 0, durable: 0, acknowledged: 0, pending: 0, failed: false, bytes: Ghost(Seq::empty()) }
     }
 
+    pub fn is_failed(&self) -> (out: bool) ensures out == self.failed(), { self.failed }
+
     pub fn begin(&mut self, length: u64) -> (out: Option<Append>)
         requires old(self).valid(),
         ensures final(self).session() == old(self).session(), final(self).valid(), final(self).history() == old(self).history(),
