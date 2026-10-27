@@ -152,8 +152,10 @@ pub struct BodyReader {
     pos: usize,
     decoder: BodyDecoder,
     /// Every byte received for the body, in order: leftover first, then each fill.
+    #[allow(dead_code)] // Read by Verus specifications.
     received: Ghost<Seq<u8>>,
     /// Every body byte a read has named, in order.
+    #[allow(dead_code)] // Read by Verus specifications.
     delivered: Ghost<Seq<u8>>,
 }
 

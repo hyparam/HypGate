@@ -61,8 +61,6 @@ impl<IO: Write> Streaming<IO> {
     pub(crate) fn send(&mut self, chunk: &[u8]) -> io::Result<()> { self.io.write_all(chunk)?; self.io.flush() }
     /// The last chunk; the stream is complete. Returns the underlying stream.
     pub(crate) fn finish(mut self) -> io::Result<IO> { self.io.finish()?; Ok(self.io.into_parts().0) }
-    /// Give the stream back without the last chunk: a truncated body.
-    pub(crate) fn truncate(self) -> IO { self.io.into_parts().0 }
 }
 
 /// A received response: head, and a reader for the body.
@@ -84,8 +82,6 @@ impl<IO: Read> Answer<IO> {
         while let Some(piece) = self.chunk()? { out.extend_from_slice(&piece); }
         Ok(out)
     }
-    /// The stream under the answer, once the body is done with.
-    pub(crate) fn into_inner(self) -> IO { self.body.into_inner() }
 }
 
 /// Send one request with a Content-Length body and read the response head.

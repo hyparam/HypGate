@@ -695,7 +695,6 @@ struct Shared<'a> {
     status: Option<u16>,
     outcome: Option<u8>,
     is_error: bool,
-    sse: bool,
 }
 
 /// The eighteen members both rows begin with.
@@ -789,7 +788,7 @@ pub fn rows(session: &[u8; 16], exchange: &Exchange, max_text: usize) -> (out: V
     let model = match &request.model { Some(m) => Some(slice_to_vec(m.as_slice())), None => match &response.model { Some(m) => Some(slice_to_vec(m.as_slice())), None => None } };
     let is_error = (match status { Some(s) => s >= 400, None => false }) || (match outcome { Some(o) => o != 0, None => false }) || exchange.incomplete;
     proof { assert(started == started_ms(*exchange)); assert(finished == finished_ms(*exchange)); }
-    let shared = Shared { session, exchange, exchange_id, session_id, host, path, model, started, status, outcome, is_error, sse };
+    let shared = Shared { session, exchange, exchange_id, session_id, host, path, model, started, status, outcome, is_error };
 
     let mut user = base_members(&shared, 0);
     push_member(&mut user, K_ROLE.as_slice(), text(V_USER.as_slice()));

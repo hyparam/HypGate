@@ -80,9 +80,6 @@ impl<R> BodyReader<R> {
     }
     /// Whether the whole body was read and well framed.
     pub(crate) fn is_complete(&self) -> bool { self.driver.is_complete() }
-    /// The stream, once the body is complete; bytes read ahead are none, since reads stop at the body's end.
-    #[cfg(test)]
-    pub(crate) fn into_inner(self) -> R { self.wire.io }
 }
 
 impl<R: Read> Read for BodyReader<R> {

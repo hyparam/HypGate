@@ -23,7 +23,7 @@ static WAKE: AtomicI32 = AtomicI32::new(-1);
 
 extern "C" {
     fn signal(signum: i32, handler: usize) -> usize;
-    fn write(fd: i32, buf: *const u8, count: usize) -> isize;
+    fn write(fd: i32, buf: *const std::ffi::c_void, count: usize) -> isize;
 }
 
 extern "C" fn on_signal(_signum: i32) {
@@ -33,7 +33,7 @@ extern "C" fn on_signal(_signum: i32) {
     // SAFETY: `write` is async-signal-safe; `fd` is the writing end of a
     // socket pair that `on_termination` leaked, so it stays open for the life
     // of the process, and `byte` outlives the call.
-    unsafe { write(fd, &byte, 1); }
+    unsafe { write(fd, std::ptr::from_ref(&byte).cast(), 1); }
 }
 
 /// Run `then` on its own thread when SIGTERM or SIGINT first arrives. Call

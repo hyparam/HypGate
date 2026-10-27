@@ -15,7 +15,9 @@
 use vstd::prelude::*;
 use crate::batch_builder::{MAX_BYTES, MAX_ROWS};
 use crate::enrollment::{throttle_delay, transport_delay, Enrollment, Recovery};
-use crate::exchange_assembler::{Assembler, Exchange, FLUSH};
+use crate::exchange_assembler::{Assembler, Exchange};
+#[allow(unused_imports)] // FLUSH appears only in proof histories.
+use crate::exchange_assembler::FLUSH;
 use crate::framing::{append, Header};
 use crate::upload_cursor::UploadCursor;
 
@@ -41,7 +43,11 @@ pub enum Outcome { Acknowledged(u64), Poisoned, Isolating, Enrolled, Unenrolled,
 
 /// One projected exchange: its NDJSON rows, each followed by a newline, and
 /// the row count.
-pub struct Pending { body: Vec<u8>, rows: usize, source: Ghost<u64> }
+pub struct Pending {
+    body: Vec<u8>, rows: usize,
+    #[allow(dead_code)] // Source identity retained for the proof.
+    source: Ghost<u64>,
+}
 impl Pending {
     pub closed spec fn body(&self) -> Seq<u8> { self.body@ }
     pub closed spec fn rows(&self) -> nat { self.rows as nat }

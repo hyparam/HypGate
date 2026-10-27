@@ -161,7 +161,9 @@ pub proof fn canonical_frame_is_complete<R: Source>(frame: &framing::RecordFrame
 
 pub struct Scanner<R: Source> {
     source: R, cursor: Cursor, session: [u8; 16],
-    start: Ghost<u64>, emitted: Ghost<Seq<(framing::Header, Seq<u8>)>>,
+    // Proof histories; Cargo does not read them.
+    #[allow(dead_code)] start: Ghost<u64>,
+    #[allow(dead_code)] emitted: Ghost<Seq<(framing::Header, Seq<u8>)>>,
 }
 
 /// What one scan call adds to the emitted sequence. A record extends it; a

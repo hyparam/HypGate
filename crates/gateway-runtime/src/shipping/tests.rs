@@ -149,13 +149,6 @@ fn fake_server(token: &str) -> (u16, RootCertStore, Shared, FakeServer) {
 
 pub(crate) const TOKEN: &str = "hsa_0123456789abcdef_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq";
 
-/// The fake server for the gateway-level test, optionally hanging every request.
-pub(crate) fn fake_server_for_gateway(hang: bool) -> (u16, RootCertStore, Shared, FakeServer) {
-    let (port, roots, state, server) = fake_server(TOKEN);
-    state.lock().unwrap().hang = hang;
-    (port, roots, state, server)
-}
-
 fn shipping_json(port: u16, state_dir: &std::path::Path, extra: Value) -> Vec<u8> {
     let mut section = json!({"server": format!("https://localhost:{port}/"), "token_env": "HYP_TOKEN",
         "state_dir": state_dir.to_str().unwrap(), "poll_ms": 100});

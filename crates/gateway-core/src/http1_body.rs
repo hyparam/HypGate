@@ -51,12 +51,15 @@ pub open spec fn take(owed: nat, len: nat, room: nat) -> nat {
 }
 
 pub struct BodyDecoder {
+    #[allow(dead_code)] // Read by Verus specifications.
     framing: Framing,
     mode: Mode,
     chunked: ChunkDecoder,
     remaining: u64,
     // Ghost history.
+    #[allow(dead_code)] // Read by Verus specifications.
     seen: Ghost<Seq<u8>>,
+    #[allow(dead_code)] // Read by Verus specifications.
     out: Ghost<Seq<u8>>,
 }
 

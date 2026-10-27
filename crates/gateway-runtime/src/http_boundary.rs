@@ -52,8 +52,6 @@ impl<'a> PreparedRequest<'a> {
     pub(crate) fn stream(&mut self) -> &mut crate::admission::Request<'a> { self.routed.stream() }
     #[cfg(test)]
     pub(crate) fn upstream_fields(&self) -> &[Field] { &self.upstream.as_ref().expect("upstream head present").fields }
-    #[cfg(test)]
-    pub(crate) fn upstream_path(&self) -> &[u8] { &self.upstream.as_ref().expect("upstream head present").path }
 
     /// Kind 2: the wall clock, the authorized route selector, and the configured
     /// text of the destination this request resolved to, built by the verified

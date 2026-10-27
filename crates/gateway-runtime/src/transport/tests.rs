@@ -150,6 +150,7 @@ fn tls_exchange_preserves_native_payloads_and_scoped_credentials() {
     assert_eq!(output.status, Some(200));
     assert_eq!(output.bytes, expected); assert_eq!(log.download, expected);
     assert_eq!(log.upload, b"{\"stream\":true}");
+    assert_eq!(stats.upload.accepted_bytes(), log.upload.len() as u64);
     assert_eq!(stats.download.accepted_bytes(), expected.len() as u64);
     assert!(!has(&output.headers, "set-cookie"));
     assert!(config.admit(b"gateway", 7).is_ok());
