@@ -122,9 +122,10 @@ rewriting. Linux ext4 validation and the evidence summary are recorded in the
 `gateway_core::session_recovery::SessionScanner` is the production driver used
 by `SessionReader`, `scan`, and both shipping modes. It owns the existing verified
 `recovery::Scanner`, all file-selection decisions, header/session comparisons,
-resume offsets, retries, and terminal failure state. The runtime only opens the
-specified path, captures its descriptor length, reads within that snapshot,
-seeks to the specified offset, and converts the resulting record type. There is
+resume offsets, retries, and terminal failure state. The runtime opens the specified path, captures its descriptor length, performs
+primitive short reads and absolute seeks, and converts the resulting record type.
+The verified `snapshot::Snapshot` adapter owns the captured-length bound,
+exact-read loop, seek validation, and cursor updates. There is
 no parallel Rust implementation of the traversal algorithm.
 
 The model gives each segment immutable eventual contents. An opened snapshot is
@@ -134,8 +135,11 @@ checksummed header has been observed, reopening its predecessor returns that
 predecessor's complete sealed contents. A mere foreign file or filename collision
 does not meet this condition. This is the explicit correspondence assumption
 between filesystem effects and the writer's protocol, not an assumption that
-the reader already recovered the right records. `SeekSource` reports whether a
-seek succeeded within the snapshot. `Scanner::restart` preserves the validated
+the reader already recovered the right records. The writer's seal-before-create
+call ordering and refusal to write predecessors are now proved separately by
+`segment_protocol`; OS visibility of that ordering remains an assumption.
+`snapshot::Snapshot` proves the `SeekSource` bounds and cursor contract over a
+truthful primitive absolute-seek result. `Scanner::restart` preserves the validated
 session and constructs a fresh scanner at the core-selected record boundary.
 
 Three inductive invariants establish the composition:
@@ -169,6 +173,30 @@ sample trailing record and successor header, and check foreign sessions, corrupt
 tails, I/O failures, empty segments, live growth, shipping replay, and real-file
 snapshot refresh. Eight deliberate defects must fail verification, including
 omitting the sealed-predecessor recheck and restarting from the wrong offset.
-Filesystem truthfulness, immutable earlier bytes, session uniqueness, and the
-writer's seal protocol remain assumptions. A missing successor is EOF, so no
+Filesystem truthfulness, immutable earlier bytes, session uniqueness, and
+physical visibility of the verified seal protocol remain assumptions. A missing successor is EOF, so no
 claim is made that an operator has not removed a file; there is no manifest.
+
+## Verified snapshot binding
+
+`FileRead` exposes primitive effects with byte/position contracts: a successful
+short read appends exactly the obtained bytes, a failed read can move the cursor
+within the attempted range, and an absolute seek truthfully reports success or
+failure. The metadata-supplied captured length is assumed to describe existing
+bytes. `snapshot::Snapshot` derives the complete `Source` and `SeekSource`
+contracts from these primitives, including monotone read positions and exact
+returned slices. It caps every fill by both the requested length and remaining
+snapshot extent. Reaching the captured end before consuming any bytes gives EOF;
+reaching it partway through an exact read gives Incomplete. Failed reads poison
+the snapshot's cursor knowledge until a successful absolute seek, avoiding an
+assumption that an error cannot move a file descriptor. The complete recovery
+driver still treats an I/O failure as terminal.
+
+The exact-read loop decreases by the number of bytes still requested; each
+successful primitive fill must return a positive byte count. This proves core
+loop termination conditional on primitive effects returning. The runtime's
+interruption retry and the OS itself are not thereby proved to terminate.
+The buffer is filled in place, so the adapter introduces no second record-sized
+payload allocation. Tests cover all short snapshot extents and fragment sizes,
+file growth, out-of-range/failed seeks, partial reads, and errors that consume
+unknown bytes. Eight deliberate snapshot mutations guard these guarantees.

@@ -225,6 +225,14 @@ cargo test -p gateway-runtime --release --locked server::tests::benchmark -- --i
 HYPGATE_HAPROXY=/path/to/haproxy cargo test -p gateway-runtime --locked proxy_gateway_process_failover -- --ignored --nocapture
 ```
 
+Additional rotation-effect validation on 2026-10-26: 1416 core verification checks
+and 393 workspace tests passed (21 opt-in tests ignored). All eight rotation and
+eight snapshot mutations were rejected by proof, along with three related
+snapshot mutations selected by the runner. The runtime passed its effect-site
+and panic-free lint checks. The new proofs cover writer sealing order and the
+bounded snapshot adapter; filesystem visibility and naming, clock sampling, CLI
+parsing, and missing-file detection remain outside those guarantees.
+
 Rotation and recovery validation after rebase on 2026-10-26: 1400 core verification
 checks passed, 387 workspace tests passed (21 opt-in tests ignored), all six rotation
 and seventeen recovery mutations were rejected by proof, and the eight pinned

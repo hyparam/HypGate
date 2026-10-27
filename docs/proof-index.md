@@ -171,9 +171,9 @@ verification of the thread scheduler or a hard wall-clock deadline.
 by exactly the offered bytes, rotation preserves earlier history and session,
 indices advance one at a time, and successful sync covers that history. Its
 size policy uses overflow-safe remaining-space comparisons and permits one intact
-oversized frame per otherwise empty segment. Failure is permanent. Six deliberate
-rotation mutations guard the size/age policy, append, sync, index, and creation
-failure checks. Filesystem durability and mapping segments to logical history
+oversized frame per otherwise empty segment. Failure is permanent. Eight deliberate
+rotation mutations guard the size/age policy, append, sync, index, creation
+failure, and seal ordering/failure checks. Filesystem durability and mapping segments to logical history
 remain explicit assumptions.
 
 `session_recovery::SessionScanner::{next_record,recovered_prefix,recovered_to_end}`
@@ -183,7 +183,20 @@ matching checked header and a complete tail. A cursor advances only by a decoded
 record extent or from a sealed predecessor's clean end to byte 56 of its immediate
 successor. The driver refreshes the predecessor after successor discovery to
 close the EOF/rotation race. Eight deliberate mutations guard the handoff,
-session checks, resume offsets, emission, and terminal errors. `Files` and
-`SeekSource` supply trusted bounded snapshots and seeks; they do not parse or
-choose the next file. See [recovery](recovery-proof.md#rotated-session-composition)
+session checks, resume offsets, emission, and terminal errors. `Files` supplies
+trusted path/metadata visibility. `snapshot::Snapshot` now proves
+`Source` and `SeekSource` over primitive `FileRead` effects, including exact
+accumulation, captured-length bounds, EOF classification, and seek/cursor updates.
+See [recovery](recovery-proof.md#rotated-session-composition)
 and [disk logging](disk-logging.md#automatic-rotation).
+
+`RotatingStorage::writer_protocol` proves the production effect trace follows
+`segment_protocol::run`. `creation_follows_seal` derives that each successor
+creation attempt immediately follows a successful predecessor seal.
+`no_append_to_predecessor` proves later appends target only the successor or later
+segments, and `prefix` proves no event follows a failed effect. The trace is
+supplied by the primitive effect contracts, not manually fabricated by the
+caller. Durability/visibility of the named syscalls and file identities remain
+trusted; their sequencing is checked. Snapshot tests and eight mutations check
+the separate verified primitive-read binding. Naming, time sampling, CLI parsing,
+and missing-file detection are not claimed as proved by this change.

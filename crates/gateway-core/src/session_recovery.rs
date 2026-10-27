@@ -7,8 +7,10 @@ verus! {
 /// An open returns a bounded snapshot of those bytes. Once a matching successor
 /// header has been observed, opening its predecessor returns the whole sealed
 /// predecessor. Merely observing an unrelated adjacent file does not seal it.
-/// Paths, filesystem snapshots, and the writer's sealing protocol are trusted;
-/// header parsing, cursor selection, and every traversal decision are verified.
+/// Filesystem path/visibility correspondence is trusted. Snapshot bounds and
+/// the writer's seal-before-create order are separately verified in `snapshot`
+/// and `segment_protocol`; physical visibility of those effects remains assumed.
+/// Header parsing, cursor selection, and every traversal decision are verified.
 pub trait Files: Sized {
     type Reader: SeekSource;
     spec fn valid(&self) -> bool;

@@ -185,8 +185,10 @@ journal and worker acknowledgment proofs apply through the verified
 `log_rotation::RotatingStorage` implementation of `Storage`. Its `SegmentIo`
 contract models record bytes across files with headers excluded. Creation must
 preserve all previous record bytes and durably establish the next header and its
-directory entry. The adapter syncs the old file before switching; a successful
-sync of the active file then covers all files. This model tracks the durability
+directory entry. The verified writer issues a successful `seal` before attempting
+successor creation; the runtime binds `seal` to the old file's `sync_all`. The checked
+`segment_protocol` trace proves there are no later writes to the predecessor.
+A successful sync of the active file then covers all files. This model tracks the durability
 promised by completed sync operations, not every byte the OS might already have
 persisted. New file headers contain the same session identifier.
 
@@ -196,8 +198,8 @@ required syncs. The prior acknowledged files remain intact under the same storag
 assumptions. The reader does not skip an incomplete header or tail. The single-file
 scanner proofs compose through `session_recovery::SessionScanner`. Its invariants
 prove the exact emitted prefix and require each crossed file to have a matching
-header and no damaged tail. The filesystem adapter supplies immutable prefix
-snapshots and truthful seeks; after a matching successor is observed, reopening
+header and no damaged tail. The verified snapshot adapter bounds reads and seeks
+over trusted primitive file effects and metadata. After a matching successor is observed, reopening
 the predecessor must see its sealed contents. The verified driver performs this
 recheck before crossing, so records appended during discovery cannot be skipped.
 These filesystem/writer correspondence assumptions remain explicit. Missing segment files cannot

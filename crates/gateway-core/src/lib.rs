@@ -47,7 +47,9 @@ pub mod fixed_queue;
 pub mod frame_queue;
 pub mod disk_worker;
 pub mod log_rotation;
+pub mod segment_protocol;
 pub mod session_recovery;
+pub mod snapshot;
 pub mod drain;
 pub mod task_credit;
 pub mod mailbox;
@@ -151,3 +153,6 @@ mod log_rotation_tests;
 #[cfg(test)]
 #[path = "tests/session_recovery.rs"]
 mod session_recovery_tests;
+#[cfg(test)]
+#[path = "tests/snapshot.rs"]
+mod snapshot_tests;

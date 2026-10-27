@@ -326,10 +326,18 @@ runs them with the pinned toolchain.
 ### Rotated recovery
 
 The production `disk_log::rotation::SessionReader` wraps the verified
-`session_recovery::SessionScanner`; snapshot acquisition, bounded file reads,
-SHA-256 comparison, and seeking are the trusted bindings. The core validates
+`session_recovery::SessionScanner`; path/length acquisition, primitive short
+reads, SHA-256 comparison, and absolute-seek results are trusted bindings.
+`snapshot::Snapshot` proves the exact-read loop, captured-length bounds, EOF
+classification, and seek/cursor updates over those primitives. The core validates
 headers, selects consecutive files, chooses resume offsets, refreshes the sealed
 predecessor before crossing, and proves exact prefix emission and complete
 consumption of crossed files. Runtime tests include rotation during successor
 discovery and shipping across file boundaries. See the
 [composition proof](recovery-proof.md#rotated-session-composition).
+
+`RotatingStorage` also issues the predecessor `seal` effect explicitly before
+`create_next`. The `segment_protocol` theorems check that ordering and prohibit
+later writes to old segments or effects after a failure. Primitive effect traces
+are the contract observation used by the proof; syscall persistence and visibility
+are still assumptions about the filesystem, not conclusions from trace legality.

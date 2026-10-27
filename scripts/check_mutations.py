@@ -22,6 +22,17 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("log_rotation.rs", "rotation_skips_seal", "let sealed = self.io.seal();", "let sealed = true;"),
+    ("log_rotation.rs", "rotation_ignores_seal_failure", "if !sealed { self.failed = true; return false; }", "if false { self.failed = true; return false; }"),
+    ("snapshot.rs", "snapshot_reads_past_capture", "let max = if remaining < needed as u64 { remaining as usize } else { needed };", "let max = needed;"),
+    ("snapshot.rs", "snapshot_skips_cursor_bytes", "self.position += (bytes.len() - before) as u64;", "self.position += max as u64;"),
+    ("snapshot.rs", "snapshot_hides_incomplete_tail", "ReadError::Eof } else { ReadError::Incomplete", "ReadError::Eof } else { ReadError::Eof"),
+    ("snapshot.rs", "snapshot_hides_read_failure", "self.errors@ = self.errors@ + 1; }\n                return Err(ReadError::Io);", "self.errors@ = self.errors@ + 1; }\n                return Err(ReadError::Eof);"),
+    ("snapshot.rs", "snapshot_retries_uncertain_cursor", "if self.failed { proof { self.errors@ = self.errors@ + 1; } return Err(ReadError::Io); }", ""),
+    ("snapshot.rs", "snapshot_seeks_outside_capture", "if offset > self.length { return false; }", "if false { return false; }"),
+    ("snapshot.rs", "snapshot_ignores_seek_failure", "if !self.file.seek(offset) { return false; }", "if false { return false; }"),
+    ("snapshot.rs", "snapshot_forgets_seek_cursor", "self.position = offset;", "self.position = self.position;"),
+
     ("session_recovery.rs", "session_recovery_skips_sealed_recheck",
         "// closes the race between an earlier snapshot EOF and rotation.\n            match self.read_current()",
         "// closes the race between an earlier snapshot EOF and rotation.\n            match Ok::<Option<RecoveredRecord>, ScanError>(None)"),
@@ -42,10 +53,10 @@ MUTATIONS = [
 
     ("log_rotation.rs", "rotation_ignores_age", "length > limit - used || expired", "length > limit - used"),
     ("log_rotation.rs", "rotation_splits_empty_segment", "used > 56 && (used > limit", "used >= 56 && (used > limit"),
-    ("log_rotation.rs", "rotation_skips_append", "if !self.io.append(bytes)", "if false"),
+    ("log_rotation.rs", "rotation_skips_append", "let appended = self.io.append(bytes);", "let appended = true;"),
     ("log_rotation.rs", "rotation_skips_sync", "let ok = self.io.sync();", "let ok = true;"),
     ("log_rotation.rs", "rotation_reuses_index", "let next = self.index + 1;", "let next = self.index;"),
-    ("log_rotation.rs", "rotation_ignores_create_failure", "if !self.io.create_next(self.session, next)", "if false"),
+    ("log_rotation.rs", "rotation_ignores_create_failure", "if !created { self.failed = true; return false; }", "if false { self.failed = true; return false; }"),
 
     ("deadline.rs", "deadline_renews_budget", "Some(end - now)", "Some(end)"),
     ("deadline.rs", "deadline_accepts_late_completion", "if finish < end { Some(result) } else { None }", "Some(result)"),

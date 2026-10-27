@@ -6,6 +6,10 @@ struct State { events: Vec<String>, fail: Option<&'static str>, expired: bool }
 struct Disk(Arc<Mutex<State>>);
 impl SegmentIo for Disk {
     fn expired(&self) -> bool { self.0.lock().unwrap().expired }
+    fn seal(&mut self) -> bool {
+        let mut state = self.0.lock().unwrap(); state.events.push("seal".into());
+        state.fail != Some("seal")
+    }
     fn create_next(&mut self, session: u128, index: u64) -> bool {
         let mut state = self.0.lock().unwrap();
         state.events.push(format!("create {session} {index}"));
@@ -43,12 +47,12 @@ fn rotation_preserves_session_and_orders_create_append_sync() {
         assert!(storage.write_all(&vec![0; 68]));
         assert!(storage.sync());
     }
-    assert_eq!(state.lock().unwrap().events, ["append 68", "sync", "create 42 1", "append 68", "sync", "create 42 2", "append 68", "sync"]);
+    assert_eq!(state.lock().unwrap().events, ["append 68", "sync", "seal", "create 42 1", "append 68", "sync", "seal", "create 42 2", "append 68", "sync"]);
 }
 
 #[test]
 fn rotation_failures_permanently_stop_all_subsequent_effects() {
-    for failure in ["create", "append", "sync"] {
+    for failure in ["seal", "create", "append", "sync"] {
         let state = Arc::new(Mutex::new(State::default()));
         let mut storage = RotatingStorage::new(Disk(state.clone()), 42, 124);
         assert!(storage.write_all(&vec![0; 68])); assert!(storage.sync());
@@ -60,5 +64,6 @@ fn rotation_failures_permanently_stop_all_subsequent_effects() {
         assert!(!storage.write_all(&vec![2; 68])); assert!(!storage.sync());
         assert_eq!(state.lock().unwrap().events, before);
         if failure == "create" { assert_eq!(before.last().unwrap(), "create 42 1"); }
+        if failure == "seal" { assert_eq!(before.last().unwrap(), "seal"); }
     }
 }

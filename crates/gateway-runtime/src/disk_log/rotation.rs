@@ -1,9 +1,9 @@
 //! Trusted filesystem segmentation of one logical journal. Record bytes across
 //! segments, excluding their headers, implement Storage's append-only history.
-use super::{ReadSource, ScanError, StoredRecord};
+use super::{ScanError, StoredRecord};
 #[cfg(test)]
 use super::LogReader;
-use gateway_core::{recovery::{Source, SeekSource}, session_recovery::{Files, SessionScanner}};
+use gateway_core::{snapshot::{FileRead, Snapshot}, session_recovery::{Files, SessionScanner}};
 use gateway_core::{framing, sha256};
 use std::{fs::{File, OpenOptions}, io::{self, Read, Seek, SeekFrom, Write}, path::{Path, PathBuf}, time::{Duration, Instant}};
 
@@ -72,11 +72,8 @@ impl RotatingFile {
 // chooses the next index, and poisons itself on any failed operation.
 impl gateway_core::log_rotation::SegmentIo for RotatingFile {
     fn expired(&self) -> bool { self.opened.elapsed() >= self.max_age }
+    fn seal(&mut self) -> bool { self.file.sync_all().is_ok() }
     fn create_next(&mut self, session: u128, index: u64) -> bool {
-        // The production worker already synced the preceding frame. This also
-        // satisfies SegmentIo for callers that append more than once per sync:
-        // syncing the active segment must cover every closed segment as well.
-        if self.file.sync_all().is_err() { return false; }
         match create_segment(&segment_path(&self.base, index), &session.to_le_bytes()) {
             Ok(file) => { self.file = file; self.opened = Instant::now(); true }
             Err(_) => false,
@@ -86,43 +83,46 @@ impl gateway_core::log_rotation::SegmentIo for RotatingFile {
     fn sync(&mut self) -> bool { self.file.sync_all().is_ok() }
 }
 
-// The reader sees a fixed prefix captured from the opened descriptor. Bytes
-// appended later are picked up by the core's next open, never mixed into this
-// snapshot. Prior bytes must not be changed externally.
-struct Snapshot { file: File, length: u64, position: u64 }
-impl Source for Snapshot {
-    fn read_exact(&mut self, length: usize) -> Result<Vec<u8>, gateway_core::recovery::ReadError> {
-        let remaining = self.length.saturating_sub(self.position);
-        let mut source = ReadSource { reader: (&mut self.file).take(remaining) };
-        let result = Source::read_exact(&mut source, length);
-        self.position = self.length.saturating_sub(source.reader.limit());
-        result
+// Primitive short reads and absolute seeks. The core owns the captured limit,
+// exact-read loop, EOF classification, and snapshot cursor arithmetic.
+struct ReadFile(File);
+impl FileRead for ReadFile {
+    fn fill(&mut self, buffer: &mut Vec<u8>, max: usize) -> bool {
+        let start = buffer.len();
+        let Some(end) = start.checked_add(max) else { return false; };
+        buffer.resize(end, 0);
+        loop {
+            let Some(target) = buffer.get_mut(start..end) else { buffer.truncate(start); return false; };
+            match self.0.read(target) {
+                Ok(0) => { buffer.truncate(start); return false; }
+                Ok(count) => {
+                    let Some(length) = start.checked_add(count) else { buffer.truncate(start); return false; };
+                    buffer.truncate(length); return true;
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(_) => { buffer.truncate(start); return false; }
+            }
+        }
+    }
+    fn seek(&mut self, offset: u64) -> bool {
+        matches!(self.0.seek(SeekFrom::Start(offset)), Ok(position) if position == offset)
     }
     fn checksum_valid(&self, header: &[u8], payload: &[u8], checksum: &[u8]) -> bool {
         let mut hasher = sha256::Hasher::new(); hasher.update(header); hasher.update(payload);
         hasher.finish() == checksum
     }
 }
-impl SeekSource for Snapshot {
-    fn seek(&mut self, offset: u64) -> bool {
-        if offset > self.length { return false; }
-        match self.file.seek(SeekFrom::Start(offset)) {
-            Ok(position) if position == offset => { self.position = offset; true }
-            _ => false,
-        }
-    }
-}
 struct SegmentFiles { base: PathBuf }
 impl Files for SegmentFiles {
-    type Reader = Snapshot;
-    fn open(&mut self, index: u64) -> Result<Option<Snapshot>, ScanError> {
+    type Reader = Snapshot<ReadFile>;
+    fn open(&mut self, index: u64) -> Result<Option<Snapshot<ReadFile>>, ScanError> {
         let file = match File::open(segment_path(&self.base, index)) {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(_) => return Err(ScanError::Io),
         };
         let length = file.metadata().map_err(|_| ScanError::Io)?.len();
-        Ok(Some(Snapshot { file, length, position: 0 }))
+        Ok(Some(Snapshot::new(ReadFile(file), length)))
     }
 }
 

@@ -45,9 +45,14 @@ history across rotation, sync-before-success, and no further effects after a
 failure. The logical history excludes segment headers. `SegmentIo` is the
 explicit trusted interface: creating a segment preserves earlier bytes and
 durably establishes the header/directory entry; append writes the offered bytes;
-sync makes the logical history durable. Runtime path construction, elapsed time,
-syscalls, and the correspondence of physical files to that history remain tested
-trust assumptions. See the [storage contract](storage-crash-contract.md).
+sync makes the logical history durable. `segment_protocol` now proves the actual
+primitive-effect trace: every successor creation attempt immediately follows a
+successful seal of its predecessor; later appends never target that predecessor,
+and failed effects admit no later effects. The old-file sync is issued by the
+verified core through `seal`, rather than hidden inside runtime `create_next`.
+Runtime path construction, elapsed time, syscalls, header-file/directory durability,
+and the correspondence of physical files to that history remain trust assumptions.
+See the [storage contract](storage-crash-contract.md).
 
 `SessionReader`, used by `scan` and both shipping modes, follows consecutive
 segments from the original path, checking each header's checksum and session ID.
@@ -64,8 +69,10 @@ single-file scanner. `SessionReader` now delegates traversal to the verified
 that records are emitted exactly once in file order and every crossed file has
 a matching checked header and a complete record boundary at its end.
 `recovered_to_end` establishes completeness when the cursor reaches the actual
-end of the current file. Snapshot acquisition and seeking remain trusted
-filesystem effects. A missing next file is EOF: there is no manifest or proof
+end of the current file. The core `snapshot::Snapshot` proves exact read
+accumulation, captured-length bounds, EOF versus incomplete-tail classification, and seek bounds/cursor updates
+over primitive short-read and seek effects. Snapshot length acquisition and the
+physical effects remain trusted. A missing next file is EOF: there is no manifest or proof
 that an operator has not removed a segment. Preserve the complete consecutive
 set, including the original path, until shipping and any required replay finish.
 
@@ -206,3 +213,25 @@ rejected; exact record matching is still required. Selecting the intended initia
 logger and its correspondence to the file remain trusted. The authorized-write
 composition through `ResolvedRoute::write_bytes` is checked; see the
 [ownership composition](ownership-composition.md).
+
+## Narrowed effect boundary
+
+The production snapshot adapter no longer supplies the whole `Source` contract
+as an unchecked runtime implementation. `snapshot::Snapshot` implements both
+`Source` and `SeekSource` in verified code over `FileRead`: one bounded short read,
+one absolute seek, and checksum comparison. Its exact-read loop has a decreasing
+remaining-byte count. It keeps one buffer, asks for no bytes beyond the captured
+length, and derives the EOF/error classification and cursor from actual replies.
+A read failure can leave the physical position uncertain, so subsequent reads
+fail until a successful seek reestablishes it. Primitive syscall termination,
+interruption handling, bytes, lengths, seek results, and checksums remain trusted
+bindings. The generic single-file `LogReader` retains its existing `ReadSource`
+adapter; production multi-file scanning/shipping uses the verified snapshot.
+
+The proof of writer effect ordering does not prove OS cache visibility or the
+path-to-file mapping. Recovery still assumes a fresh open sees the full sealed
+predecessor after a matching successor is observed, and that external actors do
+not modify or remove prior bytes. File naming, clock sampling, and CLI parsing
+remain tested runtime code. No manifest is added: a missing successor can still
+look like end-of-log. These limits are unchanged rather than silently promoted
+to proved properties.
