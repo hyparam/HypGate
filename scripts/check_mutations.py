@@ -171,7 +171,7 @@ MUTATIONS = [
     ("buffer_accounting.rs", "unreserved_encoding_in_combined_bound", "!queue.reserved() ==> encoding.len() == 0,", "true,"),
     ("frame_queue.rs", "queue_reservation_not_charged", "self.reserved = true;", "self.reserved = false;"),
     ("frame_queue.rs", "queue_push_steals_reserved_slot", "if self.reserved { return Err(item); }", "if false { return Err(item); }"),
-    ("frame_queue.rs", "queue_finish_leaks_reservation", "self.reserved = false;", "self.reserved = true;"),
+    ("frame_queue.rs", "queue_finish_leaks_reservation", "{\n        self.reserved = false;", "{\n        self.reserved = true;"),
     ("frame_queue.rs", "queue_allows_oversize_encoding_bound", "requires self.valid(), encoding_bytes <= self.payload_limit() + 65,", "requires self.valid(), encoding_bytes <= self.payload_limit() + 66,"),
     ("frame_queue.rs", "frame_queue_ignores_payload_limit", "if item.0.bytes().len() > self.payload_limit + 65 { return Err(item); }", "if false { return Err(item); }"),
     ("frame_queue.rs", "frame_queue_snapshot_omits_records", "self.items().map(|i: int, item: (RecordFrame, T)| item.0)", "Seq::empty()"),
