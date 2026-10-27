@@ -3,31 +3,46 @@
 #[allow(unused_imports)]
 use vstd::prelude::*;
 
+// Authorization and configuration.
 pub mod policy;
 pub mod resolved_route;
 pub mod egress;
+pub mod inbound;
+pub mod destination;
+pub mod headers;
+pub mod health;
+pub mod config_schema;
+pub mod config_values;
+
+// HTTP/1.1 codecs and exchange drivers.
 pub mod http1_head;
 pub mod http1_write;
 pub mod http1_framing;
 pub mod http1_chunked;
 pub mod http1_exchange;
 pub mod http1_body;
-pub mod resource;
+pub mod http_message;
+pub mod http_connection;
+pub mod body_reader;
+pub mod exchange_driver;
+pub mod serve_driver;
+
+// Streaming and audit journal.
 pub mod stream;
 pub mod owned_stream;
 pub mod submission;
 pub mod body_copy;
 pub mod exchange_lifecycle;
-pub mod headers;
-pub mod health;
-pub mod inbound;
-pub mod destination;
 pub mod journal;
 pub mod journal_binding;
 pub mod audit_journal;
 pub mod framing;
 pub mod metadata;
 pub mod recovery;
+pub mod sink;
+
+// Capacity, ownership, and worker lifetimes.
+pub mod resource;
 pub mod fixed_queue;
 pub mod frame_queue;
 pub mod disk_worker;
@@ -36,13 +51,13 @@ pub mod task_credit;
 pub mod mailbox;
 pub mod read_buffer;
 pub mod output_frame;
-pub mod http_message;
-pub mod http_connection;
 pub mod http_worker;
 pub mod http_accounting;
 pub mod lifecycle_composition;
 pub mod buffer_accounting;
 pub mod owned_accounting;
+
+// Shipping and provider projection.
 pub mod exchange_assembler;
 pub mod shipping_identity;
 pub mod batch_builder;
@@ -50,17 +65,13 @@ pub mod upload_cursor;
 pub mod enrollment;
 pub mod shipper;
 pub mod shipping_driver;
-pub mod exchange_driver;
-pub mod serve_driver;
+pub mod projection;
+
+// Shared codecs.
 pub mod json;
 pub mod utf8;
-pub mod projection;
-pub mod config_schema;
-pub mod config_values;
 pub mod calendar;
-pub mod body_reader;
 pub mod ipv6;
-pub mod sink;
 pub mod base64url;
 pub mod sha256;
 

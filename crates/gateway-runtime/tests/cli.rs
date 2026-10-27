@@ -149,3 +149,36 @@ fn executable_starts_the_shipper_from_the_root_policy_and_reports_it_in_metrics(
     assert!(stdout.contains("loggate_shipping_exchanges_emitted_total 0\n"), "{stdout}");
     fs::remove_dir_all(&dir.0).unwrap();
 }
+
+#[test]
+fn help_and_version_succeed_without_loading_configuration() {
+    for flag in ["--help", "-h", "--version", "-V"] {
+        let result = Command::new(env!("CARGO_BIN_EXE_loggate")).arg(flag).output().unwrap();
+        assert!(result.status.success(), "{flag}: {}", String::from_utf8_lossy(&result.stderr));
+        assert!(result.stderr.is_empty());
+        let output = String::from_utf8(result.stdout).unwrap();
+        if flag == "--help" || flag == "-h" {
+            assert!(output.contains("loggate scan LOG"));
+            assert!(output.contains("NEW_LOG must not exist"));
+        } else {
+            assert_eq!(output.trim(), concat!("loggate ", env!("CARGO_PKG_VERSION")));
+        }
+    }
+}
+
+#[test]
+fn invalid_commands_and_public_listeners_are_rejected_before_file_access() {
+    for (args, message) in [
+        (vec![], "usage:"),
+        (vec!["scan"], "usage: loggate scan"),
+        (vec!["ship", "missing-root"], "usage: loggate ship"),
+        (vec!["missing-root", "missing-routes", "unused-log", "0.0.0.0:8080"], "listen address must be loopback"),
+        (vec!["missing-root", "missing-routes", "unused-log", "[::]:8080"], "listen address must be loopback"),
+        (vec!["missing-root", "missing-routes", "unused-log", "invalid"], "invalid listen address"),
+    ] {
+        let result = Command::new(env!("CARGO_BIN_EXE_loggate")).args(args).output().unwrap();
+        assert!(!result.status.success());
+        assert!(String::from_utf8_lossy(&result.stderr).contains(message));
+        assert!(result.stdout.is_empty());
+    }
+}
