@@ -63,7 +63,7 @@ requests.
 
 These are theorems about the verified core, plus a short list of things we
 trust and do not prove: rustls, the OS, DNS, TLS certificates, the
-filesystem under power loss, the HypAware server, provider JSON parsing, and
+filesystem under power loss, the HypAware server, and
 that each socket, file, and log effect the core asks for is performed as
 asked. The HTTP/1.1 parser and writer are verified core code; no HTTP library
 is linked ([codec](docs/http1-codec.md)), and the order of every connection,
@@ -96,8 +96,8 @@ A runnable prototype. The core's authorization, configuration, streaming,
 shipping, HTTP/1.1 codec, exchange sequencing, and resource invariants are
 Verus-checked. The network and disk adapters are tested, and live exchanges with Anthropic and
 OpenAI, streamed and not, have been run through the gateway and shipped to
-HypAware Cloud ([smoke record](docs/hypaware.md#smoke-test-record)).
-Production hardening remains incomplete.
+HypAware Cloud ([smoke record](docs/hypaware.md#smoke-test-record)). Still open:
+physical power-loss validation of the storage contract and mechanized liveness.
 
 ## Run it
 
@@ -207,7 +207,7 @@ cargo test -p gateway-runtime --release --locked server::tests::benchmark -- --i
 LOGGATE_HAPROXY=/path/to/haproxy cargo test -p gateway-runtime --locked proxy_gateway_process_failover -- --ignored --nocapture
 ```
 
-Validation on 2026-10-26: 1371 core verification checks passed, 357 workspace tests passed, all fourteen opt-in benchmark workloads passed on the blocking runtime, all 530
+Validation on 2026-10-26: 1375 core verification checks passed, 357 workspace tests passed, all fourteen opt-in benchmark workloads passed on the blocking runtime, all 530
 deliberate mutations failed their proof obligations, and the runtime passed its panic and effect-site
 lints with no async executor linked. The opt-in TLS proxy/gateway
 process-failover test and six load/fault workloads passed on 2026-10-23.
