@@ -65,7 +65,6 @@ fn fill_head<S: Source>(source: &mut S, buffer: &mut Vec<u8>) -> (out: Result<()
 /// Read from `source` until a request head parses. `Ok` holds the head and
 /// the bytes received after it; the head is parsed from exactly the bytes
 /// received before them.
-#[verifier::exec_allows_no_decreases_clause]
 #[verifier::loop_isolation(false)]
 pub fn read_request_head<S: Source>(source: &mut S, leftover: Vec<u8>) -> (out: Result<HeadRead<RequestHead>, HeadError>)
     ensures match out {
@@ -79,6 +78,7 @@ pub fn read_request_head<S: Source>(source: &mut S, leftover: Vec<u8>) -> (out: 
     proof { assert(buffer@.subrange(0, leftover@.len() as int) =~= leftover@); }
     loop
         invariant buffer@.len() >= leftover@.len() && buffer@.subrange(0, leftover@.len() as int) == leftover@,
+        decreases MAX_BYTES - buffer@.len(),
     {
         match parse_request(buffer.as_slice()) {
             RequestProgress::Complete(head, len) => {
@@ -98,7 +98,6 @@ pub fn read_request_head<S: Source>(source: &mut S, leftover: Vec<u8>) -> (out: 
     }
 }
 /// Read from `source` until a status head parses; as `read_request_head`.
-#[verifier::exec_allows_no_decreases_clause]
 #[verifier::loop_isolation(false)]
 pub fn read_status_head<S: Source>(source: &mut S, leftover: Vec<u8>) -> (out: Result<HeadRead<StatusHead>, HeadError>)
     ensures match out {
@@ -112,6 +111,7 @@ pub fn read_status_head<S: Source>(source: &mut S, leftover: Vec<u8>) -> (out: R
     proof { assert(buffer@.subrange(0, leftover@.len() as int) =~= leftover@); }
     loop
         invariant buffer@.len() >= leftover@.len() && buffer@.subrange(0, leftover@.len() as int) == leftover@,
+        decreases MAX_BYTES - buffer@.len(),
     {
         match parse_status(buffer.as_slice()) {
             StatusProgress::Complete(head, len) => {
