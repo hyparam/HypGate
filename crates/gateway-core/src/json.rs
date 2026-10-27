@@ -1596,6 +1596,8 @@ fn member(s: &[u8], i: usize, limit: u32) -> (out: Option<(Member, usize)>)
 
 /// The rest of an object whose `{` is at `i - 1`. Complete: an object
 /// within the limit limit is found, whole and the same.
+// Keep this quantifier-heavy proof independent of earlier solver queries.
+#[verifier::spinoff_prover]
 #[verifier::loop_isolation(false)]
 #[verifier::rlimit(300)]
 fn object(s: &[u8], i: usize, limit: u32) -> (out: Option<(Value, usize)>)
