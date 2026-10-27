@@ -2,3 +2,11 @@
 /logs/
 /.git/
 __pycache__/
+
+# Local credentials and generated artifacts do not belong in build images.
+.env
+.env.*
+/output/
+.DS_Store
+/.claude/
+/.codex/
