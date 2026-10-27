@@ -26,6 +26,8 @@ jobs:
         run: rustup show active-toolchain
       - name: Test executable workspace
         run: cargo test --workspace --locked
+      - name: TLS trickle security regression
+        run: python3 scripts/check_security_deadline.py
       - name: Archive retention tests
         run: python3 -m unittest discover -s scripts -p test_retention.py
       - name: Install and smoke test the local tools

@@ -20,12 +20,15 @@ if build.returncode:
     sys.stderr.write(build.stdout)
     raise SystemExit(build.returncode)
 rustls = None
+core = None
 for line in build.stdout.splitlines():
     item = json.loads(line)
+    if item.get("reason") == "compiler-artifact" and item["target"]["name"] == "gateway_core":
+        core = next((p for p in item["filenames"] if p.endswith(".rlib")), core)
     if item.get("reason") == "compiler-artifact" and item["target"]["name"] == "rustls":
         rustls = next((p for p in item["filenames"] if p.endswith(".rlib")), rustls)
-if rustls is None:
-    raise SystemExit("locked build did not report a rustls library")
+if rustls is None or core is None:
+    raise SystemExit("locked build did not report the rustls and gateway_core libraries")
 
 source = r'''
 #![allow(dead_code)]
@@ -33,7 +36,7 @@ source = r'''
 mod net;
 use std::{io::{Read, Write}, net::{TcpListener, TcpStream}, sync::Arc,
           thread, time::{Duration, Instant}};
-use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned,
+use rustls::{ClientConfig, ClientConnection, RootCertStore,
              pki_types::ServerName};
 fn main() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -56,7 +59,7 @@ fn main() {
     let conn = ClientConnection::new(Arc::new(config), ServerName::try_from("localhost").unwrap()).unwrap();
     let socket = TcpStream::connect(address).unwrap();
     let start = Instant::now();
-    let mut tls = net::Timed::new(StreamOwned::new(conn, socket),
+    let mut tls = net::Tls::new(conn, socket,
         net::Deadline::start(Duration::from_millis(150)).unwrap());
     let result = tls.handshake();
     let elapsed = start.elapsed();
@@ -78,6 +81,6 @@ with tempfile.TemporaryDirectory(prefix="loggate-deadline-audit-") as temporary:
     path.write_text(source)
     binary = directory / "probe"
     subprocess.run(["rustc", "--edition=2021", str(path), "--extern", f"rustls={rustls}",
-                    "-L", f"dependency={Path(rustls).parent}", "-o", str(binary)], cwd=ROOT, check=True)
+                    "--extern", f"gateway_core={core}", "-L", f"dependency={Path(rustls).parent}", "-o", str(binary)], cwd=ROOT, check=True)
     result = subprocess.run([str(binary)], timeout=10)
     raise SystemExit(result.returncode)

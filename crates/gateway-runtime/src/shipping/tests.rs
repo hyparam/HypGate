@@ -160,6 +160,34 @@ fn shipping_config(port: u16, state_dir: &std::path::Path, extra: Value) -> Ship
     ShippingConfig::from_root_json(&shipping_json(port, state_dir, extra), |name| (name == "HYP_TOKEN").then(|| TOKEN.to_owned())).unwrap().unwrap()
 }
 
+#[test]
+fn cloud_client_classifies_handshake_and_record_trickles_as_timeouts() {
+    use std::io::Read;
+    for application in [false, true] {
+        let (listener, acceptor, roots) = crate::test_support::tls();
+        let dir = TempDir::new();
+        let config = shipping_config(listener.local_addr().unwrap().port(), &dir.0, json!({}));
+        let peer = thread::spawn(move || {
+            if application {
+                let mut tls = crate::test_support::accept_tls(&listener, &acceptor).unwrap();
+                read_request(&mut tls).unwrap();
+                crate::test_support::trickle_record(&mut tls.sock, 23);
+            } else {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                socket.read(&mut [0; 4096]).unwrap();
+                crate::test_support::trickle_record(&mut socket, 22);
+            }
+        });
+        let client = client::Client::with_roots(roots, &config.server, Duration::from_millis(300)).unwrap();
+        let started = std::time::Instant::now();
+        let result = client.request("GET", "/", None, &[], vec![]);
+        assert_eq!(result.unwrap_err(), client::ClientError::Timeout);
+        assert!(started.elapsed() < Duration::from_millis(900));
+        peer.join().unwrap();
+    }
+}
+
 /// Append one complete exchange to the log and return its request id.
 fn write_exchange(log: &mut DiskLog, request: u64, destination: &str, upload: &[u8], status: u16, download: &[&[u8]], outcome: u8) {
     let start = encode_request_start(1_700_000_000_000 + request, 7, destination.as_bytes()).unwrap();

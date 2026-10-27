@@ -2,7 +2,7 @@
 //! verified codec, on the shipper's own thread: blocking sockets and rustls
 //! used directly. No redirects, proxies, pooling, or retries here. One
 //! deadline covers the connect, the handshake, the request, and the reply
-//! (`net::Timed`), so a peer that trickles bytes cannot outlast it. Name
+//! (`net::Tls` over `net::Timed<TcpStream>`); trickling cannot renew it. Name
 //! resolution is blocking and outside the deadline. Response bodies are capped.
 use super::config::ShippingServer;
 use crate::http1::{self, BodyReader, read_status_head};
@@ -11,8 +11,8 @@ use gateway_core::headers::Field;
 use gateway_core::http1_exchange::{UpstreamStatus, upstream_status};
 use gateway_core::http1_framing::Framing;
 use gateway_core::http1_write::{wire_ok, write_request_head};
-use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned, pki_types::ServerName};
-use crate::net::{Deadline, Timed};
+use rustls::{ClientConfig, ClientConnection, RootCertStore, pki_types::ServerName};
+use crate::net::{Deadline, Tls};
 use std::{io::{self, Read, Write}, net::{TcpStream, ToSocketAddrs}, sync::Arc, time::Duration};
 
 pub const MAX_REPLY_BYTES: usize = 64 * 1024;
@@ -31,7 +31,6 @@ impl Reply {
 
 pub struct Client { config: Arc<ClientConfig>, server: ShippingServer, host: String, deadline: Duration }
 
-type Tls = Timed<StreamOwned<ClientConnection, TcpStream>>;
 /// The error to report for a failed operation: the deadline if it passed, else `fault`.
 fn failure(tls: &Tls, fault: ClientError) -> ClientError { if tls.expired() { ClientError::Timeout } else { fault } }
 
@@ -70,7 +69,8 @@ impl Client {
     }
 
     /// `bearer` becomes an `Authorization` header; `headers` are added verbatim.
-    /// Blocks the calling thread for at most the deadline plus name resolution.
+    /// Uses the deadline on each socket operation; name resolution, OS scheduling,
+    /// and TLS computation are outside any hard wall-clock guarantee.
     pub fn request(&self, method: &str, path: &str, bearer: Option<&str>, headers: &[(&str, String)], body: Vec<u8>)
         -> Result<Reply, ClientError>
     {
@@ -79,7 +79,7 @@ impl Client {
         let tcp = open_socket(&permit, &deadline)?;
         let server = ServerName::try_from(self.host.clone()).map_err(|_| ClientError::Tls)?;
         let connection = ClientConnection::new(self.config.clone(), server).map_err(|_| ClientError::Tls)?;
-        let mut tls: Tls = Timed::new(StreamOwned::new(connection, tcp), deadline);
+        let mut tls: Tls = Tls::new(connection, tcp, deadline);
         let shaken = tls.handshake();
         shaken.map_err(|_| failure(&tls, ClientError::Tls))?;
 

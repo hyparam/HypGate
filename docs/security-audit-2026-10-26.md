@@ -147,3 +147,26 @@ mutations, Linux ext4 storage-fault fixtures, HAProxy failover, sustained load a
 memory soak, and the clean Linux container remain separate release requirements.
 The proof and ordinary-test passes above do not waive those requirements or close
 SEC-01. No production implementation was changed by this audit.
+
+## Subsequent remediation in the working tree
+
+The disposition above remains the finding against the pinned reviewed commit.
+The subsequent implementation replaces the outer-only TLS timer with
+`net::Tls`, whose rustls stream owns a `Timed<TcpStream>`. Each raw socket
+read/write/flush now invokes the executable verified `deadline::run` driver.
+Its contracts establish at most one operation attempt, no attempt after sampled
+expiry, the exact original remaining budget, and rejection of late results.
+`retries_do_not_extend` establishes that later retries cannot renew the budget.
+Buffered TLS operations also check expiry before and after the operation.
+
+Local validation: 1,375 Verus checks passed; all four deadline proof mutations
+were rejected; 363 workspace tests passed (21 opt-in tests ignored); effect-site
+and Clippy checks passed. The original 150 ms reproduction returned `TimedOut`
+at 150 ms. Regressions cover handshake and application-record trickling, cloud
+timeout classification, cancellation, and all four request slots recovering
+under trickle load, followed by a successful new request.
+
+Clock sampling, runtime binding, timeout installation, OS timeout accuracy,
+TLS computation, and scheduling remain trusted. This is not a proof of hard
+wall-clock termination. The Linux release workflow and a review of the final
+fixed commit remain required before clearing the release gate.

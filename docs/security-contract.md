@@ -105,6 +105,14 @@ effects and resource lifetimes, and define every error transition before connect
 the core to the threaded shell. Fairness, I/O progress, and deadline behavior need separate
 assumptions and tests; state-machine safety does not imply availability.
 
+Deadline mediation now has a checked driver: `deadline::run` refuses an expired
+start, supplies the exact remaining budget to at most one primitive operation
+attempt, and rejects a result observed at or after expiry. The provider and cloud
+TLS adapters put this driver beneath rustls, at each raw socket operation,
+including internal handshake and record retries. The [proof index](proof-index.md)
+records the remaining clock, syscall, scheduling, and runtime-binding assumptions;
+this is not an unconditional wall-clock termination guarantee.
+
 ## Trusted computing base and evidence
 
 For each theorem, publish its exact scope and preconditions. The current trust

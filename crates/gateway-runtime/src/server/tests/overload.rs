@@ -2,6 +2,67 @@ use super::*;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 
 #[test]
+fn tls_trickles_release_every_request_slot_by_the_deadline() {
+    const SLOTS: usize = 4;
+    for application in [false, true] {
+        let (upstream, acceptor, roots) = tls();
+        let dir = TempDir::new();
+        let app = Gateway::new(config_with_limits(upstream.local_addr().unwrap().port(), false, SLOTS, 16384),
+            HttpsTransport::with_roots(roots, Duration::from_millis(800)).unwrap(),
+            DiskLog::create(&dir.0.join("trickle.log"), 16, Duration::from_secs(2)).unwrap());
+        let gateway = spawn_gateway(&app, 32, Duration::from_secs(5));
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let count = accepted.clone();
+        let provider = std::thread::spawn(move || {
+            let mut tasks = Vec::new();
+            for _ in 0..SLOTS {
+                let (mut socket, _) = upstream.accept().unwrap();
+                let acceptor = acceptor.clone();
+                let count = count.clone();
+                tasks.push(std::thread::spawn(move || {
+                    if application {
+                        let mut tls = tls_accept(socket, &acceptor);
+                        read_request(&mut tls).unwrap();
+                        count.fetch_add(1, Ordering::SeqCst);
+                        crate::test_support::trickle_record(&mut tls.sock, 23);
+                    } else {
+                        socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                        socket.read(&mut [0; 4096]).unwrap();
+                        count.fetch_add(1, Ordering::SeqCst);
+                        crate::test_support::trickle_record(&mut socket, 22);
+                    }
+                }));
+            }
+            for task in tasks { task.join().unwrap(); }
+            // Demonstrate real reuse, not merely a zero occupancy counter.
+            let mut tls = accept_tls(&upstream, &acceptor).unwrap();
+            read_request(&mut tls).unwrap();
+            write_response(&mut tls, 200, &[], b"recovered").unwrap();
+        });
+        let started = Instant::now();
+        let clients: Vec<_> = (0..SLOTS).map(|_| {
+            let port = gateway.port;
+            std::thread::spawn(move || {
+                let response = send(port, "/routes/7", "gateway", "POST");
+                assert_eq!(response.status, 504);
+                response.collect().unwrap();
+            })
+        }).collect();
+        assert!(wait_until(Duration::from_millis(600), || accepted.load(Ordering::SeqCst) == SLOTS));
+        assert_eq!(app.config.usage(), Some((SLOTS, SLOTS)));
+        for client in clients { client.join().unwrap(); }
+        assert!(started.elapsed() < Duration::from_millis(1500));
+        wait_workers_idle(&app);
+        assert_eq!(app.config.usage(), Some((0, SLOTS)));
+        let response = send(gateway.port, "/routes/7", "gateway", "POST");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.collect().unwrap(), b"recovered");
+        provider.join().unwrap();
+        gateway.stop().unwrap();
+    }
+}
+
+#[test]
 fn repeated_overload_preserves_active_streams_health_and_reusable_capacity() {
     for availability in [false, true] { exercise(availability, Duration::ZERO); }
 }

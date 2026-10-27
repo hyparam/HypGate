@@ -62,3 +62,15 @@ pub(crate) fn wait_until(deadline: std::time::Duration, mut condition: impl FnMu
 
 #[path = "test_support/http.rs"]
 pub(crate) mod http;
+
+/// An incomplete TLS record that keeps each relative socket read alive for
+/// two seconds. Used before authentication and after a real TLS handshake.
+pub(crate) fn trickle_record(socket: &mut TcpStream, kind: u8) {
+    use std::{io::Write, time::Duration};
+    socket.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
+    if socket.write_all(&[kind, 3, 3, 4, 0]).is_err() { return; }
+    for _ in 0..80 {
+        std::thread::sleep(Duration::from_millis(25));
+        if socket.write_all(&[0]).is_err() { return; }
+    }
+}

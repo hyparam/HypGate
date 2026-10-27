@@ -21,10 +21,15 @@ Approved-host DNS resolution is trusted and is not an IP-range/SSRF restriction.
 The exchange runs on the connection thread that called it, with no spawned
 thread of its own. One configurable total exchange deadline, at most one hour,
 covers DNS wait, connection, TLS handshake, upload, and download. It is an
-instant (`net::Deadline`); before every read and write the `net::Timed` stream
-sets the socket timeout to the time left, so a peer that trickles bytes cannot
-outlast it, and `TcpStream::connect_timeout` and the lookup wait take the same
-remaining time. A passed deadline fails the exchange with `Fault::Timeout`
+instant (`net::Deadline`). The verified `deadline::run` driver checks time before
+each primitive socket operation, supplies exactly the remaining budget, and
+rejects results observed at or after expiry. Rustls owns a `Timed<TcpStream>`:
+its internal handshake and application-record reads all cross this gate, so
+trickling does not renew a relative timeout. Outer TLS checks also reject late
+buffered results. `TcpStream::connect_timeout` and the lookup wait take the same
+remaining time. Socket timeout accuracy, clock sampling, TLS computation, and
+thread scheduling remain trusted; this is not a hard real-time bound.
+A passed deadline fails the exchange with `Fault::Timeout`
 before releasing request ownership. There is no transparent replay. A system
 DNS lookup already running cannot be interrupted; its credit returns when it
 does ([DNS](dns-resources.md)).

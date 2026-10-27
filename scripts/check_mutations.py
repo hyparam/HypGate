@@ -22,6 +22,10 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("deadline.rs", "deadline_renews_budget", "Some(end - now)", "Some(end)"),
+    ("deadline.rs", "deadline_accepts_late_completion", "if finish < end { Some(result) } else { None }", "Some(result)"),
+    ("deadline.rs", "deadline_skips_io", "let result = io.perform(budget);", "return None; let result = io.perform(budget);"),
+    ("deadline.rs", "deadline_performs_twice", "let result = io.perform(budget);", "let result = io.perform(budget); let result = io.perform(budget);"),
     ("inbound.rs", "sdk_target_rejects_valid_route", "            Some((n, end))", "            None"),
     ("inbound.rs", "sdk_target_changes_route", "            Some((n, end))", "            Some((0, end))"),
     ("inbound.rs", "sdk_target_changes_boundary", "            Some((n, end))", "            Some((n, 0))"),

@@ -5,14 +5,14 @@
 //! read a status head, download. One deadline covers them all; it is
 //! enforced by the socket timeouts the `net::Timed` stream re-arms before
 //! every read and write. Nothing here decides what happens next.
-use crate::{http1, http_body, http_boundary::PreparedRequest, net::{Cancel, Deadline, Timed},
+use crate::{http1, http_body, http_boundary::PreparedRequest, net::{Cancel, Deadline, Tls},
     transfer::{AuditLog, Direction, TransferError}};
 use gateway_core::body_copy::BodyCopy;
 use gateway_core::exchange_driver::{ConnectFailure, Failure};
 use gateway_core::http1_exchange::ChunkStream;
 use gateway_core::http1_framing::Framing;
 use gateway_core::http1_head::StatusHead;
-use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned, pki_types::ServerName};
+use rustls::{ClientConfig, ClientConnection, RootCertStore, pki_types::ServerName};
 use std::{io::{self, Read, Write}, net::{SocketAddr, TcpStream}, sync::Arc, time::Duration};
 
 // Application-data buffering only; handshake/control traffic and record overhead
@@ -23,8 +23,6 @@ const TLS_APPLICATION_BUFFER: usize = 64 * 1024;
 const TLS_SESSION_CACHE: usize = 256;
 
 mod resolver;
-
-type Tls = Timed<StreamOwned<ClientConnection, TcpStream>>;
 
 // Effect site: the only provider socket, opened under a permit the verified
 // core minted for this request's resolved destination; the addresses come
@@ -86,7 +84,7 @@ impl HttpsTransport {
         cancel.watch_socket(&tcp).map_err(|_| ConnectFailure::Tcp)?;
         let mut connection = ClientConnection::new(self.config.clone(), server).map_err(|_| ConnectFailure::Tls)?;
         connection.set_buffer_limit(Some(TLS_APPLICATION_BUFFER));
-        let mut tls: Tls = Timed::new(StreamOwned::new(connection, tcp), deadline);
+        let mut tls: Tls = Tls::new(connection, tcp, deadline);
         if tls.handshake().is_err() {
             return Err(if cancel.is_cancelled() { ConnectFailure::Cancelled } else if tls.expired() { ConnectFailure::Timeout } else { ConnectFailure::Tls });
         }

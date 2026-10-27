@@ -75,6 +75,7 @@ pub mod ipv6;
 pub mod base64url;
 pub mod sha256;
 pub mod config_build;
+pub mod deadline;
 
 #[cfg(test)]
 #[path = "tests/streaming.rs"]

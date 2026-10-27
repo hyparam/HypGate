@@ -6,7 +6,7 @@ use crate::{config::GatewayConfig, http_boundary, net::Cancel, test_support::{ac
 use gateway_core::http1_head::RequestHead;
 use rcgen::generate_simple_self_signed;
 use rustls::{CipherSuite, CipherSuiteCommon, ContentType, HandshakeKind, ProtocolVersion, ServerConfig, ServerConnection,
-    SupportedCipherSuite, Tls13CipherSuite, pki_types::PrivatePkcs8KeyDer, version::{TLS12, TLS13},
+    SupportedCipherSuite, StreamOwned, Tls13CipherSuite, pki_types::PrivatePkcs8KeyDer, version::{TLS12, TLS13},
     crypto::{cipher::{AeadKey, Iv, OutboundChunks, OutboundPlainMessage}, ring::cipher_suite::{TLS13_AES_256_GCM_SHA384, TLS13_CHACHA20_POLY1305_SHA256}}};
 use serde_json::json;
 use sha2::{Digest, Sha256};
