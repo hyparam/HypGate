@@ -63,10 +63,11 @@ step 'Environment'
 uname -srm
 rustup show active-toolchain
 cargo --version
-curl --version | head -1
+# Drain version output so pipefail cannot turn a producer's SIGPIPE into failure.
+curl --version | sed -n '1p'
 openssl version
 haproxy=${HYPGATE_HAPROXY:-$(command -v haproxy || true)}
-if [[ -n "$haproxy" ]]; then "$haproxy" -v | head -1; else echo 'haproxy not found; proxy stage skipped'; fi
+if [[ -n "$haproxy" ]]; then "$haproxy" -v | sed -n '1p'; else echo 'haproxy not found; proxy stage skipped'; fi
 
 step 'Build the release executable with locked dependencies'
 cargo build --release --locked --bin hypgate
