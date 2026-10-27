@@ -244,3 +244,15 @@ Anthropic and OpenAI, JSON and SSE, all 200 with the providers' bytes intact;
 a bad token got 401; `Expect: 100-continue` got its 100 and then 200;
 `/metrics` showed no failed exchanges and a healthy log; the log scanned
 complete.
+
+In the evening of 2026-10-26, after the socket write drivers, the base64url
+codec, and SHA-256 were verified and serde and sha2 left the binary, the smoke
+was run again with the release build. Without shipping: Anthropic and OpenAI,
+JSON and SSE, all 200 with outcome 0; a bad token got 401; no failed
+exchanges; the log scanned complete with 38 records. With shipping to
+HypAware Cloud under a service-account token: the gateway enrolled, which
+means the server's credential passed the stricter base64url decoder (it
+refuses padding inside a segment and leftover bits, which a real JWS never
+has), one exchange was emitted and its batch acknowledged before shutdown,
+and the server query returned the user and assistant rows under the new
+gateway id.

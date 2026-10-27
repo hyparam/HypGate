@@ -45,7 +45,7 @@ provider's native headers such as Content-Type and Anthropic-Version, and the
 unmodified native JSON body. The gateway forwards to the fixed configured path. For
 an OpenAI-native endpoint, use its HTTPS URL and credential kind `bearer`. There is
 no provider-body translation. Anthropic Messages and OpenAI Responses, JSON and
-SSE, were exercised live on 2026-10-25 ([smoke record](hypaware.md#smoke-test-record)).
+SSE, were exercised live on 2026-10-25 and again on 2026-10-26 ([smoke record](hypaware.md#smoke-test-record)).
 Upload compression, trailers, query parameters, HTTP/2, and full duplex are not
 supported.
 
@@ -198,8 +198,7 @@ configuration and checks its health endpoint. Further end-to-end scenarios injec
 failed logger health and provider truncation, and check strict refusal without a
 provider connection, availability-mode forwarding with unchanged authorization,
 audit-gap reporting, metrics, and rejection of a second request while the only slot
-is occupied. Logger I/O failures are tested at the disk adapter. Test totals are in
-the [README](../README.md).
+is occupied. Logger I/O failures are tested at the disk adapter. See [contributing](../CONTRIBUTING.md) for validation commands.
 
 This is a runnable prototype, not a production-ready or wholly verified gateway.
 Stress, failure-mode, and load evidence is in the [benchmarks](benchmarks.md). Resource and crash-recovery proofs are conditional
