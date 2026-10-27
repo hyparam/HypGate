@@ -19,6 +19,7 @@ pub mod config;
 pub mod client;
 mod lookup;
 pub mod state;
+mod s3;
 pub use config::ShippingConfig;
 use client::{Client, Reply};
 use state::{hex, Checkpoint, Identity};
@@ -197,11 +198,12 @@ impl Engine {
         let session = reader.session();
         self.session = Some(session);
         self.reader = Some(reader);
-        let checkpoint = state::load_checkpoint(&self.config.state_dir).filter(|c| c.session == hex(&session)
+        let checkpoint = state::load_checkpoint(&self.config.state_dir).filter(|c| c.session == self.checkpoint_session(&session)
             && c.max_open_exchanges == self.config.max_open_exchanges && c.max_exchange_bytes == self.config.max_exchange_bytes);
         let (resolved, poisoned) = checkpoint.map(|c| (c.resolved, c.poisoned)).unwrap_or((0, 0));
-        let mut machine = Machine::new(self.config.token().to_vec(), session, self.config.max_open_exchanges,
+        let mut machine = Machine::new(if self.config.s3.is_some() { Vec::new() } else { self.config.token().to_vec() }, session, self.config.max_open_exchanges,
             self.config.max_exchange_bytes, resolved, poisoned);
+        if self.config.s3.is_some() { return Some(machine); }
         if let Some(identity) = state::load_identity(&self.config.state_dir) {
             let same = identity.server == self.config.server.url()
                 && identity.token_fingerprint == state::fingerprint(self.config.token());
@@ -210,6 +212,15 @@ impl Engine {
             }
         }
         Some(machine)
+    }
+
+    // Bind S3 progress to the endpoint (including bucket/prefix) and signing region.
+    // A change of destination must replay, including a switch between backends.
+    fn checkpoint_session(&self, session: &[u8; 16]) -> String {
+        match &self.config.s3 {
+            Some(s3) => format!("s3:{}:{}", state::fingerprint(format!("{}\n{}", self.config.server.url(), s3.region).as_bytes()), hex(session)),
+            None => hex(session),
+        }
     }
 
     fn save_identity(&self, issued: &Issued) {
@@ -245,6 +256,7 @@ impl Effects for Engine {
 
     /// Send the request the machine chose to the configured server.
     fn send(&mut self, request: Request) -> MachineReply {
+        if self.config.s3.is_some() { return s3::send(&self.config, self.client.as_ref(), request, now_ms()); }
         let path = match request.path { ShipPath::Bootstrap => BOOTSTRAP_PATH, ShipPath::Refresh => REFRESH_PATH, ShipPath::Ingest => INGEST_PATH };
         let bearer = request.bearer.as_deref().and_then(|b| std::str::from_utf8(b).ok());
         let mut headers: Vec<(&str, String)> = Vec::new();
@@ -270,7 +282,7 @@ impl Effects for Engine {
 
     fn checkpoint(&mut self, _machine: &Machine, resolved: u64, poisoned: u64) {
         let Some(session) = self.session else { return; };
-        let _ = state::save_checkpoint(&self.config.state_dir, &Checkpoint { session: hex(&session), resolved, poisoned,
+        let _ = state::save_checkpoint(&self.config.state_dir, &Checkpoint { session: self.checkpoint_session(&session), resolved, poisoned,
             max_open_exchanges: self.config.max_open_exchanges, max_exchange_bytes: self.config.max_exchange_bytes });
     }
 

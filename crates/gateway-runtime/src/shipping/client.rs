@@ -98,7 +98,7 @@ impl Client {
         if let Some(token) = bearer {
             fields.push(Field { name: b"authorization".to_vec(), value: format!("Bearer {token}").into_bytes(), sensitive: true });
         }
-        for (name, value) in headers { fields.push(Field { name: name.as_bytes().to_vec(), value: value.as_bytes().to_vec(), sensitive: false }); }
+        for (name, value) in headers { fields.push(Field { name: name.as_bytes().to_vec(), value: value.as_bytes().to_vec(), sensitive: name.eq_ignore_ascii_case("authorization") || name.eq_ignore_ascii_case("x-amz-security-token") }); }
         if !wire_ok(&fields) || !path.starts_with('/') || path.bytes().any(|b| !(33..=126).contains(&b)) { return Err(ClientError::Http); }
         let mut head = Vec::new();
         write_request_head(method.as_bytes(), path.as_bytes(), &fields, &mut head);

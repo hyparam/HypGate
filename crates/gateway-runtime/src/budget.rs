@@ -74,12 +74,13 @@ pub fn shipping(open_exchanges: usize, exchange_bytes: usize) -> Option<u64> {
     let assembler = open.checked_mul(bytes)?;
     let queue = open.checked_mul(bytes.checked_add(ROW_OVERHEAD)?.checked_mul(2)?)?;
     SHIPPER_STACK.checked_add(assembler)?.checked_add(queue)?.checked_add(SCANNED_RECORD)?
-        .checked_add(2 * BATCH)?.checked_add(REPLY)
+        .checked_add(2 * BATCH)?.checked_add(REPLY)?.checked_add(SIGNING)
 }
 const SHIPPER_STACK: u64 = 2 * 1024 * 1024;
 const ROW_OVERHEAD: u64 = 16 * 1024; // destination, identifiers, timestamps, usage, JSON syntax
 const SCANNED_RECORD: u64 = 1024 * 1024 + 65;
 const BATCH: u64 = 4 * 1024 * 1024;
+const SIGNING: u64 = 128 * 1024; // S3 credentials, canonical request, HMAC and header scratch
 const REPLY: u64 = 64 * 1024;
 
 #[cfg(test)]
@@ -120,7 +121,7 @@ mod tests {
 
     #[test]
     fn shipping_budget_matches_documented_terms_and_rejects_refused_limits() {
-        assert_eq!(shipping(64, 1 << 20), Some(2_097_152 + 64 * 1_048_576 + 64 * 2 * (1_048_576 + 16_384) + 1_048_641 + 8_388_608 + 65_536));
+        assert_eq!(shipping(64, 1 << 20), Some(2_097_152 + 64 * 1_048_576 + 64 * 2 * (1_048_576 + 16_384) + 1_048_641 + 8_388_608 + 65_536 + 131_072));
         assert!(shipping(0, 1 << 20).is_none()); assert!(shipping(65_537, 1 << 20).is_none());
         assert!(shipping(1, 4_095).is_none()); assert!(shipping(1, (16 << 20) + 1).is_none());
         assert!(shipping(65_536, 16 << 20).unwrap() < 1 << 44);

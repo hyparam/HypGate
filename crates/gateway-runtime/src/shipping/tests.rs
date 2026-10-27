@@ -548,3 +548,5 @@ event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
         assert!(!text.contains('\n'));
     }
 }
+
+mod s3_tests;
