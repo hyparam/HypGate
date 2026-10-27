@@ -14,6 +14,7 @@ crates/gateway-runtime/src/main.rs:bind
 crates/gateway-runtime/src/main.rs:secret
 crates/gateway-runtime/src/server.rs:wake_accept
 crates/gateway-runtime/src/shipping/client.rs:open_socket
+crates/gateway-runtime/src/shipping/lookup.rs:new
 crates/gateway-runtime/src/shipping/state.rs:write_private
 crates/gateway-runtime/src/transport.rs:open_socket
 crates/gateway-runtime/src/transport/resolver.rs:resolve'

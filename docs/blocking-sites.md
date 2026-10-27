@@ -55,13 +55,20 @@ in its row, and poisoned locks fail closed ([runtime ownership](runtime-ownershi
 
 | Site | Blocks on | Unblocked by | Bound | Test | Kernel assumption |
 |------|-----------|--------------|-------|------|-------------------|
-| `shipping/client.rs` `open_socket` (resolve) | `getaddrinfo` on the shipper thread itself | The system resolver only | None in this process, and no requester deadline either: this is the one site with no bound of its own. `Shipper::shutdown` abandons the thread after its window | None | `getaddrinfo` eventually returns, or the shipper is lost until the process exits |
+| `shipping/lookup.rs` `Lookup::resolve` | `recv_timeout` for the lookup thread's answer | The answer, or the request deadline; a lookup thread still busy from an earlier request fails the submission at once instead of waiting | The request deadline | `a_stalled_lookup_times_out_and_later_requests_fail_fast_until_it_returns` | `recv_timeout` returns at the timeout |
 | `shipping/client.rs` `open_socket` (connect) | `connect_timeout` per address, at most 16 | Connection, refusal, or the timeout | The request deadline | `cloud_client_classifies_handshake_and_record_trickles_as_timeouts` covers the deadline after connect | `connect_timeout` returns at its timeout |
 | The shipper's reads and writes | `Io::perform` and `Tls::handshake` above | As above | The request deadline | `cloud_client_classifies_handshake_and_record_trickles_as_timeouts`, `shutdown_returns_within_its_window_while_the_server_hangs` | As above |
 | `shipping.rs` `Engine::wait` | `sleep` in slices of at most 100 ms, checking the stop flag between slices | Time, or the stop flag at the next slice | 100 ms past the stop flag | `shutdown_returns_within_its_window_while_the_server_hangs`, `ships_many_exchanges_in_bounded_batches_with_drain_mode` | `sleep` returns |
 | `shipping/state.rs` `write_private` | `fsync` of a state file and its directory | The storage stack | None; `Shipper::shutdown` abandons the thread after its window | None for a stuck sync | `fsync` eventually returns |
 | `shipping/state.rs` `read_bounded`, `disk_log.rs` `Source::read_exact` | Reads of the state files and the audit log | The filesystem; the size is checked first or bounded by the record | By the file size on a regular local file | `scanner_io_error_at_every_record_byte_preserves_prefix_and_stops_reading` covers errors, not stalls | A regular file on local storage: a FIFO or a stalled network mount blocks the thread |
 | `shipping.rs` `Shipper::shutdown` | `recv_timeout` for the finished signal, then join | The thread finishing its current step after the stop flag, or the window | The shutdown window; join only after the signal | `shutdown_returns_within_its_window_while_the_server_hangs` | `recv_timeout` returns at the timeout |
+
+## Shipper lookup thread
+
+| Site | Blocks on | Unblocked by | Bound | Test | Kernel assumption |
+|------|-----------|--------------|-------|------|-------------------|
+| `shipping/lookup.rs` `Lookup::with` | `recv` on the request channel | A submitted request, or the client dropping its sender | None: the idle wait, by design | `a_stalled_lookup_times_out_and_later_requests_fail_fast_until_it_returns` | A send or a sender drop wakes the receiver |
+| `shipping/lookup.rs` `Lookup::new` | `getaddrinfo` | The system resolver, under its own `resolv.conf` timeouts and attempts | None in this process. The requester stops waiting at its deadline; one further request is buffered and a departed requester's buffered request is skipped; the thread is never replaced | Same | `getaddrinfo` eventually returns; until it does, the shipper's requests fail fast with `Resolve` and are retried on the machine's schedule |
 
 ## Signal thread and startup
 
@@ -77,8 +84,6 @@ as documented, condition variable and channel timeouts fire, and the
 scheduler runs a woken thread. Two calls have no unblock mechanism at all,
 `fsync` and `getaddrinfo`; the gateway bounds their effect by having callers
 stop waiting at a deadline and by never replacing the blocked thread, so a
-stall costs a fixed slot rather than the process. The shipper's own
-`getaddrinfo` is the exception: nothing waits on it with a deadline, so a
-stalled resolver holds the shipper until shutdown abandons it. Routing that
-lookup through a credited job with the request deadline would close the
-exception; it is not done yet.
+stall costs a fixed slot rather than the process: a DNS worker, or the
+shipper's lookup thread, whose stall turns the shipper's requests into fast
+`Resolve` failures retried on the machine's schedule rather than a hang.

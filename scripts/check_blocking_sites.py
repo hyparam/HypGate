@@ -66,7 +66,9 @@ shipping.rs:Engine::wait:sleep
 shipping.rs:Shipper::shutdown:channel-recv
 shipping.rs:Shipper::shutdown:join
 shipping/client.rs:open_socket:connect
-shipping/client.rs:open_socket:resolve
+shipping/lookup.rs:Lookup::new:resolve
+shipping/lookup.rs:Lookup::resolve:channel-recv
+shipping/lookup.rs:Lookup::with:channel-recv
 shipping/state.rs:read_bounded:file-read
 shipping/state.rs:write_private:fsync
 signal.rs:on_termination:signal-read

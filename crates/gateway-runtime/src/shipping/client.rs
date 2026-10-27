@@ -3,8 +3,10 @@
 //! used directly. No redirects, proxies, pooling, or retries here. One
 //! deadline covers the connect, the handshake, the request, and the reply
 //! (`net::Tls` over `net::Timed<TcpStream>`); trickling cannot renew it. Name
-//! resolution is blocking and outside the deadline. Response bodies are capped.
+//! resolution runs on the client's one lookup thread and is waited for within
+//! the same deadline (`lookup`). Response bodies are capped.
 use super::config::ShippingServer;
+use super::lookup::Lookup;
 use crate::http1::{self, BodyReader, read_status_head};
 use gateway_core::egress::Egress;
 use gateway_core::headers::Field;
@@ -13,7 +15,7 @@ use gateway_core::http1_framing::Framing;
 use gateway_core::http1_write::{wire_ok, write_request_head};
 use rustls::{ClientConfig, ClientConnection, RootCertStore, pki_types::ServerName};
 use crate::net::{Deadline, Tls};
-use std::{io::{self, Read, Write}, net::{TcpStream, ToSocketAddrs}, sync::Arc, time::Duration};
+use std::{io::{self, Read, Write}, net::{SocketAddr, TcpStream}, sync::Arc, time::Duration};
 
 pub const MAX_REPLY_BYTES: usize = 64 * 1024;
 
@@ -29,21 +31,18 @@ impl Reply {
     }
 }
 
-pub struct Client { config: Arc<ClientConfig>, server: ShippingServer, host: String, deadline: Duration }
+pub struct Client { config: Arc<ClientConfig>, server: ShippingServer, host: String, deadline: Duration, lookup: Lookup }
 
 /// The error to report for a failed operation: the deadline if it passed, else `fault`.
 fn failure(tls: &Tls, fault: ClientError) -> ClientError { if tls.expired() { ClientError::Timeout } else { fault } }
 
-// Effect site: the only cloud socket. Resolution and connection happen under a
-// permit minted from the configured shipping server and nothing else, and the
-// connect is bounded by the request deadline.
+// Effect site: the only cloud socket, opened under a permit minted from the
+// configured shipping server and nothing else; the addresses come from
+// resolving that permit's host, and each connect is bounded by the request deadline.
 #[allow(clippy::disallowed_methods)]
-fn open_socket(permit: &Egress<'_, ShippingServer>, deadline: &Deadline) -> Result<TcpStream, ClientError> {
-    let target = permit.target();
-    let addresses: Vec<_> = (target.host(), target.port()).to_socket_addrs().map_err(|_| ClientError::Resolve)?.take(16).collect();
-    if addresses.is_empty() { return Err(ClientError::Resolve); }
+fn open_socket(_permit: &Egress<'_, ShippingServer>, addresses: &[SocketAddr], deadline: &Deadline) -> Result<TcpStream, ClientError> {
     let mut failure = ClientError::Connect;
-    for address in &addresses {
+    for address in addresses {
         match TcpStream::connect_timeout(address, deadline.remaining().map_err(|_| ClientError::Timeout)?) {
             Ok(socket) => return Ok(socket),
             Err(e) if matches!(e.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock) => failure = ClientError::Timeout,
@@ -65,18 +64,26 @@ impl Client {
         let mut config = ClientConfig::builder().with_root_certificates(roots).with_no_client_auth();
         config.enable_early_data = false;
         config.cert_decompressors.clear();
-        Ok(Self { config: Arc::new(config), server, host, deadline })
+        Ok(Self { config: Arc::new(config), server, host, deadline, lookup: Lookup::new()? })
+    }
+    /// The server's addresses, within the deadline. A lookup thread still busy
+    /// from an earlier request is a `Resolve` error, not a wait.
+    fn resolve(&self, deadline: &Deadline) -> Result<Vec<SocketAddr>, ClientError> {
+        let left = deadline.remaining().map_err(|_| ClientError::Timeout)?;
+        self.lookup.resolve(self.server.host(), self.server.port(), left)
+            .map_err(|e| if e.kind() == io::ErrorKind::TimedOut { ClientError::Timeout } else { ClientError::Resolve })
     }
 
     /// `bearer` becomes an `Authorization` header; `headers` are added verbatim.
-    /// Uses the deadline on each socket operation; name resolution, OS scheduling,
-    /// and TLS computation are outside any hard wall-clock guarantee.
+    /// Uses the deadline on name resolution and each socket operation; OS
+    /// scheduling and TLS computation are outside any hard wall-clock guarantee.
     pub fn request(&self, method: &str, path: &str, bearer: Option<&str>, headers: &[(&str, String)], body: Vec<u8>)
         -> Result<Reply, ClientError>
     {
         let deadline = Deadline::start(self.deadline).map_err(|_| ClientError::Timeout)?;
         let permit = Egress::cloud(&self.server);
-        let tcp = open_socket(&permit, &deadline)?;
+        let addresses = self.resolve(&deadline)?;
+        let tcp = open_socket(&permit, &addresses, &deadline)?;
         let server = ServerName::try_from(self.host.clone()).map_err(|_| ClientError::Tls)?;
         let connection = ClientConnection::new(self.config.clone(), server).map_err(|_| ClientError::Tls)?;
         let mut tls: Tls = Tls::new(connection, tcp, deadline);

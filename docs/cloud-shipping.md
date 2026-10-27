@@ -181,7 +181,7 @@ implemented.
 
 ## Resources
 
-One extra 2 MiB thread stack; at most `max_open_exchanges × max_exchange_bytes`
+One extra 2 MiB thread stack and the shipper's 256 KiB lookup thread; at most `max_open_exchanges × max_exchange_bytes`
 in the assembler and `max_open_exchanges × 2 × (max_exchange_bytes + 16 KiB)`
 of queued rows; one scanned record of at most 1 MiB; one batch of at most 4 MiB
 and its copy in the request; a 64 KiB reply. `budget::shipping` composes these

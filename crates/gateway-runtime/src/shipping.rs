@@ -17,6 +17,7 @@ use crate::disk_log::{SessionReader, ScanError};
 
 pub mod config;
 pub mod client;
+mod lookup;
 pub mod state;
 pub use config::ShippingConfig;
 use client::{Client, Reply};
