@@ -167,6 +167,27 @@ fn interim_statuses_are_skipped_and_the_continue_is_sent_once() {
 }
 
 #[test]
+fn interim_heads_beyond_the_cap_are_an_upstream_failure() {
+    use crate::exchange_driver::MAX_INTERIM_HEADS;
+    let cap = MAX_INTERIM_HEADS as usize;
+    let interim = || StatusHead { status: 103, fields: vec![] };
+    // Exactly the cap is tolerated.
+    let mut statuses: Vec<StatusHead> = (0..cap).map(|_| interim()).collect();
+    statuses.push(StatusHead { status: 200, fields: vec![field("content-length", "0")] });
+    let (fake, recorded) = run(Script { statuses, ..Script::default() });
+    assert!(recorded);
+    assert!(client_text(&fake).starts_with("HTTP/1.1 200 OK\r\n"), "{}", client_text(&fake));
+    assert_eq!(fake.calls.iter().filter(|c| *c == "read_status_head").count(), cap + 1);
+    // One more is refused as an HTTP fault without reading further.
+    let statuses: Vec<StatusHead> = (0..cap + 4).map(|_| interim()).collect();
+    let (fake, recorded) = run(Script { statuses, ..Script::default() });
+    assert!(recorded);
+    assert!(client_text(&fake).starts_with("HTTP/1.1 502 "), "{}", client_text(&fake));
+    assert!(fake.calls.contains(&format!("{:?}", Event::Failed(Fault::Http))));
+    assert_eq!(fake.calls.iter().filter(|c| *c == "read_status_head").count(), cap + 1);
+}
+
+#[test]
 fn refusals_before_admission_write_the_table_status_and_no_record() {
     for (script, status) in [
         (Script { head: HeadKind::TooLarge, ..Script::default() }, 431),

@@ -11,7 +11,9 @@ HTTP/1.1 only, one exchange per connection, closed after the response.
 Inbound requests use origin-form targets. Bodies are delimited by
 Content-Length, by chunked transfer coding, or, for upstream responses only,
 by the close of the connection. Interim 1xx responses from upstream are
-skipped, except 101, which is refused. Not supported, and refused when seen:
+skipped, except 101, which is refused; more than `MAX_INTERIM_HEADS` (8) of
+them is an upstream failure, so the head loop is bounded. Not supported, and
+refused when seen:
 HTTP/1.0, pipelining, Upgrade, trailers, any transfer coding other than
 `chunked` alone, obsolete line folding, and bare CR or LF. A request that
 carries both Content-Length and Transfer-Encoding is refused.

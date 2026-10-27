@@ -415,14 +415,25 @@ impl Driver {
     }
 }
 
+/// The most interim (1xx) heads tolerated before the final one. Beyond it the
+/// upstream is treated as an HTTP failure, which bounds the head loop.
+pub const MAX_INTERIM_HEADS: u32 = 8;
+
 /// Read status heads until a final one, as the verified classification says.
-#[verifier::exec_allows_no_decreases_clause]
+/// Reads at most `MAX_INTERIM_HEADS + 1` heads.
 fn final_head<E: Effects>(effects: &mut E) -> (out: Result<(u16, Vec<Field>, Framing), Fault>)
 {
-    loop {
+    let mut interim: u32 = 0;
+    loop
+        invariant interim <= MAX_INTERIM_HEADS,
+        decreases MAX_INTERIM_HEADS - interim,
+    {
         let status_head = match effects.read_status_head() { Ok(head) => head, Err(failure) => return Err(fault_of(failure, Fault::Http)) };
         match upstream_status(status_head.status, &status_head.fields) {
-            UpstreamStatus::Interim => {}
+            UpstreamStatus::Interim => {
+                if interim == MAX_INTERIM_HEADS { return Err(Fault::Http); }
+                interim = interim + 1;
+            }
             UpstreamStatus::Refused => return Err(Fault::Metadata),
             UpstreamStatus::Bodiless => return Ok((status_head.status, status_head.fields, Framing::Length(0))),
             UpstreamStatus::Framed(framing) => return Ok((status_head.status, status_head.fields, framing)),

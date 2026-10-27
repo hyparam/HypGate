@@ -56,7 +56,7 @@ The transport is a set of effects the verified exchange driver asks for:
 until `upstream_status` names a final one, so ordinary interim responses such
 as 103 are skipped and an unsolicited 101 is refused before any client header
 is written; no upgraded protocol bytes are forwarded or logged as a response
-body. Redirects are returned as status/body without following Location. The
+body. At most `MAX_INTERIM_HEADS` interim heads are read; a ninth answers 502. Redirects are returned as status/body without following Location. The
 status and filtered headers reach the client, through the driver's
 `Connection` machine, before any body byte. Local TLS tests cover rejection
 without replay, slot release, and a 103 followed by a normal 200. After a
