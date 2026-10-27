@@ -57,6 +57,18 @@ fn accepts_hex_case_leading_zeros_and_extensions() {
 }
 
 #[test]
+fn chunk_extensions_are_bounded_by_the_size_line_cap() {
+    // A size line exactly at the cap is accepted; one byte longer is refused.
+    let at_cap = format!("1;{}\r\nx\r\n0\r\n\r\n", "e".repeat(MAX_SIZE_LINE - 2));
+    let (body, done, _) = decode(at_cap.as_bytes(), 7).unwrap();
+    assert_eq!(body, b"x".to_vec());
+    assert!(done);
+    let over = format!("1;{}\r\nx\r\n0\r\n\r\n", "e".repeat(MAX_SIZE_LINE - 1));
+    assert!(decode(over.as_bytes(), 1).is_none());
+    assert!(decode(over.as_bytes(), over.len()).is_none());
+}
+
+#[test]
 fn rejects_malformed_chunked_bodies() {
     for bad in [
         &b"\r\n\r\n"[..],                          // no size digits

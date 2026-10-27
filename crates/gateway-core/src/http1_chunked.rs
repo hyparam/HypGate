@@ -18,6 +18,9 @@ verus! {
 pub const SEMICOLON: u8 = 59;
 /// Chunk sizes are spelled in at most sixteen hex digits: every `u64`, nothing larger.
 pub const MAX_SIZE_DIGITS: u8 = 16;
+/// A size line, digits and any extension, is at most this long, so the framing
+/// between two data steps is bounded and a reader's loop over it terminates.
+pub const MAX_SIZE_LINE: usize = 1024;
 
 pub open spec fn is_hex(b: u8) -> bool { (48 <= b <= 57) || (65 <= b <= 70) || (97 <= b <= 102) }
 pub open spec fn hex_val(b: u8) -> nat {
@@ -47,7 +50,8 @@ pub open spec fn hex_digits(n: nat) -> Seq<u8>
 /// A size line without its CRLF: `hexlen` hex digits spelling `n`, then either
 /// nothing or `;` and extension bytes, which are accepted and ignored.
 pub open spec fn size_split(line: Seq<u8>, n: nat, hexlen: int) -> bool {
-    1 <= hexlen <= MAX_SIZE_DIGITS && hexlen <= line.len() && all_hex(line.subrange(0, hexlen)) && hex_value(line.subrange(0, hexlen)) == n
+    1 <= hexlen <= MAX_SIZE_DIGITS && hexlen <= line.len() && line.len() <= MAX_SIZE_LINE
+        && all_hex(line.subrange(0, hexlen)) && hex_value(line.subrange(0, hexlen)) == n
         && (hexlen == line.len() || (line[hexlen] == SEMICOLON && forall|k: int| hexlen < k < line.len() ==> crate::http1_head::is_value_byte(#[trigger] line[k])))
 }
 pub open spec fn size_line_ok(line: Seq<u8>, n: nat) -> bool { exists|hexlen: int| #[trigger] size_split(line, n, hexlen) }
@@ -103,6 +107,7 @@ pub struct ChunkDecoder {
     size: u64,
     digits: u8,
     remaining: u64,
+    line_len: usize,
     // Ghost history.
     done_bytes: Ghost<Seq<u8>>,
     done_body: Ghost<Seq<u8>>,
@@ -126,7 +131,7 @@ impl ChunkDecoder {
     pub closed spec fn accepts(&self, b: u8) -> bool {
         match self.phase {
             Phase::Size => (is_hex(b) && self.digits < MAX_SIZE_DIGITS) || ((b == SEMICOLON || b == CR) && self.digits >= 1),
-            Phase::Ext => b == CR || crate::http1_head::is_value_byte(b),
+            Phase::Ext => b == CR || (crate::http1_head::is_value_byte(b) && self.line@.len() < MAX_SIZE_LINE),
             Phase::SizeCr => b == LF,
             Phase::Data => true,
             Phase::DataCr => b == CR,
@@ -160,9 +165,25 @@ impl ChunkDecoder {
     spec fn line_shape(&self, ext: bool) -> bool {
         let line = self.line@;
         let d = self.digits as int;
-        d <= MAX_SIZE_DIGITS && d <= line.len() && all_hex(line.subrange(0, d)) && hex_value(line.subrange(0, d)) == self.size
+        self.line_len == line.len() && line.len() <= MAX_SIZE_LINE
+            && d <= MAX_SIZE_DIGITS && d <= line.len() && all_hex(line.subrange(0, d)) && hex_value(line.subrange(0, d)) == self.size
             && if ext { d < line.len() && line[d] == SEMICOLON && forall|k: int| d < k < line.len() ==> crate::http1_head::is_value_byte(#[trigger] line[k]) }
                else { d == line.len() }
+    }
+    /// Framing bytes the decoder may consume before its next data step,
+    /// completion, or rejection. Every framing step lowers it, so a loop that
+    /// feeds the decoder until it names data terminates.
+    pub closed spec fn framing_budget(&self) -> nat {
+        match self.phase {
+            Phase::Size | Phase::Ext => (MAX_SIZE_LINE + 4 - self.line@.len()) as nat,
+            Phase::SizeCr => 3nat,
+            Phase::Data => 0nat,
+            Phase::DataCr => (MAX_SIZE_LINE + 6) as nat,
+            Phase::DataLf => (MAX_SIZE_LINE + 5) as nat,
+            Phase::LastCr => 2nat,
+            Phase::LastLf => 1nat,
+            Phase::Done | Phase::Failed => 0nat,
+        }
     }
     pub closed spec fn valid(&self) -> bool {
         chunks_ok(self.done_bytes@, self.done_body@)
@@ -183,7 +204,7 @@ impl ChunkDecoder {
     pub fn new() -> (out: Self)
         ensures out.valid(), out.fed() == Seq::<u8>::empty(), out.body() == Seq::<u8>::empty(), !out.done(), !out.failed(),
     {
-        let out = ChunkDecoder { phase: Phase::Size, size: 0, digits: 0, remaining: 0,
+        let out = ChunkDecoder { phase: Phase::Size, size: 0, digits: 0, remaining: 0, line_len: 0,
             done_bytes: Ghost(Seq::empty()), done_body: Ghost(Seq::empty()), line: Ghost(Seq::empty()), partial: Ghost(Seq::empty()) };
         proof {
             assert(out.line@.subrange(0, 0) =~= Seq::<u8>::empty());
@@ -260,7 +281,8 @@ impl ChunkDecoder {
     pub open spec fn step_ok(before: Self, after: Self, input: Seq<u8>, out: Step) -> bool {
         after.valid() && match out {
             Step::Framing(n) => n == 1 && after.fed() == before.fed() + input.subrange(0, 1) && after.body() == before.body()
-                && !after.done() && !after.failed() && before.phase() != Phase::LastLf,
+                && !after.done() && !after.failed() && before.phase() != Phase::LastLf
+                && after.framing_budget() < before.framing_budget(),
             Step::Data(n) => 1 <= n <= input.len() && after.fed() == before.fed() + input.subrange(0, n as int)
                 && after.body() == before.body() + input.subrange(0, n as int) && !after.done() && !after.failed()
                 && before.phase() == Phase::Data && n == if before.pending() < input.len() { before.pending() } else { input.len() as nat },
@@ -308,6 +330,7 @@ impl ChunkDecoder {
             let ghost before = *self;
             self.size = self.size * 16 + v;
             self.digits = self.digits + 1;
+            self.line_len = self.line_len + 1;
             self.line = Ghost(before.line@.push(b));
             proof {
                 let d = before.digits as int;
@@ -328,6 +351,7 @@ impl ChunkDecoder {
             if self.digits == 0 { return self.reject(); }
             let ghost before = *self;
             self.phase = Phase::Ext;
+            self.line_len = self.line_len + 1;
             self.line = Ghost(before.line@.push(b));
             proof {
                 let d = before.digits as int;
@@ -366,7 +390,9 @@ impl ChunkDecoder {
             proof { assert(self.fed() =~= before.fed() + one); }
             Step::Framing(1)
         } else if crate::http1_head::value_byte_exec(b) {
+            if self.line_len >= MAX_SIZE_LINE { return self.reject(); }
             let ghost before = *self;
+            self.line_len = self.line_len + 1;
             self.line = Ghost(before.line@.push(b));
             proof {
                 let d = before.digits as int;
@@ -436,6 +462,7 @@ impl ChunkDecoder {
         self.phase = Phase::Size;
         self.size = 0;
         self.digits = 0;
+        self.line_len = 0;
         self.done_bytes = Ghost(before.done_bytes@ + chunk);
         self.done_body = Ghost(before.done_body@ + before.partial@);
         self.line = Ghost(Seq::empty());

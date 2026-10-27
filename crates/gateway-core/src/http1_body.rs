@@ -73,6 +73,8 @@ impl BodyDecoder {
     pub closed spec fn failed(&self) -> bool { self.mode == Mode::Failed }
     /// Body bytes still owed by a Content-Length framing; meaningful before the body is done.
     pub closed spec fn owed(&self) -> nat { self.remaining as nat }
+    /// Framing bytes that may precede the next data step; every framing step lowers it.
+    pub closed spec fn framing_budget(&self) -> nat { if self.mode == Mode::Chunked { self.chunked.framing_budget() } else { 0 } }
 
     pub closed spec fn valid(&self) -> bool {
         match self.mode {
@@ -118,7 +120,8 @@ impl BodyDecoder {
     pub open spec fn step_ok(before: Self, after: Self, input: Seq<u8>, room: nat, out: Step) -> bool {
         after.valid() && after.framing() == before.framing() && match out {
             Step::Framing(n) => n == 1 && after.fed() == before.fed() + input.subrange(0, 1) && after.body() == before.body()
-                && !after.done() && !after.failed() && before.framing() == Framing::Chunked,
+                && !after.done() && !after.failed() && before.framing() == Framing::Chunked
+                && after.framing_budget() < before.framing_budget(),
             Step::Data(n) => 1 <= n <= input.len() && n <= room && after.fed() == before.fed() + input.subrange(0, n as int)
                 && after.body() == before.body() + input.subrange(0, n as int) && !after.failed()
                 && match before.framing() {

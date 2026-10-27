@@ -203,7 +203,6 @@ impl BodyReader {
 
     /// The next body bytes, at most `room` of them, reading from `source`
     /// only when the buffer is spent.
-    #[verifier::exec_allows_no_decreases_clause]
     #[verifier::loop_isolation(false)]
     pub fn read<S: Source>(&mut self, source: &mut S, room: usize) -> (out: Read)
         requires old(self).inv(), room >= 1,
@@ -225,6 +224,8 @@ impl BodyReader {
         loop
             invariant self.inv(), room >= 1, self.decoder.framing() == old(self).decoder.framing(), self.delivered@ == old(self).delivered@,
                 received0.len() <= self.received@.len(), self.received@.subrange(0, received0.len() as int) == received0,
+            // Each framing step spends decoder budget; a refill only moves from a spent buffer to a full one.
+            decreases self.decoder.framing_budget(), (if self.pos < self.buffer@.len() { 0int } else { 1int }),
         {
             if self.decoder.is_done() { return Read::End; }
             if self.decoder.is_failed() { return Read::Failed; }
