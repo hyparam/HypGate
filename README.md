@@ -3,7 +3,7 @@
 HypGate is a small LLM gateway with a machine-checked core. It forwards request
 bodies to your provider unchanged, streams responses back, writes every
 exchange to an audit log on disk, and optionally ships that log to
-[HypAware](https://hypaware.ai) for analysis. No provider API translation, no
+[HypAware](https://hypaware.ai) for analysis or an S3 bucket. No provider API translation, no
 plugins, no other network destinations.
 
 ![HypGate forwards requests and responses between an AI client and provider, records exchanges in a local audit log, and optionally ships logs to HypAware Cloud.](docs/images/hypgate-flow.png)
@@ -19,7 +19,7 @@ panic-free.
 ### 1. Data only goes where you configured
 
 Requests go to the provider you set up, using the key you set up. Logs go to
-the log file on disk. If you turn on shipping, logs go to your HypAware server
+the log file on disk. If you turn on shipping, logs go to your configured HypAware or S3 endpoint
 and nowhere else. There is no other network connection in the binary.
 
 ### 2. Correctness
@@ -50,6 +50,10 @@ The gateway is a faithful pass-through with a faithful record.
   the server confirms the exact batch. After a restart the gateway resends only
   what was unconfirmed, with the same identities, so the server stores each
   exchange once.
+
+S3 uploads projected NDJSON batches using [verified SigV4 signing](docs/cloud-shipping.md#s3-destination),
+without new dependencies. Identical retries overwrite the same object; consumers
+can deduplicate overlapping batches by row identity.
 
 Strict mode is the guarantee. Availability mode is an opt-out that keeps
 forwarding after the log fails and counts each unrecorded request as a gap.
@@ -165,7 +169,7 @@ Runtime and adapters:
 | [Body transfer](docs/body-transfer.md) | Blocking body driver and the durable-log contract |
 | [HTTPS transport](docs/https-transport.md) | Upstream TLS exchange on the connection thread, deadlines, and cancellation |
 | [Disk logging](docs/disk-logging.md) | Bounded disk worker, sync acknowledgments, recovery scanner |
-| [Cloud shipping](docs/cloud-shipping.md) | HypAware shipper thread: protocol, configuration, proved and trusted parts |
+| [Cloud shipping](docs/cloud-shipping.md) | HypAware and S3 shipping: protocol, configuration, proved and trusted parts |
 | [HypAware setup](docs/hypaware.md) | Operator walkthrough: tokens, shipping config, checking rows on the server, live smoke test record |
 | [HTTP ownership](docs/http-ownership.md) | HTTP owner counts derived from the worker and connection registries |
 | [HTTP buffer lifetimes](docs/http-buffer-lifetimes.md) | HTTP body buffers, role credit, and cancellation |

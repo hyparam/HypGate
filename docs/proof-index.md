@@ -200,3 +200,18 @@ caller. Durability/visibility of the named syscalls and file identities remain
 trusted; their sequencing is checked. Snapshot tests and eight mutations check
 the separate verified primitive-read binding. Naming, time sampling, CLI parsing,
 and missing-file detection are not claimed as proved by this change.
+
+## S3 shipping
+
+| Claim | Contracts | Runtime boundary |
+| --- | --- | --- |
+| HMAC is exactly SHA-256 over the standard normalized-key inner/outer pads | `s3::{pad,hmac,padded,mac}`; `sha256::digest` | Cryptographic strength is an assumption; RFC 4231 vectors test interoperability. |
+| SigV4 authorization binds the exact host, path, date, region, session token and payload hash | `s3::{canonical,scope,signing_key,string_to_sign,authorization,sign}` | Runtime supplies clock and configured fields and sends the returned headers. Independent signing vectors and a TLS server check wire signatures. |
+| Object path is exactly prefix + hex batch identity + full payload hash + suffix | `s3::object_path` | Runtime uses the configured prefix; identical batches overwrite the same S3 key. Changed batch boundaries can create overlapping objects. |
+| Only HTTP 200 resolves an uploaded batch; S3 errors never poison it | `s3::upload_reply`; shared `shipper::Machine::reply` and `shipping_driver::drive` | PUT status is from the configured TLS peer. Local oversized projections retain the shared poison policy. |
+| Credentials activate locally; path/region inputs reject unsafe characters; schema extracts the configured S3 strings exactly | `s3::{activation,safe_exec}`; `config_schema::{section_ok,reads_section,read_shipping}` | Runtime chooses the backend, resolves environment secrets, formats UTC civil fields, and binds checkpoint identity to endpoint/prefix and region. |
+
+S3 uses the existing effect sites; no AWS SDK, new dependency, additional socket
+site, or unverified cryptographic implementation was introduced. Focused proof
+mutations reject changed HMAC padding, wrong signing service, missing payload
+binding, unsafe path acceptance, and acknowledgment of failed PUTs.

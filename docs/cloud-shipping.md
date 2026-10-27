@@ -1,7 +1,9 @@
-# Cloud shipping to HypAware
+# Cloud shipping to HypAware or S3
 
 The shipper runs on one dedicated thread inside `hypgate`, enabled by an
-optional `shipping` section of the root policy. Every decision is made by the
+optional `shipping` section of the root policy. HypAware is the default backend;
+[S3](#s3-destination) reuses the same driver with signed PUT requests. The
+HypAware behavior is described below, followed by the S3 differences. Every decision is made by the
 verified shipper machine (`gateway_core::shipper::Machine`): which records
 form which exchange, which exchanges go into the next batch, which request to
 send with which credential, how to read a reply, and how long to wait. The
@@ -88,7 +90,76 @@ boundary.
 finished log and exits when every exchange is resolved; exchanges still open
 after five idle polls are flushed as `incomplete`.
 
-## Protocol
+## S3 destination
+
+Set a nonempty `s3_region` to select S3 instead of HypAware. The same live
+shipper and `hypgate ship ROOT.json LOG` upload the same projected NDJSON
+batches (not raw audit frames). No AWS SDK or new dependency is needed.
+
+```json
+"shipping": {
+  "server": "https://my-audit-bucket.s3.us-east-1.amazonaws.com/hypgate/",
+  "s3_region": "us-east-1",
+  "s3_access_key_env": "AWS_ACCESS_KEY_ID",
+  "token_env": "AWS_SECRET_ACCESS_KEY",
+  "s3_session_token_env": "AWS_SESSION_TOKEN",
+  "state_dir": "/var/lib/hypgate/s3-shipping",
+  "poll_ms": 1000
+}
+```
+
+Omit `s3_session_token_env` for long-lived access keys. All secrets come from
+the named environment variables, once at startup; temporary credentials require
+restarting with refreshed values before expiry. There is no instance metadata,
+STS, profile-file discovery, credential refresh, bucket creation, or redirect
+following. Grant `s3:PutObject` on the chosen prefix and configure bucket encryption,
+lifecycle, and access policy separately. A bucket requiring extra encryption
+headers is not supported by this initial implementation.
+
+`server` is the sole HTTPS destination. Its path is the object prefix and must
+end in `/`; a path-style endpoint can include `/bucket/prefix/`. Prefixes support
+ASCII letters, digits, hyphens, underscores and slashes, up to 1024 bytes; spaces,
+dots, percent escapes and queries are rejected. The region and access key use
+the same character set without slashes. The secret access key is `token_env`
+(1–512 visible ASCII bytes); a session token can be up to 16 KiB.
+
+Each upload is an AWS Signature Version 4 PUT with `host`, `x-amz-date`,
+`x-amz-content-sha256`, and, when present, `x-amz-security-token` signed. The
+verified core implements HMAC using the existing verified SHA-256 and proves
+the canonical request, signing-key derivation, string to sign, and authorization
+bytes match their specifications. Time comes from the system clock, formatted
+using the verified calendar's civil fields by the runtime adapter.
+
+Object names are the prefix, hex batch identity, a hyphen, the full SHA-256
+payload hash, and `.ndjson`. A retry of identical data overwrites the same key.
+Only HTTP 200 resolves a PUT. Every other response or transport failure retains
+the batch and retries; 429/503 honor the existing bounded Retry-After policy.
+Authentication failures, redirects, and S3 400 errors never trigger the
+HypAware poison behavior. Oversized projections still follow the shared
+machine's local poison rules. Credential activation is a local core action:
+no bootstrap or refresh request goes to S3, and AWS secrets never enter the
+machine's enrollment token or an identity file.
+
+Checkpoints bind the log session, assembler limits, S3 endpoint including its
+prefix, and region. Changing the destination replays the log. Keep each shipper's
+state directory private and exclusive. A failed checkpoint write safely causes
+replay. Without an atomic server-side row ledger, changed batch boundaries after
+a restart can store overlapping rows in different objects: consumers needing
+row-level deduplication should use `part_id`. Versioned buckets can retain
+multiple versions of an overwritten object. S3 provides at-least-once delivery,
+not the HypAware server's exactly-once row-storage contract.
+
+The core's existing queue, driver, cursor, recovery, and bounded retry proofs
+are reused. `s3::{mac,sign,object_path,upload_reply,activation,safe_exec}` adds
+explicit contracts for S3; configuration shape and exact field extraction are
+proved by `config_schema`. HTTPS, clock formatting, environment resolution,
+checkpoint binding and filesystem effects remain the tested runtime boundary.
+Cryptographic collision resistance, AWS signature validation and successful PUT
+durability are external assumptions, not theorems about AWS. Regression tests
+use independent signature vectors and a local TLS server; no live AWS account
+was used for validation.
+
+## HypAware protocol
 
 Enrollment: `POST /v1/identity/bootstrap` with `{"bootstrap_token": ...}`
 returns `{jwt, expires_at, org}`. The gateway id is the credential's `sub`
@@ -135,7 +206,7 @@ stamps `gateway_id`, `org`, and `received_at` itself. Full parity with the
 HypAware client's projector (tool parts, thinking blocks, compaction) is not
 implemented.
 
-## Properties
+## HypAware properties
 
 | Property | Evidence |
 | --- | --- |
@@ -184,7 +255,8 @@ implemented.
 One extra 2 MiB thread stack and the shipper's 256 KiB lookup thread; at most `max_open_exchanges × max_exchange_bytes`
 in the assembler and `max_open_exchanges × 2 × (max_exchange_bytes + 16 KiB)`
 of queued rows; one scanned record of at most 1 MiB; one batch of at most 4 MiB
-and its copy in the request; a 64 KiB reply. `budget::shipping` composes these
+and its copy in the request; a 64 KiB reply; a 128 KiB allowance for S3
+credentials, signing, and request-header scratch (charged for either backend). `budget::shipping` composes these
 and the executable prints the figure at startup. See
 [resource composition](resource-composition.md#per-instance).
 

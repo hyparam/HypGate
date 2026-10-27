@@ -342,3 +342,22 @@ discovery and shipping across file boundaries. See the
 later writes to old segments or effects after a failure. Primitive effect traces
 are the contract observation used by the proof; syscall persistence and visibility
 are still assumptions about the filesystem, not conclusions from trace legality.
+
+## S3 shipping adapter
+
+S3 reuses `shipping::client::open_socket` under the configured `ShippingServer`
+egress permit and `shipping::state::write_private`; the effect-site allowlist
+is unchanged. `shipping::s3::send` supplies the clock and configured fields to
+verified `s3::sign`, sends its authorization and payload-hash headers via the
+existing HTTPS client, then passes the peer's status to verified
+`s3::upload_reply`. No redirects or secondary credential endpoints are used.
+Authorization and session-token fields are marked sensitive. AWS credentials
+are read through the existing environment resolver and never persisted.
+
+The same verified shipping driver, assembler, queue and cursor govern S3.
+The trusted joins are backend selection, UTC date formatting from verified civil
+fields, attaching the returned headers to PUT, and destination-scoped checkpoint
+loading/saving. Tests independently verify wire signatures over TLS, retry 503
+and 400 without poison, follow rotated logs, replay after a lost checkpoint,
+and replay after a prefix change. S3 storage durability, cryptographic security,
+and row deduplication by downstream consumers remain external premises.

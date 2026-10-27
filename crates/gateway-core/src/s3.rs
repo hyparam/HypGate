@@ -7,6 +7,7 @@ verus! {
 pub open spec fn pad(key: Seq<u8>, byte: u8) -> Seq<u8> {
     Seq::new(64, |i: int| (if i < key.len() { key[i] } else { 0u8 }) ^ byte)
 }
+#[verifier::opaque]
 pub open spec fn hmac(key: Seq<u8>, message: Seq<u8>) -> Seq<u8> {
     let k = if key.len() > 64 { sha256::hash(key) } else { key };
     sha256::hash(pad(k, 0x5c) + sha256::hash(pad(k, 0x36) + message))
@@ -32,6 +33,7 @@ pub fn mac(key: &[u8], message: &[u8]) -> (out: Vec<u8>)
     requires key.len() <= 1048576, message.len() <= 16777216,
     ensures out@ == hmac(key@, message@), out.len() == 32,
 {
+    proof { reveal(hmac); }
     let k = if key.len() > 64 { sha256::digest(key) } else { vstd::slice::slice_to_vec(key) };
     let mut inner = padded(k.as_slice(), 0x36);
     append(&mut inner, message);

@@ -28,9 +28,10 @@ premises about the runtime that join the proof to the world.
 names for its tenant, carrying that grant's credential. An audit record is
 written only to the configured log file. Log contents leave the machine only
 if the root policy has a `shipping` section, and then only to the single
-HypAware server it names, authenticated by a credential that server issued in
-exchange for the operator's token. The binary contains no other network
-destination.
+server it names: either HypAware, authenticated by a credential that server
+issued in exchange for the operator's token, or S3, authenticated by AWS
+Signature Version 4 using the configured environment credentials. The binary
+contains no other network destination.
 
 **Proved today.**
 
@@ -67,15 +68,22 @@ destination.
   its own Content-Encoding. The fields themselves come from the verified
   HTTP/1.1 head parser and go out through the verified head writer
   ([codec](docs/http1-codec.md)); the runtime moves bytes and nothing else.
-- The shipper's enrollment machine refuses to upload without an unexpired
+- S3 uploads use the same verified queue, driver, and upload cursor. The
+  `s3` module proves HMAC-SHA256, exact SigV4 canonical and authorization
+  bytes, object names binding the batch and full payload hash, and that only
+  HTTP 200 resolves a PUT. All S3 errors retain the batch for retry. S3 uses
+  local credential activation, never a network enrollment request. Signature
+  cryptographic security and S3 durability are external premises; AWS secrets,
+  clock formatting and network/state adapters remain trusted and tested.
+- The HypAware shipper's enrollment machine refuses to upload without an unexpired
   server-issued credential; a revoked service account stops it for good.
-- Every outgoing shipper request is chosen by the verified machine
+- Every outgoing HypAware shipper request is chosen by the verified machine
   (`shipper::Machine::next`): it names a path and a body but no host, so the
   only destination any body can reach is the client built from the configured
   server. A bootstrap body is the escaped operator token, a refresh body is
   empty, an ingest body is queued rows, and no other action, checkpoint, or
   state carries the token.
-- The operator token is read once and moved into the machine; the gateway
+- The HypAware operator token is read once and moved into the machine; the gateway
   configuration, request path, and log never hold it.
 - Both outbound socket sites take one permit type, `egress::Egress`. A
   provider permit is minted by the verified core only for the destination the

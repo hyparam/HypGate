@@ -164,7 +164,7 @@ checks this over 3,000 rounds.
 | Retained configuration content, bounded by both one-MiB input documents | 2,097,152 | [Configuration storage](configuration.md#configuration-storage-and-startup-scratch) |
 | Disk queue slot vector | Q × size of `Option<(RecordFrame, Sender)>` | [Audit ownership](audit-buffer-lifetimes.md#verified-fixed-queue-and-synchronization-obligations) |
 | Root store trust-anchor descriptors | root count × size of `TrustAnchor` | `webpki-roots` static table, cloned descriptors over static DER |
-| Optional shipper thread (only with a `shipping` section): its stack, `O × E` assembler bytes, `O × 2 × (E + 16,384)` queued rows, one scanned record, one 4 MiB batch and its request copy, a 64 KiB reply | 2,097,152 + O × E + O × 2 × (E + 16,384) + 1,048,641 + 8,388,608 + 65,536 | [Cloud shipping](cloud-shipping.md#resources); `budget::shipping`, printed separately at startup |
+| Optional shipper thread (only with a `shipping` section): its stack, `O × E` assembler bytes, `O × 2 × (E + 16,384)` queued rows, one scanned record, one 4 MiB batch and its request copy, a 64 KiB reply, 128 KiB S3 credential/signing/header scratch | 2,097,152 + O × E + O × 2 × (E + 16,384) + 1,048,641 + 8,388,608 + 65,536 + 131,072 | [Cloud shipping](cloud-shipping.md#resources); `budget::shipping`, printed separately at startup |
 
 The composed bound is:
 

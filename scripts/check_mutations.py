@@ -22,6 +22,11 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("s3.rs", "s3_accepts_failed_put", "if status == 200 { 200 }", "if status == 403 { 200 }"),
+    ("s3.rs", "s3_changes_hmac_pad", "padded(k.as_slice(), 0x36)", "padded(k.as_slice(), 0x5c)"),
+    ("s3.rs", "s3_signs_wrong_service", 'mac(k_region.as_slice(), b"s3")', 'mac(k_region.as_slice(), b"ec2")'),
+    ("s3.rs", "s3_omits_payload_binding", 'let payload_hash = hex(sha256::digest(body).as_slice());', 'let payload_hash = hex(sha256::digest(b"wrong").as_slice());'),
+    ("s3.rs", "s3_allows_query_in_prefix", "b == 95 || (slash && b == 47)", "b == 95 || b == 63 || (slash && b == 47)"),
     ("log_rotation.rs", "rotation_skips_seal", "let sealed = self.io.seal();", "let sealed = true;"),
     ("log_rotation.rs", "rotation_ignores_seal_failure", "if !sealed { self.failed = true; return false; }", "if false { self.failed = true; return false; }"),
     ("snapshot.rs", "snapshot_reads_past_capture", "let max = if remaining < needed as u64 { remaining as usize } else { needed };", "let max = needed;"),
