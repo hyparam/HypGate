@@ -612,3 +612,28 @@ fn drain_returns_errors_for_corrupt_records_and_unreadable_session_headers() {
         assert!(result.expect("drain must terminate on read failure").is_err(), "{problem}");
     }
 }
+
+
+#[test]
+fn short_lived_tokens_ship_multiple_batches_without_refresh_starvation() {
+    let (port, roots, state, _server) = fake_server(TOKEN);
+    state.lock().unwrap().jwt_ttl = 3600;
+    let dir = TempDir::new();
+    let state_dir = dir.0.join("state");
+    std::fs::create_dir(&state_dir).unwrap();
+    let log_path = dir.0.join("audit.log");
+    let mut log = DiskLog::create(&log_path, 4, Duration::from_secs(2)).unwrap();
+    let shipper = Shipper::spawn_with_roots(shipping_config(port, &state_dir, json!({})), log_path, Some(roots)).unwrap();
+    let metrics = shipper.metrics();
+    for request in 1..=3 {
+        write_exchange(&mut log, request, "https://api.anthropic.com/v1/messages",
+            ANTHROPIC_REQUEST.as_bytes(), 200, &[ANTHROPIC_RESPONSE.as_bytes()], 0);
+        assert!(wait_until(Duration::from_secs(10), || metrics.batches_acknowledged() == request));
+    }
+    shipper.shutdown(Duration::from_secs(5)).unwrap();
+    let state = state.lock().unwrap();
+    assert_eq!(state.issued, 3, "one bootstrap and one refresh per subsequent batch");
+    assert_eq!(state.batches.len(), 3);
+    let checkpoint = load_checkpoint(&state_dir).unwrap();
+    assert_eq!((checkpoint.resolved, checkpoint.poisoned), (3, 0));
+}

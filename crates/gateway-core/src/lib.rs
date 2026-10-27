@@ -68,6 +68,7 @@ pub mod batch_builder;
 pub mod upload_cursor;
 pub mod enrollment;
 pub mod shipper;
+pub mod shipping_progress;
 pub mod shipping_driver;
 pub mod shipping_wire;
 pub mod client_exchange;

@@ -202,8 +202,11 @@ encodings of some bytes, and parsed by the verified JSON reader; the subject
 is 1 to 128 bytes. The credential document is read the same way
 (`shipping_wire::issued`), its expiry the earlier of `expires_at` and `exp`.
 `POST /v1/identity/refresh` with the current
-credential renews it; the shipper refreshes when less than 24 hours remain or
-once after a rejected upload, and re-enrolls when a refresh is rejected.
+credential renews it; the shipper refreshes used or restored credentials when
+at most 24 hours remain, or after a rejected upload, and re-enrolls when a
+refresh is rejected. A freshly issued, unexpired credential gets an upload
+opportunity before proactive renewal, including credentials lasting less than
+24 hours. Expired credentials still require renewal.
 `service_token_revoked` and `service_account_disabled` stop the shipper
 permanently; `hypgate_shipping_stopped` reports it.
 
@@ -346,3 +349,32 @@ Drain mode (`hypgate ship`) exits with an error if the session header cannot be
 opened or validated, or a record is corrupt or unreadable. Follow mode continues
 to expose read failures through its metrics. A torn final record remains a
 recoverable crash tail: only complete records are shipped.
+
+
+## Conditional upload progress
+
+`shipping_progress::successful_round` composes the production `Machine::next`
+and `Machine::reply` transitions: a nonempty queue of sendable projections
+advances its resolved count, without poisoning any exchange, after at most one
+successful bootstrap or refresh and one accepted ingest. The newly issued
+credential need only remain unexpired until the upload decision; it need not
+outlive the 24-hour renewal window.
+
+`drain_successful_suffix` uses queue length as a strictly decreasing natural
+number to prove that a finite queue drains under successive successful rounds.
+These are verified executable proof harnesses, not alternative runtime drivers.
+Their premises model a suffix in which reads finish (EOF), pending backoff has
+elapsed, execution continues without stopping or revocation, enrollment succeeds,
+and ingests receive 200 or 202. No new projections are added during the drain
+witness; time may advance arbitrarily between rounds, provided each issued
+credential survives until its upload decision. The real
+scheduler, finite I/O completion, server acceptance, and adequate credential
+lifetime remain environmental assumptions. Permanent outages, endless input
+reads, repeated rejection, or tokens expiring before use cannot have an
+unconditional upload-progress guarantee.
+
+Regression tests exercise short-lived tokens through both the machine and the
+TLS shipping runtime. Proof mutations restore the refresh loop, remove fresh
+credential issuance, permit expired fresh tokens, omit the acknowledgment,
+or skip a drain round;
+each must fail verification.

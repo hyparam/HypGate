@@ -14,10 +14,17 @@ pub enum State { Unenrolled, Enrolled { expires_at: u64 }, Stopped }
 #[derive(Debug, PartialEq, Eq, Structural)]
 pub enum Recovery { Refresh, Bootstrap, Stop }
 
-pub struct Enrollment { state: State, refreshed_after_rejection: bool }
+pub struct Enrollment { state: State, refreshed_after_rejection: bool, fresh: bool }
 
 impl Enrollment {
     pub closed spec fn state(&self) -> State { self.state }
+    pub closed spec fn fresh(&self) -> bool { self.fresh }
+    pub open spec fn renewal_due(&self, now: u64) -> bool {
+        match self.enrolled_until() {
+            Some(e) => e <= now || (!self.fresh() && e <= now + RENEWAL_WINDOW_SECONDS),
+            None => false,
+        }
+    }
     pub closed spec fn refreshed(&self) -> bool { self.refreshed_after_rejection }
     pub open spec fn stopped(&self) -> bool { self.state() == State::Stopped }
     pub open spec fn enrolled_until(&self) -> Option<u64> {
@@ -26,7 +33,7 @@ impl Enrollment {
 
     pub fn new() -> (out: Self)
         ensures out.state() == State::Unenrolled, !out.refreshed(),
-    { Enrollment { state: State::Unenrolled, refreshed_after_rejection: false } }
+    { Enrollment { state: State::Unenrolled, refreshed_after_rejection: false, fresh: false } }
 
     pub fn is_stopped(&self) -> (out: bool) ensures out == self.stopped(), { matches!(self.state, State::Stopped) }
 
@@ -37,13 +44,13 @@ impl Enrollment {
         match self.state { State::Enrolled { expires_at } => now < expires_at, _ => false }
     }
 
-    /// Enrolled and inside the renewal window (or already expired).
+    /// Renew expired tokens, or used tokens inside the renewal window. A newly
+    /// issued token gets an upload opportunity even when its lifetime is short.
     pub fn needs_refresh(&self, now: u64) -> (out: bool)
-        ensures out == match self.enrolled_until() {
-            Some(expires_at) => expires_at <= now + RENEWAL_WINDOW_SECONDS, None => false },
+        ensures out == self.renewal_due(now),
     {
         match self.state {
-            State::Enrolled { expires_at } => expires_at <= now || expires_at - now <= RENEWAL_WINDOW_SECONDS,
+            State::Enrolled { expires_at } => expires_at <= now || (!self.fresh && expires_at - now <= RENEWAL_WINDOW_SECONDS),
             _ => false,
         }
     }
@@ -56,19 +63,20 @@ impl Enrollment {
     /// leave the state unchanged. Stopped is absorbing.
     pub fn enrolled(&mut self, expires_at: u64, now: u64) -> (ok: bool)
         ensures ok == (!old(self).stopped() && now < expires_at),
-            ok ==> final(self).state() == (State::Enrolled { expires_at }) && !final(self).refreshed(),
+            ok ==> final(self).state() == (State::Enrolled { expires_at }) && !final(self).refreshed() && final(self).fresh(),
             !ok ==> *final(self) == *old(self),
     {
         if matches!(self.state, State::Stopped) || now >= expires_at { return false; }
         self.state = State::Enrolled { expires_at };
+        self.fresh = true;
         self.refreshed_after_rejection = false;
         true
     }
 
     /// An upload was accepted: a later rejection may try one refresh again.
     pub fn uploaded(&mut self)
-        ensures final(self).state() == old(self).state(), !final(self).refreshed(),
-    { self.refreshed_after_rejection = false; }
+        ensures final(self).state() == old(self).state(), !final(self).refreshed(), !final(self).fresh(),
+    { self.refreshed_after_rejection = false; self.fresh = false; }
 
     /// The server rejected the gateway token on an upload (401). The first
     /// rejection after a successful upload earns one refresh; a second one means

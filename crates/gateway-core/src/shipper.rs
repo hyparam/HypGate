@@ -330,6 +330,7 @@ impl Machine {
             !ok ==> final(self).same_credential(old(self)),
     {
         if !self.enrollment.enrolled(expires_at, now) { return false; }
+        self.enrollment.uploaded(); // A restored token is not a newly issued credential.
         self.jwt = Some(jwt);
         true
     }
@@ -347,6 +348,7 @@ impl Machine {
         ensures final(self).valid(), final(self).same_progress(old(self)), final(self).same_credential(old(self)),
             final(self).same_inputs(old(self)),
             final(self).emitted() == old(self).emitted(), final(self).at_end(), final(self).read_failed() == old(self).read_failed(),
+            final(self).force_refresh() == old(self).force_refresh(),
     { self.at_end = true; }
     pub fn log_failed(&mut self)
         requires old(self).valid(),
@@ -587,6 +589,7 @@ impl Machine {
                 Action::Send(r) => !old(self).stopped() && old(self).delay() == 0 && !old(self).wants()
                     && old(self).queue().len() > 0 && final(self).queue() == old(self).queue()
                     && final(self).resolved() == old(self).resolved() && final(self).awaiting() == Some(r.path)
+                    && final(self).poisoned() == old(self).poisoned() && final(self).delay() == 0
                     && match r.path {
                         Path::Bootstrap => r.body@ == bootstrap_body(old(self).token()) && r.bearer.is_none()
                             && r.batch_id.is_none() && old(self).enrollment().state() == crate::enrollment::State::Unenrolled
@@ -616,7 +619,7 @@ impl Machine {
             // Pending work with a usable credential is always sent or poisoned.
             (!old(self).stopped() && old(self).delay() == 0 && !old(self).wants() && old(self).queue().len() > 0
                 && !old(self).force_refresh()
-                && (match old(self).enrollment().enrolled_until() { Some(e) => e > now + crate::enrollment::RENEWAL_WINDOW_SECONDS, None => false }))
+                && old(self).can_upload(now) && !old(self).enrollment().renewal_due(now))
                 ==> (match out { Action::Send(r) => r.path == Path::Ingest, Action::Poisoned => true, _ => false }),
     {
         proof { old(self).cursor.bounds(); }
@@ -639,8 +642,8 @@ impl Machine {
             self.awaiting = Some(Path::Refresh);
             return Action::Send(Request { path: Path::Refresh, bearer: Some(bearer), body: Vec::new(), batch_id: None });
         }
-        // Enrolled and outside the renewal window, so the credential is unexpired.
-        proof { assert(self.can_upload(now)); }
+        // Either newly issued or outside the renewal window, and always unexpired.
+        proof { assert(!self.force_refresh); assert(self.can_upload(now)); }
         let limit: usize = if self.isolate { 1 } else { self.queue.len() };
         let mut count: usize = 0;
         let mut rows: usize = 0;
@@ -790,6 +793,8 @@ impl Machine {
             // Enrollment replies never move progress.
             old(self).awaiting() != Some(Path::Ingest) ==> final(self).queue() == old(self).queue()
                 && final(self).resolved() == old(self).resolved() && final(self).poisoned() == old(self).poisoned(),
+            old(self).awaiting() == Some(Path::Ingest) && (reply.status == 200 || reply.status == 202)
+                ==> final(self).delay() == old(self).delay(),
             // An accepted ingest resolves exactly the batch that was in flight.
             old(self).awaiting() == Some(Path::Ingest) && (reply.status == 200 || reply.status == 202)
                 ==> (match old(self).in_flight() {
@@ -809,6 +814,11 @@ impl Machine {
                         final(self).resolved() == old(self).resolved() && final(self).queue() == old(self).queue()
                             && final(self).poisoned() == old(self).poisoned()
                     }),
+            // Successful enrollment enables an upload for the whole remaining lifetime.
+            old(self).awaiting() != Some(Path::Ingest) && !old(self).stopped()
+                && reply.status == 200 && (match reply.credential { Some(c) => now < c.expires_at, None => false })
+                ==> final(self).enrollment().fresh() && final(self).delay() == 0 && !final(self).force_refresh()
+                    && (match reply.credential { Some(c) => final(self).enrollment().enrolled_until() == Some(c.expires_at), None => false }),
             // A credential is adopted only from a 200 with an unexpired expiry.
             final(self).enrolled() && !old(self).enrolled()
                 ==> reply.status == 200 && (match reply.credential {
@@ -836,6 +846,7 @@ impl Machine {
             final(self).skip() == old(self).skip(), final(self).token() == old(self).token(),
             final(self).session() == old(self).session(), final(self).read_failed() == old(self).read_failed(),
             !final(self).at_end(),
+            (reply.status == 200 || reply.status == 202) ==> final(self).delay() == old(self).delay(),
             (reply.status == 200 || reply.status == 202)
                 ==> (match old(self).in_flight() {
                     Some(b) => out == Outcome::Acknowledged((b.end() - b.first()) as u64) && final(self).resolved() == b.end()
@@ -923,6 +934,11 @@ impl Machine {
             final(self).session() == old(self).session(), final(self).read_failed() == old(self).read_failed(),
             !final(self).at_end(), final(self).queue() == old(self).queue(),
             final(self).resolved() == old(self).resolved(), final(self).poisoned() == old(self).poisoned(),
+            // Successful enrollment enables an upload for the whole remaining lifetime.
+            old(self).awaiting() != Some(Path::Ingest) && !old(self).stopped()
+                && reply.status == 200 && (match reply.credential { Some(c) => now < c.expires_at, None => false })
+                ==> final(self).enrollment().fresh() && final(self).delay() == 0 && !final(self).force_refresh()
+                    && (match reply.credential { Some(c) => final(self).enrollment().enrolled_until() == Some(c.expires_at), None => false }),
             final(self).enrolled() && !old(self).enrolled()
                 ==> reply.status == 200 && (match reply.credential {
                     Some(c) => now < c.expires_at && final(self).jwt() == Some(c.jwt@)
@@ -943,6 +959,7 @@ impl Machine {
                     if self.enrollment.enrolled(credential.expires_at, now) {
                         self.jwt = Some(credential.jwt);
                         self.enroll_attempt = 0;
+                        self.delay = 0;
                         self.force_refresh = false;
                         Outcome::Enrolled
                     } else {

@@ -23,6 +23,12 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("shipping_progress.rs", "progress_drain_skips_round", "successful_round(m, w.now, w.upload_at, w.expires_at, w.status);", "// Missing round must violate the decreasing rank."),
+    ("enrollment.rs", "progress_fresh_token_refresh_loop", "(!self.fresh && expires_at - now <= RENEWAL_WINDOW_SECONDS)", "(expires_at - now <= RENEWAL_WINDOW_SECONDS)"),
+    ("enrollment.rs", "progress_enrollment_never_fresh", "self.fresh = true;", "self.fresh = false;"),
+    ("enrollment.rs", "progress_fresh_token_never_expires", "expires_at <= now || (!self.fresh", "false || (!self.fresh"),
+    ("shipping_progress.rs", "progress_witness_omits_ack", "m.reply(upload_at, Reply { status, retry_after: None, revocation: false, credential: None });", "// Missing acknowledgment must not count as progress."),
+
     ("config_schema.rs", "buffered_default_weakens_durability", "None => Durability::Durable,", "None => Durability::Buffered,"),
     ("journal_binding.rs", "buffered_receipt_under_durable_policy", "!self.require_sync || durable", "true"),
     ("audit_receipt.rs", "buffered_receipt_claims_durable", "durable: self.sync_required()", "durable: true"),

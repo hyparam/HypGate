@@ -158,6 +158,8 @@ fn enrollment_gates_uploads_and_stops_for_good() {
     assert!(!e.enrolled(100, 100)); // already expired
     assert!(e.enrolled(1_000_000, 100));
     assert!(e.can_upload(999_999) && !e.can_upload(1_000_000));
+    assert!(!e.needs_refresh(999_999), "a fresh unexpired token can upload first");
+    e.uploaded();
     assert!(!e.needs_refresh(1_000_000 - 86_401));
     assert!(e.needs_refresh(1_000_000 - 86_400) && e.needs_refresh(5_000_000));
     assert_eq!(e.rejected(), Recovery::Refresh);
@@ -328,8 +330,8 @@ fn machine_skips_checkpointed_exchanges_poisons_oversized_ones_and_bounds_its_qu
     let r = send(&mut m, DAY);
     assert_eq!(r.path, Path::Bootstrap);
     assert_eq!(m.reply(DAY, credential_reply(b"j2", DAY + 1)), Outcome::Enrolled);
-    let r = send(&mut m, DAY);
-    assert_eq!(r.path, Path::Refresh, "a credential inside the renewal window is refreshed before use");
+    let r = send(&mut m, DAY + 1);
+    assert_eq!(r.path, Path::Refresh, "even a fresh credential must refresh once expired");
     assert_eq!(m.reply(DAY, credential_reply(b"j3", DAY)), Outcome::Deferred(30), "an already expired credential is refused");
 }
 
@@ -452,4 +454,65 @@ fn a_crash_at_any_step_resends_only_the_unacknowledged_exchanges_and_the_server_
         run_with_crash(7, Some(kill_at), &mut ledger);
         assert_eq!(ledger.stored, reference.stored, "crash after step {kill_at}");
     }
+}
+
+#[test]
+fn short_lived_enrollment_uploads_before_renewing_again() {
+    for lifetime in [1, 3600, DAY] {
+        for bootstrap in [true, false] {
+            let mut m = Machine::new(b"token".to_vec(), [7; 16], 4, 1024, 0, 0);
+            let token = feed(&mut m, 1, b"body");
+            assert!(m.enqueue(token, b"{}\n".to_vec(), 1).is_ok());
+            if !bootstrap { assert!(m.adopt_identity(b"old".to_vec(), 101, 100)); }
+            let request = send(&mut m, 100);
+            assert_eq!(request.path, if bootstrap { Path::Bootstrap } else { Path::Refresh });
+            assert_eq!(m.reply(100, credential_reply(b"fresh", 100 + lifetime)), Outcome::Enrolled);
+            let request = send(&mut m, 100 + lifetime - 1);
+            assert_eq!(request.path, Path::Ingest, "a usable fresh token must not refresh forever");
+            assert_eq!(m.reply(100 + lifetime - 1, ok_reply(202)), Outcome::Acknowledged(1));
+            assert_eq!(m.progress(), (1, 0));
+            // The next batch may renew proactively again, but must then upload.
+            let token = feed(&mut m, 2, b"next");
+            assert!(m.enqueue(token, b"{}\n".to_vec(), 1).is_ok());
+            assert_eq!(send(&mut m, 100 + lifetime - 1).path, Path::Refresh);
+        }
+    }
+}
+
+#[test]
+fn fresh_credentials_still_expire_and_rejected_uploads_still_refresh() {
+    for status in [401, 0] {
+        let mut m = Machine::new(b"token".to_vec(), [7; 16], 4, 1024, 0, 0);
+        let token = feed(&mut m, 1, b"body");
+        assert!(m.enqueue(token, b"{}\n".to_vec(), 1).is_ok());
+        assert_eq!(send(&mut m, 100).path, Path::Bootstrap);
+        m.reply(100, credential_reply(b"fresh", 101));
+        if status == 401 {
+            assert_eq!(send(&mut m, 100).path, Path::Ingest);
+            m.reply(100, ok_reply(401));
+            assert_eq!(send(&mut m, 100).path, Path::Refresh);
+        } else {
+            assert_eq!(send(&mut m, 101).path, Path::Refresh, "freshness never authorizes expired tokens");
+        }
+        assert_eq!(m.progress(), (0, 0));
+    }
+}
+
+#[test]
+fn progress_witness_drains_batches_with_advancing_time_and_one_second_tokens() {
+    use gateway_core::shipping_progress::{drain_successful_suffix, ServiceWindow};
+    let mut m = Machine::new(b"token".to_vec(), [7; 16], 4, 1024, 0, 0);
+    for request in 1..=3 {
+        let token = feed(&mut m, request, b"body");
+        // Each projection consumes a batch's row allowance, forcing three rounds.
+        assert!(m.enqueue(token, b"{}\n".to_vec(), MAX_ROWS).is_ok());
+    }
+    let service = vec![
+        ServiceWindow { now: 100, upload_at: 100, expires_at: 101, status: 200 },
+        ServiceWindow { now: 200, upload_at: 200, expires_at: 201, status: 202 },
+        ServiceWindow { now: 300, upload_at: 300, expires_at: 301, status: 200 },
+    ];
+    drain_successful_suffix(&mut m, &service);
+    assert_eq!(m.queue_len(), 0);
+    assert_eq!(m.progress(), (3, 0));
 }
