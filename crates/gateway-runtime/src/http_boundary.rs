@@ -117,9 +117,10 @@ pub fn prepare<'a>(config: &'a GatewayConfig, head: &RequestHead) -> Result<Prep
     if head.method != b"POST" { return Err(HttpError::MethodNotAllowed); }
     let fields = &head.fields;
     if !headers::fits(fields) { return Err(HttpError::HeadersTooLarge); }
-    // Origin form only, and the path itself is parsed by the verified
-    // `inbound::route_selector`, which accepts exactly `/routes/<canonical decimal u64>`.
-    let route = gateway_core::inbound::route_selector(&head.target).ok_or(HttpError::BadRequest)?;
+    // The verified prefix selects a route; an SDK suffix must match that
+    // route's fixed endpoint after admission. It never overrides a destination.
+    let (route, endpoint_start) = gateway_core::inbound::route_target(&head.target)
+        .ok_or(HttpError::BadRequest)?;
     let token = bearer(fields)?;
     // Every verified header rule runs before a request slot is taken, so a
     // rejected head never consumes capacity.
@@ -128,6 +129,9 @@ pub fn prepare<'a>(config: &'a GatewayConfig, head: &RequestHead) -> Result<Prep
         AdmissionError::Unauthorized => HttpError::Unauthorized,
         AdmissionError::AtCapacity | AdmissionError::Unavailable => HttpError::Unavailable,
     })?;
+    if !gateway_core::inbound::matches_endpoint(&head.target, endpoint_start, &routed.destination().path) {
+        return Err(HttpError::BadRequest);
+    }
     // The verified projection: allowlisted client headers, Host from the
     // resolved destination, the resolved credential exactly once, and
     // `Accept-Encoding: identity` so the provider sends opaque bytes.

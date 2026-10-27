@@ -4,17 +4,21 @@ The verified HTTP/1.1 parser ([codec](http1-codec.md)) delivers each head as
 byte fields; the runtime hands them to the verified projection in
 `gateway_core::headers` and the verified writer serializes the result.
 The route selector and the bearer token are parsed by the verified
-`gateway_core::inbound`; the admission binding is tested Rust. Every header,
-selector, and token rule below is proved in both directions: what is accepted
-is well-formed, and everything well-formed is accepted. No sockets, TLS, request bodies, response bodies,
+`gateway_core::inbound`; the admission binding is tested Rust. The header, canonical selector, and token parsers have soundness and
+completeness contracts. The SDK splitter proves both acceptance and rejection against its canonical
+route-prefix and suffix-boundary specification; the endpoint comparison is exact. No sockets, TLS, request bodies, response bodies,
 or disk effects are implemented in this layer.
 
-Clients use `POST /routes/<selector>` with one `Authorization: Bearer <gateway-token>`
-header. Proved by `inbound::route_selector`: a path is accepted exactly when it is
-`/routes/` followed by the canonical decimal of a `u64`, so escaped selectors,
-extra path components, leading zeros, and out-of-range values are rejected and
-every canonical selector is accepted. Absolute-form URLs and queries are rejected
-before the path is parsed. Proved by `inbound::bearer`: the token is accepted
+Clients use `POST /routes/<selector>` or append the configured endpoint path
+for SDK calls, with one `Authorization: Bearer <gateway-token>` header.
+`inbound::route_selector` accepts exactly the canonical route spelling;
+`route_target` proves that the selected prefix is that spelling and the optional
+suffix begins with a slash. After admission, `matches_endpoint` requires that
+suffix to equal the fixed destination path. It never changes the destination.
+Escaped selectors, leading zeros, out-of-range values, absolute URLs, queries,
+and mismatched suffixes are rejected. A suffix mismatch releases the admitted
+capacity before any upstream connection or audit effect.
+Proved by `inbound::bearer`: the token is accepted
 exactly when there is one Authorization field, its scheme is `bearer` in any case,
 and the token is one to 512 token characters. Authorization is still decided by
 the verified tenant-scoped policy. Capacity exhaustion returns an unavailable error.
@@ -23,7 +27,7 @@ The resulting private-constructor `PreparedRequest` owns the admitted routed req
 and its capacity lease. Its URI is the configured HTTPS endpoint, Host comes from
 that endpoint's authority, and its credential is loaded from the same policy
 snapshot. It has no public cloning, mutation, or raw-request extraction API.
-The future transport must consume this object and retain it through response work.
+The transport consumes this object and retains it through response work.
 
 Proved by `headers::forward_request`: only Content-Type, Accept,
 Anthropic-Version, Anthropic-Beta, and OpenAI-Beta are copied from client headers,

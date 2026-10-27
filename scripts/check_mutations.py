@@ -22,6 +22,10 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("inbound.rs", "sdk_target_rejects_valid_route", "            Some((n, end))", "            None"),
+    ("inbound.rs", "sdk_target_changes_route", "            Some((n, end))", "            Some((0, end))"),
+    ("inbound.rs", "sdk_target_changes_boundary", "            Some((n, end))", "            Some((n, 0))"),
+    ("inbound.rs", "sdk_endpoint_accepts_mismatch", "end == path.len() || eq(slice_subrange(path, end, path.len()), endpoint)", "true"),
     ("task_credit.rs", "task_result_accepts_foreign_source", "if self.source != credit.owner_id() { return Err(self); }", ""),
     ("task_credit.rs", "task_result_skips_destination_handoff", "if !credit.handoff_to(registry, owner) { return Err(self); }", ""),
     ("task_credit.rs", "task_result_issues_wrong_source", "TaskResult { source: self.key.owner(), value }", "TaskResult { source: 0, value }"),

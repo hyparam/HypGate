@@ -254,3 +254,21 @@ fn dispatch_rejects_changed_path_credentials_or_host_and_cannot_repeat() {
     assert_eq!(value_of(&outgoing.fields, "authorization"), Some(&b"Bearer secret-OPENAI"[..]));
     assert!(p.take_upstream().is_err());
 }
+
+#[test]
+fn sdk_paths_match_only_the_admitted_endpoint_and_release_rejected_capacity() {
+    let c = config(); let h = headers();
+    for path in ["/routes/7/v1/responses", "/routes/8/v1/messages"] {
+        assert!(prep(&c, &h, path).is_ok(), "{path}");
+    }
+    for path in ["/routes/7/v1/messages", "/routes/8/v1/responses", "/routes/7/",
+        "/routes/7//v1/responses", "/routes/7/v1/responses?stream=true",
+        "/routes/7/v1/responses/", "/routes/7/v1/../responses", "/routes/07/v1/responses",
+        "/routes/%37/v1/responses", "/routes/18446744073709551616/v1/responses"] {
+        assert!(matches!(prep(&c, &h, path), Err(HttpError::BadRequest)), "{path}");
+        assert!(prep(&c, &h, "/routes/7").is_ok(), "rejected path retained a slot: {path}");
+    }
+    assert!(matches!(prep(&c, &h, "/routes/999/v1/responses"), Err(HttpError::Unauthorized)));
+    let mut wrong = headers(); set(&mut wrong, "authorization", "Bearer wrong");
+    assert!(matches!(prep(&c, &wrong, "/routes/7/v1/responses"), Err(HttpError::Unauthorized)));
+}

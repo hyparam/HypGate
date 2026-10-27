@@ -41,8 +41,9 @@ destination.
   pick another tenant's credential. The concrete destination and credential
   come from the authorized table indices and nothing else.
 - The route selector and gateway token are parsed by verified code
-  (`inbound::route_selector`, `inbound::bearer`): a path selects a route
-  exactly when it is `/routes/` plus the canonical decimal of a `u64`, and a
+  (`inbound::route_selector`, `inbound::route_target`, `inbound::bearer`): the
+  route prefix is `/routes/` plus the canonical decimal of a `u64`; an optional
+  SDK suffix must equal the admitted destination path (`matches_endpoint`). A
   token is accepted exactly when one Authorization field holds `Bearer` and
   one to 512 token characters. Nothing else in a request can pick a route.
 - A configured destination is accepted by a verified parser

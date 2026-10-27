@@ -16,6 +16,7 @@ mod memory;
 mod overload;
 mod process_crash;
 mod stalled_log;
+mod sdk;
 
 fn config(port: u16, availability: bool) -> GatewayConfig { config_with_limits(port, availability, 1, 3) }
 fn config_with_limits(port: u16, availability: bool, requests: usize, chunk_bytes: usize) -> GatewayConfig {

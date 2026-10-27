@@ -305,4 +305,79 @@ pub fn route_selector(path: &[u8]) -> (out: Option<u64>)
     }
     Some(acc)
 }
+
+/// A canonical route prefix and an optional slash-prefixed endpoint.
+pub open spec fn sdk_target(path: Seq<u8>, n: u64, end: int) -> bool {
+    8 < end <= path.len() && path.subrange(0, end) == selector_path(n)
+        && (end == path.len() || path[end] == 47)
+}
+
+// The first slash after `/routes/` uniquely determines a valid prefix boundary.
+proof fn target_boundary(path: Seq<u8>, n: u64, expected: int, end: int)
+    requires sdk_target(path, n, expected), 8 <= end <= path.len(),
+        forall|k: int| 8 <= k < end ==> #[trigger] path[k] != 47,
+        end == path.len() || path[end] == 47,
+    ensures end == expected,
+{
+    lemma_decimal_shape(n as nat);
+    assert(ROUTES@.len() == 8);
+    assert(path.subrange(0, expected) == ROUTES@ + decimal(n as nat));
+    assert(path.subrange(0, expected).len() == 8 + decimal(n as nat).len());
+    if end < expected {
+        assert(path.subrange(0, expected)[end] == (ROUTES@ + decimal(n as nat))[end]);
+        assert(path[end] == decimal(n as nat)[end - 8]);
+        assert(is_digit(path[end]));
+    }
+    if expected < end { assert(path[expected] != 47); }
+}
+
+/// Split an SDK target into a canonical route prefix and an optional endpoint.
+/// The suffix is not routing authority: the runtime must match it against the
+/// admitted destination with `matches_endpoint` before preparing any effects.
+pub fn route_target(path: &[u8]) -> (out: Option<(u64, usize)>)
+    ensures match out {
+        Some((n, end)) => sdk_target(path@, n, end as int),
+        None => forall|n: u64, end: int| !sdk_target(path@, n, end),
+    },
+{
+    if path.len() <= 8 { return None; }
+    let mut end: usize = 8;
+    while end < path.len() && path[end] != 47
+        invariant 8 <= end <= path.len(),
+            forall|k: int| 8 <= k < end ==> #[trigger] path@[k] != 47,
+        decreases path.len() - end,
+    { end = end + 1; }
+    let prefix = slice_subrange(path, 0, end);
+    match route_selector(prefix) {
+        Some(n) => {
+            proof {
+                lemma_decimal_shape(n as nat);
+                assert(ROUTES@.len() == 8);
+                assert(prefix@ == ROUTES@ + decimal(n as nat));
+                assert(prefix@.len() == end);
+                assert(end > 8);
+            }
+            Some((n, end))
+        },
+        None => {
+            proof {
+                assert forall|n: u64, expected: int| !sdk_target(path@, n, expected) by {
+                    if sdk_target(path@, n, expected) {
+                        target_boundary(path@, n, expected, end as int);
+                    }
+                }
+            }
+            None
+        },
+    }
+}
+
+/// Legacy targets have no suffix; SDK targets must name the exact fixed path.
+pub fn matches_endpoint(path: &[u8], end: usize, endpoint: &[u8]) -> (out: bool)
+    requires end <= path.len(),
+    ensures out == (end == path.len() || path@.subrange(end as int, path.len() as int) == endpoint@),
+{
+    end == path.len() || eq(slice_subrange(path, end, path.len()), endpoint)
+}
+
 }
