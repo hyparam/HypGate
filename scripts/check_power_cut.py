@@ -29,7 +29,7 @@ def main():
     print(subprocess.check_output(['qemu-system-x86_64', '--version'], text=True).splitlines()[0])
     print('kernel_sha256=' + hashlib.sha256(kernel.read_bytes()).hexdigest(), flush=True)
     binary = pathlib.Path('target/debug/examples/power_cut').resolve()
-    with tempfile.TemporaryDirectory(prefix='loggate-power-') as temporary:
+    with tempfile.TemporaryDirectory(prefix='hypgate-power-') as temporary:
         work = pathlib.Path(temporary)
         root = work / 'root'
         for directory in ['bin', 'dev', 'proc', 'sys', 'data', 'lib/modules']:

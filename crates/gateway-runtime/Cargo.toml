@@ -4,11 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Blocking network and disk runtime for the LogGate AI gateway"
+description = "Blocking network and disk runtime for the HypGate AI gateway"
 publish = false
 
 [[bin]]
-name = "loggate"
+name = "hypgate"
 path = "src/main.rs"
 
 [dependencies]

@@ -50,7 +50,7 @@ pub(crate) fn on_termination(then: impl FnOnce() + Send + 'static) -> io::Result
     // calls one async-signal-safe function.
     let installed = unsafe { signal(SIGTERM, handler) != SIG_ERR && signal(SIGINT, handler) != SIG_ERR };
     if !installed { return Err(io::Error::other("cannot install signal handlers")); }
-    std::thread::Builder::new().name("loggate-signal".into()).stack_size(STACK_BYTES).spawn(move || {
+    std::thread::Builder::new().name("hypgate-signal".into()).stack_size(STACK_BYTES).spawn(move || {
         let mut byte = [0u8; 1];
         let _ = reader.read(&mut byte);
         then();

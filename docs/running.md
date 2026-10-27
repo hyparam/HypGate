@@ -1,7 +1,7 @@
 # Running the gateway
 
-Build with the pinned Rust toolchain: `cargo build --locked --bin loggate`.
-Run `target/debug/loggate ROOT.json ROUTES.json NEW_LOG [127.0.0.1:8080]`.
+Build with the pinned Rust toolchain: `cargo build --locked --bin hypgate`.
+Run `target/debug/hypgate ROOT.json ROUTES.json NEW_LOG [127.0.0.1:8080]`.
 The log path must not exist; its parent directory must already exist and be private
 to the operator. Configuration and secret-loading failures prevent startup.
 
@@ -56,12 +56,12 @@ supported.
 
 To upload exchanges to HypAware Cloud, add a `shipping` section to the root policy
 and provide its token through the named environment variable; see
-[cloud shipping](cloud-shipping.md). `loggate ship ROOT.json LOG` uploads a
+[cloud shipping](cloud-shipping.md). `hypgate ship ROOT.json LOG` uploads a
 finished log without starting the gateway.
 
 ## Scanning a log
 
-`loggate scan LOG` reads an existing log without changing it. It prints one JSON
+`hypgate scan LOG` reads an existing log without changing it. It prints one JSON
 line of metadata per valid record, then a summary with session ID, record count,
 valid-prefix byte offset, and status. Scanning never replays or truncates data.
 
@@ -94,22 +94,22 @@ are handled by the durability gate instead.
 
 `GET /metrics` exposes these gauges and counters, with no payloads or credentials:
 
-- `loggate_failed_exchanges_total`: transport errors returned to the worker,
+- `hypgate_failed_exchanges_total`: transport errors returned to the worker,
   including exchanges cancelled by a client leaving or by shutdown.
-- `loggate_audit_gap_requests_total`: availability-mode requests whose first log
+- `hypgate_audit_gap_requests_total`: availability-mode requests whose first log
   append failed, counted once per request even if the request later fails or is
   canceled (the verified `health::GapObserver` decides when an append counts). It
   flags possible incomplete audit coverage, not a count of unlogged bytes.
   Strict-mode refusals are not gaps.
-- `loggate_audit_healthy`: logger health.
-- `loggate_requests_active` and `loggate_requests_limit`: live registry slots,
+- `hypgate_audit_healthy`: logger health.
+- `hypgate_requests_active` and `hypgate_requests_limit`: live registry slots,
   sampled under the runtime lock. These are not memory or connection counts.
-- `loggate_admission_healthy`: zero when admission is poisoned, in which case the
+- `hypgate_admission_healthy`: zero when admission is poisoned, in which case the
   occupancy gauges are omitted.
-- `loggate_worker_admission_healthy`: whether the worker registry is unpoisoned and
+- `hypgate_worker_admission_healthy`: whether the worker registry is unpoisoned and
   open. Worker registry failure also fails readiness in both modes.
-- `loggate_shipping_*`: present when the root policy has a `shipping` section;
-  otherwise `loggate_shipping_enabled 0`. See [cloud shipping](cloud-shipping.md).
+- `hypgate_shipping_*`: present when the root policy has a `shipping` section;
+  otherwise `hypgate_shipping_enabled 0`. See [cloud shipping](cloud-shipping.md).
 
 Counters live in memory, so a restart resets them. Switching `logging` to
 `availability` allows unaudited forwarding after a logging failure while keeping the

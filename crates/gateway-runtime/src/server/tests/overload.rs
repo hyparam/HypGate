@@ -68,9 +68,9 @@ fn repeated_overload_preserves_active_streams_health_and_reusable_capacity() {
 }
 
 #[test]
-#[ignore = "sustained overload workload: five minutes per logging mode unless LOGGATE_OVERLOAD_SECONDS says otherwise"]
+#[ignore = "sustained overload workload: five minutes per logging mode unless HYPGATE_OVERLOAD_SECONDS says otherwise"]
 fn sustained_overload_preserves_active_streams_and_health() {
-    let seconds = std::env::var("LOGGATE_OVERLOAD_SECONDS").map_or(300, |value| value.parse().expect("LOGGATE_OVERLOAD_SECONDS must be a whole number of seconds"));
+    let seconds = std::env::var("HYPGATE_OVERLOAD_SECONDS").map_or(300, |value| value.parse().expect("HYPGATE_OVERLOAD_SECONDS must be a whole number of seconds"));
     for availability in [false, true] {
         exercise(availability, Duration::from_secs(seconds));
     }

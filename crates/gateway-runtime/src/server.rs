@@ -79,13 +79,13 @@ impl Gateway {
         match target {
             b"/metrics" => {
                 use std::fmt::Write as _;
-                let mut text = format!("loggate_audit_gap_requests_total {}\nloggate_failed_exchanges_total {}\nloggate_audit_healthy {}\nloggate_worker_admission_healthy {}\n",
+                let mut text = format!("hypgate_audit_gap_requests_total {}\nhypgate_failed_exchanges_total {}\nhypgate_audit_healthy {}\nhypgate_worker_admission_healthy {}\n",
                     self.audit_gaps(), self.failed_exchanges(), u8::from(self.log.healthy()), u8::from(self.worker_slots.healthy()));
                 match self.config.usage() {
-                    Some((active, limit)) => { let _ = write!(text, "loggate_admission_healthy 1\nloggate_requests_active {active}\nloggate_requests_limit {limit}\n"); }
-                    None => text.push_str("loggate_admission_healthy 0\n"),
+                    Some((active, limit)) => { let _ = write!(text, "hypgate_admission_healthy 1\nhypgate_requests_active {active}\nhypgate_requests_limit {limit}\n"); }
+                    None => text.push_str("hypgate_admission_healthy 0\n"),
                 }
-                match &self.shipping { Some(metrics) => metrics.render(&mut text), None => text.push_str("loggate_shipping_enabled 0\n") }
+                match &self.shipping { Some(metrics) => metrics.render(&mut text), None => text.push_str("hypgate_shipping_enabled 0\n") }
                 Some(FixedResponse { status: 200, fields: vec![http1::field(b"content-type", b"text/plain; version=0.0.4".to_vec())], body: text.into_bytes() })
             }
             b"/healthz" => Some(fixed(200, b"ok\n".to_vec())),
@@ -272,7 +272,7 @@ impl ClientWatch {
         let finished = Arc::new(AtomicBool::new(false));
         let probe = socket.try_clone()?;
         let flag = finished.clone();
-        let thread = std::thread::Builder::new().name("loggate-watch".into()).stack_size(WATCHER_STACK_BYTES).spawn(move || {
+        let thread = std::thread::Builder::new().name("hypgate-watch".into()).stack_size(WATCHER_STACK_BYTES).spawn(move || {
             let mut byte = [0u8; 1];
             loop {
                 if flag.load(Ordering::Acquire) { return; }
@@ -364,7 +364,7 @@ impl serve_driver::Effects for ServeEffects {
         let app = self.app.clone();
         let deadline = self.connection_deadline;
         // A thread that cannot start drops its socket and lease here.
-        let _ = std::thread::Builder::new().name("loggate-connection".into()).stack_size(CONNECTION_STACK_BYTES).spawn(move || {
+        let _ = std::thread::Builder::new().name("hypgate-connection".into()).stack_size(CONNECTION_STACK_BYTES).spawn(move || {
             leased::run(lease, move || { let _ = serve_connection(socket, app, deadline); });
         });
     }

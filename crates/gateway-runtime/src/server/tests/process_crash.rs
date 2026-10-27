@@ -8,7 +8,7 @@ impl Drop for Process { fn drop(&mut self) { let _ = self.0.kill(); let _ = self
 
 #[test]
 fn gateway_child() {
-    let Some(directory) = std::env::var_os("LOGGATE_GATEWAY_CRASH_CHILD") else { return; };
+    let Some(directory) = std::env::var_os("HYPGATE_GATEWAY_CRASH_CHILD") else { return; };
     let directory = std::path::PathBuf::from(directory);
     let upstream: u16 = std::fs::read_to_string(directory.join("upstream")).unwrap().parse().unwrap();
     let mut roots = RootCertStore::empty();
@@ -27,7 +27,7 @@ fn start(directory: &TempDir, root: &[u8], upstream: u16) -> (Process, u16) {
     std::fs::write(directory.0.join("upstream"), upstream.to_string()).unwrap();
     let mut child = Process(Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "server::tests::process_crash::gateway_child", "--nocapture"])
-        .env("LOGGATE_GATEWAY_CRASH_CHILD", &directory.0)
+        .env("HYPGATE_GATEWAY_CRASH_CHILD", &directory.0)
         .stdout(Stdio::null()).stderr(Stdio::inherit()).spawn().unwrap());
     let started = Instant::now();
     let port = loop {
@@ -45,7 +45,7 @@ fn start(directory: &TempDir, root: &[u8], upstream: u16) -> (Process, u16) {
 fn killed_gateway_truncates_response_preserves_audit_prefix_and_does_not_replay() { exercise(false); }
 
 #[test]
-#[ignore = "requires HAProxy; set LOGGATE_HAPROXY and run with --ignored"]
+#[ignore = "requires HAProxy; set HYPGATE_HAPROXY and run with --ignored"]
 fn proxy_gateway_process_failover_without_replay() { exercise(true); }
 
 fn exercise(with_proxy: bool) {
@@ -152,8 +152,8 @@ fn start_proxy(directory: &TempDir, primary: u16, standby: u16, pem: &str) -> (P
         .replace("127.0.0.1:8082", &format!("127.0.0.1:{standby}"));
     let path = directory.0.join("haproxy.cfg"); std::fs::write(&path, config).unwrap();
     drop(reservation);
-    let mut process = Process(Command::new(std::env::var_os("LOGGATE_HAPROXY").unwrap_or_else(|| "haproxy".into()))
-        .arg("-db").arg("-f").arg(&path).env("LOGGATE_TLS_PEM", certificate)
+    let mut process = Process(Command::new(std::env::var_os("HYPGATE_HAPROXY").unwrap_or_else(|| "haproxy".into()))
+        .arg("-db").arg("-f").arg(&path).env("HYPGATE_TLS_PEM", certificate)
         .stdout(Stdio::null()).stderr(Stdio::inherit()).spawn().unwrap());
     let started = Instant::now();
     loop {

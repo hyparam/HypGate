@@ -79,7 +79,7 @@ def main():
         threading.Thread(target=backend.serve_forever, daemon=True).start()
     process = None
     try:
-        with tempfile.TemporaryDirectory(prefix='loggate-proxy-') as directory:
+        with tempfile.TemporaryDirectory(prefix='hypgate-proxy-') as directory:
             root = Path(directory)
             subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
                 '-subj', '/CN=localhost', '-days', '1', '-keyout', str(root/'key.pem'),
@@ -90,7 +90,7 @@ def main():
             listen = port()
             config = (Path(__file__).resolve().parents[1]/'deploy/haproxy.cfg').read_text()
             config = config.replace(':8443 ssl', f'127.0.0.1:{listen} ssl')
-            config = config.replace('${LOGGATE_TLS_PEM}', str(pem))
+            config = config.replace('${HYPGATE_TLS_PEM}', str(pem))
             config = config.replace('127.0.0.1:8081', f'127.0.0.1:{first.server_port}')
             config = config.replace('127.0.0.1:8082', f'127.0.0.1:{standby.server_port}')
             path = root/'haproxy.cfg'

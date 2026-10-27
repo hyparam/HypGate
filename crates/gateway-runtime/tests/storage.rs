@@ -7,8 +7,8 @@ use common::TempDir;
 
 fn fixture() -> PathBuf {
     assert!(cfg!(target_os = "linux"), "storage fixture requires Linux");
-    let root = PathBuf::from(std::env::var_os("LOGGATE_STORAGE_TEST_DIR").expect("run scripts/check_storage.sh"));
-    assert_eq!(fs::read(root.join(".loggate-ext4-fixture")).unwrap(), b"loggate-private-ext4-64MiB\n");
+    let root = PathBuf::from(std::env::var_os("HYPGATE_STORAGE_TEST_DIR").expect("run scripts/check_storage.sh"));
+    assert_eq!(fs::read(root.join(".hypgate-ext4-fixture")).unwrap(), b"hypgate-private-ext4-64MiB\n");
     root
 }
 fn record(chunk: u64, bytes: &[u8]) -> LogRecord<'_> {

@@ -1,14 +1,14 @@
 //! Command parsing without configuration reads or external effects.
 use std::net::SocketAddr;
 
-pub(crate) const HELP: &str = "LogGate — an AI gateway with a verified audit core
+pub(crate) const HELP: &str = "HypGate — an AI gateway with a verified audit core
 
 Usage:
-  loggate ROOT.json ROUTES.json NEW_LOG [127.0.0.1:8080]
-  loggate scan LOG
-  loggate ship ROOT.json LOG
-  loggate --help
-  loggate --version
+  hypgate ROOT.json ROUTES.json NEW_LOG [127.0.0.1:8080]
+  hypgate scan LOG
+  hypgate ship ROOT.json LOG
+  hypgate --help
+  hypgate --version
 
 The listen address must be loopback. NEW_LOG must not exist.
 scan prints record metadata without body payloads or changes to the log.
@@ -39,11 +39,11 @@ impl<'a> Command<'a> {
             [flag] if flag == "--version" || flag == "-V" => Ok(Self::Version),
             [command, rest @ ..] if command == "scan" => match rest {
                 [log] => Ok(Self::Scan { log }),
-                _ => Err("usage: loggate scan LOG"),
+                _ => Err("usage: hypgate scan LOG"),
             },
             [command, rest @ ..] if command == "ship" => match rest {
                 [root, log] => Ok(Self::Ship { root, log }),
-                _ => Err("usage: loggate ship ROOT.json LOG"),
+                _ => Err("usage: hypgate ship ROOT.json LOG"),
             },
             [root, routes, log, rest @ ..] if rest.len() <= 1 => {
                 let address: SocketAddr = rest
@@ -62,7 +62,7 @@ impl<'a> Command<'a> {
                     address,
                 })
             }
-            _ => Err("usage: loggate ROOT.json ROUTES.json NEW_LOG [127.0.0.1:8080]; see --help"),
+            _ => Err("usage: hypgate ROOT.json ROUTES.json NEW_LOG [127.0.0.1:8080]; see --help"),
         }
     }
 }

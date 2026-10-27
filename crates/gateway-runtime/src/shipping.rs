@@ -46,9 +46,9 @@ impl Metrics {
     /// Prometheus text lines; `enabled` is 1 whenever a shipper exists.
     pub fn render(&self, out: &mut String) {
         use std::fmt::Write as _;
-        let _ = write!(out, "loggate_shipping_enabled 1\nloggate_shipping_enrolled {}\nloggate_shipping_stopped {}\nloggate_shipping_log_read_failed {}\n\
-            loggate_shipping_records_read_total {}\nloggate_shipping_exchanges_emitted_total {}\nloggate_shipping_lag_exchanges {}\n\
-            loggate_shipping_batches_acknowledged_total {}\nloggate_shipping_last_acknowledged_unix_ms {}\nloggate_shipping_poisoned_batches_total {}\n",
+        let _ = write!(out, "hypgate_shipping_enabled 1\nhypgate_shipping_enrolled {}\nhypgate_shipping_stopped {}\nhypgate_shipping_log_read_failed {}\n\
+            hypgate_shipping_records_read_total {}\nhypgate_shipping_exchanges_emitted_total {}\nhypgate_shipping_lag_exchanges {}\n\
+            hypgate_shipping_batches_acknowledged_total {}\nhypgate_shipping_last_acknowledged_unix_ms {}\nhypgate_shipping_poisoned_batches_total {}\n",
             u8::from(self.enrolled()), u8::from(self.stopped()), u8::from(self.read_failed.load(Ordering::Relaxed)),
             self.records_read(), self.exchanges_emitted.load(Ordering::Relaxed), self.lag(),
             self.batches_acknowledged(), self.last_acknowledged_ms.load(Ordering::Relaxed), self.poisoned_batches());
@@ -75,7 +75,7 @@ impl Shipper {
         let metrics = Arc::new(Metrics::default());
         let (done, finished) = mpsc::channel();
         let (flag, shared) = (stop.clone(), metrics.clone());
-        let thread = std::thread::Builder::new().name("loggate-shipping".into()).stack_size(STACK_BYTES).spawn(move || {
+        let thread = std::thread::Builder::new().name("hypgate-shipping".into()).stack_size(STACK_BYTES).spawn(move || {
             let _done = done; // dropped when the thread ends, however it ends
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(flag, shared.clone())));
             if outcome.is_err() {
@@ -106,7 +106,7 @@ impl Shipper {
 impl Drop for Shipper { fn drop(&mut self) { self.stop.store(true, Ordering::Relaxed); } }
 
 /// Ship a finished log on the current thread until every exchange is resolved
-/// or the enrollment is stopped for good. Used by `loggate ship`. Blocks the
+/// or the enrollment is stopped for good. Used by `hypgate ship`. Blocks the
 /// calling thread and enters no runtime.
 pub fn ship_to_end(config: ShippingConfig, log_path: PathBuf) -> Result<Metrics, &'static str> { ship_to_end_with_roots(config, log_path, None) }
 pub fn ship_to_end_with_roots(config: ShippingConfig, log_path: PathBuf, roots: Option<RootCertStore>) -> Result<Metrics, &'static str> {

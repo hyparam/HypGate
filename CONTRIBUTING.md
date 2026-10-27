@@ -2,7 +2,7 @@
 
 ## Code layout
 
-LogGate has two crates. Keep policy decisions in the core and external effects
+HypGate has two crates. Keep policy decisions in the core and external effects
 in the runtime; moving a decision into an adapter removes it from verification.
 
 - `crates/gateway-core`: Verus contracts and executable policy, HTTP codecs,
@@ -34,7 +34,7 @@ container deployment; a local unit-test pass does not replace those checks.
 Review [operational limits](docs/operational-limits.md) and
 [the storage contract](docs/storage-crash-contract.md) when changing defaults.
 
-Build the executable with `cargo build --release --locked --bin loggate`.
+Build the executable with `cargo build --release --locked --bin hypgate`.
 The workspace crates are implementation components with `publish = false`;
 this repository currently distributes the gateway as source. Release artifacts
 must include the [MIT license](LICENSE). Keep versions in the workspace manifest

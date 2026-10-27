@@ -1,6 +1,6 @@
 # Audit log retention
 
-LogGate writes one new audit file per process start. It never truncates or reuses
+HypGate writes one new audit file per process start. It never truncates or reuses
 a log. Retention is a separate operator action, after a log has been closed and
 any required shipping has completed; it is not part of the durability proof.
 
@@ -9,7 +9,7 @@ any required shipping has completed; it is not part of the durability proof.
 Keep an archive directory separate from the directory used by running gateways.
 It must be owned by your user and private (mode 700). Only move a file there once
 its gateway has stopped and any shipper reading it has finished. A successful
-`loggate ship ROOT.json LOG` can finish uploading an old log before archival.
+`hypgate ship ROOT.json LOG` can finish uploading an old log before archival.
 Do not place shipper identity or checkpoint files in the archive.
 
 Archive filenames must use `session-<name>.log`, where the name contains ASCII
@@ -18,12 +18,12 @@ Moving a closed file into the archive preserves its last-modified time.
 
 ## Preview and apply
 
-The installer provides `loggate-retain`; it requires Python 3. From a checkout,
-use `python3 scripts/loggate-retain` instead.
+The installer provides `hypgate-retain`; it requires Python 3. From a checkout,
+use `python3 scripts/hypgate-retain` instead.
 
 ```sh
-loggate-retain /private/archive --days 30
-loggate-retain /private/archive --days 30 --apply
+hypgate-retain /private/archive --days 30
+hypgate-retain /private/archive --days 30 --apply
 ```
 
 The first command prints JSON lines naming expired files and their sizes without
@@ -32,7 +32,7 @@ was eligible. Invalid log headers are reported as skipped. Errors give a nonzero
 exit; deletions already completed are not rolled back.
 
 A file expires only when its last modification is strictly older than the
-specified number of 24-hour days. The tool checks the LogGate session header and
+specified number of 24-hour days. The tool checks the HypGate session header and
 its checksum, ignores unrelated names, directories, symlinks, and hard links,
 and refuses a symlink archive root or a non-private archive directory. It does
 not inspect record bodies or require a complete final exchange: a closed log

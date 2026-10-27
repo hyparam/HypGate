@@ -1,20 +1,20 @@
-# Build from the repository root: docker build -f deploy/Dockerfile.runtime -t loggate .
+# Build from the repository root: docker build -f deploy/Dockerfile.runtime -t hypgate .
 FROM rust:1.99.1-slim-trixie@sha256:aab42391a986424e22d6a3ec14f37bc6dd3dacff4d457ca7cccd781e02297cc6 AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
-RUN cargo build --release --locked --bin loggate
+RUN cargo build --release --locked --bin hypgate
 
 FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
-RUN groupadd --gid 10001 loggate \
-    && useradd --uid 10001 --gid loggate --no-create-home --shell /usr/sbin/nologin loggate \
-    && mkdir -p /var/lib/loggate /etc/loggate \
-    && chown loggate:loggate /var/lib/loggate \
-    && chmod 700 /var/lib/loggate
-COPY --from=build /src/target/release/loggate /usr/local/bin/loggate
-COPY LICENSE /usr/share/licenses/loggate/LICENSE
+RUN groupadd --gid 10001 hypgate \
+    && useradd --uid 10001 --gid hypgate --no-create-home --shell /usr/sbin/nologin hypgate \
+    && mkdir -p /var/lib/hypgate /etc/hypgate \
+    && chown hypgate:hypgate /var/lib/hypgate \
+    && chmod 700 /var/lib/hypgate
+COPY --from=build /src/target/release/hypgate /usr/local/bin/hypgate
+COPY LICENSE /usr/share/licenses/hypgate/LICENSE
 USER 10001:10001
-WORKDIR /var/lib/loggate
+WORKDIR /var/lib/hypgate
 STOPSIGNAL SIGTERM
-ENTRYPOINT ["/usr/local/bin/loggate"]
+ENTRYPOINT ["/usr/local/bin/hypgate"]
 CMD ["--help"]

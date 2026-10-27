@@ -2,7 +2,7 @@
 
 ## Scope
 
-Make LogGate easier to adopt without changing its provider-native bodies,
+Make HypGate easier to adopt without changing its provider-native bodies,
 explicit route grants, or strict audit-before-forwarding policy.
 
 ## 1. SDK compatibility
@@ -54,7 +54,7 @@ work.
 - SDK paths retain fixed destination binding and the original route syntax.
   Real OpenAI 3.39.0 and Anthropic 2.3.0 clients pass JSON and SSE tests against a
   local TLS fixture; logged upload/download bytes match the fixture exactly.
-- `loggate-retain` previews archive expiry by default and requires `--apply` to
+- `hypgate-retain` previews archive expiry by default and requires `--apply` to
   delete. Age boundaries, unrelated files, invalid headers, symlinks, hard links,
   and directory permissions have automated coverage.
 - `scripts/install.sh` installs into a user prefix; installation and the installed

@@ -1,12 +1,12 @@
-# LogGate - Formally Verified AI Gateway
+# HypGate - Formally Verified AI Gateway
 
-LogGate is a small LLM gateway with a machine-checked core. It forwards request
+HypGate is a small LLM gateway with a machine-checked core. It forwards request
 bodies to your provider unchanged, streams responses back, writes every
 exchange to an audit log on disk, and optionally ships that log to
 [HypAware](https://hypaware.ai) for analysis. No provider API translation, no
 plugins, no other network destinations.
 
-![LogGate forwards requests and responses between an AI client and provider, records exchanges in a local audit log, and optionally ships logs to HypAware Cloud.](docs/images/loggate-flow.png)
+![HypGate forwards requests and responses between an AI client and provider, records exchanges in a local audit log, and optionally ships logs to HypAware Cloud.](docs/images/hypgate-flow.png)
 
 What makes it different: the code that decides what the gateway does is
 proved correct with [Verus](https://github.com/verus-lang/verus). The proofs
@@ -116,9 +116,9 @@ set your gateway-token digest, and supply `PROVIDER_KEY` through your environmen
 Then run:
 
 ```sh
-cargo build --release --locked --bin loggate
+cargo build --release --locked --bin hypgate
 mkdir -m 700 logs
-target/release/loggate root.json routes.json logs/session-001.log
+target/release/hypgate root.json routes.json logs/session-001.log
 ```
 
 The server listens on `127.0.0.1:8080`; check it with
@@ -213,7 +213,7 @@ cargo test -p gateway-runtime --locked --lib sustained_overload -- --ignored --n
 cargo test -p gateway-runtime --locked --lib isolated_gateway_memory_in_both_logging_modes -- --ignored --nocapture
 cargo test -p gateway-runtime --locked --lib isolated_gateway_memory_soak -- --ignored --nocapture
 cargo test -p gateway-runtime --release --locked server::tests::benchmark -- --ignored --nocapture --test-threads=1
-LOGGATE_HAPROXY=/path/to/haproxy cargo test -p gateway-runtime --locked proxy_gateway_process_failover -- --ignored --nocapture
+HYPGATE_HAPROXY=/path/to/haproxy cargo test -p gateway-runtime --locked proxy_gateway_process_failover -- --ignored --nocapture
 ```
 
 Validation on 2026-10-26: 1376 core verification checks passed, 363 workspace tests passed, all fourteen opt-in benchmark workloads passed on the blocking runtime, all 539

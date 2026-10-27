@@ -49,7 +49,7 @@ fn bounded_file(path: &str) -> io::Result<Vec<u8>> {
 }
 fn main() {
     if let Err(message) = run() {
-        eprintln!("loggate: {message}");
+        eprintln!("hypgate: {message}");
         std::process::exit(1);
     }
 }
@@ -61,7 +61,7 @@ fn run() -> Result<(), &'static str> {
             Ok(())
         }
         cli::Command::Version => {
-            println!("loggate {}", env!("CARGO_PKG_VERSION"));
+            println!("hypgate {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
         cli::Command::Scan { log } => scan::run(log),
@@ -119,7 +119,7 @@ fn serve(
     };
     let listener = bind(address).map_err(|_| "cannot bind listener")?;
     eprintln!(
-        "loggate listening on {}",
+        "hypgate listening on {}",
         listener
             .local_addr()
             .map_err(|_| "cannot read listen address")?
@@ -132,13 +132,13 @@ fn serve(
     })
     .ok_or("allocation budget overflow")?;
     // Informational only: a closed stderr must not stop the server.
-    let _ = writeln!(io::stderr().lock(), "loggate requested-allocation budget {} bytes under docs/resource-composition.md assumptions", budget.total);
+    let _ = writeln!(io::stderr().lock(), "hypgate requested-allocation budget {} bytes under docs/resource-composition.md assumptions", budget.total);
     if let Some((open, bytes)) = shipping_limits {
         let extra =
             gateway_runtime::budget::shipping(open, bytes).ok_or("shipping budget overflow")?;
         let _ = writeln!(
             io::stderr().lock(),
-            "loggate shipping thread adds {extra} bytes to that budget"
+            "hypgate shipping thread adds {extra} bytes to that budget"
         );
     }
     // SIGTERM and SIGINT trigger the cooperative drain (signal.rs). SIGKILL
@@ -160,7 +160,7 @@ fn serve(
     // After request workers and the logger: a bounded window, no replacement.
     if let Some(shipper) = shipper {
         if shipper.shutdown(Duration::from_secs(2)).is_err() {
-            eprintln!("loggate: shipping thread did not stop within its window");
+            eprintln!("hypgate: shipping thread did not stop within its window");
         }
     }
     served

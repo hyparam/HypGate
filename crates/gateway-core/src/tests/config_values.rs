@@ -36,5 +36,5 @@ fn credential_values_carry_the_bearer_prefix_and_no_control_bytes() {
         (1, MIN_EXCHANGE_BYTES - 1, MIN_POLL_MS), (1, MAX_EXCHANGE_BYTES + 1, MIN_POLL_MS), (1, MIN_EXCHANGE_BYTES, MIN_POLL_MS - 1), (1, MIN_EXCHANGE_BYTES, MAX_POLL_MS + 1)] {
         assert!(!shipping_limits_ok_exec(open, bytes, poll));
     }
-    assert!(state_dir_ok_exec(b"/var/lib/loggate") && !state_dir_ok_exec(b"") && !state_dir_ok_exec(&[b'p'; MAX_STATE_DIR + 1]));
+    assert!(state_dir_ok_exec(b"/var/lib/hypgate") && !state_dir_ok_exec(b"") && !state_dir_ok_exec(&[b'p'; MAX_STATE_DIR + 1]));
 }

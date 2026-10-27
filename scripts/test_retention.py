@@ -6,7 +6,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-loader = importlib.machinery.SourceFileLoader("retention", str(Path(__file__).with_name("loggate-retain")))
+loader = importlib.machinery.SourceFileLoader("retention", str(Path(__file__).with_name("hypgate-retain")))
 spec = importlib.util.spec_from_loader(loader.name, loader)
 retention = importlib.util.module_from_spec(spec)
 loader.exec_module(retention)

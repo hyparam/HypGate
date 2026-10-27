@@ -43,9 +43,9 @@ fn response(path: &str, streaming: bool) -> Vec<u8> {
 }
 
 #[test]
-#[ignore = "requires Python with openai and anthropic; set LOGGATE_SDK_PYTHON"]
+#[ignore = "requires Python with openai and anthropic; set HYPGATE_SDK_PYTHON"]
 fn real_python_sdks_preserve_json_streams_credentials_and_audit_bytes() {
-    let python = std::env::var("LOGGATE_SDK_PYTHON").expect("set LOGGATE_SDK_PYTHON to the SDK virtualenv's python");
+    let python = std::env::var("HYPGATE_SDK_PYTHON").expect("set HYPGATE_SDK_PYTHON to the SDK virtualenv's python");
     let (listener, tls_config, roots) = tls();
     let port = listener.local_addr().unwrap().port();
     let paths = ["/v1/responses", "/v1/chat/completions", "/v1/messages"];

@@ -111,7 +111,7 @@ impl DiskLog {
         let receiver = queue.clone();
         let healthy = Arc::new(AtomicBool::new(true));
         let worker_health = healthy.clone();
-        let thread = std::thread::Builder::new().name("loggate-audit".into()).stack_size(WORKER_STACK_BYTES).spawn(move || {
+        let thread = std::thread::Builder::new().name("hypgate-audit".into()).stack_size(WORKER_STACK_BYTES).spawn(move || {
             let _health_on_exit = UnhealthyOnExit(worker_health.clone(), receiver.clone());
             let mut journal = Journal::new(u128::from_le_bytes(session));
             let mut storage = Storage(file);

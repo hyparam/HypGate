@@ -39,7 +39,7 @@ impl TempDir {
     pub(crate) fn new() -> Self {
         let mut random = [0; 16]; getrandom::fill(&mut random).unwrap();
         let name: String = random.iter().map(|b| format!("{b:02x}")).collect();
-        let path = std::env::temp_dir().join(format!("loggate-test-{name}"));
+        let path = std::env::temp_dir().join(format!("hypgate-test-{name}"));
         std::fs::create_dir(&path).unwrap(); Self(path)
     }
 }

@@ -1,4 +1,4 @@
-# Setting up LogGate with HypAware
+# Setting up HypGate with HypAware
 
 This is the operator walkthrough: get a token, point the gateway at a HypAware
 server, run a request, and confirm the exchange on the server. The protocol,
@@ -41,7 +41,7 @@ the dashboard uses (`POST /v1/org/service-accounts`, then
 
 ```sh
 hyp remote login hypaware          # once, browser sign-in
-hyp remote mint --label loggate-dev --expires-days 30
+hyp remote mint --label hypgate-dev --expires-days 30
 ```
 
 This mints a bootstrap token bound to one gateway that belongs to you and
@@ -82,7 +82,7 @@ smoke test below used:
   "shipping": {
     "server": "https://api.hypaware.ai",
     "token_env": "HYPAWARE_TOKEN",
-    "state_dir": "/var/lib/loggate/shipping"
+    "state_dir": "/var/lib/hypgate/shipping"
   }
 }
 ```
@@ -109,7 +109,7 @@ server-issued gateway credential and a fingerprint of the operator token, and
 ```sh
 export ANTHROPIC_API_KEY=... OPENAI_API_KEY=... HYPAWARE_TOKEN=...
 mkdir -m 700 logs state
-target/release/loggate root.json routes.json logs/session-001.log
+target/release/hypgate root.json routes.json logs/session-001.log
 ```
 
 Startup fails with `invalid shipping configuration or missing token` when the
@@ -139,9 +139,9 @@ Streaming (`"stream": true`) works the same way and is parsed for usage.
 
 ## 4. Check it
 
-Locally, `GET /metrics` reports `loggate_shipping_enabled 1`,
-`loggate_shipping_batches_acknowledged_total` climbing once per confirmed
-batch, and `loggate_shipping_stopped 0`. `loggate scan logs/session-001.log`
+Locally, `GET /metrics` reports `hypgate_shipping_enabled 1`,
+`hypgate_shipping_batches_acknowledged_total` climbing once per confirmed
+batch, and `hypgate_shipping_stopped 0`. `hypgate scan logs/session-001.log`
 lists every record and ends with a summary whose status is `complete`.
 
 On the server, query the dataset as yourself with the HypAware CLI. Take the
@@ -158,7 +158,7 @@ Name the remote target explicitly (`--remote hypaware`); a bare `--remote`
 placed before the SQL swallows the query as the target name. The SQL dialect
 is DuckDB's, so use `json_extract` rather than the `->` operator.
 
-Enrollment is lazy: `loggate_shipping_enrolled` stays 0 and `identity.json`
+Enrollment is lazy: `hypgate_shipping_enrolled` stays 0 and `identity.json`
 is absent until the first exchange completes. After that, shipping lags the
 log by at most `poll_ms` plus one upload round trip, so rows normally appear
 within a few seconds of the completion record.
@@ -170,7 +170,7 @@ without a `shipping` section, or to replay one after the state directory was
 lost, run the same loop on its own:
 
 ```sh
-HYPAWARE_TOKEN=... target/release/loggate ship root.json logs/session-001.log
+HYPAWARE_TOKEN=... target/release/hypgate ship root.json logs/session-001.log
 ```
 
 It exits when every exchange is resolved. The server stores each exchange once
@@ -191,7 +191,7 @@ time was the id the shipper enrolled under.
 | Anthropic Messages, SSE stream | 200, outcome 0 |
 | OpenAI Responses, JSON | 200, outcome 0 |
 | OpenAI Responses, SSE stream | 200, outcome 0 |
-| `loggate scan` | 37 or 38 records, status `complete`, `loggate_audit_gap_requests_total 0` |
+| `hypgate scan` | 37 or 38 records, status `complete`, `hypgate_audit_gap_requests_total 0` |
 | Shipping (both token kinds) | `enrolled 1`, 4 exchanges emitted, 4 batches acknowledged, 0 poisoned |
 | Server query (both token kinds) | 8 rows under the gateway id: a user and an assistant row per exchange |
 
@@ -201,7 +201,7 @@ the requested model, `session_id` was the caller id from `metadata.user_id` or
 `user`, and `attributes.usage` carried input, output, and total tokens for all
 four exchanges, streamed or not.
 
-The local-only log was then uploaded with `loggate ship` and a second
+The local-only log was then uploaded with `hypgate ship` and a second
 service-account token, twice: once into an empty state directory, then again
 after deleting `identity.json` and `checkpoint.json`. Both runs enrolled under
 the same gateway id and both reported one acknowledged batch; the server holds
@@ -215,7 +215,7 @@ intact, the two refusals were 100-then-200 and 401, the log scanned complete,
 and two exchanges shipped and were acknowledged by HypAware Cloud through the
 new shipping client.
 
-That run also found a bug, fixed in this commit: `loggate ship` panicked at
+That run also found a bug, fixed in this commit: `hypgate ship` panicked at
 startup with "Cannot start a runtime from within a runtime", because the
 subcommand built the shipper's Tokio runtime on the thread that already ran the
 executable's. It now runs on its own thread, as it does beside the gateway, and
@@ -223,7 +223,7 @@ the executable test covers the subcommand to the end of its drain loop.
 
 On 2026-10-26 the shipping client moved off Tokio entirely: blocking sockets
 and rustls used directly on the shipper's thread, with the request deadline
-enforced by socket timeouts. `loggate ship` was run again against HypAware
+enforced by socket timeouts. `hypgate ship` was run again against HypAware
 Cloud with a fresh service-account token and state directory: it enrolled,
 read the smoke log's 32 records into four exchanges, and had the one batch
 acknowledged in about two seconds.

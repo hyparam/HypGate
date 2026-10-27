@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Verified policy, HTTP codecs, and audit state machines for LogGate"
+description = "Verified policy, HTTP codecs, and audit state machines for HypGate"
 publish = false
 
 [dependencies]

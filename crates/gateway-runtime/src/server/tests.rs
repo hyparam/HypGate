@@ -227,9 +227,9 @@ fn exercise(availability: bool, failed_log: bool, truncated: bool, stop: Stop) {
     let metrics = send(port, "/metrics", "", "GET").collect().unwrap();
     wait_connections_at_most(&app, 1);
     let metrics = std::str::from_utf8(&metrics).unwrap();
-    assert!(metrics.contains("loggate_admission_healthy 1\n"));
-    assert!(metrics.contains("loggate_requests_active 1\n"));
-    assert!(metrics.contains("loggate_requests_limit 1\n"));
+    assert!(metrics.contains("hypgate_admission_healthy 1\n"));
+    assert!(metrics.contains("hypgate_requests_active 1\n"));
+    assert!(metrics.contains("hypgate_requests_limit 1\n"));
     if matches!(stop, Stop::Drain | Stop::Abort | Stop::SharedAbort) {
         let started = Instant::now();
         gateway.shutdown.trigger();
@@ -300,10 +300,10 @@ fn exercise(availability: bool, failed_log: bool, truncated: bool, stop: Stop) {
     wait_workers_idle(&app);
     let metrics = send(port, "/metrics", "", "GET").collect().unwrap();
     let metrics = std::str::from_utf8(&metrics).unwrap();
-    assert!(metrics.contains("loggate_requests_active 0\n"));
-    assert!(metrics.contains(&format!("loggate_audit_gap_requests_total {}\n", u8::from(failed_log && availability))));
-    assert!(metrics.contains(&format!("loggate_failed_exchanges_total {}\n", u8::from(truncated))));
-    assert!(metrics.contains(&format!("loggate_audit_healthy {}\n", u8::from(!failed_log))));
+    assert!(metrics.contains("hypgate_requests_active 0\n"));
+    assert!(metrics.contains(&format!("hypgate_audit_gap_requests_total {}\n", u8::from(failed_log && availability))));
+    assert!(metrics.contains(&format!("hypgate_failed_exchanges_total {}\n", u8::from(truncated))));
+    assert!(metrics.contains(&format!("hypgate_audit_healthy {}\n", u8::from(!failed_log))));
     gateway.stop().unwrap();
     assert!(workers_idle(&app)); assert_eq!(app.failed_exchanges(), u64::from(truncated));
     assert_eq!(app.audit_gaps(), u64::from(failed_log && availability));
@@ -365,8 +365,8 @@ fn failed_start_record_refuses_in_strict_mode_and_forwards_with_one_gap_in_avail
         wait_workers_idle(&app);
         let metrics = send(port, "/metrics", "", "GET").collect().unwrap();
         let metrics = std::str::from_utf8(&metrics).unwrap();
-        assert!(metrics.contains(&format!("loggate_audit_gap_requests_total {}\n", u8::from(availability))));
-        assert!(metrics.contains("loggate_audit_healthy 1\n"));
+        assert!(metrics.contains(&format!("hypgate_audit_gap_requests_total {}\n", u8::from(availability))));
+        assert!(metrics.contains("hypgate_audit_healthy 1\n"));
         assert!(app.log.healthy());
         gateway.stop().unwrap();
         assert_eq!(app.audit_gaps(), u64::from(availability));
@@ -603,10 +603,10 @@ fn poisoned_admission_is_unready_and_fail_closed_in_both_logging_modes() {
         }
         let metrics = send(gateway.port, "/metrics", "", "GET").collect().unwrap();
         let metrics = std::str::from_utf8(&metrics).unwrap();
-        assert!(metrics.contains("loggate_admission_healthy 0\n"));
-        assert!(!metrics.contains("loggate_requests_active"));
-        assert!(!metrics.contains("loggate_requests_limit"));
-        assert!(metrics.contains("loggate_audit_healthy 1\n"));
+        assert!(metrics.contains("hypgate_admission_healthy 0\n"));
+        assert!(!metrics.contains("hypgate_requests_active"));
+        assert!(!metrics.contains("hypgate_requests_limit"));
+        assert!(metrics.contains("hypgate_audit_healthy 1\n"));
         assert!(no_connection(&upstream, Duration::from_millis(20)));
         wait_workers_idle(&app);
         gateway.stop().unwrap();
@@ -721,8 +721,8 @@ fn poisoned_worker_registry_is_unready_and_fail_closed_in_both_modes() {
         }
         let metrics = send(gateway.port, "/metrics", "", "GET").collect().unwrap();
         let metrics = std::str::from_utf8(&metrics).unwrap();
-        assert!(metrics.contains("loggate_worker_admission_healthy 0\n"));
-        assert!(metrics.contains("loggate_admission_healthy 1\n"));
+        assert!(metrics.contains("hypgate_worker_admission_healthy 0\n"));
+        assert!(metrics.contains("hypgate_admission_healthy 1\n"));
         assert!(no_connection(&upstream, Duration::from_millis(20)));
         // A poisoned registry reports no usage; the drain window ends shutdown.
         let started = Instant::now();
@@ -906,8 +906,8 @@ fn shipping_thread_panic_changes_only_metrics() {
         assert_eq!(r.status, status, "{path}"); r.collect().unwrap();
     }
     let text = String::from_utf8(send(port, "/metrics", "", "GET").collect().unwrap()).unwrap();
-    assert!(text.contains("loggate_shipping_enabled 1\n") && text.contains("loggate_shipping_stopped 1\n"), "{text}");
-    assert!(text.contains("loggate_shipping_batches_acknowledged_total 0\n"));
+    assert!(text.contains("hypgate_shipping_enabled 1\n") && text.contains("hypgate_shipping_stopped 1\n"), "{text}");
+    assert!(text.contains("hypgate_shipping_batches_acknowledged_total 0\n"));
     wait_workers_idle(&app);
     gateway.stop().unwrap();
     assert_eq!(shipper.shutdown(Duration::from_secs(2)).unwrap_err().to_string(), "shipper panicked");
@@ -1000,9 +1000,9 @@ fn shipping_uploads_forwarded_exchanges_without_touching_readiness() {
             assert_eq!(r.status, status, "{path} with hang={hang}"); r.collect().unwrap();
         }
         let text = String::from_utf8(send(port, "/metrics", "", "GET").collect().unwrap()).unwrap();
-        assert!(text.contains("loggate_shipping_enabled 1\n"), "{text}");
-        assert!(text.contains(&format!("loggate_shipping_batches_acknowledged_total {}\n", u8::from(!hang))), "{text}");
-        assert!(text.contains("loggate_shipping_stopped 0\n"));
+        assert!(text.contains("hypgate_shipping_enabled 1\n"), "{text}");
+        assert!(text.contains(&format!("hypgate_shipping_batches_acknowledged_total {}\n", u8::from(!hang))), "{text}");
+        assert!(text.contains("hypgate_shipping_stopped 0\n"));
         wait_workers_idle(&app);
         gateway.stop().unwrap();
         let started = Instant::now();

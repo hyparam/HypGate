@@ -32,14 +32,14 @@ jobs:
         run: python3 -m unittest discover -s scripts -p test_retention.py
       - name: Install and smoke test the local tools
         run: |
-          bash scripts/install.sh --prefix "$RUNNER_TEMP/loggate-install"
-          "$RUNNER_TEMP/loggate-install/bin/loggate" --version
-          "$RUNNER_TEMP/loggate-install/bin/loggate-retain" --help
+          bash scripts/install.sh --prefix "$RUNNER_TEMP/hypgate-install"
+          "$RUNNER_TEMP/hypgate-install/bin/hypgate" --version
+          "$RUNNER_TEMP/hypgate-install/bin/hypgate-retain" --help
       - name: Real provider SDKs through the local TLS fixture
         run: |
-          python3 -m venv "$RUNNER_TEMP/loggate-sdks"
-          "$RUNNER_TEMP/loggate-sdks/bin/pip" install -r scripts/sdk-requirements.txt
-          LOGGATE_SDK_PYTHON="$RUNNER_TEMP/loggate-sdks/bin/python" cargo test -p gateway-runtime --locked --lib real_python_sdks -- --ignored --nocapture
+          python3 -m venv "$RUNNER_TEMP/hypgate-sdks"
+          "$RUNNER_TEMP/hypgate-sdks/bin/pip" install -r scripts/sdk-requirements.txt
+          HYPGATE_SDK_PYTHON="$RUNNER_TEMP/hypgate-sdks/bin/python" cargo test -p gateway-runtime --locked --lib real_python_sdks -- --ignored --nocapture
       - name: Panic lints and pinned effect sites
         run: rustup component add clippy && bash scripts/check_effect_sites.sh
       - name: Concurrent logging failure workloads
@@ -72,7 +72,7 @@ jobs:
         run: rustup show active-toolchain
       - name: One minute of overload per logging mode
         env:
-          LOGGATE_OVERLOAD_SECONDS: 60
+          HYPGATE_OVERLOAD_SECONDS: 60
         run: cargo test -p gateway-runtime --locked --lib sustained_overload -- --ignored --nocapture
 
   verify:
@@ -128,7 +128,7 @@ jobs:
         run: rustup show active-toolchain
       - name: Check gateway-process failover
         env:
-          LOGGATE_HAPROXY: /usr/sbin/haproxy
+          HYPGATE_HAPROXY: /usr/sbin/haproxy
         run: cargo test -p gateway-runtime --locked proxy_gateway_process_failover -- --ignored --nocapture
 
   storage:
@@ -166,12 +166,12 @@ jobs:
         run: bash scripts/check_deployment.sh
       - name: Build the unprivileged runtime image
         run: |
-          docker build --file deploy/Dockerfile.runtime --tag loggate-runtime .
-          docker run --rm loggate-runtime --version
+          docker build --file deploy/Dockerfile.runtime --tag hypgate-runtime .
+          docker run --rm hypgate-runtime --version
       - name: Build, test, and verify in a clean container
-        run: docker build --file deploy/Dockerfile --tag loggate-deploy .
+        run: docker build --file deploy/Dockerfile --tag hypgate-deploy .
       - name: Deploy the documented configuration inside the container
-        run: docker run --rm loggate-deploy
+        run: docker run --rm hypgate-deploy
 
   benchmarks:
     name: Release workloads

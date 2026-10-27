@@ -8,7 +8,7 @@
 set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
 cd "$repo"
-work=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/loggate-deploy.XXXXXX")
+work=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/hypgate-deploy.XXXXXX")
 chmod 700 "$work"
 pids=()
 cleanup() {
@@ -43,12 +43,12 @@ start_gateway() { # name log-path -> sets $address and appends pid
     eval "${name}_pid=$!"
     local line=
     for _ in $(seq 1 100); do
-        line=$(grep -m1 'loggate listening on ' "$work/$name.err" || true)
+        line=$(grep -m1 'hypgate listening on ' "$work/$name.err" || true)
         [[ -n "$line" ]] && break
         sleep 0.1
     done
     [[ -n "$line" ]] || fail "$name did not start: $(cat "$work/$name.err")"
-    address=${line#loggate listening on }
+    address=${line#hypgate listening on }
     echo "$name listening on $address"
 }
 stop_gateway() { # name -> SIGTERM and a successful cooperative drain
@@ -65,12 +65,12 @@ rustup show active-toolchain
 cargo --version
 curl --version | head -1
 openssl version
-haproxy=${LOGGATE_HAPROXY:-$(command -v haproxy || true)}
+haproxy=${HYPGATE_HAPROXY:-$(command -v haproxy || true)}
 if [[ -n "$haproxy" ]]; then "$haproxy" -v | head -1; else echo 'haproxy not found; proxy stage skipped'; fi
 
 step 'Build the release executable with locked dependencies'
-cargo build --release --locked --bin loggate
-binary="$repo/target/release/loggate"
+cargo build --release --locked --bin hypgate
+binary="$repo/target/release/hypgate"
 
 step 'Provision the documented configuration'
 token=$(openssl rand -hex 32)                       # 32 random bytes, bearer-safe
@@ -121,8 +121,8 @@ step 'Health, readiness, and metrics'
 echo 'ok: /healthz'
 expect_status 200 'GET /readyz' "http://$primary/readyz"
 metrics=$(curl --fail -s "http://$primary/metrics")
-for line in 'loggate_audit_healthy 1' 'loggate_admission_healthy 1' 'loggate_worker_admission_healthy 1' \
-    'loggate_requests_active 0' 'loggate_requests_limit 16' 'loggate_failed_exchanges_total 0'; do
+for line in 'hypgate_audit_healthy 1' 'hypgate_admission_healthy 1' 'hypgate_worker_admission_healthy 1' \
+    'hypgate_requests_active 0' 'hypgate_requests_limit 16' 'hypgate_failed_exchanges_total 0'; do
     grep -qx "$line" <<<"$metrics" || fail "metrics missing '$line': $metrics"
 done
 echo 'ok: /metrics reports healthy strict logging and 16 request slots'
@@ -141,9 +141,9 @@ expect_status 400 'POST /other with the right token' -X POST -H "authorization: 
 expect_status 502 'POST /routes/7 authorized, upstream refuses the connection' -X POST \
     -H 'content-type: application/json' -H "authorization: Bearer $token" --data "$body" "http://$primary/routes/7"
 metrics=$(curl --fail -s "http://$primary/metrics")
-grep -qx 'loggate_failed_exchanges_total 1' <<<"$metrics" || fail "failed exchange not counted: $metrics"
-grep -qx 'loggate_requests_active 0' <<<"$metrics" || fail "request slot not released: $metrics"
-grep -qx 'loggate_audit_gap_requests_total 0' <<<"$metrics" || fail "strict mode reported a gap: $metrics"
+grep -qx 'hypgate_failed_exchanges_total 1' <<<"$metrics" || fail "failed exchange not counted: $metrics"
+grep -qx 'hypgate_requests_active 0' <<<"$metrics" || fail "request slot not released: $metrics"
+grep -qx 'hypgate_audit_gap_requests_total 0' <<<"$metrics" || fail "strict mode reported a gap: $metrics"
 expect_status 200 'GET /readyz after the failed exchange' "http://$primary/readyz"
 echo 'ok: one failed exchange counted, slot released, still ready'
 
@@ -158,8 +158,8 @@ if [[ -n "$haproxy" ]]; then
     proxy_port=$(free_port)
     sed -e "s/bind :8443/bind 127.0.0.1:$proxy_port/" -e "s/127\\.0\\.0\\.1:8081/$primary/" \
         -e "s/127\\.0\\.0\\.1:8082/$standby/" deploy/haproxy.cfg >"$work/haproxy.cfg"
-    LOGGATE_TLS_PEM="$work/tls.pem" "$haproxy" -c -f "$work/haproxy.cfg"
-    LOGGATE_TLS_PEM="$work/tls.pem" "$haproxy" -db -f "$work/haproxy.cfg" >"$work/haproxy.log" 2>&1 &
+    HYPGATE_TLS_PEM="$work/tls.pem" "$haproxy" -c -f "$work/haproxy.cfg"
+    HYPGATE_TLS_PEM="$work/tls.pem" "$haproxy" -db -f "$work/haproxy.cfg" >"$work/haproxy.log" 2>&1 &
     pids+=("$!"); haproxy_pid=$!
     proxy="https://localhost:$proxy_port"
     for _ in $(seq 1 100); do # wait for both backends to pass two readiness checks
@@ -184,7 +184,7 @@ if [[ -n "$haproxy" ]]; then
     expect_status 401 'proxied POST /routes/7 after primary shutdown' --cacert "$work/cert.pem" -X POST \
         --data "$body" "$proxy/routes/7"
     metrics=$(curl --fail -s "http://$standby/metrics")
-    grep -qx 'loggate_failed_exchanges_total 0' <<<"$metrics" || fail "standby saw a replayed exchange: $metrics"
+    grep -qx 'hypgate_failed_exchanges_total 0' <<<"$metrics" || fail "standby saw a replayed exchange: $metrics"
     echo 'ok: standby serves new requests; no generation was replayed'
     stop_gateway standby
     kill -TERM "$haproxy_pid"; wait "$haproxy_pid" || true

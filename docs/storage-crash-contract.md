@@ -93,7 +93,7 @@ private 128 MiB ext4 image (`data=ordered,barrier=1`), virtio block storage, and
 `crates/gateway-runtime/examples/power_cut.rs`. The host observes flushed serial
 ACK lines emitted only after `append` succeeds, then sends SIGKILL to QEMU without
 letting the guest shut down, sync, or unmount. A fresh guest boots against the
-same disk, allowing ext4 journal recovery before the LogGate scanner runs.
+same disk, allowing ext4 journal recovery before the HypGate scanner runs.
 
 The first trial pauses after ACK 1; later trials continue appending while the host
 cuts power at ACK thresholds 3, 8, 17, 32, and 63. Every recovered record must have
@@ -113,12 +113,12 @@ and squashfs-tools, then prepare a matching kernel and module tree. For the Alpi
 netboot images used here:
 
 ```sh
-mkdir -p /tmp/loggate-power
-curl -fL https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/x86_64/netboot/vmlinuz-virt -o /tmp/loggate-power/kernel
-curl -fL https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/x86_64/netboot/modloop-virt -o /tmp/loggate-power/modloop
-unsquashfs -d /tmp/loggate-power/modules /tmp/loggate-power/modloop
+mkdir -p /tmp/hypgate-power
+curl -fL https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/x86_64/netboot/vmlinuz-virt -o /tmp/hypgate-power/kernel
+curl -fL https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/x86_64/netboot/modloop-virt -o /tmp/hypgate-power/modloop
+unsquashfs -d /tmp/hypgate-power/modules /tmp/hypgate-power/modloop
 cargo build --locked -p gateway-runtime --example power_cut
-python3 scripts/check_power_cut.py /tmp/loggate-power/kernel /tmp/loggate-power/modules/modules 6
+python3 scripts/check_power_cut.py /tmp/hypgate-power/kernel /tmp/hypgate-power/modules/modules 6
 ```
 
 A local run on 2026-10-26 against base commit `213c477` (with only this fixture
@@ -142,7 +142,7 @@ The fixture requires no root privileges, host mounts, or networking in the guest
 with `data=ordered,barrier=1`, and removes it after testing. It never formats a host
 device. The Ubuntu 24.04 CI storage job records the kernel, mount options, and
 e2fsprogs version. The storage job passed on 2026-10-23 in
-[CI run 40039148167](https://github.com/hyparam/LogGate/actions/runs/40039148167),
+[CI run 40039148167](https://github.com/hyparam/HypGate/actions/runs/40039148167),
 commit `7b9ce21`: Linux `6.17.0-1022-azure`, e2fsprogs `1.47.0`, observed mounts
 `rw,relatime,data=ordered` and then `ro,relatime,data=ordered`. Barriers were requested
 explicitly; their default enabled state is omitted from the displayed mount options.

@@ -75,7 +75,7 @@ fn tls_expired_result(result: std::io::Result<()>) -> bool {
     matches!(result, Err(e) if matches!(e.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock))
 }
 '''.replace("NET_PATH", json.dumps(str(ROOT / "crates/gateway-runtime/src/net.rs")))
-with tempfile.TemporaryDirectory(prefix="loggate-deadline-audit-") as temporary:
+with tempfile.TemporaryDirectory(prefix="hypgate-deadline-audit-") as temporary:
     directory = Path(temporary)
     path = directory / "probe.rs"
     path.write_text(source)

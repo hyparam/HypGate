@@ -1,6 +1,6 @@
 # Provider SDKs
 
-LogGate forwards provider-native request and response bodies. It does not
+HypGate forwards provider-native request and response bodies. It does not
 translate between providers or expose every endpoint of a provider's API.
 Each configured route grants access to one fixed HTTPS endpoint.
 
@@ -83,9 +83,9 @@ checks endpoint and credential binding, and compares logged body bytes with the
 bytes exchanged. No paid API call or live credential is needed.
 
 ```sh
-python3 -m venv /tmp/loggate-sdks
-/tmp/loggate-sdks/bin/pip install -r scripts/sdk-requirements.txt
-LOGGATE_SDK_PYTHON=/tmp/loggate-sdks/bin/python \
+python3 -m venv /tmp/hypgate-sdks
+/tmp/hypgate-sdks/bin/pip install -r scripts/sdk-requirements.txt
+HYPGATE_SDK_PYTHON=/tmp/hypgate-sdks/bin/python \
   cargo test -p gateway-runtime --locked --lib real_python_sdks -- --ignored --nocapture
 ```
 
