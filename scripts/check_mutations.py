@@ -8,13 +8,14 @@ many to a verifier run (see "Verus's simplified VIR" below for why that is
 sound); every other mutation, and any batch the VIR check cannot vouch for,
 is verified on its own.
 """
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
 import tempfile
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "crates/gateway-core/src"
@@ -482,7 +483,7 @@ MUTATIONS = [
     ("shipping_driver.rs", "driver_reads_when_unwanted", "    while count < PUMP_BATCH && machine.wants_records()\n", "    while count < PUMP_BATCH\n"),
     ("shipping_driver.rs", "driver_pump_ignores_batch_cap", "    while count < PUMP_BATCH && machine.wants_records()\n", "    while machine.wants_records()\n"),
     ("shipping_driver.rs", "driver_flushes_without_room", "while machine.open_exchanges() > 0 && machine.has_room()", "while machine.open_exchanges() > 0"),
-    ("shipping_driver.rs", "driver_ignores_reply", "let outcome = machine.reply(replied_at, reply);", "let outcome = Outcome::Nothing;"),
+    ("shipping_driver.rs", "driver_ignores_reply", "machine.reply(replied_at, reply)", "Outcome::Nothing"),
     ("exchange_assembler.rs", "emission_spec_evicts_newest", "else if open.len() == max_open { (open.drop_first().push(request), Some(open[0])) }", "else if open.len() == max_open { (open.drop_first().push(request), Some(open[open.len() - 1])) }"),
     ("shipper.rs", "machine_forgets_emission", "                self.emissions = Ghost(self.emissions@.push(exchange.request_id()));\n                proof { assert(self.emissions@.drop_last() =~= old(self).emissions@); }\n                self.number(exchange)\n            }\n        }\n    }\n\n    /// Emit the oldest open exchange", "                self.number(exchange)\n            }\n        }\n    }\n\n    /// Emit the oldest open exchange"),
     ("shipper.rs", "machine_records_wrong_source", "source: Ghost(token.exchange.request_id())", "source: Ghost(0)"),
@@ -913,13 +914,21 @@ if __name__ == "__main__":
 
     with tempfile.TemporaryDirectory(prefix="gateway-mutations-") as temporary:
         workdir = Path(temporary)
+        started = time.monotonic()
+        print("Verifying production core and recording mutation baseline...", flush=True)
         subprocess.run(command(SOURCE, log_dir=workdir / "baseline"), check=True)
+        print(f"Production core verified in {time.monotonic() - started:.1f}s", flush=True)
         baseline, baseline_spans = parse_vir(workdir / "baseline" / "crate-simple.vir")
         batches, singles = plan(baseline, baseline_spans)
         jobs = [lambda i=i, b=b: check_batch(workdir, baseline, i, b) for i, b in enumerate(batches)]
         jobs += [lambda m=m: [check(workdir, *m)] for m in singles]
         # Each job verifies its own copy, so the independent runs share the machine.
-        with ThreadPoolExecutor(max_workers=os.cpu_count() or 1) as pool:
-            for reports in pool.map(lambda job: job(), jobs):
-                print("\n".join(reports), flush=True)
+        workers = os.cpu_count() or 1
+        print(f"Checking {len(MUTATIONS)} mutations in {len(batches)} batches and {len(singles)} single runs with {workers} workers...", flush=True)
+        mutations_started = time.monotonic()
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(job) for job in jobs]
+            for completed, future in enumerate(as_completed(futures), 1):
+                print("\n".join(future.result()), flush=True)
+                print(f"Completed {completed}/{len(jobs)} mutation jobs in {time.monotonic() - mutations_started:.1f}s", flush=True)
     print(f"{len(MUTATIONS)} mutations rejected by proof ({len(batches)} batched runs, {len(singles)} single runs)", flush=True)

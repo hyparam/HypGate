@@ -140,7 +140,13 @@ expect_status 400 'POST /other with the right token' -X POST -H "authorization: 
     "http://$primary/other"
 expect_status 502 'POST /routes/7 authorized, upstream refuses the connection' -X POST \
     -H 'content-type: application/json' -H "authorization: Bearer $token" --data "$body" "http://$primary/routes/7"
-metrics=$(curl --fail -s "http://$primary/metrics")
+# The client receives the response before the worker finishes audit and stream
+# cleanup. Wait for its credit to return, but still fail on a leaked slot.
+for _ in $(seq 1 100); do
+    metrics=$(curl --fail -s --max-time 1 "http://$primary/metrics")
+    grep -qx 'hypgate_requests_active 0' <<<"$metrics" && break
+    sleep 0.1
+done
 grep -qx 'hypgate_failed_exchanges_total 1' <<<"$metrics" || fail "failed exchange not counted: $metrics"
 grep -qx 'hypgate_requests_active 0' <<<"$metrics" || fail "request slot not released: $metrics"
 grep -qx 'hypgate_audit_gap_requests_total 0' <<<"$metrics" || fail "strict mode reported a gap: $metrics"

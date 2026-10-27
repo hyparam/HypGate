@@ -8,6 +8,14 @@ from unittest.mock import patch
 import check_mutations as runner
 
 
+class MutationSourceTests(unittest.TestCase):
+    def test_every_mutation_matches_current_source_once(self):
+        for filename, name, before, _after in runner.MUTATIONS:
+            with self.subTest(mutation=name):
+                source = (runner.SOURCE / filename).read_text()
+                self.assertEqual(source.count(before), 1)
+
+
 class BatchTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()

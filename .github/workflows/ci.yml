@@ -102,11 +102,9 @@ jobs:
           echo "VERUS=$RUNNER_TEMP/verus/verus-x86-linux/verus" >> "$GITHUB_ENV"
       - name: Report verifier version
         run: verus --version
-      - name: Verify production core
-        # The release archive ships vstd already verified; cargo-verus would rebuild and
-        # re-verify it from source on every run.
-        run: verus crates/gateway-core/src/lib.rs --crate-type lib --triggers-mode silent
-      - name: Reject deliberate defects
+      - name: Verify production core and reject deliberate defects
+        # The mutation runner verifies the full production core before building
+        # its VIR baseline. Running Verus separately would repeat that proof.
         run: |
           python3 -m unittest discover -s scripts -p test_check_mutations.py
           python3 scripts/check_mutations.py
