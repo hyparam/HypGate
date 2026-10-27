@@ -509,6 +509,48 @@ fn deadline_drops_connection_and_releases_admission() {
 }
 
 #[test]
+fn response_sink_failures_cancel_without_a_client_watcher() {
+    enum SinkFailure { Write, Zero, Flush }
+    struct FailedSink(SinkFailure);
+    impl Write for FailedSink {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            match self.0 {
+                SinkFailure::Write => Err(io::ErrorKind::BrokenPipe.into()),
+                SinkFailure::Zero => Ok(0),
+                SinkFailure::Flush => Ok(bytes.len()),
+            }
+        }
+        fn flush(&mut self) -> io::Result<()> { Err(io::ErrorKind::BrokenPipe.into()) }
+    }
+    impl ResponseSink for FailedSink {
+        fn start(&mut self, _: u16, _: Vec<Field>) -> io::Result<()> { Ok(()) }
+    }
+    for failure in [SinkFailure::Write, SinkFailure::Zero, SinkFailure::Flush] {
+        let (listener, acceptor, roots) = tls();
+        let config = config(listener.local_addr().unwrap().port());
+        let upstream = thread::spawn(move || {
+            let mut socket = accept_tls(&listener, &acceptor).unwrap();
+            read_until_last_chunk(&mut socket);
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabc").unwrap();
+            socket.flush().unwrap();
+            let mut tail = Vec::new();
+            let _ = socket.read_to_end(&mut tail);
+            assert!(tail.is_empty());
+        });
+        let transport = HttpsTransport::with_roots(roots, Duration::from_secs(5)).unwrap();
+        let cancel = Cancel::new(); // No watcher can supply cancellation for this test.
+        let mut prepared = prepare(&config);
+        let result = transport.exchange(&mut prepared, &mut &b"{}"[..], &mut FailedSink(failure),
+            &mut Log::default(), &worker_http(), &cancel);
+        assert!(matches!(result, Err(TransportError::Cancelled)), "{}", describe(&result));
+        assert!(cancel.is_cancelled());
+        drop(prepared);
+        assert!(config.admit(b"gateway", 7).is_ok());
+        upstream.join().unwrap();
+    }
+}
+
+#[test]
 fn truncated_response_is_never_reported_as_success() {
     let (listener, acceptor, roots) = tls();
     let config = config(listener.local_addr().unwrap().port());

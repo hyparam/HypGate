@@ -137,6 +137,12 @@ impl Session {
         let copied = prepared.copy_body(&mut reader, sink, log, Direction::Download);
         let complete = reader.body().is_complete();
         drop(reader);
+        // A failed response write already proves the client is gone. Publish
+        // cancellation here rather than racing the socket watcher's next peek;
+        // otherwise this client failure is mislabeled as a provider read failure.
+        if matches!(copied, Err(TransferError::Write | TransferError::WriteZero | TransferError::Flush)) {
+            self.cancel.cancel();
+        }
         let copy = copied.map_err(|error| self.transfer_failure(error))?;
         // A body that stopped before its framing said so is a failure, never a clean end.
         if !complete { return Err(self.failure()); }
