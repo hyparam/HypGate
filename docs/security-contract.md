@@ -11,13 +11,14 @@ and there is no single mechanized theorem over the threaded runtime. The
 
 ## Threat and policy boundary
 
-Treat request bodies, headers, URI components, route selectors, and candidate
-configuration as untrusted. Keep the operator's root security policy separate:
-it grants principals/tenants access to approved origins and credential handles.
-Configuration may select within those grants, never enlarge them. A proof cannot
-establish that an arbitrary administrator-supplied root policy expresses the
-administrator's intended security policy. Root-policy provisioning, authentication
-evidence, and the environment that supplies secrets need explicit trust assumptions.
+Treat request bodies, headers, URI components, and route selectors as untrusted.
+The operator controls one configuration file: its grants bind tenants to approved
+destinations and credential handles, and every grant is active. The runtime passes
+all grants to the core's general policy validator as the selected routes; callers
+cannot supply a separate selection. A proof cannot establish that an arbitrary
+administrator-supplied configuration expresses the administrator's intended policy.
+Configuration provisioning, authentication evidence, and the environment supplying
+secrets remain trust assumptions.
 
 The gateway uses static policy snapshots, fixed routes, no redirects, no fallback, and
 no automatic request replay. No general RBAC system or provider-body interpretation

@@ -25,7 +25,7 @@ fn config_with_limits(port: u16, availability: bool, requests: usize, chunk_byte
         "destinations":[format!("https://localhost:{port}/v1/messages")],
         "credentials":[{"tenant":1,"kind":"api_key","env":"KEY"}],"grants":routes,
         "limits":{"requests":requests,"chunk_bytes":chunk_bytes},"logging":if availability { "availability" } else { "strict" }});
-    GatewayConfig::from_json(&serde_json::to_vec(&root).unwrap(), &serde_json::to_vec(&json!({"routes":routes})).unwrap(),
+    GatewayConfig::from_json(&serde_json::to_vec(&root).unwrap(),
         |_| Some("provider-secret".into())).unwrap()
 }
 type Client = Answer<TcpStream>;
@@ -433,7 +433,7 @@ fn concurrent_tenants_keep_credentials_bodies_and_audit_records_isolated() {
         "grants":routes,"limits":{"requests":2,"chunk_bytes":3},"logging":"strict"
     });
     let config = GatewayConfig::from_json(&serde_json::to_vec(&root).unwrap(),
-        &serde_json::to_vec(&json!({"routes":routes})).unwrap(), |name| Some(format!("secret-{name}"))).unwrap();
+        |name| Some(format!("secret-{name}"))).unwrap();
     let dir = TempDir::new(); let path = dir.0.join("audit.log");
     let app = Gateway::new(config, HttpsTransport::with_roots(roots, Duration::from_secs(5)).unwrap(),
         DiskLog::create(&path, 4, Duration::from_secs(2)).unwrap());

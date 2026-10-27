@@ -53,7 +53,7 @@ fn benchmark(availability: bool, profile: Profile) {
         "limits":{"requests":concurrency,"chunk_bytes":16384},
         "logging":if availability { "availability" } else { "strict" }});
     let config = GatewayConfig::from_json(&serde_json::to_vec(&root).unwrap(),
-        &serde_json::to_vec(&json!({"routes":routes})).unwrap(), |_| Some("fixture-key".into())).unwrap();
+        |_| Some("fixture-key".into())).unwrap();
     let dir = TempDir::new(); let path = dir.0.join("benchmark.log");
     let app = Gateway::new(config, HttpsTransport::with_roots(roots, Duration::from_secs(300)).unwrap(),
         DiskLog::create(&path, 16, Duration::from_secs(2)).unwrap());

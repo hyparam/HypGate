@@ -414,7 +414,7 @@ fn shipping_section_is_optional_and_validated() {
     let resolver = |name: &str| (name == "HYP_TOKEN").then(|| TOKEN.to_owned());
     let without = br#"{"identities":[],"destinations":[],"credentials":[],"grants":[],"limits":{"requests":1,"chunk_bytes":4},"logging":"strict"}"#;
     assert!(ShippingConfig::from_root_json(without, resolver).unwrap().is_none());
-    assert!(crate::config::GatewayConfig::from_json(&shipping_json(443, &dir.0, json!({})), br#"{"routes":[]}"#, |_| None).is_ok(),
+    assert!(crate::config::GatewayConfig::from_json(&shipping_json(443, &dir.0, json!({})), |_| None).is_ok(),
         "the gateway configuration ignores the section");
     let config = ShippingConfig::from_root_json(&shipping_json(443, &dir.0, json!({})), resolver).unwrap().unwrap();
     assert_eq!(config.server.url(), "https://localhost:443/");

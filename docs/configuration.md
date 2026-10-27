@@ -1,14 +1,14 @@
 # Static configuration boundary
 
-The runtime parses two separate JSON inputs: an operator-controlled root policy
-and an untrusted candidate route selection. `GatewayConfig::from_json` receives an
+The runtime reads one operator-controlled JSON file, conventionally named
+`config.json`. `GatewayConfig::from_json` receives that file's bytes and an
 operator-controlled secret resolver; the executable resolves named environment
-variables. See [running](running.md) for the command-line interface.
-Never permit a caller to supply root policy or the secret resolver.
+variables. Never let a request caller supply configuration or the secret resolver.
 
-## Root policy format
+## Configuration format
 
-The root object has exactly these fields:
+The configuration has these required fields (and an optional
+[`shipping`](cloud-shipping.md) section):
 
 - `identities`: records containing `tenant` (u64) and `sha256` (64 hexadecimal
   characters encoding the hash of a high-entropy gateway token).
@@ -24,10 +24,15 @@ The root object has exactly these fields:
 - `limits`: `requests` and `chunk_bytes`, both positive integers.
 - `logging`: `strict` or `availability`.
 
-The candidate object contains only `routes`, whose entries use exactly the grant
-record format. Every selected tuple must occur in the root grants and must satisfy
-the verified tenant, identity, and handle constraints. An empty route selection
-is allowed and grants no forwarding authority. No fallback or URL override exists.
+Every entry in `grants` is active. Each binds a tenant and route selector to
+one destination and credential. The verified builder rejects invalid references,
+ambiguous routes, and credentials owned by another tenant. Empty grants allow
+health checks but no forwarding. No fallback or URL override exists.
+
+Internally, the runtime copies all grants into the verified builder's route
+selection. The core retains its general policy-validation contracts, but the
+runtime exposes no separate route-selection input. Configuration changes require
+a restart.
 
 Input is bounded to one MiB per JSON document before parsing. Unknown and duplicate
 object fields are rejected. Limits allow at most 65,536 request slots and one MiB
@@ -136,20 +141,20 @@ count, and C the credential count. The immutable configuration retains:
 If U denotes the total retained URI component bytes, a conservative logical
 variable-content subtotal is **32 × I + U + 8,199 × C** bytes, in addition to the
 struct arrays and registry entries. Counts are fixed after construction and
-bounded by the input documents; accepted decoded strings cannot expand beyond
+bounded by the input document; accepted decoded strings cannot expand beyond
 their JSON representation, apart from URI default-path representation. This is
 not a retained-allocation theorem: URI/HeaderValue shared backing, vector spare
 capacity, allocator rounding, and object metadata require separate accounting.
 The one-MiB input limit is not a one-MiB total configuration-memory limit.
 
-The executable scopes both source JSON vectors to configuration construction, so
-they are dropped before TLS, logger, listener, and server creation. Each file read
+The executable scopes the source JSON buffer to configuration construction, so
+it is dropped before TLS, logger, listener, and server creation. Each file read
 accepts at most one MiB plus a sentinel byte before the parser's size check.
 Destination input strings are consumed during URI conversion, rather than retained
 through all credential loading. Identity/grant/candidate input vectors are consumed
 by normalization and validation; source grants and credential-owner vectors drop
 when core validation returns because their resulting policy fields are ghost-only.
-Successful construction owns all runtime data and borrows neither source JSON.
+Successful construction owns all runtime data and does not borrow the source JSON.
 
 Parsing can temporarily hold source documents, deserialized structs/strings, and
 normalized output simultaneously. The per-credential resolver can allocate its

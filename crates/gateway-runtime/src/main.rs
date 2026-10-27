@@ -68,25 +68,22 @@ fn run() -> Result<(), &'static str> {
         cli::Command::Ship { root, log } => ship(root, log),
         cli::Command::Serve {
             root,
-            routes,
             log,
             address,
             rotation,
-        } => serve(root, routes, log, address, rotation),
+        } => serve(root, log, address, rotation),
     }
 }
 
 fn serve(
     root_path: &str,
-    routes_path: &str,
     log_path: &str,
     address: SocketAddr,
     rotation: Rotation,
 ) -> Result<(), &'static str> {
     let (config, shipping) = {
-        let root = bounded_file(root_path).map_err(|_| "cannot read root policy")?;
-        let routes = bounded_file(routes_path).map_err(|_| "cannot read candidate routes")?;
-        let config = GatewayConfig::from_json(&root, &routes, secret)
+        let root = bounded_file(root_path).map_err(|_| "cannot read configuration")?;
+        let config = GatewayConfig::from_json(&root, secret)
             .map_err(|_| "invalid configuration or missing credential")?;
         // The cloud token is read here once and moves into the shipper thread;
         // the gateway configuration above never holds it.
@@ -172,7 +169,7 @@ fn serve(
 /// Ship a finished log with the root policy's `shipping` section, then exit.
 /// Runs on the main thread with blocking sockets.
 fn ship(root_path: &str, log_path: &str) -> Result<(), &'static str> {
-    let root = bounded_file(root_path).map_err(|_| "cannot read root policy")?;
+    let root = bounded_file(root_path).map_err(|_| "cannot read configuration")?;
     let config = ShippingConfig::from_root_json(&root, secret)
         .map_err(|_| "invalid shipping configuration or missing token")?
         .ok_or("root policy has no shipping section")?;

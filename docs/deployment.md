@@ -61,8 +61,7 @@ process; it does not wait for pending uploads.
 `scripts/check_deployment.sh` performs the documented operator path from a fresh
 checkout with nothing but bash, the pinned Rust toolchain, curl, and openssl. It
 builds the release executable with locked dependencies, generates a 32-byte gateway
-token and its SHA-256 digest, writes the [documented root policy and candidate
-routes](running.md#configuration-example) with only the digest and the upstream
+token and its SHA-256 digest, writes the [documented configuration](running.md#configuration-example) with only the digest and the upstream
 destination substituted, and creates a mode-700 log directory. The destination is a
 closed loopback port, so the check makes no provider or external network connection
 and needs no real credential; `PROVIDER_KEY` holds a placeholder.

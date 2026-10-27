@@ -45,7 +45,7 @@ fn config(port: u16) -> GatewayConfig {
         "destinations":[format!("https://localhost:{port}/v1/messages")],
         "credentials":[{"tenant":1,"kind":"api_key","env":"KEY"}],"grants":routes,
         "limits":{"requests":1,"chunk_bytes":3},"logging":"strict"});
-    GatewayConfig::from_json(&serde_json::to_vec(&root).unwrap(), &serde_json::to_vec(&json!({"routes":routes})).unwrap(),
+    GatewayConfig::from_json(&serde_json::to_vec(&root).unwrap(),
         |_| Some("provider-secret".into())).unwrap()
 }
 fn prepare(c: &GatewayConfig) -> PreparedRequest<'_> {

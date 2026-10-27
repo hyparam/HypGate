@@ -17,7 +17,7 @@ fn config() -> GatewayConfig {
         "grants":routes,"limits":{"requests":1,"chunk_bytes":4096},"logging":"strict"
     });
     GatewayConfig::from_json(&serde_json::to_vec(&root).unwrap(),
-        &serde_json::to_vec(&json!({"routes":routes})).unwrap(), |name| Some(format!("secret-{name}"))).unwrap()
+        |name| Some(format!("secret-{name}"))).unwrap()
 }
 fn headers() -> Vec<Field> {
     vec![field("authorization", "Bearer gateway-token"), field("content-type", "application/json"), field("accept", "text/event-stream")]
@@ -197,7 +197,7 @@ fn maximum_configured_request_head_serializes_below_64_kib() {
         "grants":routes,"limits":{"requests":1,"chunk_bytes":4096},"logging":"strict"
     });
     let config = GatewayConfig::from_json(&serde_json::to_vec(&root).unwrap(),
-        &serde_json::to_vec(&json!({"routes":routes})).unwrap(), |_| Some("k".repeat(MAX_CREDENTIAL_BYTES))).unwrap();
+        |_| Some("k".repeat(MAX_CREDENTIAL_BYTES))).unwrap();
     let mut input = vec![field("authorization", "Bearer gateway-token")];
     for _ in 0..98 { input.push(field("accept", "x")); }
     let used: usize = input.iter().map(|f| f.name.len() + f.value.len()).sum();

@@ -16,7 +16,7 @@ requested-allocation accounting that follows from them.
 | --- | --- | --- | --- |
 | Request slots (`limits.requests`) | 1 to 65,536; documented example 16 | Admission returns 503 before any upstream connection; readiness stays 200; a released slot is reusable. Slots above the audit queue depth add waiting per frame, not failures. | Proved acquire/release/occupancy; `repeated_overload_preserves_active_streams_health_and_reusable_capacity`, `sustained_overload_preserves_active_streams_and_health`; measured. |
 | Chunk size (`limits.chunk_bytes`) | 1 byte to 1 MiB; example 16 KiB; `requests × chunk_bytes` at most 128 MiB | Larger configurations are rejected at startup. The chunk size bounds every core stream chunk and every audit record payload. | `validate_limits` proved; configuration tests. |
-| Root policy and candidate route files | 1 MiB each | Startup fails with "invalid configuration". | `config.rs` tests. |
+| Configuration file | 1 MiB | Startup fails with "invalid configuration". | `config.rs` tests. |
 | Destination URL | 8,192 bytes, `https://` only, no query, host at most 253 bytes | Rejected at startup; routing never uses caller URLs. | Configuration confinement proved and tested. |
 | Provider credential | 1 to 8,192 printable ASCII bytes from the named environment variable | Startup fails with "missing credential"; the credential never appears in logs. | `check_deployment.sh`; secret-header tests. |
 | Gateway token | 1 to 512 bytes; SHA-256 digest compared | Longer or missing tokens are 401 without capacity use. | `authorization_failures_return_capacity_and_drop_reclaims_it`. |

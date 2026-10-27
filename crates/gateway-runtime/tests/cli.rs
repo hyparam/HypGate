@@ -7,11 +7,10 @@ fn json(value: impl Into<serde_json::Value>) -> serde_json::Value { value.into()
 #[test]
 fn executable_starts_and_serves_health_with_real_configuration() {
     let dir = TempDir::new("hypgate-cli");
-    let root = dir.0.join("root.json"); let routes = dir.0.join("routes.json"); let log = dir.0.join("audit.log");
+    let root = dir.0.join("config.json"); let log = dir.0.join("audit.log");
     fs::write(&root, br#"{"identities":[],"destinations":[],"credentials":[],"grants":[],"limits":{"requests":1,"chunk_bytes":4},"logging":"strict"}"#).unwrap();
-    fs::write(&routes, br#"{"routes":[]}"#).unwrap();
     let mut child = Process(Command::new(env!("CARGO_BIN_EXE_hypgate"))
-        .args([root.as_os_str(), routes.as_os_str(), log.as_os_str()]).arg("127.0.0.1:0")
+        .args([root.as_os_str(), log.as_os_str()]).arg("127.0.0.1:0")
         .stderr(Stdio::piped()).spawn().unwrap());
     let mut startup = String::new();
     BufReader::new(child.0.stderr.take().unwrap()).read_line(&mut startup).unwrap();
@@ -27,11 +26,10 @@ fn executable_starts_and_serves_health_with_real_configuration() {
 #[test]
 fn sigterm_drains_and_exits_cleanly_with_a_complete_log() {
     let dir = TempDir::new("hypgate-sigterm");
-    let root = dir.0.join("root.json"); let routes = dir.0.join("routes.json"); let log = dir.0.join("audit.log");
+    let root = dir.0.join("config.json"); let log = dir.0.join("audit.log");
     fs::write(&root, br#"{"identities":[],"destinations":[],"credentials":[],"grants":[],"limits":{"requests":1,"chunk_bytes":4},"logging":"strict"}"#).unwrap();
-    fs::write(&routes, br#"{"routes":[]}"#).unwrap();
     let mut child = Process(Command::new(env!("CARGO_BIN_EXE_hypgate"))
-        .args([root.as_os_str(), routes.as_os_str(), log.as_os_str()]).arg("127.0.0.1:0")
+        .args([root.as_os_str(), log.as_os_str()]).arg("127.0.0.1:0")
         .stderr(Stdio::piped()).spawn().unwrap());
     let mut startup = String::new();
     BufReader::new(child.0.stderr.take().unwrap()).read_line(&mut startup).unwrap();
@@ -97,19 +95,18 @@ fn scan_command_reports_valid_prefix_without_printing_payload_or_editing_log() {
 #[test]
 fn executable_starts_the_shipper_from_the_root_policy_and_reports_it_in_metrics() {
     let dir = TempDir::new("hypgate-ship");
-    let root = dir.0.join("root.json"); let routes = dir.0.join("routes.json"); let log = dir.0.join("audit.log");
+    let root = dir.0.join("config.json"); let log = dir.0.join("audit.log");
     let state = dir.0.join("state"); fs::create_dir(&state).unwrap();
     fs::write(&root, format!(r#"{{"identities":[],"destinations":[],"credentials":[],"grants":[],"limits":{{"requests":1,"chunk_bytes":4}},"logging":"strict",
         "shipping":{{"server":"https://localhost:1/","token_env":"HYPGATE_TEST_HYP_TOKEN","state_dir":"{}","poll_ms":100}}}}"#, state.display())).unwrap();
-    fs::write(&routes, br#"{"routes":[]}"#).unwrap();
     // Without the token the executable refuses to start.
-    let refused = Command::new(env!("CARGO_BIN_EXE_hypgate")).args([root.as_os_str(), routes.as_os_str(), log.as_os_str()]).arg("127.0.0.1:0")
+    let refused = Command::new(env!("CARGO_BIN_EXE_hypgate")).args([root.as_os_str(), log.as_os_str()]).arg("127.0.0.1:0")
         .env_remove("HYPGATE_TEST_HYP_TOKEN").output().unwrap();
     assert!(!refused.status.success());
     assert!(String::from_utf8_lossy(&refused.stderr).contains("missing token"));
     assert!(!log.exists());
     let mut child = Process(Command::new(env!("CARGO_BIN_EXE_hypgate"))
-        .args([root.as_os_str(), routes.as_os_str(), log.as_os_str()]).arg("127.0.0.1:0")
+        .args([root.as_os_str(), log.as_os_str()]).arg("127.0.0.1:0")
         .env("HYPGATE_TEST_HYP_TOKEN", "hsa_0123456789abcdef_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq")
         .stderr(Stdio::piped()).spawn().unwrap());
     let mut stderr = BufReader::new(child.0.stderr.take().unwrap());
@@ -172,9 +169,9 @@ fn invalid_commands_and_public_listeners_are_rejected_before_file_access() {
         (vec![], "usage:"),
         (vec!["scan"], "usage: hypgate scan"),
         (vec!["ship", "missing-root"], "usage: hypgate ship"),
-        (vec!["missing-root", "missing-routes", "unused-log", "0.0.0.0:8080"], "listen address must be loopback"),
-        (vec!["missing-root", "missing-routes", "unused-log", "[::]:8080"], "listen address must be loopback"),
-        (vec!["missing-root", "missing-routes", "unused-log", "invalid"], "invalid listen address"),
+        (vec!["missing-root", "unused-log", "0.0.0.0:8080"], "listen address must be loopback"),
+        (vec!["missing-root", "unused-log", "[::]:8080"], "listen address must be loopback"),
+        (vec!["missing-root", "unused-log", "invalid"], "invalid listen address"),
     ] {
         let result = Command::new(env!("CARGO_BIN_EXE_hypgate")).args(args).output().unwrap();
         assert!(!result.status.success());

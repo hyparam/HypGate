@@ -2,7 +2,7 @@
 
 `gateway_core::json` reads a byte string into a `Value` tree or refuses it,
 and writes a `Value` tree back out as one compact document. It is what the
-gateway reads its root policy, its routes, the shipper's state files, the
+gateway reads its configuration, the shipper's state files, the
 HypAware server's replies, and provider bodies with, and what it writes the
 state files, the shipped rows, and the scan output with. It depends only on
 `vstd` and three small helpers in this crate (the hex digit specification
@@ -91,7 +91,7 @@ zeros, or lone low surrogates would make the reader incomplete).
 
 ## Where it is used
 
-`config.rs` reads the root policy and routes through it and the verified
+`config.rs` reads the configuration through it and the verified
 schema reader (`gateway_core::config_schema`: allowed keys, once each,
 required kinds); `shipping/config.rs` reads the `shipping` section the same
 way; `shipping/state.rs` reads and writes the identity

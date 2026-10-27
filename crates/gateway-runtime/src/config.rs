@@ -40,10 +40,6 @@ fn read_root(bytes: &[u8]) -> Result<schema::Root, ConfigError> {
     let value = json::parse(bytes).ok_or(ConfigError::Syntax)?;
     schema::read_root(&value).ok_or(ConfigError::Syntax)
 }
-fn read_candidate(bytes: &[u8]) -> Result<schema::Candidate, ConfigError> {
-    let value = json::parse(bytes).ok_or(ConfigError::Syntax)?;
-    schema::read_candidate(&value).ok_or(ConfigError::Syntax)
-}
 pub(crate) use schema::Logging;
 
 /// The environment as the verified assembly's secret store. Names reach it
@@ -105,14 +101,17 @@ impl GatewayConfig {
     pub(crate) fn poison_admission_for_test(&self) { self.admission.poison_for_test(); }
     pub(crate) fn usage(&self) -> Option<(usize, usize)> { self.admission.usage().ok() }
     pub(crate) fn requires_audit(&self) -> bool { self.admission.requires_audit() }
-    /// Root policy and secret resolver are operator-controlled. Candidate JSON
-    /// can select only grants already in root policy. Errors never echo inputs.
-    pub fn from_json(root: &[u8], candidate: &[u8], secret: impl FnMut(&str) -> Option<String>)
+    /// Configuration and secret resolver are operator-controlled. Every configured
+    /// grant is active. Errors never echo inputs.
+    pub fn from_json(root: &[u8], secret: impl FnMut(&str) -> Option<String>)
         -> Result<Self, ConfigError>
     {
-        if root.len() > MAX_CONFIG || candidate.len() > MAX_CONFIG { return Err(ConfigError::Limits); }
+        if root.len() > MAX_CONFIG { return Err(ConfigError::Limits); }
         let root = read_root(root)?;
-        let candidate = read_candidate(candidate)?;
+        // Select every configured grant for the existing verified policy builder.
+        let candidate = schema::Candidate { routes: root.grants.iter().map(|route|
+            gateway_core::policy::Route { tenant: route.tenant, selector: route.selector,
+                origin: route.origin, credential: route.credential }).collect() };
         // The verified assembly: identity, destination, and credential `i`
         // come from entry `i`, with the secret fetched under that entry's
         // name and formed into the header value by the verified rules.

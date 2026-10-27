@@ -13,16 +13,15 @@ fn root() -> Value {
         "limits": {"requests": 2, "chunk_bytes": 4096}, "logging": "strict"
     })
 }
-fn candidate(root: &Value) -> Value { json!({"routes": root["grants"]}) }
-fn load(root: &Value, routes: &Value) -> Result<GatewayConfig, ConfigError> {
-    GatewayConfig::from_json(&serde_json::to_vec(root).unwrap(), &serde_json::to_vec(routes).unwrap(),
+fn load(root: &Value) -> Result<GatewayConfig, ConfigError> {
+    GatewayConfig::from_json(&serde_json::to_vec(root).unwrap(),
         |name| Some(format!("secret-{name}")))
 }
 
 #[test]
 fn native_provider_endpoints_keep_their_own_credentials() {
     let r = root();
-    let c = load(&r, &candidate(&r)).unwrap();
+    let c = load(&r).unwrap();
     assert!(matches!(c.admit(b"incorrect", 7), Err(AdmissionError::Unauthorized)));
     assert!(matches!(c.admit(b"test-gateway-token", 9), Err(AdmissionError::Unauthorized)));
     let one = c.admit(b"test-gateway-token", 7).unwrap();
@@ -40,19 +39,18 @@ fn native_provider_endpoints_keep_their_own_credentials() {
 }
 
 #[test]
-fn untrusted_configuration_cannot_change_destinations_or_ownership() {
-    let r = root();
-    for field in ["tenant", "selector", "origin", "credential"] {
-        let mut routes = candidate(&r);
-        routes["routes"][0][field] = json!(99);
-        assert!(matches!(load(&r, &routes), Err(ConfigError::Policy)), "{field}");
+fn configuration_rejects_invalid_routes_and_cross_tenant_credentials() {
+    for field in ["tenant", "origin", "credential"] {
+        let mut r = root();
+        r["grants"][0][field] = json!(99);
+        assert!(matches!(load(&r), Err(ConfigError::Policy)), "{field}");
     }
-    let mut routes = candidate(&r);
-    routes["destinations"] = json!(["https://attacker.example/"]);
-    assert!(matches!(load(&r, &routes), Err(ConfigError::Syntax)));
     let mut r = root();
     r["credentials"][0]["tenant"] = json!(2);
-    assert!(matches!(load(&r, &candidate(&r)), Err(ConfigError::Policy)));
+    assert!(matches!(load(&r), Err(ConfigError::Policy)));
+    let mut r = root();
+    r["grants"] = json!([]);
+    assert!(matches!(load(&r).unwrap().admit(b"test-gateway-token", 7), Err(AdmissionError::Unauthorized)));
 }
 
 #[test]
@@ -74,24 +72,23 @@ fn malformed_or_ambiguous_destinations_are_rejected() {
 fn malformed_limits_and_identity_fail_before_secret_loading() {
     for (field, value) in [("requests", 0), ("requests", 65537), ("chunk_bytes", 0), ("chunk_bytes", 1048577)] {
         let mut r = root(); r["limits"][field] = json!(value);
-        assert!(matches!(load(&r, &candidate(&r)), Err(ConfigError::Limits)));
+        assert!(matches!(load(&r), Err(ConfigError::Limits)));
     }
     let mut r = root(); r["limits"] = json!({"requests": 65536, "chunk_bytes": 1048576});
-    assert!(matches!(load(&r, &candidate(&r)), Err(ConfigError::Limits)));
+    assert!(matches!(load(&r), Err(ConfigError::Limits)));
     let mut r = root(); r["identities"][0]["sha256"] = json!("not-a-digest");
-    assert!(matches!(load(&r, &candidate(&r)), Err(ConfigError::Identity)));
-    let r = root(); let mut routes = candidate(&r); routes["routes"][0]["tenant"] = json!(2);
+    assert!(matches!(load(&r), Err(ConfigError::Identity)));
+    let mut r = root(); r["grants"][0]["tenant"] = json!(2);
     assert!(matches!(GatewayConfig::from_json(&serde_json::to_vec(&r).unwrap(),
-        &serde_json::to_vec(&routes).unwrap(), |_| panic!("must validate before loading secrets")),
+        |_| panic!("must validate before loading secrets")),
         Err(ConfigError::Policy)));
 }
 
 #[test]
 fn secret_errors_are_redacted_and_invalid_headers_rejected() {
     let r = root(); let root_bytes = serde_json::to_vec(&r).unwrap();
-    let routes = serde_json::to_vec(&candidate(&r)).unwrap();
     for secret in [None, Some(""), Some("secret\r\nInjected: header"), Some("contains space")] {
-        let result = GatewayConfig::from_json(&root_bytes, &routes, |_| secret.map(String::from));
+        let result = GatewayConfig::from_json(&root_bytes, |_| secret.map(String::from));
         assert!(matches!(result, Err(ConfigError::Credential)));
     }
     assert_eq!(format!("{:?}", ConfigError::Credential), "Credential");
@@ -99,11 +96,14 @@ fn secret_errors_are_redacted_and_invalid_headers_rejected() {
 
 #[test]
 fn schemas_reject_unknown_duplicate_and_oversized_input() {
-    let r = root(); let mut routes = candidate(&r); routes["fallback"] = json!(true);
-    assert!(matches!(load(&r, &routes), Err(ConfigError::Syntax)));
-    assert!(matches!(GatewayConfig::from_json(&serde_json::to_vec(&r).unwrap(),
-        br#"{"routes":[],"routes":[]}"#, |_| None), Err(ConfigError::Syntax)));
-    assert!(matches!(GatewayConfig::from_json(&vec![b' '; MAX_CONFIG + 1], b"{}", |_| None), Err(ConfigError::Limits)));
+    let mut r = root(); r["fallback"] = json!(true);
+    assert!(matches!(load(&r), Err(ConfigError::Syntax)));
+    let mut r = root(); r["routes"] = r["grants"].clone();
+    assert!(matches!(load(&r), Err(ConfigError::Syntax)));
+    let raw = serde_json::to_string(&root()).unwrap();
+    let duplicate = raw.replacen("{", "{\"grants\":[],", 1);
+    assert!(matches!(GatewayConfig::from_json(duplicate.as_bytes(), |_| None), Err(ConfigError::Syntax)));
+    assert!(matches!(GatewayConfig::from_json(&vec![b' '; MAX_CONFIG + 1], |_| None), Err(ConfigError::Limits)));
 }
 
 #[test]
@@ -111,11 +111,11 @@ fn destination_size_is_bounded_before_secret_loading() {
     let prefix = "https://api.example.com/";
     let endpoint = format!("{prefix}{}", "p".repeat(MAX_DESTINATION_BYTES - prefix.len()));
     let mut r = root(); r["destinations"][0] = json!(endpoint);
-    assert!(load(&r, &candidate(&r)).is_ok());
+    assert!(load(&r).is_ok());
     r["destinations"][0] = json!(format!("{endpoint}x"));
     let mut secret_calls = 0;
     let result = GatewayConfig::from_json(&serde_json::to_vec(&r).unwrap(),
-        &serde_json::to_vec(&candidate(&r)).unwrap(), |_| { secret_calls += 1; Some("secret".into()) });
+        |_| { secret_calls += 1; Some("secret".into()) });
     assert!(matches!(result, Err(ConfigError::Destination)));
     assert_eq!(secret_calls, 0);
 }

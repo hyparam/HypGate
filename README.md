@@ -62,14 +62,14 @@ physical storage durability remains a deployment assumption.
 ## Run it
 
 Install Rust through rustup; this repository selects the pinned toolchain. Create
-`root.json` and `routes.json` from the [configuration example](docs/running.md#configuration-example),
+`config.json` from the [configuration example](docs/running.md#configuration-example),
 set your gateway-token digest, and supply `PROVIDER_KEY` through your environment.
 Then run:
 
 ```sh
 cargo build --release --locked --bin hypgate
 mkdir -m 700 logs
-target/release/hypgate root.json routes.json logs/session-001.log
+target/release/hypgate config.json logs/session-001.log
 ```
 
 The server listens on `127.0.0.1:8080`; check it with

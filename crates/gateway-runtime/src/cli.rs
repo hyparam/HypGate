@@ -5,9 +5,9 @@ use gateway_runtime::disk_log::Rotation;
 pub(crate) const HELP: &str = "HypGate — an AI gateway with a verified audit core
 
 Usage:
-  hypgate ROOT.json ROUTES.json NEW_LOG [127.0.0.1:8080] [--log-max-bytes N] [--log-max-age-seconds N]
+  hypgate CONFIG.json NEW_LOG [127.0.0.1:8080] [--log-max-bytes N] [--log-max-age-seconds N]
   hypgate scan LOG
-  hypgate ship ROOT.json LOG
+  hypgate ship CONFIG.json LOG
   hypgate --help
   hypgate --version
 
@@ -16,7 +16,7 @@ Logs rotate at 128 MiB or 24 hours by default, on the next record.
 Numbered segments append .000001, .000002, etc. to NEW_LOG; none are deleted.
 scan and ship follow numbered segments from the original LOG path.
 scan prints record metadata without body payloads or changes to the log.
-ship uploads a finished log using the root policy's shipping configuration.";
+ship uploads a finished log using the configuration's shipping section.";
 
 pub(crate) enum Command<'a> {
     Help,
@@ -30,7 +30,6 @@ pub(crate) enum Command<'a> {
     },
     Serve {
         root: &'a str,
-        routes: &'a str,
         log: &'a str,
         address: SocketAddr,
         rotation: Rotation,
@@ -48,9 +47,9 @@ impl<'a> Command<'a> {
             },
             [command, rest @ ..] if command == "ship" => match rest {
                 [root, log] => Ok(Self::Ship { root, log }),
-                _ => Err("usage: hypgate ship ROOT.json LOG"),
+                _ => Err("usage: hypgate ship CONFIG.json LOG"),
             },
-            [root, routes, log, rest @ ..] => {
+            [root, log, rest @ ..] => {
                 let mut rest = rest;
                 let address: SocketAddr = if let Some((value, tail)) = rest.split_first().filter(|(value, _)| !value.starts_with("--")) {
                     let address = value.parse().map_err(|_| "invalid listen address")?;
@@ -78,13 +77,12 @@ impl<'a> Command<'a> {
                 }
                 Ok(Self::Serve {
                     root,
-                    routes,
                     log,
                     address,
                     rotation,
                 })
             }
-            _ => Err("usage: hypgate ROOT.json ROUTES.json NEW_LOG [127.0.0.1:8080]; see --help"),
+            _ => Err("usage: hypgate CONFIG.json NEW_LOG [127.0.0.1:8080]; see --help"),
         }
     }
 }
@@ -101,11 +99,11 @@ mod tests {
     }
     #[test]
     fn rotation_defaults_and_overrides() {
-        let default = parse(&["root", "routes", "log"]).unwrap();
+        let default = parse(&["config", "log"]).unwrap();
         assert_eq!(default.max_bytes, 128 * 1024 * 1024);
         assert_eq!(default.max_age, Duration::from_secs(86400));
         for address in [None, Some("127.0.0.1:0")] {
-            let mut args = vec!["root", "routes", "log"];
+            let mut args = vec!["config", "log"];
             args.extend(address);
             args.extend(["--log-max-age-seconds", "10", "--log-max-bytes", "1024"]);
             let rotation = parse(&args).unwrap();
@@ -122,7 +120,7 @@ mod tests {
             vec!["--log-max-bytes", "128", "--log-max-bytes", "256"],
             vec!["--unknown", "10"],
         ] {
-            let mut args = vec!["root", "routes", "log"];
+            let mut args = vec!["config", "log"];
             args.extend(flags);
             assert!(parse(&args).is_err());
         }

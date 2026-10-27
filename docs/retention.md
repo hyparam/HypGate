@@ -12,7 +12,7 @@ It must be owned by your user and private (mode 700). Only move a session there 
 its gateway has stopped and any shipper reading it has finished. Keep its original
 file and every numbered segment together, with their names unchanged until all
 shipping or replay is complete. A successful
-`hypgate ship ROOT.json LOG` can finish uploading an old log before archival.
+`hypgate ship CONFIG.json LOG` can finish uploading an old log before archival.
 Do not place shipper identity or checkpoint files in the archive.
 
 Archive filenames must use `session-<name>.log`, where the name contains ASCII

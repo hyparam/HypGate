@@ -1,7 +1,7 @@
 # Running the gateway
 
 Build with the pinned Rust toolchain: `cargo build --locked --bin hypgate`.
-Run `target/debug/hypgate ROOT.json ROUTES.json NEW_LOG [127.0.0.1:8080]`.
+Run `target/debug/hypgate CONFIG.json NEW_LOG [127.0.0.1:8080]`.
 The log path must not exist; its parent directory must already exist and be private
 to the operator. Configuration and secret-loading failures prevent startup.
 
@@ -17,7 +17,7 @@ For provider clients, see [SDK setup](sdks.md); for closed audit files, see
 
 ## Configuration example
 
-Use the schema in [configuration](configuration.md). A root policy for an
+Use the schema in [configuration](configuration.md). A configuration for an
 Anthropic-native endpoint looks like this (replace the digest placeholder with the
 SHA-256 hex digest of a securely generated gateway token):
 
@@ -32,11 +32,9 @@ SHA-256 hex digest of a securely generated gateway token):
 }
 ```
 
-The separate candidate route file selects the permitted grant:
-
-```json
-{"routes": [{"tenant": 1, "selector": 7, "origin": 0, "credential": 0}]}
-```
+Save this as `config.json`. Each entry in `grants` defines an active route;
+there is no separate route-selection file. Remove a grant to disable that route.
+Configuration is loaded at startup, so changes require a restart.
 
 Provide `PROVIDER_KEY` in the process environment through your secret manager.
 Gateway tokens need at least 32 random bytes, encoded in bearer-token characters.
@@ -56,7 +54,7 @@ supported.
 
 To upload exchanges to HypAware Cloud, add a `shipping` section to the root policy
 and provide its token through the named environment variable; see
-[cloud shipping](cloud-shipping.md). `hypgate ship ROOT.json LOG` uploads a
+[cloud shipping](cloud-shipping.md). `hypgate ship CONFIG.json LOG` uploads a
 finished log without starting the gateway.
 
 ## Scanning a log

@@ -89,14 +89,14 @@ environment resolver as provider keys and moves it into the shipper thread.
 This is an ownership and module boundary inside one process, not a process
 boundary.
 
-`hypgate ship ROOT.json LOG` runs the same loop on the current thread over a
+`hypgate ship CONFIG.json LOG` runs the same loop on the current thread over a
 finished log and exits when every exchange is resolved; exchanges still open
 after five idle polls are flushed as `incomplete`.
 
 ## S3 destination
 
 Set a nonempty `s3_region` to select S3 instead of HypAware. The same live
-shipper and `hypgate ship ROOT.json LOG` upload the same projected NDJSON
+shipper and `hypgate ship CONFIG.json LOG` upload the same projected NDJSON
 batches (not raw audit frames). No AWS SDK or new dependency is needed.
 
 ```json
@@ -351,7 +351,7 @@ and completion times.
 
 ## Rotated logs
 
-Live shipping and `hypgate ship ROOT.json LOG` follow the numbered segments from
+Live shipping and `hypgate ship CONFIG.json LOG` follow the numbered segments from
 `LOG`. Rotation preserves the session ID, assembler, batch identities, and
 checkpoint sequence, so requests spanning files are assembled normally. The
 verified session recovery driver rechecks a sealed predecessor after discovering

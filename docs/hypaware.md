@@ -109,7 +109,7 @@ server-issued gateway credential and a fingerprint of the operator token, and
 ```sh
 export ANTHROPIC_API_KEY=... OPENAI_API_KEY=... HYPAWARE_TOKEN=...
 mkdir -m 700 logs state
-target/release/hypgate root.json routes.json logs/session-001.log
+target/release/hypgate config.json logs/session-001.log
 ```
 
 Startup fails with `invalid shipping configuration or missing token` when the
@@ -170,7 +170,7 @@ without a `shipping` section, or to replay one after the state directory was
 lost, run the same loop on its own:
 
 ```sh
-HYPAWARE_TOKEN=... target/release/hypgate ship root.json logs/session-001.log
+HYPAWARE_TOKEN=... target/release/hypgate ship config.json logs/session-001.log
 ```
 
 It exits when every exchange is resolved. The server stores each exchange once

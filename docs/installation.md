@@ -47,11 +47,10 @@ Linux, use host networking with a TLS proxy on the same host:
 ```sh
 # Provision ./logs as UID/GID 10001, mode 700, before starting.
 docker run --rm --network host \
-  --mount type=bind,src="$PWD/root.json",dst=/etc/hypgate/root.json,readonly \
-  --mount type=bind,src="$PWD/routes.json",dst=/etc/hypgate/routes.json,readonly \
+  --mount type=bind,src="$PWD/config.json",dst=/etc/hypgate/config.json,readonly \
   --mount type=bind,src="$PWD/logs",dst=/var/lib/hypgate \
   --env PROVIDER_KEY \
-  hypgate /etc/hypgate/root.json /etc/hypgate/routes.json /var/lib/hypgate/session-001.log
+  hypgate /etc/hypgate/config.json /var/lib/hypgate/session-001.log
 ```
 
 A proxy in the same container network namespace (for example a Kubernetes pod)

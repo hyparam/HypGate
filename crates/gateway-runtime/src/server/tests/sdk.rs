@@ -55,7 +55,7 @@ fn real_python_sdks_preserve_json_streams_credentials_and_audit_bytes() {
         "credentials":[{"tenant":1,"kind":"bearer","env":"KEY"},{"tenant":1,"kind":"bearer","env":"KEY"},{"tenant":1,"kind":"api_key","env":"KEY"}],
         "grants":routes,"limits":{"requests":8,"chunk_bytes":4096},"logging":"strict"});
     let config = GatewayConfig::from_json(&serde_json::to_vec(&root).unwrap(),
-        &serde_json::to_vec(&json!({"routes":routes})).unwrap(), |_| Some("provider-secret".into())).unwrap();
+        |_| Some("provider-secret".into())).unwrap();
     let dir = TempDir::new(); let log = dir.0.join("sdk.log");
     let app = Gateway::new(config, HttpsTransport::with_roots(roots, Duration::from_secs(10)).unwrap(),
         DiskLog::create(&log, 16, Duration::from_secs(2)).unwrap());

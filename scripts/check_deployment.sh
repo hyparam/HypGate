@@ -37,7 +37,7 @@ free_port() { # a loopback port that currently refuses connections
 file_mode() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
 start_gateway() { # name log-path -> sets $address and appends pid
     local name=$1 log=$2
-    PROVIDER_KEY="$provider_key" "$binary" "$work/root.json" "$work/routes.json" "$log" 127.0.0.1:0 \
+    PROVIDER_KEY="$provider_key" "$binary" "$work/config.json" "$log" 127.0.0.1:0 \
         2>"$work/$name.err" &
     pids+=("$!")
     eval "${name}_pid=$!"
@@ -78,7 +78,7 @@ digest=$(printf '%s' "$token" | openssl dgst -sha256 | awk '{print $NF}')
 closed=$(free_port)                                 # nothing listens here
 provider_key=deployment-check-placeholder-not-a-real-credential
 umask 077
-cat >"$work/root.json" <<EOF
+cat >"$work/config.json" <<EOF
 {
   "identities": [{"tenant": 1, "sha256": "$digest"}],
   "destinations": ["https://localhost:$closed/v1/messages"],
@@ -88,22 +88,21 @@ cat >"$work/root.json" <<EOF
   "logging": "strict"
 }
 EOF
-echo '{"routes": [{"tenant": 1, "selector": 7, "origin": 0, "credential": 0}]}' >"$work/routes.json"
 mkdir -m 700 "$work/logs"
 echo "destination https://localhost:$closed refuses connections; digest $digest"
 
 step 'Startup refuses unsafe deployments'
-if PROVIDER_KEY=x "$binary" "$work/root.json" "$work/routes.json" "$work/logs/bad.log" 0.0.0.0:0 2>"$work/bad.err"; then
+if PROVIDER_KEY=x "$binary" "$work/config.json" "$work/logs/bad.log" 0.0.0.0:0 2>"$work/bad.err"; then
     fail 'non-loopback listen address accepted'; fi
 grep -q 'must be loopback' "$work/bad.err" || fail "unexpected error: $(cat "$work/bad.err")"
 [[ ! -e "$work/logs/bad.log" ]] || fail 'log created before listen address check'
 echo 'ok: non-loopback listen address refused'
-if env -u PROVIDER_KEY "$binary" "$work/root.json" "$work/routes.json" "$work/logs/bad.log" 127.0.0.1:0 2>"$work/bad.err"; then
+if env -u PROVIDER_KEY "$binary" "$work/config.json" "$work/logs/bad.log" 127.0.0.1:0 2>"$work/bad.err"; then
     fail 'missing provider credential accepted'; fi
 grep -q 'missing credential' "$work/bad.err" || fail "unexpected error: $(cat "$work/bad.err")"
 echo 'ok: missing provider credential refused'
 : >"$work/logs/existing.log"
-if PROVIDER_KEY=x "$binary" "$work/root.json" "$work/routes.json" "$work/logs/existing.log" 127.0.0.1:0 2>"$work/bad.err"; then
+if PROVIDER_KEY=x "$binary" "$work/config.json" "$work/logs/existing.log" 127.0.0.1:0 2>"$work/bad.err"; then
     fail 'existing log path accepted'; fi
 grep -q 'new audit log' "$work/bad.err" || fail "unexpected error: $(cat "$work/bad.err")"
 [[ ! -s "$work/logs/existing.log" ]] || fail 'existing log was modified'
