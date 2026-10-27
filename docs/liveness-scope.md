@@ -20,7 +20,7 @@ checked either way.
 | `body_reader::read_request_head` | `fill_head` strictly grows the buffer and never past `MAX_BYTES`; the parser returns `Incomplete` only below `MAX_BYTES` | A: done, measure `MAX_BYTES - buffer.len()` |
 | `body_reader::read_status_head` | Same | A: done |
 | `body_reader::BodyReader::read` | Buffered half: each `Framing` step consumes one byte, so `buffer.len() - pos` decreases. Refill half: needs a bound on framing bytes the chunked decoder consumes between data steps (chunk-size line and trailers are already size-capped, but the decoder does not expose a budget) | B: needs a decoder ghost budget, no new trust |
-| `shipping_driver::flush` | Each `Some` from `Machine::flush` emits one open exchange; `open_exchanges` should fall by one. Needs that fact in `flush`'s `ensures` | A, after one lemma |
+| `shipping_driver::flush` | Each `Some` from `Machine::flush` evicts one open exchange, and numbering, enqueueing, and settling leave the open count alone | A: done, measure `open_count` |
 | `shipping_driver::pump` | `wants_records` is false once the queue is full or the log ends or fails. A log of unbounded no-op records (bad headers go to `log_failed` and stop it, but admitted records that open nothing do not) is not bounded by the machine | C: needs a finite-log fuel on `Effects::read` |
 | `exchange_driver::final_head` | Loops on 1xx interim heads with no cap | C: either cap interim heads (behavior change, recommended) or assume the upstream eventually sends a final head |
 | `serve_driver::accept_loop` | Exits only on trigger or accept failure. A service loop; termination is the wrong theorem | D: reactive loop |

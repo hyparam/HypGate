@@ -62,6 +62,7 @@ fn settle<E: Effects>(machine: &mut Machine, effects: &mut E, token: crate::ship
         final(machine).counted() == old(machine).counted() + 1, final(machine).emitted() == old(machine).emitted(),
         final(machine).awaiting() == old(machine).awaiting(), final(machine).same_credential(old(machine)),
         final(machine).at_end() == old(machine).at_end(), final(machine).read_failed() == old(machine).read_failed(),
+        final(machine).open_count() == old(machine).open_count(),
 {
     proof { old(machine).valid_bounds(); }
     effects.observe(Event::ExchangeEmitted, machine);
@@ -106,7 +107,6 @@ fn pump<E: Effects>(machine: &mut Machine, effects: &mut E) -> (count: u64)
 
 /// Drain mode: emit every open exchange as incomplete. True while anything
 /// remains to ship.
-#[verifier::exec_allows_no_decreases_clause]
 fn flush<E: Effects>(machine: &mut Machine, effects: &mut E) -> (remaining: bool)
     requires old(machine).valid(), old(machine).outstanding() == 0, old(machine).awaiting().is_none(),
     ensures final(machine).valid(), final(machine).outstanding() == 0, final(machine).awaiting().is_none(),
@@ -114,6 +114,7 @@ fn flush<E: Effects>(machine: &mut Machine, effects: &mut E) -> (remaining: bool
     let mut emitted = false;
     while machine.open_exchanges() > 0 && machine.has_room() && !machine.has_read_failed()
         invariant machine.valid(), machine.outstanding() == 0, machine.awaiting().is_none(),
+        decreases machine.open_count(),
     {
         proof { machine.valid_bounds(); }
         match machine.flush() {

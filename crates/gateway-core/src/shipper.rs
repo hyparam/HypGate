@@ -363,6 +363,7 @@ impl Machine {
             old(self).emissions@ == old(self).emissions@.drop_last().push(exchange.request_id()),
         ensures final(self).valid(), final(self).same_progress(old(self)), final(self).same_credential(old(self)),
             final(self).same_inputs(old(self)), final(self).at_end() == old(self).at_end(),
+            final(self).open_count() == old(self).open_count(),
             match out {
                 Some(t) => t.index() == old(self).emitted() && old(self).emitted() >= old(self).skip()
                     && final(self).emitted() == old(self).emitted() + 1 && t.exchange_value() == exchange
@@ -446,6 +447,7 @@ impl Machine {
             final(self).at_end() == old(self).at_end(),
             final(self).inputs() == old(self).inputs().push((FLUSH, 0)),
             final(self).emissions() == crate::exchange_assembler::emitted_requests(final(self).inputs(), old(self).max_open()),
+            out.is_some() ==> final(self).open_count() + 1 == old(self).open_count(),
             match out {
                 Some(t) => t.index() == old(self).emitted() && old(self).emitted() >= old(self).skip()
                     && final(self).emitted() == old(self).emitted() + 1 && t.exchange_value().is_incomplete()
@@ -486,7 +488,7 @@ impl Machine {
             final(self).skip() == old(self).skip(), final(self).token() == old(self).token(),
             final(self).session() == old(self).session(), final(self).max_open() == old(self).max_open(),
             final(self).max_bytes() == old(self).max_bytes(), final(self).at_end() == old(self).at_end(),
-            final(self).read_failed() == old(self).read_failed(),
+            final(self).read_failed() == old(self).read_failed(), final(self).open_count() == old(self).open_count(),
             out.is_ok() == (token.index() == old(self).counted()),
             out.is_ok() ==> final(self).counted() == old(self).counted() + 1
                 && final(self).history().len() == old(self).history().len() + 1
