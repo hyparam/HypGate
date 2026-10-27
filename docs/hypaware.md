@@ -178,81 +178,25 @@ even if a batch is sent twice, so re-running is safe.
 
 ## Smoke test record
 
-Run on 2026-10-25 from a MacBook against the live providers and HypAware Cloud
-with the two-route configuration above, debug build at commit `f1070a2` plus
-the changes in this commit. The same four requests were sent three times: with
-no `shipping` section, with a CI enrollment token from `hyp remote mint`, and
-with a service-account token. For the CI token, the gateway id printed at mint
-time was the id the shipper enrolled under.
+Live checks on 2026-10-25 and 2026-10-26 exercised Anthropic Messages and OpenAI
+Responses, both JSON and SSE, against the providers and HypAware Cloud.
+The latest recorded release-build run on 2026-10-26 used the threaded server,
+verified exchange driver, socket write drivers, base64url codec, and SHA-256:
 
-| Step | Result, each run |
-| --- | --- |
-| Anthropic Messages, JSON | 200, outcome 0 |
-| Anthropic Messages, SSE stream | 200, outcome 0 |
-| OpenAI Responses, JSON | 200, outcome 0 |
-| OpenAI Responses, SSE stream | 200, outcome 0 |
-| `hypgate scan` | 37 or 38 records, status `complete`, `hypgate_audit_gap_requests_total 0` |
-| Shipping (both token kinds) | `enrolled 1`, 4 exchanges emitted, 4 batches acknowledged, 0 poisoned |
-| Server query (both token kinds) | 8 rows under the gateway id: a user and an assistant row per exchange |
+- Without shipping, all four requests returned 200 with outcome 0 and intact
+  provider bytes. A bad token returned 401, no exchanges failed, and the log
+  scanned complete with 38 records.
+- With a service-account token, the gateway enrolled, emitted one exchange,
+  and had its batch acknowledged before shutdown. The server query returned
+  that exchange's user and assistant rows under the new gateway id.
 
-Response bodies came back byte for byte as the providers sent them, including
-SSE padding. On the server, `provider` was `anthropic` or `openai`, `model` was
-the requested model, `session_id` was the caller id from `metadata.user_id` or
-`user`, and `attributes.usage` carried input, output, and total tokens for all
-four exchanges, streamed or not.
+Earlier checks covered CI enrollment and service-account tokens, preserved
+provider/model/session/usage fields, and `Expect: 100-continue` followed by a
+successful response. Re-uploading a finished four-exchange log after removing
+local identity and checkpoint state left eight server rows rather than sixteen,
+confirming deduplication for that fixture.
 
-The local-only log was then uploaded with `hypgate ship` and a second
-service-account token, twice: once into an empty state directory, then again
-after deleting `identity.json` and `checkpoint.json`. Both runs enrolled under
-the same gateway id and both reported one acknowledged batch; the server holds
-8 rows for those 4 exchanges, not 16, which is the batch ledger doing its job.
-
-Later the same day the gateway's HTTP library was replaced by the verified
-HTTP/1.1 codec ([codec](http1-codec.md)), and the same four requests were run
-again through it, plus a request with `Expect: 100-continue` and a request
-with a bad token: all four exchanges returned 200 with the providers' bytes
-intact, the two refusals were 100-then-200 and 401, the log scanned complete,
-and two exchanges shipped and were acknowledged by HypAware Cloud through the
-new shipping client.
-
-That run also found a bug, fixed in this commit: `hypgate ship` panicked at
-startup with "Cannot start a runtime from within a runtime", because the
-subcommand built the shipper's Tokio runtime on the thread that already ran the
-executable's. It now runs on its own thread, as it does beside the gateway, and
-the executable test covers the subcommand to the end of its drain loop.
-
-On 2026-10-26 the shipping client moved off Tokio entirely: blocking sockets
-and rustls used directly on the shipper's thread, with the request deadline
-enforced by socket timeouts. `hypgate ship` was run again against HypAware
-Cloud with a fresh service-account token and state directory: it enrolled,
-read the smoke log's 32 records into four exchanges, and had the one batch
-acknowledged in about two seconds.
-
-Later on 2026-10-26 the gateway itself followed: Tokio, tokio-util, and
-tokio-rustls left the dependency tree, and the server now runs one thread per
-connection over blocking sockets, with the exchange deadline enforced by
-socket timeouts. The same smoke was run through the threaded server: Anthropic
-and OpenAI, JSON and SSE, all returned 200 with the providers' bytes intact; a
-bad token got 401; a request with `Expect: 100-continue` got its 100 and then
-200; `/metrics` showed no failed exchanges and a healthy log; and the log
-scanned complete with 37 records.
-
-Also on 2026-10-26 the sequencing of each connection moved into the verified
-exchange driver (`gateway_core::exchange_driver`), with the server reduced to
-performing the effects it names. The same smoke was run through the driver:
-Anthropic and OpenAI, JSON and SSE, all 200 with the providers' bytes intact;
-a bad token got 401; `Expect: 100-continue` got its 100 and then 200;
-`/metrics` showed no failed exchanges and a healthy log; the log scanned
-complete.
-
-In the evening of 2026-10-26, after the socket write drivers, the base64url
-codec, and SHA-256 were verified and serde and sha2 left the binary, the smoke
-was run again with the release build. Without shipping: Anthropic and OpenAI,
-JSON and SSE, all 200 with outcome 0; a bad token got 401; no failed
-exchanges; the log scanned complete with 38 records. With shipping to
-HypAware Cloud under a service-account token: the gateway enrolled, which
-means the server's credential passed the stricter base64url decoder (it
-refuses padding inside a segment and leftover bits, which a real JWS never
-has), one exchange was emitted and its batch acknowledged before shutdown,
-and the server query returned the user and assistant rows under the new
-gateway id.
+These are dated integration observations, not evidence that every later change
+has been exercised against live providers. Reproduce setup and row checks with
+the steps above; protocol and trust boundaries are in
+[cloud shipping](cloud-shipping.md).

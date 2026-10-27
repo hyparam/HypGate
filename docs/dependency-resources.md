@@ -1,23 +1,14 @@
 # Dependency resource audit
 
-Source inspection on 2026-10-23 of the versions in Cargo.lock: rustls 0.23.46 and
-tokio-rustls 0.26.6, with the HTTP/1.1 buffers of the gateway's own codec adapter
-added on 2026-10-25. These are trusted implementation facts, not Verus proofs or
-whole-process allocation ceilings. Recheck them on upgrades. The
-[resource inventory](resource-accounting.md) separately accounts for our own
-buffers and the number of live connections and requests.
-
-**Status (2026-10-26).** Tokio, tokio-util, and tokio-rustls are no longer
-linked; the runtime uses rustls directly over blocking sockets, one thread per
-connection, with the exchange deadline enforced by socket timeouts
-([HTTPS transport](https-transport.md)). The rustls sections below still
-describe the linked library and remain the per-exchange TLS allowances, kept as
-upper bounds. The sections on the Tokio async adapters (`ReadLimited`,
-`DrainBeforeWrite`, tokio-rustls `connect_with`, the handshake pool, Tokio's
-DNS and channel storage) describe code that no longer exists; each is marked
-below with what replaced it. There is no per-task or per-future storage left to
-account for; thread stacks take its place
-([dedicated thread stacks](#dedicated-thread-stacks)).
+Source inspection of pinned rustls 0.23.46 began on 2026-10-23; the gateway's
+HTTP/1.1 codec buffers were added on 2026-10-25. The current runtime uses rustls
+directly over blocking sockets, one thread per connection, with exchange
+deadlines enforced by the [TLS adapter](https-transport.md).
+These are trusted implementation facts, not Verus proofs or whole-process
+allocation ceilings. Recheck them on upgrades. The
+[resource inventory](resource-accounting.md) separately accounts for application
+buffers and owner counts; [thread stacks](#dedicated-thread-stacks) are separate
+from the TLS allowances below.
 
 ## HTTP/1 storage
 
@@ -53,8 +44,7 @@ holds four integers and ghost state only.
 Every upstream TLS plaintext read is a `BodyReader` read into its own
 32,768-byte buffer, so no read requests more than that from rustls regardless
 of the destination buffer the body copy offers; inbound reads go straight to
-the TCP socket with the same buffer. (`http_io::ReadLimited`, which imposed
-this bound on the async stream, is gone.)
+the TCP socket with the same buffer.
 
 ### Chunk framing buffers
 
@@ -86,15 +76,12 @@ Error responses the adapter writes itself (`431`, `400`, `503`, `502`, `504`)
 have empty field lists and a `content-length: 0`, so their heads are under 100
 bytes. The `100 Continue` interim response is a 25-byte constant.
 
-### What no longer exists
+### Parsed field storage
 
-There is no parser backing store that grows past the head limit, no header
-vector or `HeaderMap`, no URI, no dequeued-frame retention outside our mailbox,
-and no trailer assembly: trailers are refused by the chunked decoder at the
-first byte of a trailer field. The `Bytes` type and its shared backing owners
-are gone with the dependency, so a small value can no longer pin a large
-parser buffer; every field value is its own `Vec<u8>` copy made by the parser.
-Allocator rounding and `Vec` spare capacity remain outside the logical bounds.
+Every parsed field value owns its `Vec<u8>` copy; small values do not share and
+retain a larger parser buffer. The chunked decoder refuses trailers at the
+first byte of a trailer field. Allocator rounding and `Vec` spare capacity
+remain outside the logical bounds.
 
 ## Upstream TLS storage
 
@@ -357,12 +344,9 @@ into the ciphertext queue. The observed queued length increases by exactly
 81,000 bytes (3,000 times 27), exceeding twice the configured limit.
 
 This is a counterexample to treating the rustls application setting as a total
-ciphertext-queue bound. It is not a production gateway exploit: the fixture
-explicitly schedules reads and writes, without the HTTP adapter or tokio-rustls. The next
-obligation is to establish whether production polling and body backpressure
-permit equivalent repeated interleavings, including empty peer application
-records, or enforce an explicit queue bound at the TLS adapter. The consecutive
-key-update counter alone cannot discharge that obligation.
+ciphertext-queue bound. The fixture schedules reads and writes directly,
+without the production HTTP or TLS adapter; production interleavings require
+a separate argument.
 
 The production transport writes through rustls's blocking `Stream`
 (`StreamOwned`), whose `write` first completes prior I/O: while the connection
@@ -370,8 +354,7 @@ wants to write, it drains `sendable_tls` to the socket before accepting more
 plaintext, and the socket write blocks under the exchange deadline's timeout
 rather than returning pending. A blocked ciphertext drain therefore blocks the
 writing thread instead of letting successive plaintext writes move additional
-replies into the queue, which is what the async adapter's `DrainBeforeWrite`
-wrapper existed to ensure. Reads are a separate blocking call on the same
+replies into the queue. Reads are a separate blocking call on the same
 thread; the transport never reads and writes the TLS stream concurrently, so
 full-duplex progress is not a question here.
 
@@ -380,16 +363,8 @@ the full TLS heap accounting obligation: direct control appends during reads,
 handshake state, record capacities/overhead, and maximum transient allocations
 still need composition.
 
-The async-era test `tls_drain_guard_holds_control_queue_stable_and_resumes_exact_bytes`
-exercised the wrapper around real tokio-rustls TLS 1.3 over loopback TCP, with
-a synthetic write gate below TLS and 3,000 peer key-update/data rounds; it went
-with the wrapper. The blocking `Stream` behavior it relied on is rustls's own
-(`complete_prior_io` in `stream.rs`), re-audited on upgrade like the rest of
-this section.
-Opening the gate delivers the complete original 65,536 bytes followed by the
-new byte, and leaves zero queued ciphertext. This validates the guarded
-interleaving and recovery without depending on OS socket-buffer saturation;
-it does not enumerate all TLS control paths or prove an allocation bound.
+This blocking behavior is a pinned rustls source fact (`complete_prior_io` in
+`stream.rs`), to be re-audited on upgrade.
 
 ### Application-write record subtotal
 
@@ -474,7 +449,7 @@ entire original allocation until `consume` pops that record. Consequently a
 bound on remaining ciphertext bytes needs an additional consumed-prefix
 allowance of up to one original record (conservatively 16,413 bytes for the
 pinned default fragment size and ring suites) when bounding retained record
-allocations. The drain-before-write guard empties old records before new
+allocations. The blocking stream drains old records before new
 application writes, but read-side alerts can still overlap a partly sent front
 record. VecDeque descriptor capacity and replacement overlap depend on the
 maximum simultaneous record count over the whole connection, including its
@@ -501,13 +476,13 @@ Source anchors are `client/tls13.rs::ExpectTraffic`,
 `CommonState::process_alert`, and `ConnectionCore::process_new_packets`.
 In particular, `queue_tls_message` first transfers a pending key-update reply,
 so a fatal alert can add both that reply and its own record while output is
-stalled. The guard does not promise that read polls never grow the output queue.
+stalled. Read-side control processing can still grow the output queue.
 
 The record-layer read sequence soft limit can also call `send_close_notify`
 before decrypting a record (`conn.rs` deframing path). This is another read-side
 control source, even though reaching it is impractical in the fixture.
 Local `send_close_notify` suppresses duplicate close notifications using
-`sent_fatal_alert`; tokio-rustls shutdown invokes it separately from reads.
+`sent_fatal_alert`.
 Automatic traffic-key refresh also has a separate output path:
 `ConnectionCommon::send_plaintext` invokes `maybe_refresh_traffic_keys`, which
 can emit a key-update request between application records. The gateway does not
@@ -634,21 +609,9 @@ their surviving owners; they do not add another copy of message payloads.
 | Audit completion `mpsc` channels | Q + 1 + R | Encoding/queued jobs, sole active worker, and live request receivers |
 | DNS completion `mpsc` channels | 32 + R | Credited lookup jobs or live request receivers after result handoff |
 
-Each HTTP channel now has one Arc-backed mutex state containing an inline
-`Mailbox<Message>`, with no separate slot allocation. The core proves exact
-item identity, full-slot refusal, sender-close preservation, receiver-close
-extraction, and permanent closure of both endpoints. The trusted adapter stores at most
-two registered wakers and non-cloneable sender/receiver endpoints. Cloning and
-retirement occur outside the state lock, as do wake callbacks. Waker replacement
-and wake invocation have bounded temporary handles, separate from the two stored
-slots; underlying task allocations and arbitrary waker implementations remain
-trusted. ABI padding, Arc headers, allocator overhead, and underlying task storage
-must still be distinguished from logical payload size.
-
-The HTTP body channel between worker and connection no longer exists: the
-connection thread copies body bytes straight from the body reader to the
-chunked writer, so there is no queued HTTP payload and no mailbox control
-storage. See the [HTTP lifetime audit](http-buffer-lifetimes.md).
+The connection thread copies body bytes directly from the body reader to the
+chunked writer, so HTTP has no queued payload or mailbox control storage.
+See the [HTTP lifetime audit](http-buffer-lifetimes.md).
 
 The remaining channels are `std::sync::mpsc`: one per disk append carries the
 receipt back to the waiting thread, one per DNS job carries its reply, and one
@@ -662,11 +625,10 @@ counts above include jobs after caller cancellation. DNS delivered address vecto
 likewise belong to waiting requests after lookup credit is returned.
 
 The disk queue also uses a verified fixed FIFO: one Q-slot vector plus a
-mutex/condvar, with no message blocks or permit futures. See
+mutex/condvar. See
 [audit ownership](audit-buffer-lifetimes.md#verified-fixed-queue-and-synchronization-obligations).
 These source-derived object counts still exclude
-private ABI sizes, allocator bookkeeping, transient replacement allocations,
-and task references retained by wakeups.
+private ABI sizes, allocator bookkeeping, and transient replacement allocations.
 
 ## Audit encoding allocation requests
 
