@@ -29,17 +29,13 @@ struct Lease<'a> {
 }
 
 impl Lease<'_> {
-    fn stream(&self) -> &OwnedStream {
-        match self.state.as_ref().expect("live lease") {
-            LeaseState::Streaming(stream) => stream,
-            LeaseState::Reserved(_) => unreachable!("admitted stream"),
-        }
+    /// The admitted stream. A `Request` only ever holds a streaming lease;
+    /// should it not, callers treat the request as closed and failed.
+    fn stream(&self) -> Option<&OwnedStream> {
+        match self.state.as_ref() { Some(LeaseState::Streaming(stream)) => Some(stream), _ => None }
     }
-    fn stream_mut(&mut self) -> &mut OwnedStream {
-        match self.state.as_mut().expect("live lease") {
-            LeaseState::Streaming(stream) => stream,
-            LeaseState::Reserved(_) => unreachable!("admitted stream"),
-        }
+    fn stream_mut(&mut self) -> Option<&mut OwnedStream> {
+        match self.state.as_mut() { Some(LeaseState::Streaming(stream)) => Some(stream), _ => None }
     }
 }
 
@@ -98,7 +94,10 @@ impl Admission {
         let (mut lease, capacity, request_id) = {
             let mut registry = self.registry.lock().map_err(|_| AdmissionError::Unavailable)?;
             let key = registry.acquire().ok_or(AdmissionError::AtCapacity)?;
-            let capacity = registry.capacity(&key).expect("fresh registry key");
+            let Some(capacity) = registry.capacity(&key) else {
+                let _ = registry.release(&key);
+                return Err(AdmissionError::Unavailable);
+            };
             let request_id = key.owner();
             (Lease { admission: self, state: Some(LeaseState::Reserved(key)) }, capacity, request_id)
         };
@@ -107,7 +106,7 @@ impl Admission {
             .ok_or(AdmissionError::Unauthorized)?;
         {
             let registry = self.registry.lock().map_err(|_| AdmissionError::Unavailable)?;
-            let Some(LeaseState::Reserved(key)) = lease.state.take() else { unreachable!("new reservation") };
+            let Some(LeaseState::Reserved(key)) = lease.state.take() else { return Err(AdmissionError::Unavailable) };
             match OwnedStream::claim(&registry, key, &authorized, self.strict) {
                 Ok(stream) => lease.state = Some(LeaseState::Streaming(stream)),
                 Err(key) => {
@@ -133,25 +132,27 @@ impl<'a> Request<'a> {
         value: gateway_core::task_credit::TaskResult<T>) -> Result<T, gateway_core::task_credit::TaskResult<T>>
     {
         let Ok(registry) = self.lease.admission.registry.lock() else { return Err(value); };
-        value.adopt(credit, &registry, self.lease.stream())
+        let Some(owner) = self.lease.stream() else { return Err(value); };
+        value.adopt(credit, &registry, owner)
     }
 
-    fn stream(&self) -> &StreamChunk { self.lease.stream().stream() }
-    fn stream_mut(&mut self) -> &mut OwnedStream { self.lease.stream_mut() }
-    pub(crate) fn owned(&self) -> &OwnedStream { self.lease.stream() }
+    fn stream(&self) -> Option<&StreamChunk> { self.lease.stream().map(OwnedStream::stream) }
+    fn stream_mut(&mut self) -> Option<&mut OwnedStream> { self.lease.stream_mut() }
+    pub(crate) fn owned(&self) -> Option<&OwnedStream> { self.lease.stream() }
     /// The verified owner, its authority, and its journal designation, for the
     /// body-copy machine. The lease keeps ownership; nothing is extracted.
-    pub(crate) fn parts(&mut self) -> (&mut OwnedStream, &AuthorizedRequest<'a>, &mut gateway_core::journal_binding::JournalBinding) {
-        (self.lease.stream_mut(), &self.authorized, &mut self.journal)
+    pub(crate) fn parts(&mut self) -> Option<(&mut OwnedStream, &AuthorizedRequest<'a>, &mut gateway_core::journal_binding::JournalBinding)> {
+        Some((self.lease.stream_mut()?, &self.authorized, &mut self.journal))
     }
     /// The stream this ticket was prepared against, if the ticket is ours.
     fn bound_stream(&self, ticket: &WriteTicket<'_>) -> Option<&OwnedStream> {
-        std::ptr::eq(ticket.admission, self.lease.admission).then(|| self.lease.stream())
+        if std::ptr::eq(ticket.admission, self.lease.admission) { self.lease.stream() } else { None }
     }
     pub fn request_id(&self) -> u64 { self.authorized.request_id() }
     pub fn tenant_id(&self) -> u64 { self.authorized.tenant_id() }
-    pub(crate) fn is_closed(&self) -> bool { self.stream().is_closed() }
-    pub(crate) fn log_failed(&self) -> bool { self.stream().is_failed() }
+    /// A request whose lease is not streaming counts as closed and log-failed.
+    pub(crate) fn is_closed(&self) -> bool { self.stream().is_none_or(StreamChunk::is_closed) }
+    pub(crate) fn log_failed(&self) -> bool { self.stream().is_none_or(StreamChunk::is_failed) }
     #[cfg(test)]
     pub(crate) fn strict(&self) -> bool { self.lease.admission.strict }
 
@@ -159,7 +160,7 @@ impl<'a> Request<'a> {
         // Verus models payload length, not Vec backing capacity. Reject excess
         // spare allocation at the trusted ownership boundary before retaining it.
         if bytes.capacity() > self.capacity { return None; }
-        self.stream_mut().advance(bytes)
+        self.stream_mut()?.advance(bytes)
     }
     /// Bind the logger's result to this request's current immutable chunk.
     /// The logger remains trusted to report actual durability. An abandoned
@@ -175,7 +176,7 @@ impl<'a> Request<'a> {
             return Err(TransferError::InvalidState);
         }
         let direction_id = direction.id();
-        let (header, bytes) = pending.request.stream()
+        let (header, bytes) = pending.request.stream().ok_or(TransferError::InvalidState)?
             .audit_record(&pending.request.authorized, direction_id)
             .ok_or(TransferError::InvalidState)?;
         let chunk = header.chunk;
@@ -189,7 +190,8 @@ impl<'a> Request<'a> {
                 return Err(TransferError::Log);
             }
         };
-        if !pending.request.lease.stream_mut().acknowledge_receipt(&pending.request.authorized, &pending.request.journal, direction_id, &receipt) {
+        let Some(stream) = pending.request.lease.stream_mut() else { return Err(TransferError::InvalidState) };
+        if !stream.acknowledge_receipt(&pending.request.authorized, &pending.request.journal, direction_id, &receipt) {
             return Err(TransferError::InvalidState);
         }
         pending.armed = false;
@@ -238,18 +240,20 @@ impl<'a> Request<'a> {
         Ok(())
     }
     pub fn prepare(&mut self, max: usize, direction: Direction) -> Option<WriteTicket<'a>> {
-        AuthorizedWrite::prepare(self.lease.stream_mut(), &self.authorized, &self.journal, direction.id(), max)
-            .map(|core| WriteTicket { admission: self.lease.admission, core })
+        let admission = self.lease.admission;
+        AuthorizedWrite::prepare(self.lease.stream_mut()?, &self.authorized, &self.journal, direction.id(), max)
+            .map(|core| WriteTicket { admission, core })
     }
     pub fn pending_bytes(&self, ticket: &WriteTicket<'_>, direction: Direction) -> Option<&[u8]> {
         ticket.core.bytes(self.bound_stream(ticket)?, &self.authorized, &self.journal, direction.id())
     }
     pub fn complete(&mut self, ticket: &WriteTicket<'_>, count: usize) -> bool {
         if self.bound_stream(ticket).is_none() { return false; }
-        ticket.core.complete(self.stream_mut(), count)
+        let Some(stream) = self.stream_mut() else { return false };
+        ticket.core.complete(stream, count)
     }
-    pub fn cancel(&mut self) { self.stream_mut().cancel(); }
-    pub fn fail_log(&mut self) { self.stream_mut().fail_log(); }
+    pub fn cancel(&mut self) { if let Some(stream) = self.stream_mut() { stream.cancel(); } }
+    pub fn fail_log(&mut self) { if let Some(stream) = self.stream_mut() { stream.fail_log(); } }
 }
 
 #[cfg(test)]

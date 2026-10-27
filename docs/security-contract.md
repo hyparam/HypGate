@@ -132,7 +132,9 @@ thread performs those requests against the client built from the configured
 server under an `egress::Egress` permit, the same permit type the provider
 transport requires. Every other socket, lookup, listener, file write, and
 secret read in the runtime is denied by `clippy.toml` and the audited sites
-are pinned by `scripts/check_effect_sites.sh`. The token is confined by
+are pinned by `scripts/check_effect_sites.sh`; the same clippy run denies
+unwrap, expect, panic, unreachable, indexing, and unchecked arithmetic in
+the runtime's production code. The token is confined by
 ownership and module structure, not by a process boundary: it is read once at
 startup, moved into the machine, and never placed in the gateway
 configuration, on the request path, or in the log. The shipper has no handle

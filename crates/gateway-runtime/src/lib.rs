@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::disallowed_methods)]
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unreachable, clippy::todo,
+    clippy::unimplemented, clippy::indexing_slicing, clippy::arithmetic_side_effects))]
 //! Trusted runtime ownership around the verified synchronous core. Blocking
 //! sockets and threads only; no executor is linked.
 // Policy binding and request ownership.

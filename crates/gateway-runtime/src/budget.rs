@@ -49,16 +49,17 @@ pub fn compose(limits: Limits) -> Option<Budget> {
     // The audit queue admits metadata payloads up to 8,210 bytes, so its frame
     // bound is A = max(K, 8210); the verified subtotal is instantiated at A.
     let a = k.max(gateway_core::metadata::MAX_PAYLOAD as u64);
-    let visible_payload = (r * k).checked_add(2 * r * 32_768)?
-        .checked_add((c + 2 * r) * 16_384)?
-        .checked_add((q + r + 1).checked_mul(a + 65)?)?
-        .checked_add((r + 1) * 33)?;
+    let visible_payload = r.checked_mul(k)?
+        .checked_add(r.checked_mul(2 * 32_768)?)?
+        .checked_add(c.checked_add(r.checked_mul(2)?)?.checked_mul(16_384)?)?
+        .checked_add(q.checked_add(r)?.checked_add(1)?.checked_mul(a.checked_add(65)?)?)?
+        .checked_add(r.checked_add(1)?.checked_mul(33)?)?;
     let inbound_connections = c.checked_mul(PER_INBOUND_CONNECTION)?;
     let admitted_exchanges = r.checked_mul(PER_ADMITTED_EXCHANGE)?;
-    let instance = (8 * (2 * r + c + POOL_SLOTS)).checked_add(DEDICATED_STACKS)?
+    let instance = r.checked_mul(2)?.checked_add(c)?.checked_add(POOL_SLOTS)?.checked_mul(8)?.checked_add(DEDICATED_STACKS)?
         .checked_add(SESSION_CACHE_CONTENT)?.checked_add(DNS_JOBS)?.checked_add(CONFIGURATION_CONTENT)?
         .checked_add(q.checked_mul(size_of::<QueueSlot>() as u64)?)?
-        .checked_add(webpki_roots::TLS_SERVER_ROOTS.len() as u64 * size_of::<TrustAnchor<'static>>() as u64)?;
+        .checked_add((webpki_roots::TLS_SERVER_ROOTS.len() as u64).checked_mul(size_of::<TrustAnchor<'static>>() as u64)?)?;
     let total = visible_payload.checked_add(inbound_connections)?.checked_add(admitted_exchanges)?.checked_add(instance)?;
     Some(Budget { visible_payload, inbound_connections, admitted_exchanges, instance, total })
 }
@@ -68,11 +69,12 @@ pub fn compose(limits: Limits) -> Option<Budget> {
 /// projected rows it stops filling when full, one scanned record, one batch
 /// under construction plus its copy in the request, and the capped reply.
 pub fn shipping(open_exchanges: usize, exchange_bytes: usize) -> Option<u64> {
-    if open_exchanges == 0 || open_exchanges > 65_536 || exchange_bytes < 4_096 || exchange_bytes > 16 * 1024 * 1024 { return None; }
+    if open_exchanges == 0 || open_exchanges > 65_536 || !(4_096..=16 * 1024 * 1024).contains(&exchange_bytes) { return None; }
     let (open, bytes) = (open_exchanges as u64, exchange_bytes as u64);
     let assembler = open.checked_mul(bytes)?;
-    let queue = open.checked_mul(2 * (bytes + ROW_OVERHEAD))?;
-    Some(SHIPPER_STACK + assembler + queue + SCANNED_RECORD + 2 * BATCH + REPLY)
+    let queue = open.checked_mul(bytes.checked_add(ROW_OVERHEAD)?.checked_mul(2)?)?;
+    SHIPPER_STACK.checked_add(assembler)?.checked_add(queue)?.checked_add(SCANNED_RECORD)?
+        .checked_add(2 * BATCH)?.checked_add(REPLY)
 }
 const SHIPPER_STACK: u64 = 2 * 1024 * 1024;
 const ROW_OVERHEAD: u64 = 16 * 1024; // destination, identifiers, timestamps, usage, JSON syntax

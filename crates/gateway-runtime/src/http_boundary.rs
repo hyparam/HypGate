@@ -47,8 +47,9 @@ impl<'a> PreparedRequest<'a> {
         self.routed.copy_body(reader, writer, log, direction)
     }
     /// The configured destination string exactly as the operator wrote it.
+    #[cfg(test)]
     pub fn destination_text(&self) -> &str { self.routed.destination_text() }
-    pub(crate) fn egress(&self) -> gateway_core::egress::Egress<'_, gateway_core::destination::Parts> { self.routed.egress() }
+    pub(crate) fn egress(&self) -> &gateway_core::egress::Egress<'_, gateway_core::destination::Parts> { self.routed.egress() }
     pub(crate) fn stream(&mut self) -> &mut crate::admission::Request<'a> { self.routed.stream() }
     #[cfg(test)]
     pub(crate) fn upstream_fields(&self) -> &[Field] { &self.upstream.as_ref().expect("upstream head present").fields }

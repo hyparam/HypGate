@@ -8,18 +8,16 @@ mod worker;
 pub(crate) use worker::WorkerHttp;
 
 /// A body source bound to a worker's reader role. Reads pass straight through
-/// to the framed body; the role is released when the reader is dropped.
-pub(crate) struct Reader<B> { body: Option<B>, charge: Option<worker::Charge> }
-impl<B> Reader<B> {
-    pub(crate) fn new(body: B) -> Self { Self { body: Some(body), charge: None } }
-    pub(crate) fn body(&self) -> &B { self.body.as_ref().expect("live reader") }
+/// to the framed body. Fields drop in declaration order, so the body is gone
+/// before the guard releases the role.
+pub(crate) struct Reader<B> {
+    body: B,
+    #[allow(dead_code)] // held for its destructor
+    charge: worker::ChargeGuard,
 }
-impl<B> Drop for Reader<B> {
-    fn drop(&mut self) {
-        drop(self.body.take());
-        if let Some(charge) = self.charge.take() { charge.finish(); }
-    }
+impl<B> Reader<B> {
+    pub(crate) fn body(&self) -> &B { &self.body }
 }
 impl<B: Read> Read for Reader<B> {
-    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> { self.body.as_mut().expect("live reader").read(out) }
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> { self.body.read(out) }
 }

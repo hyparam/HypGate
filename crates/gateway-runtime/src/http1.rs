@@ -48,7 +48,8 @@ impl<R: Read> Source for Wire<R> {
     fn fill(&mut self, buffer: &mut Vec<u8>, max: usize) -> Fill {
         let start = buffer.len();
         buffer.resize(start.saturating_add(max), 0);
-        match read_uninterrupted(&mut self.io, &mut buffer[start..]) {
+        let Some(room) = buffer.get_mut(start..) else { buffer.truncate(start); return Fill::Failed };
+        match read_uninterrupted(&mut self.io, room) {
             Err(e) => { buffer.truncate(start); self.error = Some(e); Fill::Failed }
             Ok(0) => { buffer.truncate(start); Fill::Closed }
             Ok(n) => { buffer.truncate(start.saturating_add(n.min(max))); Fill::Bytes }

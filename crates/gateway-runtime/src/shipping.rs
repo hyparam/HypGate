@@ -7,8 +7,6 @@
 //! request workers; its only inputs are the log path, the server, the token,
 //! and a state directory, and its only outputs are metrics. Failure here never
 //! touches admission or readiness.
-#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unreachable, clippy::todo, clippy::unimplemented,
-    clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 use gateway_core::exchange_assembler::Exchange;
 use gateway_core::framing::Header;
 use gateway_core::shipper::{Credential, Machine, Outcome, Path as ShipPath, Reply as MachineReply, Request};

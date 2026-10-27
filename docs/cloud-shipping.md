@@ -13,9 +13,10 @@ exchange into HypAware rows is verified too (`gateway_core::projection`, see
 [the projection](#the-projection)), reading provider bodies through the
 verified JSON reader and writing rows through the verified writer, with
 timestamps from the verified calendar. The HTTPS client, the state files'
-I/O, and the server's own behavior are trusted and tested; the shipping
-adapters are held to a panic-free standard by clippy denies on unwrap,
-expect, panic, indexing, and unchecked arithmetic. The client runs on the
+I/O, and the server's own behavior are trusted and tested; the whole
+runtime, these adapters included, is held to a panic-free standard by clippy
+denies on unwrap, expect, panic, unreachable, indexing, and unchecked
+arithmetic. The client runs on the
 shipper's own thread with blocking sockets and rustls used directly, no
 executor: one deadline covers connect, handshake, request, and reply,
 enforced by setting the socket timeout to the time left before every read

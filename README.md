@@ -10,8 +10,9 @@ plugins, no other network destinations.
 
 What makes it different: the code that decides what the gateway does is
 proved correct with [Verus](https://github.com/verus-lang/verus). The proofs
-check the core against explicit contracts; the code that talks to the network
-and disk is tested and audited.
+check the core against explicit contracts; the thin code that moves bytes
+between sockets, files, and the core is tested, audited, and lint-checked
+panic-free.
 
 ## Three guarantees
 
@@ -56,10 +57,14 @@ forwarding after the log fails and counts each unrecorded request as a gap.
 ### 3. Core safety and crash recovery
 
 Under its stated preconditions, the verified core cannot panic, overflow, or
-read out of bounds. This is not a process-wide crash guarantee. After a process
-kill, the scanner recovers the valid log prefix under the storage contract.
-Shipping runs on its own thread, so if it fails, the gateway keeps serving
-requests.
+read out of bounds. The runtime around it is lint-checked panic-free: no
+unwrap, expect, panic, unreachable, indexing, or unchecked arithmetic in
+production code, so a bookkeeping fault refuses a request or strands a slot
+instead of crashing. Allocation failure and the internals of the standard
+library and rustls are the remaining ways the process can die; after any
+process kill, the scanner recovers the valid log prefix under the storage
+contract. Shipping runs on its own thread, so if it fails, the gateway keeps
+serving requests.
 
 These are theorems about the verified core, plus a short list of things we
 trust and do not prove: rustls, the OS, DNS, TLS certificates, the
@@ -188,9 +193,9 @@ cargo clippy -p gateway-runtime --locked
 bash scripts/check_effect_sites.sh
 ```
 
-The clippy run enforces the panic-free standard on the cloud-shipping
-adapters (`crates/gateway-runtime/src/shipping`): unwrap, expect, panic,
-indexing, and unchecked arithmetic are denied there. It also denies every
+The clippy run enforces the panic-free standard on the whole runtime crate:
+unwrap, expect, panic, unreachable, indexing, and unchecked arithmetic are
+denied outside tests. It also denies every
 socket, name lookup, listener, file write, and secret read outside the
 audited effect sites (`clippy.toml`); the script fails if that set of sites
 changes.
@@ -207,8 +212,8 @@ cargo test -p gateway-runtime --release --locked server::tests::benchmark -- --i
 LOGGATE_HAPROXY=/path/to/haproxy cargo test -p gateway-runtime --locked proxy_gateway_process_failover -- --ignored --nocapture
 ```
 
-Validation on 2026-10-26: 1375 core verification checks passed, 357 workspace tests passed, all fourteen opt-in benchmark workloads passed on the blocking runtime, all 530
-deliberate mutations failed their proof obligations, and the runtime passed its panic and effect-site
+Validation on 2026-10-26: 1376 core verification checks passed, 363 workspace tests passed, all fourteen opt-in benchmark workloads passed on the blocking runtime, all 539
+deliberate mutations failed their proof obligations, and the runtime passed its panic-free and effect-site
 lints with no async executor linked. The opt-in TLS proxy/gateway
 process-failover test and six load/fault workloads passed on 2026-10-23.
 Two ten-minute overload runs and the final 100-wave-per-mode isolated memory soak

@@ -78,10 +78,15 @@ pub struct GatewayConfig {
 pub struct RoutedRequest<'a> {
     request: Request<'a>,
     resolved: gateway_core::resolved_route::ResolvedRoute<'a, Destination, Credential>,
+    // Read once from `resolved` for this request's authority at admission.
+    destination: &'a Destination,
+    credential: &'a Credential,
+    egress: gateway_core::egress::Egress<'a, Destination>,
 }
 
 /// The verified parts are visible ASCII, so this never fails for a destination
 /// `parse` accepted.
+#[cfg(test)]
 fn ascii(bytes: &[u8]) -> &str { std::str::from_utf8(bytes).expect("verified destination part is ASCII") }
 
 /// Validate a destination with the verified parser and, for a bracketed
@@ -129,7 +134,14 @@ impl GatewayConfig {
         let request = self.admission.admit(&digest, selector)?;
         let resolved = gateway_core::resolved_route::ResolvedRoute::resolve(
             request.authority(), &self.destinations, &self.credentials).ok_or(AdmissionError::Unavailable)?;
-        Ok(RoutedRequest { request, resolved })
+        // Bound here, from the route just resolved for this authority, so the
+        // accessors below are plain field reads.
+        let (Some(destination), Some(credential), Some(egress)) = (
+            resolved.destination(request.authority()),
+            resolved.credential(request.authority()),
+            gateway_core::egress::Egress::provider(&resolved, request.authority()),
+        ) else { return Err(AdmissionError::Unavailable) };
+        Ok(RoutedRequest { request, resolved, destination, credential, egress })
     }
 }
 
@@ -141,15 +153,13 @@ impl<'a> RoutedRequest<'a> {
     }
     pub(crate) fn stream(&mut self) -> &mut Request<'a> { &mut self.request }
     /// The verified parts of the resolved destination.
-    pub fn destination(&self) -> &Destination { self.parts() }
-    fn parts(&self) -> &Destination { self.resolved.destination(self.request.authority()).expect("private request/route binding") }
-    /// The permit a socket may be opened under: the verified core binds it to
-    /// this request's resolved destination and route.
-    pub(crate) fn egress(&self) -> gateway_core::egress::Egress<'_, Destination> {
-        gateway_core::egress::Egress::provider(&self.resolved, self.request.authority()).expect("private request/route binding")
-    }
+    pub fn destination(&self) -> &Destination { self.destination }
+    /// The permit a socket may be opened under: the verified core bound it to
+    /// this request's resolved destination and route at admission.
+    pub(crate) fn egress(&self) -> &gateway_core::egress::Egress<'a, Destination> { &self.egress }
     /// The configured destination string exactly as the operator wrote it.
-    pub fn destination_text(&self) -> &str { ascii(&self.parts().text) }
+    #[cfg(test)]
+    pub fn destination_text(&self) -> &str { ascii(&self.destination.text) }
     /// The request-start record payload, built by the verified core from the
     /// authorized selector and the resolved destination's configured text.
     pub(crate) fn start_record(&self, time_ms: u64) -> Option<Vec<u8>> {
@@ -159,8 +169,7 @@ impl<'a> RoutedRequest<'a> {
     // Only the trusted HTTP boundary may inject provider credentials. The
     // header name and value are the verified assembly's for this credential.
     pub(crate) fn credential_header(&self) -> (&[u8], &[u8]) {
-        let credential = self.resolved.credential(self.request.authority()).expect("private request/route binding");
-        (&credential.name, &credential.value)
+        (&self.credential.name, &self.credential.value)
     }
 }
 

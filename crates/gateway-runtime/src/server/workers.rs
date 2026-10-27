@@ -12,7 +12,7 @@ pub(super) struct WorkerSlots { registry: Arc<Mutex<WorkerRegistry>>, drained: C
 pub(super) struct WorkerLease { slots: Arc<WorkerSlots>, credit: Option<TaskCredit>, http: crate::http_body::WorkerHttp }
 
 impl TaskLease for WorkerLease {
-    fn credit(&mut self) -> &mut TaskCredit { self.credit.as_mut().expect("live worker lease") }
+    fn credit(&mut self) -> Option<&mut TaskCredit> { self.credit.as_mut() }
 }
 
 impl WorkerLease {
@@ -23,8 +23,7 @@ impl Drop for WorkerLease {
     fn drop(&mut self) {
         // Never recover poisoned state just to return credit.
         if let Ok(mut registry) = self.slots.registry.lock() {
-            let credit = self.credit.take().expect("live worker lease");
-            registry.release_task(credit);
+            if let Some(credit) = self.credit.take() { registry.release_task(credit); }
         }
         self.slots.drained.notify_all();
     }

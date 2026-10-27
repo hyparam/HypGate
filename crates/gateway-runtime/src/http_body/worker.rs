@@ -24,50 +24,52 @@ impl WorkerHttp {
     }
     fn reader<B>(&self, body: B, role: usize) -> Option<super::Reader<B>> {
         let charge = self.issue(role)?;
-        let mut reader = super::Reader::new(body);
-        reader.charge = Some(charge);
-        Some(reader)
+        Some(super::Reader { body, charge: ChargeGuard(Some(charge)) })
     }
     /// The writer that frames the request body onto the upstream connection;
     /// the writer comes back when the role is unavailable.
     pub(crate) fn upload_writer<W>(&self, writer: W) -> Result<Charged<W>, W> {
         match self.issue(gateway_core::http_worker::UPLOAD_CHANNEL) {
-            Some(charge) => Ok(Charged { inner: Some(writer), charge: Some(charge) }),
+            Some(charge) => Ok(Charged { inner: writer, charge: ChargeGuard(Some(charge)) }),
             None => Err(writer),
         }
     }
     /// The writer that frames the response body onto the client connection.
     pub(crate) fn response_writer<W>(&self, writer: W) -> Result<Charged<W>, W> {
         match self.issue(gateway_core::http_worker::RESPONSE_WRITER) {
-            Some(charge) => Ok(Charged { inner: Some(writer), charge: Some(charge) }),
+            Some(charge) => Ok(Charged { inner: writer, charge: ChargeGuard(Some(charge)) }),
             None => Err(writer),
         }
     }
 }
-/// A writer holding one worker HTTP role for its lifetime.
-pub(crate) struct Charged<W> { inner: Option<W>, charge: Option<Charge> }
+/// A writer holding one worker HTTP role for its lifetime. Fields drop in
+/// declaration order: the writer first, then the guard releases the role.
+pub(crate) struct Charged<W> {
+    inner: W,
+    #[allow(dead_code)] // held for its destructor
+    charge: ChargeGuard,
+}
 impl<W> Charged<W> {
     /// The wrapped writer; the role is released here.
-    pub(crate) fn into_inner(mut self) -> W {
-        if let Some(charge) = self.charge.take() { charge.finish(); }
-        self.inner.take().expect("live charged writer")
-    }
-}
-impl<W> Drop for Charged<W> {
-    fn drop(&mut self) {
-        drop(self.inner.take());
-        if let Some(charge) = self.charge.take() { charge.finish(); }
-    }
+    pub(crate) fn into_inner(self) -> W { self.inner }
 }
 impl<W: Write> Write for Charged<W> {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> { self.inner.as_mut().expect("live charged writer").write(bytes) }
-    fn flush(&mut self) -> io::Result<()> { self.inner.as_mut().expect("live charged writer").flush() }
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> { self.inner.write(bytes) }
+    fn flush(&mut self) -> io::Result<()> { self.inner.flush() }
+}
+/// Releases its role when dropped. Declared after the stream it charges, so
+/// the stream is gone first.
+pub(super) struct ChargeGuard(Option<Charge>);
+impl Drop for ChargeGuard {
+    fn drop(&mut self) { if let Some(charge) = self.0.take() { charge.finish(); } }
 }
 impl Charge {
-    // No automatic Drop: only an explicit normal-return boundary may finish.
-    pub(super) fn finish(self) {
+    fn finish(self) {
         if let Ok(mut registry) = self.registry.lock() {
-            assert!(registry.finish(self.permit), "HTTP resource belongs to worker");
+            // The permit came from this registry; a refusal here is a
+            // bookkeeping fault that leaves the role occupied (fail closed).
+            let finished = registry.finish(self.permit);
+            debug_assert!(finished, "HTTP resource belongs to worker");
         }
     }
 }

@@ -307,10 +307,10 @@ with what the server already holds.
   (`a_crash_at_any_step_resends_only_the_unacknowledged_exchanges_and_the_server_stores_each_once`).
 
 **Premises.** The storage contract (synced bytes survive); shutting down a
-socket makes a thread blocked on it return; the shipping adapters are panic-free, which clippy
-denies on unwrap, expect, panic, indexing, and unchecked arithmetic enforce
+socket makes a thread blocked on it return; the runtime's production code is panic-free, which clippy
+denies on unwrap, expect, panic, unreachable, indexing, and unchecked arithmetic enforce
 (`cargo clippy -p gateway-runtime`), and the thread boundary contains any
-panic that does occur; the clock is monotone enough for the enrollment
+panic that does occur inside the standard library or rustls; the clock is monotone enough for the enrollment
 windows.
 
 The gateway's own cancellation across threads and whole-process memory are
@@ -350,8 +350,9 @@ documented rather than mechanized; the table below records where.
   parsers, with the canonical-decimal spec.
 - `crates/gateway-core/src/destination.rs`: the destination grammar and the
   extraction of authority, host, port, and path.
-- `crates/gateway-runtime/src/shipping`: the trusted adapters, held to a
-  panic-free standard by clippy and run under `catch_unwind`.
+- `crates/gateway-runtime/src/shipping`: the trusted adapters, run under
+  `catch_unwind`; the whole runtime crate is held to the panic-free standard
+  by clippy.
 
 ## Specific properties proved
 

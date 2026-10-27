@@ -7,7 +7,7 @@ struct Credit { slots: Arc<Mutex<ResourceAdmission>>, state: Option<TaskCredit> 
 impl Drop for Credit {
     fn drop(&mut self) {
         if let Ok(mut slots) = self.slots.lock() {
-            let state = self.state.take().expect("live job credit");
+            let Some(state) = self.state.take() else { return };
             let ready = state.can_release();
             let released = state.release(&mut slots);
             debug_assert_eq!(released, ready, "job credit belongs to its registry");
@@ -27,11 +27,15 @@ impl<T> Reply<T> {
     // directly on the caller's thread, already charged to that request.
     pub(crate) fn direct(value: T) -> Self { Self { value: Some(Payload::Direct(value)), credit: None } }
     pub(crate) fn adopt(mut self, request: &mut crate::admission::Request<'_>) -> io::Result<T> {
-        let value = match self.value.take().expect("owned reply value") {
+        let Some(payload) = self.value.take() else { return Err(io::ErrorKind::BrokenPipe.into()) };
+        let value = match payload {
             Payload::Direct(value) => value,
             Payload::Credited(value) => {
-                let credit = self.credit.as_mut().expect("credited reply source");
-                match request.adopt_background(credit.state.as_mut().expect("live reply credit"), value) {
+                let Some(state) = self.credit.as_mut().and_then(|credit| credit.state.as_mut()) else {
+                    self.value = Some(Payload::Credited(value));
+                    return Err(io::ErrorKind::BrokenPipe.into());
+                };
+                match request.adopt_background(state, value) {
                     Ok(value) => value,
                     Err(value) => {
                         self.value = Some(Payload::Credited(value));
@@ -55,14 +59,18 @@ impl<T> Reply<T> {
 }
 impl<T> Drop for Reply<T> {
     fn drop(&mut self) {
-        if let Some(credit) = self.credit.as_mut() {
-            let state = credit.state.as_mut().expect("live reply credit");
-            let mut cleanup = state.begin_cleanup_with(self.value.take())
-                .unwrap_or_else(|_| panic!("live reply"));
-            drop(cleanup.take());
-            assert!(cleanup.finish(), "reply value destroyed");
-            assert!(state.finish_cleanup_with(&cleanup), "reply cleanup belongs to credit");
-        }
+        let Some(state) = self.credit.as_mut().and_then(|credit| credit.state.as_mut()) else { return };
+        // A credit outside its protocol keeps its slot occupied (fail closed);
+        // the debug assertions make such a fault fail tests.
+        let Ok(mut cleanup) = state.begin_cleanup_with(self.value.take()) else {
+            debug_assert!(false, "live reply");
+            return;
+        };
+        drop(cleanup.take());
+        let finished = cleanup.finish();
+        debug_assert!(finished, "reply value destroyed");
+        let recorded = state.finish_cleanup_with(&cleanup);
+        debug_assert!(recorded, "reply cleanup belongs to credit");
     }
 }
 
@@ -81,7 +89,8 @@ impl<T> Pending<T> {
     pub(crate) fn direct(value: T) -> Self { Self { ready: Some(Reply::direct(value)), receive: None, wanted: Arc::new(AtomicBool::new(true)) } }
     pub(crate) fn wait(mut self, timeout: Duration) -> io::Result<Reply<T>> {
         if let Some(reply) = self.ready.take() { return Ok(reply); }
-        match self.receive.as_ref().expect("queued job").recv_timeout(timeout) {
+        let Some(receive) = self.receive.as_ref() else { return Err(io::Error::other("job lost")) };
+        match receive.recv_timeout(timeout) {
             Ok(result) => result,
             Err(mpsc::RecvTimeoutError::Timeout) => Err(io::ErrorKind::TimedOut.into()),
             Err(mpsc::RecvTimeoutError::Disconnected) => Err(io::Error::other("job lost")),
@@ -95,33 +104,40 @@ pub(crate) struct CreditedJob(Box<dyn Runnable>);
 struct Job<T, F> { work: Option<F>, send: Option<Sender<T>>, credit: Option<Credit> }
 impl<T: Send + 'static, F: FnOnce(&mut Sender<T>) -> Option<io::Result<T>> + Send + 'static> Runnable for Job<T, F> {
     fn run(mut self: Box<Self>) {
-        let work = self.work.take().expect("job runs once");
+        let (Some(work), Some(send)) = (self.work.take(), self.send.as_mut()) else { return };
         // FnOnce destroys its captures before returning or unwinding. Credit
         // remains in this owner throughout a blocked lookup.
-        let result = work(self.send.as_mut().expect("job reply sender"));
+        let result = work(send);
         match result {
             Some(Ok(value)) => {
-                let value = self.credit.as_mut().unwrap().state.as_mut().unwrap().finish_work_with(value)
-                    .unwrap_or_else(|_| panic!("work and captures finished before creating reply"));
+                // A credit outside its protocol sends no reply: the requester
+                // sees the job as lost and the slot stays occupied.
+                let Some(state) = self.credit.as_mut().and_then(|credit| credit.state.as_mut()) else { return };
+                let Ok(value) = state.finish_work_with(value) else {
+                    debug_assert!(false, "work and captures finished before creating reply");
+                    return;
+                };
                 let reply = Reply { value: Some(Payload::Credited(value)), credit: self.credit.take() };
-                self.send.take().unwrap().send(Ok(reply));
+                if let Some(send) = self.send.take() { send.send(Ok(reply)); }
             }
-            Some(Err(error)) => { self.send.take().unwrap().send(Err(error)); }
+            Some(Err(error)) => { if let Some(send) = self.send.take() { send.send(Err(error)); } }
             None => {},
         }
     }
 }
 impl<T, F> Drop for Job<T, F> {
     fn drop(&mut self) {
-        if let Some(credit) = self.credit.as_mut() {
-            let state = credit.state.as_mut().expect("live job credit");
-            let mut cleanup = state.begin_cleanup_with((self.work.take(), self.send.take()))
-                .unwrap_or_else(|_| panic!("live job"));
-            drop(cleanup.take());
-            // A queued capture destructor panic skips this and strands capacity.
-            assert!(cleanup.finish(), "job captures destroyed");
-            assert!(state.finish_cleanup_with(&cleanup), "job cleanup belongs to credit");
-        }
+        let Some(state) = self.credit.as_mut().and_then(|credit| credit.state.as_mut()) else { return };
+        let Ok(mut cleanup) = state.begin_cleanup_with((self.work.take(), self.send.take())) else {
+            debug_assert!(false, "live job");
+            return;
+        };
+        drop(cleanup.take());
+        // A queued capture destructor panic skips this and strands capacity.
+        let finished = cleanup.finish();
+        debug_assert!(finished, "job captures destroyed");
+        let recorded = state.finish_cleanup_with(&cleanup);
+        debug_assert!(recorded, "job cleanup belongs to credit");
     }
 }
 impl CreditedJob {
@@ -130,7 +146,8 @@ impl CreditedJob {
         -> (Self, Pending<T>)
     {
         let mut state = TaskCredit::new(key);
-        assert!(state.start(), "fresh job reservation");
+        let started = state.start();
+        debug_assert!(started, "fresh job reservation");
         let (inner, receive) = mpsc::channel();
         let wanted = Arc::new(AtomicBool::new(true));
         let send = Sender { inner, wanted: wanted.clone() };

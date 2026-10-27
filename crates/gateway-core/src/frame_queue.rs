@@ -69,6 +69,13 @@ impl<T> FrameQueue<T> {
         self.reserved = true;
         true
     }
+    // The adapter gives back a reservation whose record the encoder refused.
+    pub fn cancel_reserved(&mut self)
+        requires old(self).valid(),
+        ensures final(self).valid(), !final(self).reserved(), final(self).items() == old(self).items(),
+            final(self).capacity() == old(self).capacity(), final(self).payload_limit() == old(self).payload_limit(),
+            final(self).closed() == old(self).closed(),
+    { self.reserved = false; }
     // The trusted adapter invokes this once per synchronous reservation, under
     // its mutex. This contract bounds the returned body, not callback multiplicity.
     pub fn encode_reserved(&self, header: crate::framing::Header, payload: &[u8])

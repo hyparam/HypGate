@@ -77,7 +77,7 @@ impl HttpsTransport {
             let reply = pending.wait(deadline.remaining().map_err(|_| ConnectFailure::Timeout)?)
                 .map_err(|e| if timed_out(&e) { ConnectFailure::Timeout } else { ConnectFailure::Resolve })?;
             let addresses = reply.adopt(prepared.stream()).map_err(|_| ConnectFailure::Resolve)?;
-            open_socket(&prepared.egress(), addresses.as_slice(), &deadline)
+            open_socket(prepared.egress(), addresses.as_slice(), &deadline)
                 .map_err(|e| if timed_out(&e) { ConnectFailure::Timeout } else { ConnectFailure::Tcp })?
         };
         // Cancellation shuts this socket down; the blocked operation then fails.

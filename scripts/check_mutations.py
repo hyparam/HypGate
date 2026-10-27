@@ -532,6 +532,7 @@ MUTATIONS = [
     ('config_build.rs', 'build_skips_secret_length_rule', "        if !secret_ok_exec(raw.as_slice(), MAX_CREDENTIAL_BYTES) { return None; }\n", ""),
     ('config_build.rs', 'build_skips_ipv6_rule', "    if parts.authority.len() > 0 && parts.authority[0] == 91 && !crate::ipv6::literal_ok(parts.host.as_slice()) { return None; }\n", ""),
     ('config_build.rs', 'build_bearer_header_misspelt', "            out.push(122); out.push(97); out.push(116); out.push(105); out.push(111); out.push(110);", "            out.push(122); out.push(97); out.push(116); out.push(105); out.push(111); out.push(109);"),
+    ('frame_queue.rs', 'frame_queue_cancel_keeps_reservation', '    { self.reserved = false; }', '    { self.reserved = true; }'),
     ('sha256.rs', 'sha256_round_constant_wrong', '    ensures out == k(t as int),\n{\n    if t == 0 { 0x428a2f98 }', '    ensures out == k(t as int),\n{\n    if t == 0 { 0x428a2f99 }'),
     ('sha256.rs', 'sha256_skips_the_feed_forward', '    Words { a: add_exec(s.a, r.a), b: add_exec(s.b, r.b),', '    Words { a: r.a, b: add_exec(s.b, r.b),'),
     ('sha256.rs', 'sha256_schedule_wrong_tap', '        w.push(add_exec(add_exec(add_exec(s1, w[t - 7]), s0), w[t - 16]));', '        w.push(add_exec(add_exec(add_exec(s1, w[t - 8]), s0), w[t - 16]));'),

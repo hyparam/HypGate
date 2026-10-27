@@ -96,11 +96,12 @@ pub(crate) fn copy_body_bound<R, W, L, D: Sync, C: Sync>(request: &mut Request<'
     writer: &mut W, log: &mut L, direction: Direction, route: Option<&ResolvedRoute<'_, D, C>>) -> Result<BodyCopy, TransferError>
 where R: Read, W: Write, L: AuditLog {
     let mut guard = CancelOnDrop { request, armed: true };
-    let mut copy = BodyCopy::begin(guard.request.owned(), direction.id()).ok_or(TransferError::InvalidState)?;
+    let owner = guard.request.owned().ok_or(TransferError::InvalidState)?;
+    let mut copy = BodyCopy::begin(owner, direction.id()).ok_or(TransferError::InvalidState)?;
     loop {
         match copy.next() {
             Action::Read => {
-                let (stream, _, _) = guard.request.parts();
+                let Some((stream, _, _)) = guard.request.parts() else { return Err(TransferError::InvalidState) };
                 if copy.begin_read(stream) {
                     let length = read_uninterrupted(reader, copy.read_buffer(stream)).ok();
                     copy.finish_read(stream, length);
@@ -108,7 +109,7 @@ where R: Read, W: Write, L: AuditLog {
             }
             Action::Audit => {
                 let session = log.session_id();
-                let (stream, authority, journal) = guard.request.parts();
+                let Some((stream, authority, journal)) = guard.request.parts() else { return Err(TransferError::InvalidState) };
                 if let Some((header, bytes)) = copy.audit_record(stream, authority, journal, session) {
                     let record = LogRecord { tenant: header.tenant, request: header.request, chunk: header.chunk,
                         kind: direction.into(), bytes };
@@ -117,7 +118,7 @@ where R: Read, W: Write, L: AuditLog {
                 }
             }
             Action::Write => {
-                let (stream, authority, journal) = guard.request.parts();
+                let Some((stream, authority, journal)) = guard.request.parts() else { return Err(TransferError::InvalidState) };
                 if let Some((write, bytes)) = copy.write_bytes(stream, authority, journal, route) {
                     let count = write_uninterrupted(writer, bytes).ok();
                     copy.finish_write(stream, &write, count);
@@ -125,7 +126,7 @@ where R: Read, W: Write, L: AuditLog {
             }
             Action::Flush => {
                 let ok = writer.flush().is_ok();
-                let (stream, _, _) = guard.request.parts();
+                let Some((stream, _, _)) = guard.request.parts() else { return Err(TransferError::InvalidState) };
                 copy.finish_flush(stream, ok);
             }
             Action::Done => { guard.armed = false; return Ok(copy); }

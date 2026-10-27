@@ -11,12 +11,13 @@ pub(super) struct Queue { state: Mutex<FrameQueue<Completion>>, ready: Condvar, 
 // constructing a second record through the same queue reservation.
 struct EncodingPermit<'a> { state: &'a FrameQueue<Completion> }
 impl EncodingPermit<'_> {
-    fn encode(self, record: LogRecord<'_>) -> (Job, mpsc::Receiver<Option<DurableFrame>>) {
-        let body = self.state.encode_reserved(super::record_header(&record), record.bytes)
-            .expect("validated reserved audit record");
+    /// `None` when the verified encoder refuses the record (over the payload
+    /// limit or an invalid header); the caller then gives the reservation back.
+    fn encode(self, record: LogRecord<'_>) -> Option<(Job, mpsc::Receiver<Option<DurableFrame>>)> {
+        let body = self.state.encode_reserved(super::record_header(&record), record.bytes)?;
         let frame = super::seal_record(body);
         let (done, receive) = mpsc::channel();
-        ((frame, Completion(done)), receive)
+        Some(((frame, Completion(done)), receive))
     }
 }
 
@@ -51,29 +52,33 @@ impl Queue {
         }
         let mut receive = None;
         Self::insert(&mut state, &self.space, &self.ready, |permit| {
-            let (job, completion) = permit.encode(record);
+            let (job, completion) = permit.encode(record)?;
             receive = Some(completion);
-            job
+            Some(job)
         })?;
-        Ok(receive.expect("successful insertion constructed a receipt"))
+        receive.ok_or_else(|| io::Error::from(io::ErrorKind::BrokenPipe))
     }
     /// One attempt without waiting: `WouldBlock` when full.
     #[cfg(test)]
-    fn push_with(&self, make: impl FnOnce(EncodingPermit<'_>) -> Job) -> io::Result<()> {
+    fn push_with(&self, make: impl FnOnce(EncodingPermit<'_>) -> Option<Job>) -> io::Result<()> {
         let _wake = WakeOnDrop(&self.ready);
         let mut state = self.state.lock().map_err(|_| io::ErrorKind::BrokenPipe)?;
         if state.is_closed() { return Err(io::ErrorKind::BrokenPipe.into()); }
         Self::insert(&mut state, &self.space, &self.ready, make)
     }
     fn insert(state: &mut MutexGuard<'_, FrameQueue<Completion>>, space: &Condvar, ready: &Condvar,
-        make: impl FnOnce(EncodingPermit<'_>) -> Job) -> io::Result<()>
+        make: impl FnOnce(EncodingPermit<'_>) -> Option<Job>) -> io::Result<()>
     {
         // The verified reservation decides; a bookkeeping fault refuses rather than overfills.
         if !state.reserve() { return Err(io::ErrorKind::WouldBlock.into()); }
         // Capacity is reserved before allocating the frame, under the same lock
         // as insertion and shutdown. A panic leaves the reservation charged
         // in poisoned state, which is never recovered for new admission.
-        let job = make(EncodingPermit { state });
+        // A refused record gives its reservation back and is reported, not queued.
+        let Some(job) = make(EncodingPermit { state }) else {
+            state.cancel_reserved();
+            return Err(io::ErrorKind::InvalidInput.into());
+        };
         if state.finish_reserved(job).is_err() {
             state.close();
             space.notify_all();
@@ -235,7 +240,7 @@ mod tests {
     #[test]
     fn full_and_closed_queues_never_construct_rejected_jobs_and_close_drains() {
         let queue = Queue::new(1);
-        queue.push_with(|_| job(1)).unwrap();
+        queue.push_with(|_| Some(job(1))).unwrap();
         assert_eq!(queue.push_with(|_| panic!("full queue allocated a job")).unwrap_err().kind(), io::ErrorKind::WouldBlock);
         queue.close();
         assert_eq!(queue.push_with(|_| panic!("closed queue allocated a job")).unwrap_err().kind(), io::ErrorKind::BrokenPipe);
@@ -246,7 +251,7 @@ mod tests {
     fn worker_exit_discards_queued_receipt_senders() {
         let queue = Queue::new(1);
         let (done, receive) = mpsc::channel();
-        queue.push_with(|_| { let (frame, _) = job(1); (frame, Completion(done)) }).unwrap();
+        queue.push_with(|_| { let (frame, _) = job(1); Some((frame, Completion(done))) }).unwrap();
         queue.abort();
         assert!(receive.recv().is_err());
         assert!(queue.recv_raw_for_test().is_none()); assert_eq!(queue.len(), 0);
@@ -259,7 +264,7 @@ mod tests {
         let (release, wait) = mpsc::channel();
         let producer_queue = queue.clone();
         let producer = std::thread::spawn(move || producer_queue.push_with(|_| {
-            entered.send(()).unwrap(); wait.recv().unwrap(); job(1)
+            entered.send(()).unwrap(); wait.recv().unwrap(); Some(job(1))
         }));
         inside.recv_timeout(Duration::from_secs(2)).unwrap();
         let (closing, started) = mpsc::channel();

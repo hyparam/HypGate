@@ -373,7 +373,7 @@ impl serve_driver::Effects for ServeEffects {
     fn close_workers(&mut self) { self.app.worker_slots.close(); }
     fn wait_drained(&mut self, _window: Window) -> bool {
         // One shared window covers connections and workers from all listeners.
-        let end = Instant::now() + DRAIN_WINDOW;
+        let Some(end) = Instant::now().checked_add(DRAIN_WINDOW) else { return false };
         self.slots.wait_drained(end) && self.app.worker_slots.wait_drained(end)
     }
     fn cancel_live(&mut self) { self.app.cancel_live(); }

@@ -9,14 +9,13 @@ pub(super) struct ConnectionSlots { registry: Mutex<ResourceAdmission>, drained:
 pub(super) struct ConnectionLease { slots: Arc<ConnectionSlots>, credit: Option<TaskCredit> }
 
 impl TaskLease for ConnectionLease {
-    fn credit(&mut self) -> &mut TaskCredit { self.credit.as_mut().expect("live connection lease") }
+    fn credit(&mut self) -> Option<&mut TaskCredit> { self.credit.as_mut() }
 }
 impl Drop for ConnectionLease {
     fn drop(&mut self) {
         if let Ok(mut registry) = self.slots.registry.lock() {
-            let credit = self.credit.take().expect("live connection lease");
             // A credit still running (the work panicked) is not releasable and stays occupied.
-            credit.release(&mut registry);
+            if let Some(credit) = self.credit.take() { credit.release(&mut registry); }
         }
         self.slots.drained.notify_all();
     }

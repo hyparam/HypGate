@@ -1,4 +1,6 @@
 #![deny(clippy::disallowed_methods)]
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unreachable, clippy::todo,
+    clippy::unimplemented, clippy::indexing_slicing, clippy::arithmetic_side_effects))]
 #![deny(unsafe_code)]
 mod cli;
 mod scan;

@@ -141,10 +141,10 @@ impl DiskLog {
             return Err(io::ErrorKind::InvalidInput.into());
         }
         self.queue.0.close();
-        let end = Instant::now() + deadline;
+        let start = Instant::now();
         loop {
             {
-                let mut thread = self.thread.lock().unwrap();
+                let mut thread = self.thread.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 if thread.as_ref().is_none_or(|thread| thread.is_finished()) {
                     if let Some(thread) = thread.take() {
                         if thread.join().is_err() {
@@ -155,7 +155,7 @@ impl DiskLog {
                     return Ok(());
                 }
             }
-            if Instant::now() >= end {
+            if start.elapsed() >= deadline {
                 self.healthy.store(false, Ordering::Release);
                 return Err(io::ErrorKind::TimedOut.into());
             }
@@ -289,11 +289,13 @@ struct ReadSource<R: Read> { reader: R }
 impl<R: Read> gateway_core::recovery::Source for ReadSource<R> {
     fn read_exact(&mut self, length: usize) -> Result<Vec<u8>, gateway_core::recovery::ReadError> {
         use gateway_core::recovery::ReadError;
-        let mut bytes = vec![0; length]; let mut filled = 0;
+        let mut bytes = vec![0; length]; let mut filled = 0usize;
         while filled < length {
-            match self.reader.read(&mut bytes[filled..]) {
+            let Some(room) = bytes.get_mut(filled..) else { return Err(ReadError::Io) };
+            let available = room.len();
+            match self.reader.read(room) {
                 Ok(0) => return Err(if filled == 0 { ReadError::Eof } else { ReadError::Incomplete }),
-                Ok(count) => filled += count,
+                Ok(count) => filled = filled.saturating_add(count.min(available)),
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                 Err(_) => return Err(ReadError::Io),
             }
