@@ -9,7 +9,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-expected='crates/gateway-runtime/src/disk_log.rs:create_with_payload_limit
+expected='crates/gateway-runtime/src/disk_log/rotation.rs:create_segment
 crates/gateway-runtime/src/main.rs:bind
 crates/gateway-runtime/src/main.rs:secret
 crates/gateway-runtime/src/server.rs:wake_accept

@@ -4,8 +4,8 @@ use vstd::prelude::*;
 use crate::{audit_journal::AuditJournal, frame_queue::FrameQueue, framing::RecordFrame, journal::DurableFrame};
 
 verus! {
-// The implementation owns one file, initialized with its session header. These
-// histories model subsequent record bytes. Failed writes may leave a partial
+// The implementation owns one logical journal, initialized with its session
+// header (or headers for rotated segments). These histories model record bytes. Failed writes may leave a partial
 // suffix; the journal then fails permanently and performs no further writes.
 pub trait Storage {
     spec fn valid(&self) -> bool;

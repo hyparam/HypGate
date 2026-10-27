@@ -39,6 +39,16 @@ pub trait Source: Sized {
         ensures ok == (Self::digest(header@ + payload@) == checksum@);
 }
 
+/// A snapshot source that can seek within its immutable bytes. Filesystem seek
+/// and snapshot acquisition remain trusted effects; recovery chooses the offset.
+pub trait SeekSource: Source {
+    fn seek(&mut self, offset: u64) -> (ok: bool)
+        requires old(self).valid(),
+        ensures final(self).valid(), final(self).data() == old(self).data(),
+            final(self).io_errors() == old(self).io_errors(),
+            ok ==> final(self).position() == offset && offset <= final(self).data().len();
+}
+
 pub open spec fn complete_record<R: Source>(data: Seq<u8>, start: nat) -> bool {
     start + 33 <= data.len() && match framing::decoded(data.subrange(start as int, start as int + 33)) {
         Some(h) => {
@@ -91,7 +101,7 @@ proof fn lemma_prefix_of_sum<T>(a: Seq<T>, b: Seq<T>, c: Seq<T>)
 
 /// A record complete in a file stays complete, with the same contents, in any
 /// extension of that file.
-proof fn lemma_complete_extends<R: Source>(data: Seq<u8>, longer: Seq<u8>, start: nat)
+pub proof fn lemma_complete_extends<R: Source>(data: Seq<u8>, longer: Seq<u8>, start: nat)
     requires data.is_prefix_of(longer), complete_record::<R>(data, start),
     ensures complete_record::<R>(longer, start), record_end(longer, start) == record_end(data, start),
         record_at(longer, start) == record_at(data, start),
@@ -312,7 +322,7 @@ impl<R: Source> Scanner<R> {
     pub fn new(mut source: R) -> (out: Result<Self, ScanError>)
         requires source.valid(), source.position() == 0,
         ensures match out {
-            Ok(scanner) => scanner.valid() && scanner.position() == 56 && !scanner.stopped()
+            Ok(scanner) => scanner.valid() && scanner.position() == 56 && !scanner.stopped() && scanner.data().len() >= 56
                 && scanner.start() == 56 && scanner.emitted() == Seq::<(framing::Header, Seq<u8>)>::empty()
                 && scanner.data() == source.data()
                 && scanner.data().subrange(0, 24) == framing::session_encoding(scanner.session_id()@)
@@ -439,4 +449,20 @@ impl<R: Source> Scanner<R> {
         }
     }
 }
+impl<R: SeekSource> Scanner<R> {
+    /// Reuse a checked header while resuming at a previously emitted boundary.
+    pub fn restart(mut self, offset: u64) -> (out: Result<Self, ScanError>)
+        requires self.valid(), offset >= 56,
+        ensures match out {
+            Ok(scanner) => scanner.valid() && !scanner.stopped() && scanner.position() == offset
+                && scanner.data() == self.data() && scanner.session_id() == self.session_id()
+                && scanner.start() == offset && scanner.emitted() == Seq::<(framing::Header, Seq<u8>)>::empty(),
+            Err(_) => true,
+        },
+    {
+        if !self.source.seek(offset) { return Err(ScanError::Io); }
+        Ok(Scanner::resume(self.source, self.session, offset))
+    }
+}
+
 }

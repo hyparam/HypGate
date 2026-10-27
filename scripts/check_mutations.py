@@ -22,6 +22,31 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("session_recovery.rs", "session_recovery_skips_sealed_recheck",
+        "// closes the race between an earlier snapshot EOF and rotation.\n            match self.read_current()",
+        "// closes the race between an earlier snapshot EOF and rotation.\n            match Ok::<Option<RecoveredRecord>, ScanError>(None)"),
+    ("session_recovery.rs", "session_recovery_accepts_foreign_successor",
+        "if candidate.session() != self.session", "if false"),
+    ("session_recovery.rs", "session_recovery_accepts_replaced_current",
+        "if scanner.session() != self.session", "if false"),
+    ("session_recovery.rs", "session_recovery_restarts_at_header",
+        "scanner.restart(self.offset)", "scanner.restart(56)"),
+    ("session_recovery.rs", "session_recovery_repeats_cursor",
+        "self.offset = scanner.offset();", "self.offset = self.offset;"),
+    ("session_recovery.rs", "session_recovery_skips_first_record_in_successor",
+        "self.index = next;\n            self.offset = 56;", "self.index = next;\n            self.offset = 124;"),
+    ("session_recovery.rs", "session_recovery_returns_false_eof",
+        "let out = scanner.next_record();", "let out: Result<Option<RecoveredRecord>, ScanError> = Ok(None);"),
+    ("session_recovery.rs", "session_recovery_retries_terminal_errors",
+        "if self.failed { return Ok(None); }", "if false { return Ok(None); }"),
+
+    ("log_rotation.rs", "rotation_ignores_age", "length > limit - used || expired", "length > limit - used"),
+    ("log_rotation.rs", "rotation_splits_empty_segment", "used > 56 && (used > limit", "used >= 56 && (used > limit"),
+    ("log_rotation.rs", "rotation_skips_append", "if !self.io.append(bytes)", "if false"),
+    ("log_rotation.rs", "rotation_skips_sync", "let ok = self.io.sync();", "let ok = true;"),
+    ("log_rotation.rs", "rotation_reuses_index", "let next = self.index + 1;", "let next = self.index;"),
+    ("log_rotation.rs", "rotation_ignores_create_failure", "if !self.io.create_next(self.session, next)", "if false"),
+
     ("deadline.rs", "deadline_renews_budget", "Some(end - now)", "Some(end)"),
     ("deadline.rs", "deadline_accepts_late_completion", "if finish < end { Some(result) } else { None }", "Some(result)"),
     ("deadline.rs", "deadline_skips_io", "let result = io.perform(budget);", "return None; let result = io.perform(budget);"),

@@ -181,6 +181,12 @@ Operations:
 | [Benchmarks](docs/benchmarks.md) | Latency, throughput, overload, and memory measurements |
 | [JSON reader and writer](docs/json.md) | The verified reader for configuration, state, and provider bodies and the verified writer for state, rows, and scan output: what is proved and what is not |
 
+Audit logs rotate automatically at 128 MiB or 24 hours, on the next record.
+Use `--log-max-bytes N` and `--log-max-age-seconds N` after the serving arguments
+to override the defaults. Numbered files retain one session identity; `scan` and
+`ship` follow them from the original path. Rotation never deletes logs. See
+[rotation](docs/disk-logging.md#automatic-rotation) and [retention](docs/retention.md).
+
 ## Development
 
 The production core lives in `crates/gateway-core`. Cargo builds and Verus checks
@@ -216,7 +222,13 @@ cargo test -p gateway-runtime --release --locked server::tests::benchmark -- --i
 HYPGATE_HAPROXY=/path/to/haproxy cargo test -p gateway-runtime --locked proxy_gateway_process_failover -- --ignored --nocapture
 ```
 
-Validation on 2026-10-26: 1376 core verification checks passed, 363 workspace tests passed, all fourteen opt-in benchmark workloads passed on the blocking runtime, all 539
+Rotation and recovery validation after rebase on 2026-10-26: 1400 core verification
+checks passed, 387 workspace tests passed (21 opt-in tests ignored), all six rotation
+and seventeen recovery mutations were rejected by proof, and the eight pinned
+effect sites passed their check. The Linux storage and deployment workloads were
+not rerun for this change.
+
+Previous baseline validation on 2026-10-26: 1376 core verification checks passed, 363 workspace tests passed, all fourteen opt-in benchmark workloads passed on the blocking runtime, all 539
 deliberate mutations failed their proof obligations, and the runtime passed its panic-free and effect-site
 lints with no async executor linked. The opt-in TLS proxy/gateway
 process-failover test and six load/fault workloads passed on 2026-10-23.

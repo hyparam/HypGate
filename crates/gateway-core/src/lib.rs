@@ -46,6 +46,8 @@ pub mod resource;
 pub mod fixed_queue;
 pub mod frame_queue;
 pub mod disk_worker;
+pub mod log_rotation;
+pub mod session_recovery;
 pub mod drain;
 pub mod task_credit;
 pub mod mailbox;
@@ -143,3 +145,9 @@ mod sha256_tests;
 #[cfg(test)]
 #[path = "tests/config_build.rs"]
 mod config_build_tests;
+#[cfg(test)]
+#[path = "tests/log_rotation.rs"]
+mod log_rotation_tests;
+#[cfg(test)]
+#[path = "tests/session_recovery.rs"]
+mod session_recovery_tests;

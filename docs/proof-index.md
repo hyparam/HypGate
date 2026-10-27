@@ -163,3 +163,27 @@ rank to worker ownership, shared-listener admission closure, cancellation, and
 logger timeout. Eventual scheduling, finite synchronous calls/destructors, lock
 progress, and timer behavior remain explicit assumptions; this is not a formal
 verification of the thread scheduler or a hard wall-clock deadline.
+
+## Log rotation
+
+`log_rotation::RotatingStorage` implements the existing verified disk worker's
+`Storage` contract over `SegmentIo`: successful writes extend the logical history
+by exactly the offered bytes, rotation preserves earlier history and session,
+indices advance one at a time, and successful sync covers that history. Its
+size policy uses overflow-safe remaining-space comparisons and permits one intact
+oversized frame per otherwise empty segment. Failure is permanent. Six deliberate
+rotation mutations guard the size/age policy, append, sync, index, and creation
+failure checks. Filesystem durability and mapping segments to logical history
+remain explicit assumptions.
+
+`session_recovery::SessionScanner::{next_record,recovered_prefix,recovered_to_end}`
+composes the actual `recovery::Scanner` across files. The emitted sequence is the
+exact ordered prefix of the recoverable records; every crossed segment has a
+matching checked header and a complete tail. A cursor advances only by a decoded
+record extent or from a sealed predecessor's clean end to byte 56 of its immediate
+successor. The driver refreshes the predecessor after successor discovery to
+close the EOF/rotation race. Eight deliberate mutations guard the handoff,
+session checks, resume offsets, emission, and terminal errors. `Files` and
+`SeekSource` supply trusted bounded snapshots and seeks; they do not parse or
+choose the next file. See [recovery](recovery-proof.md#rotated-session-composition)
+and [disk logging](disk-logging.md#automatic-rotation).

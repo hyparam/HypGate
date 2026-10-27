@@ -116,3 +116,59 @@ adapter implementation remain trusted. This is not an initial-open or scheduling
 liveness theorem, power-loss certification, or protection against malicious log
 rewriting. Linux ext4 validation and the evidence summary are recorded in the
 [storage contract](storage-crash-contract.md#evidence-summary).
+
+## Rotated-session composition
+
+`gateway_core::session_recovery::SessionScanner` is the production driver used
+by `SessionReader`, `scan`, and both shipping modes. It owns the existing verified
+`recovery::Scanner`, all file-selection decisions, header/session comparisons,
+resume offsets, retries, and terminal failure state. The runtime only opens the
+specified path, captures its descriptor length, reads within that snapshot,
+seeks to the specified offset, and converts the resulting record type. There is
+no parallel Rust implementation of the traversal algorithm.
+
+The model gives each segment immutable eventual contents. An opened snapshot is
+a prefix of those contents; future appends do not change earlier bytes. `Files`
+records which segments have been observed. Once the successor with the matching
+checksummed header has been observed, reopening its predecessor returns that
+predecessor's complete sealed contents. A mere foreign file or filename collision
+does not meet this condition. This is the explicit correspondence assumption
+between filesystem effects and the writer's protocol, not an assumption that
+the reader already recovered the right records. `SeekSource` reports whether a
+seek succeeded within the snapshot. `Scanner::restart` preserves the validated
+session and constructs a fresh scanner at the core-selected record boundary.
+
+Three inductive invariants establish the composition:
+
+- The emitted sequence plus records remaining at the current cursor equals all
+  recoverable records in preceding files plus the current file's records.
+- The current offset is reachable from byte 56 solely by consuming complete,
+  checksummed records. Each crossed file has a matching checked session header
+  and its scanner stop equals its physical end; no damaged tail can be skipped.
+- A retained scanner is live, at exactly the saved offset, under the same session,
+  over a prefix snapshot of the selected file.
+
+`next_record` extends the emitted sequence by exactly the returned header and
+payload, or leaves it unchanged. `recovered_prefix` derives the ordered-prefix
+property and the completeness of every crossed file. `recovered_to_end` derives
+complete recovery through the current file when the cursor reaches its actual
+end. Both theorems apply to the same struct and methods the runtime executes;
+proof histories are erased and retain no prior records in memory.
+
+At snapshot EOF the driver opens only the immediately numbered successor and
+validates its header. It then reopens and rechecks the predecessor before crossing.
+Without that recheck, a writer could append its final record between the earlier
+EOF and discovery of the successor. If the refreshed predecessor yields a record,
+it is returned first; if it has a damaged tail, the driver stays there. Only a
+clean EOF in the sealed snapshot permits advancing to byte 56 of the successor.
+Incomplete tails and next headers can be retried without moving the saved cursor.
+Corruption or I/O failure permanently stops all later effects, including opens.
+
+Tests rotate at the exact successor-open boundary, cover every truncation of a
+sample trailing record and successor header, and check foreign sessions, corrupt
+tails, I/O failures, empty segments, live growth, shipping replay, and real-file
+snapshot refresh. Eight deliberate defects must fail verification, including
+omitting the sealed-predecessor recheck and restarting from the wrong offset.
+Filesystem truthfulness, immutable earlier bytes, session uniqueness, and the
+writer's seal protocol remain assumptions. A missing successor is EOF, so no
+claim is made that an operator has not removed a file; there is no manifest.

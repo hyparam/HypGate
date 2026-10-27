@@ -2,11 +2,13 @@
 //! not verified. A single worker owns the file; requests never choose its path.
 use crate::transfer::{AuditLog, Direction, LogRecord, RecordKind};
 use gateway_core::{audit_journal::AuditJournal as Journal, journal::DurableFrame};
-use gateway_core::framing::{self, Header, RecordBody, RecordFrame};
+use gateway_core::framing::{Header, RecordBody, RecordFrame};
 use gateway_core::sha256;
-use std::{fs::{File, OpenOptions}, io::{self, Read, Write}, path::Path,
+use std::{fs::File, io::{self, Read, Write}, path::Path,
     sync::{Arc, Mutex, mpsc, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
 mod queue;
+mod rotation;
+pub use rotation::{Rotation, SessionReader};
 use queue::Queue;
 
 #[cfg(test)]
@@ -73,8 +75,6 @@ impl DiskLog {
     }
 
     /// Enforce the gateway's chunk budget before encoding any audit payload.
-    // Effect site: the audit log file, created new at the operator's path.
-    #[allow(clippy::disallowed_methods)]
     pub fn create_with_payload_limit(path: &Path, queue_capacity: usize, deadline: Duration, payload_limit: usize) -> io::Result<Self> {
         if payload_limit == 0 || payload_limit > MAX_RECORD_BYTES
             || queue_capacity == 0 || queue_capacity > 1024 || deadline.is_zero()
@@ -83,21 +83,25 @@ impl DiskLog {
         }
         let mut session = [0u8; 16];
         getrandom::fill(&mut session).map_err(|_| io::ErrorKind::Other)?;
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)] {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(path)?;
-        let mut header = framing::encode_session(&session);
-        let checksum = sha256::digest(&header);
-        header.extend_from_slice(&checksum);
-        file.write_all(&header)?;
-        file.sync_all()?;
-        let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
-        File::open(parent)?.sync_all()?;
+        let file = rotation::create_segment(path, &session)?;
         Self::start_limited(file, queue_capacity, deadline, session, payload_limit)
+    }
+
+    /// Create a logical journal split into numbered files by the same worker.
+    pub fn create_rotating(path: &Path, queue_capacity: usize, deadline: Duration,
+        payload_limit: usize, rotation: Rotation) -> io::Result<Self>
+    {
+        rotation.validate()?;
+        if payload_limit == 0 || payload_limit > MAX_RECORD_BYTES
+            || queue_capacity == 0 || queue_capacity > 1024 || deadline.is_zero()
+            || deadline > Duration::from_secs(300) {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        let mut session = [0u8; 16];
+        getrandom::fill(&mut session).map_err(|_| io::ErrorKind::Other)?;
+        let file = rotation::RotatingFile::create(path, session, rotation)?;
+        let storage = gateway_core::log_rotation::RotatingStorage::new(file, u128::from_le_bytes(session), rotation.max_bytes);
+        Self::start_storage(storage, queue_capacity, deadline, session, payload_limit)
     }
 
     #[cfg(test)]
@@ -106,6 +110,12 @@ impl DiskLog {
     }
 
     fn start_limited<W: DurableWrite>(file: W, capacity: usize, deadline: Duration, session: [u8; 16], payload_limit: usize) -> io::Result<Self> {
+        Self::start_storage(Storage(file), capacity, deadline, session, payload_limit)
+    }
+
+    fn start_storage<S: gateway_core::disk_worker::Storage + Send + 'static>(mut storage: S, capacity: usize,
+        deadline: Duration, session: [u8; 16], payload_limit: usize) -> io::Result<Self>
+    {
         if payload_limit == 0 || payload_limit > MAX_RECORD_BYTES || capacity == 0 || capacity > 1024 { return Err(io::ErrorKind::InvalidInput.into()); }
         let queue = Arc::new(Queue::with_payload_limit(capacity, payload_limit));
         let receiver = queue.clone();
@@ -114,7 +124,6 @@ impl DiskLog {
         let thread = std::thread::Builder::new().name("hypgate-audit".into()).stack_size(WORKER_STACK_BYTES).spawn(move || {
             let _health_on_exit = UnhealthyOnExit(worker_health.clone(), receiver.clone());
             let mut journal = Journal::new(u128::from_le_bytes(session));
-            let mut storage = Storage(file);
             let mut owner = gateway_core::disk_worker::DiskWorker::new(payload_limit, u128::from_le_bytes(session));
             while let Some(job) = receiver.recv(&mut owner) {
                 let finished = owner.run(job, &mut journal, &mut storage, worker_health.load(Ordering::Acquire));

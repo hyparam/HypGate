@@ -1,19 +1,23 @@
 # Audit log retention
 
-HypGate writes one new audit file per process start. It never truncates or reuses
+HypGate starts a new audit session per process start and automatically splits it
+into numbered files at the configured size or age threshold. It never truncates or reuses
 a log. Retention is a separate operator action, after a log has been closed and
 any required shipping has completed; it is not part of the durability proof.
 
 ## Archive closed logs
 
 Keep an archive directory separate from the directory used by running gateways.
-It must be owned by your user and private (mode 700). Only move a file there once
-its gateway has stopped and any shipper reading it has finished. A successful
+It must be owned by your user and private (mode 700). Only move a session there once
+its gateway has stopped and any shipper reading it has finished. Keep its original
+file and every numbered segment together, with their names unchanged until all
+shipping or replay is complete. A successful
 `hypgate ship ROOT.json LOG` can finish uploading an old log before archival.
 Do not place shipper identity or checkpoint files in the archive.
 
 Archive filenames must use `session-<name>.log`, where the name contains ASCII
 letters, numbers, hyphens, or underscores and begins with a letter or number.
+Numbered segments may additionally end in a dot followed by 6 to 20 digits.
 Moving a closed file into the archive preserves its last-modified time.
 
 ## Preview and apply
@@ -44,6 +48,7 @@ whether a remote server has acknowledged its contents. Placement in the archive
 is the operator's assertion that the file is ready for retention. Deleting a
 log deliberately removes local audit evidence; keep backups if required.
 
-A scheduler can run the explicit `--apply` command against this archive. There
-is no automatic rotation or deletion in the serving process. Rotation requires
-a coordinated log-session and shipping handoff and remains a separate feature.
+A scheduler can run the explicit `--apply` command against this archive. The
+serving process rotates files but never deletes them. Rotation alone does not
+bound total disk usage; deletion remains this separate operator action. See
+[automatic rotation](disk-logging.md#automatic-rotation).

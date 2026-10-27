@@ -8,18 +8,25 @@ fn record(bytes: &[u8], chunk: u64) -> LogRecord<'_> {
 const WAIT: Duration = Duration::from_secs(5);
 
 #[test]
-fn strict_transfer_and_real_disk_records_have_identical_payloads() {
+fn strict_transfer_and_real_disk_records_have_identical_payloads() { strict_transfer(false); }
+
+#[test]
+fn strict_transfer_spans_rotations_without_changing_receipt_identity() { strict_transfer(true); }
+
+fn strict_transfer(rotate: bool) {
     let admission = admission(1, 3, true);
     let mut request = admission.admit(&[11; 32], 7).unwrap();
     let dir = TempDir::new(); let path = dir.0.join("transfer.log");
-    let mut log = DiskLog::create_with_payload_limit(&path, 1, Duration::from_secs(5), 3).unwrap();
+    let mut log = if rotate {
+        DiskLog::create_rotating(&path, 1, WAIT, 3, Rotation { max_bytes: 124, ..Default::default() }).unwrap()
+    } else { DiskLog::create_with_payload_limit(&path, 1, WAIT, 3).unwrap() };
     let input = b"data: hello\n\ndata: [DONE]\n\n";
     let mut output = Vec::new();
     let stats = copy_body(&mut request, &mut &input[..], &mut output, &mut log, Direction::Download).unwrap();
     assert_eq!(output, input);
     assert_eq!(stats.accepted_bytes(), input.len() as u64);
     assert!(!stats.audit_gap());
-    let mut reader = LogReader::new(File::open(path).unwrap()).unwrap();
+    let mut reader = SessionReader::open(&path).unwrap();
     let mut recorded = Vec::new(); let mut expected_chunk = 1;
     while let Some(record) = reader.next_record().unwrap() {
         assert_eq!(record.request, request.request_id());

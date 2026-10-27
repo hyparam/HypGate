@@ -80,7 +80,7 @@ gateway's own listener, to wake its blocking accept on shutdown.
 | Upstream TLS handshake | rustls `ClientConnection::complete_io` in `net::Timed::handshake`, on the connection thread | `ServerName` built from the configured destination host in `HttpsTransport::connect`; socket timeouts re-armed from the exchange deadline before each step |
 | Upstream HTTP request, including the provider credential header | `Session::write` of the head the driver took from the verified `http1_exchange::Upstream::request`, then `http1::ChunkedWriter` for the body in `Session::upload`, then `Session::write` of the last chunk the driver took from the stream | Head fields built only by `http_boundary::prepare` and rechecked by `PreparedRequest::take_upstream` (the `upstream_head` effect); the writer's bytes are proved to be the head for those fields, and the driver writes them only after a successful `connect` |
 | Response bytes to the client | `ConnectionEffects::write_client` for the bytes the driver took from the verified `Connection` machine (refusal, `100 Continue`, head, last chunk); `http1::ChunkedWriter` in `ConnectionEffects::download` for each frame the body copy writes through the driver's `ChunkStream` | Proved by the driver: the bytes handed over are exactly the machine's output plus the stream's frames, in order; one head; an error after the head aborts without the last chunk |
-| Create audit file, write/sync header, sync parent directory | `DiskLog::create_with_payload_limit` | Startup only; `create_new`, mode 0600, path chosen by the operator |
+| Create audit segment, write/sync header, sync parent directory | `disk_log::rotation::create_segment` | Startup and worker rotation; `create_new`, mode 0600, operator base path plus sequential suffix, unchanged session. Verified `log_rotation::RotatingStorage` implements logical append/sync ordering over trusted `SegmentIo` filesystem effects; no deletion. |
 | Audit record write and sync | `Storage::write_all`/`Storage::sync` called by `DiskWorker::run` on the worker thread started in `DiskLog::start_limited` | One worker thread; frame came through the verified queue reservation |
 | Read audit file for recovery | `LogReader::new`/`LogReader::next_record` over `disk_log::ReadSource` | Read-only; never truncates, appends, or replays |
 | Dedicated threads | `DiskLog::start_limited` (1), `Resolver::with_limit` (4), `shipping::Shipper::spawn` (1, only with a `shipping` section); plus one connection thread and one watcher per accepted connection, at most C of each | Fixed counts at construction; never replaced after a timeout; connection threads are bounded by the connection credits |
@@ -322,3 +322,14 @@ bash scripts/check_effect_sites.sh
 Tests, proofs, and deliberate defects are checked by the commands in the
 [README](../README.md), which also records the current validation totals; CI
 runs them with the pinned toolchain.
+
+### Rotated recovery
+
+The production `disk_log::rotation::SessionReader` wraps the verified
+`session_recovery::SessionScanner`; snapshot acquisition, bounded file reads,
+SHA-256 comparison, and seeking are the trusted bindings. The core validates
+headers, selects consecutive files, chooses resume offsets, refreshes the sealed
+predecessor before crossing, and proves exact prefix emission and complete
+consumption of crossed files. Runtime tests include rotation during successor
+discovery and shipping across file boundaries. See the
+[composition proof](recovery-proof.md#rotated-session-composition).

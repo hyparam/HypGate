@@ -177,3 +177,30 @@ sync calls; hardware power-cut testing can provide additional evidence for a
 specific deployment. These results do not establish hardware certification,
 verified kernel/filesystem code, permanent-device-loss tolerance, or durable
 audit-gap reporting.
+
+## Rotated sessions
+
+The executable stores one logical journal in consecutive segment files. Existing
+journal and worker acknowledgment proofs apply through the verified
+`log_rotation::RotatingStorage` implementation of `Storage`. Its `SegmentIo`
+contract models record bytes across files with headers excluded. Creation must
+preserve all previous record bytes and durably establish the next header and its
+directory entry. The adapter syncs the old file before switching; a successful
+sync of the active file then covers all files. This model tracks the durability
+promised by completed sync operations, not every byte the OS might already have
+persisted. New file headers contain the same session identifier.
+
+Death during rotation may leave no next file, an incomplete header, an empty
+next segment, or a partial final record. None has been acknowledged before its
+required syncs. The prior acknowledged files remain intact under the same storage
+assumptions. The reader does not skip an incomplete header or tail. The single-file
+scanner proofs compose through `session_recovery::SessionScanner`. Its invariants
+prove the exact emitted prefix and require each crossed file to have a matching
+header and no damaged tail. The filesystem adapter supplies immutable prefix
+snapshots and truthful seeks; after a matching successor is observed, reopening
+the predecessor must see its sealed contents. The verified driver performs this
+recheck before crossing, so records appended during discovery cannot be skipped.
+These filesystem/writer correspondence assumptions remain explicit. Missing segment files cannot
+be distinguished from the end of a session without a manifest. Physical storage
+durability remains a deployment assumption; the earlier guest power-cut
+experiments did not exercise rotation.

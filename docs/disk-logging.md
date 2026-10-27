@@ -14,7 +14,62 @@ must already exist and be operator-controlled. Startup itself is synchronous.
 Directory syncing makes the current implementation a Unix-oriented prototype;
 supported deployment filesystems and their crash guarantees still need validation.
 
-One worker thread owns the file. Cloned logger handles share its bounded queue.
+## Automatic rotation
+
+The executable uses `DiskLog::create_rotating`. It starts at the supplied path
+and creates `PATH.000001`, `PATH.000002`, and so on. Each segment has the same
+56-byte format header and immutable session ID. The original library constructors
+remain single-file APIs. No existing file is overwritten, renamed, or deleted.
+
+Defaults are 128 MiB per segment (including its header) or 24 hours since the
+segment opened, whichever is reached first. Override them with
+`--log-max-bytes N` (greater than 56) and `--log-max-age-seconds N` (positive).
+The monotonic age is checked on append, so an idle logger creates no empty files.
+Rotation happens before a complete frame that would exceed the size target;
+a single oversized frame is allowed intact in an otherwise empty segment.
+Thus a segment is bounded by the larger of the target and one maximum frame
+plus the 56-byte header. Requests may span segments, but individual frames never do.
+
+The same worker closes the old file only after syncing it and durably creating
+the next header and parent directory entry. The record is then written and
+synced before acknowledgment, under the existing append deadline. A collision,
+creation, write, or sync failure permanently poisons logging health, with the
+existing strict/availability behavior; there is no fallback, retry, or replacement
+worker. At rotation there are at most two open audit segment files plus a
+short-lived parent-directory handle, independent of segment count.
+
+`log_rotation::RotatingStorage` is the production, verified implementation of
+`disk_worker::Storage`. Its proof establishes overflow-safe size decisions,
+sequential segment indices, unchanged session identity, exact append-only logical
+history across rotation, sync-before-success, and no further effects after a
+failure. The logical history excludes segment headers. `SegmentIo` is the
+explicit trusted interface: creating a segment preserves earlier bytes and
+durably establishes the header/directory entry; append writes the offered bytes;
+sync makes the logical history durable. Runtime path construction, elapsed time,
+syscalls, and the correspondence of physical files to that history remain tested
+trust assumptions. See the [storage contract](storage-crash-contract.md).
+
+`SessionReader`, used by `scan` and both shipping modes, follows consecutive
+segments from the original path, checking each header's checksum and session ID.
+It crosses a file boundary only at clean record EOF, never past a torn or corrupt
+record. After discovering a matching successor, it reopens the sealed predecessor
+and consumes any records added since its earlier snapshot before crossing. This
+closes the race between seeing EOF and discovering rotation. Each file snapshot
+is bounded by its descriptor's captured length; later appends are read on refresh.
+Live reads can retry an incomplete tail or next header. Corruption and
+I/O errors stop the reader. Scan output includes `segment` (zero for the original
+file); `valid_end` is an offset within that physical file. `LogReader` remains a
+single-file scanner. `SessionReader` now delegates traversal to the verified
+`session_recovery::SessionScanner`. Its `recovered_prefix` theorem establishes
+that records are emitted exactly once in file order and every crossed file has
+a matching checked header and a complete record boundary at its end.
+`recovered_to_end` establishes completeness when the cursor reaches the actual
+end of the current file. Snapshot acquisition and seeking remain trusted
+filesystem effects. A missing next file is EOF: there is no manifest or proof
+that an operator has not removed a segment. Preserve the complete consecutive
+set, including the original path, until shipping and any required replay finish.
+
+One worker thread owns the active file. Cloned logger handles share its bounded queue.
 Each append reserves a queue slot before copying its record; the worker performs
 `write_all` followed by `sync_all` before returning a positive acknowledgment.
 The production `DiskWorker` core verifies that sequence and retains an independent

@@ -1,14 +1,14 @@
 //! Read-only audit inspection. Body payloads are never printed.
 use gateway_core::json::Value;
 use gateway_runtime::{
-    disk_log::{LogReader, Metadata, ScanError, StoredRecord},
+    disk_log::{SessionReader, Metadata, ScanError, StoredRecord},
     json_build::{number, object, size, text, write},
 };
 use std::io::{self, Write};
 
 pub(crate) fn run(path: &str) -> Result<(), &'static str> {
-    let file = std::fs::File::open(path).map_err(|_| "cannot open audit log")?;
-    let mut reader = LogReader::new(file).map_err(|_| "invalid or incomplete audit header")?;
+    let mut reader = SessionReader::open(std::path::Path::new(path))
+        .map_err(|_| "cannot open or validate audit header")?;
     let session: String = reader
         .session()
         .iter()
@@ -22,7 +22,7 @@ pub(crate) fn run(path: &str) -> Result<(), &'static str> {
                 records = records.checked_add(1).ok_or("record count exhausted")?;
                 write_line(
                     &mut output,
-                    &scan_row(&session, &record, reader.valid_end()),
+                    &scan_row(&session, &record, reader.valid_end(), reader.segment()),
                 )?;
             }
             Ok(None) => break None,
@@ -40,6 +40,7 @@ pub(crate) fn run(path: &str) -> Result<(), &'static str> {
         ("session", text(&session)),
         ("records", number(records)),
         ("valid_end", number(reader.valid_end())),
+        ("segment", number(reader.segment())),
         ("status", text(status)),
     ]);
     write_line(&mut output, &summary)?;
@@ -59,7 +60,7 @@ fn write_line(output: &mut impl Write, row: &Value) -> Result<(), &'static str> 
 
 // Body payloads are never printed; metadata fields are decoded with the
 // verified codecs, and a metadata payload that does not decode is reported as such.
-fn scan_row(session: &str, record: &StoredRecord, valid_end: u64) -> Value {
+fn scan_row(session: &str, record: &StoredRecord, valid_end: u64, segment: u64) -> Value {
     let mut row = vec![
         ("type", text("record")),
         ("session", text(session)),
@@ -69,6 +70,7 @@ fn scan_row(session: &str, record: &StoredRecord, valid_end: u64) -> Value {
         ("kind", text(record.kind.name())),
         ("payload_bytes", size(record.bytes.len())),
         ("valid_end", number(valid_end)),
+        ("segment", number(segment)),
     ];
     if let Some(direction) = record.direction() {
         row.push((

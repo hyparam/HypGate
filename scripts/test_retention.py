@@ -45,6 +45,16 @@ class RetentionTests(unittest.TestCase):
         self.assertTrue(all(p.exists() for p in [boundary, young, unrelated, invalid]))
         self.assertEqual([r["action"] for r in rows], ["skip", "deleted"])
 
+    def test_numbered_segments_are_eligible_only_in_the_offline_archive(self):
+        segment = self.log("session-old.log.000001", 31)
+        unrelated = self.log("session-old.log.backup", 31)
+        rows = retention.prune(self.archive, 30, now_ns=self.now)
+        self.assertEqual([r["file"] for r in rows], [segment.name])
+        self.assertTrue(segment.exists())
+        retention.prune(self.archive, 30, apply=True, now_ns=self.now)
+        self.assertFalse(segment.exists())
+        self.assertTrue(unrelated.exists())
+
     def test_links_directories_and_future_files_are_not_deleted(self):
         outside = self.log("unrelated.log", 31)
         (self.archive / "session-link.log").symlink_to(outside)

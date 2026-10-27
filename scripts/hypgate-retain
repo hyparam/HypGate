@@ -9,7 +9,7 @@ import stat
 import sys
 import time
 
-NAME = re.compile(r"session-[A-Za-z0-9][A-Za-z0-9_-]*\.log\Z")
+NAME = re.compile(r"session-[A-Za-z0-9][A-Za-z0-9_-]*\.log(?:\.[0-9]{6,20})?\Z")
 DAY_NS = 86_400 * 1_000_000_000
 
 

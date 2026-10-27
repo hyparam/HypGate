@@ -182,3 +182,28 @@ fn invalid_commands_and_public_listeners_are_rejected_before_file_access() {
         assert!(result.stdout.is_empty());
     }
 }
+
+#[test]
+fn scan_follows_rotated_segments_and_identifies_physical_offsets() {
+    let dir = TempDir::new("hypgate-rotated-scan"); let path = dir.0.join("audit.log");
+    let mut log = DiskLog::create_rotating(&path, 2, Duration::from_secs(2), 1024,
+        gateway_runtime::disk_log::Rotation { max_bytes: 128, ..Default::default() }).unwrap();
+    for chunk in 1..=3 {
+        log.append(LogRecord { tenant: 1, request: 2, chunk, kind: RecordKind::Download,
+            bytes: b"private-payload-marker" }).unwrap();
+    }
+    log.shutdown(Duration::from_secs(2)).unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_hypgate")).arg("scan").arg(&path).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    let text = String::from_utf8(result.stdout).unwrap();
+    assert!(!text.contains("private-payload-marker"));
+    let rows: Vec<serde_json::Value> = text.lines().map(|s| serde_json::from_str(s).unwrap()).collect();
+    assert_eq!(rows.len(), 4);
+    for (index, row) in rows[..3].iter().enumerate() {
+        assert_eq!(row["chunk"], index + 1);
+        assert_eq!(row["segment"], index);
+        assert_eq!(row["session"], rows[0]["session"]);
+    }
+    assert_eq!(rows[3]["records"], 3);
+    assert_eq!(rows[3]["status"], "complete");
+}

@@ -11,9 +11,9 @@ use gateway_core::exchange_assembler::Exchange;
 use gateway_core::framing::Header;
 use gateway_core::shipper::{Credential, Machine, Outcome, Path as ShipPath, Reply as MachineReply, Request};
 use gateway_core::shipping_driver::{drive, Effects, Event, Halt, Mode, Projected, Read};
-use std::{fs::File, io::{self, Seek, SeekFrom}, path::PathBuf, sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}, mpsc}, time::{Duration, SystemTime}};
+use std::{io, path::PathBuf, sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}, mpsc}, time::{Duration, SystemTime}};
 use rustls::RootCertStore;
-use crate::disk_log::{LogReader, ScanError};
+use crate::disk_log::{SessionReader, ScanError};
 
 pub mod config;
 pub mod client;
@@ -128,8 +128,7 @@ struct Engine {
     metrics: Arc<Metrics>,
     client: Option<Client>,
     session: Option<[u8; 16]>,
-    reader: Option<LogReader<File>>,
-    valid_end: u64,
+    reader: Option<SessionReader>,
     /// The credential parsed from the last enrollment reply, kept for the identity file.
     issued: Option<Issued>,
 }
@@ -151,7 +150,7 @@ fn parse_credential(body: &[u8]) -> Option<Issued> {
 
 impl Engine {
     fn new(config: ShippingConfig, log_path: PathBuf, roots: Option<RootCertStore>, stop: Arc<AtomicBool>, metrics: Arc<Metrics>) -> Self {
-        Engine { config, log_path, roots, stop, metrics, client: None, session: None, reader: None, valid_end: 56, issued: None }
+        Engine { config, log_path, roots, stop, metrics, client: None, session: None, reader: None, issued: None }
     }
 
     /// Sleep in short slices so a stop request is honored promptly. False when stopping.
@@ -189,15 +188,14 @@ impl Engine {
     /// Read the log header, build the machine from the matching checkpoint, and
     /// adopt a saved identity for this server and token.
     fn open_session(&mut self) -> Option<Machine> {
-        let file = File::open(&self.log_path).ok()?;
-        let reader = match LogReader::new(file) {
+        let reader = match SessionReader::open(&self.log_path) {
             Ok(reader) => reader,
             Err(ScanError::Incomplete) => return None,
             Err(_) => { self.metrics.read_failed.store(true, Ordering::Relaxed); return None; }
         };
         let session = reader.session();
         self.session = Some(session);
-        self.valid_end = 56;
+        self.reader = Some(reader);
         let checkpoint = state::load_checkpoint(&self.config.state_dir).filter(|c| c.session == hex(&session)
             && c.max_open_exchanges == self.config.max_open_exchanges && c.max_exchange_bytes == self.config.max_exchange_bytes);
         let (resolved, poisoned) = checkpoint.map(|c| (c.resolved, c.poisoned)).unwrap_or((0, 0));
@@ -224,28 +222,15 @@ impl Effects for Engine {
     fn stop_requested(&mut self) -> bool { self.stop.load(Ordering::Relaxed) }
     fn now(&mut self) -> u64 { now_seconds() }
 
-    /// The next record after the last valid end. The reader is kept across
-    /// calls while records keep coming and reopened at the same offset after
-    /// the end of the file, so the file is read exactly once in order
-    /// (`recovery::emission_step` and `lemma_records_resume`).
+    /// Continue through numbered segments without resetting the assembler or
+    /// checkpoint identity: requests may span files within the same session.
     fn read(&mut self) -> Read {
-        let Some(session) = self.session else { return Read::Failed; };
-        if self.reader.is_none() {
-            let Ok(mut file) = File::open(&self.log_path) else { return Read::End; };
-            if file.seek(SeekFrom::Start(self.valid_end)).is_err() { return Read::End; }
-            match LogReader::resume(file, session, self.valid_end) {
-                Ok(reader) => self.reader = Some(reader),
-                Err(_) => { self.metrics.read_failed.store(true, Ordering::Relaxed); return Read::Failed; }
-            }
-        }
-        let Some(reader) = self.reader.as_mut() else { return Read::End; };
-        let next = reader.next_record();
-        self.valid_end = reader.valid_end();
-        match next {
+        let Some(reader) = self.reader.as_mut() else { return Read::Failed; };
+        match reader.next_record() {
             Ok(Some(record)) => Read::Record(Header { payload: record.bytes.len() as u32, tenant: record.tenant, request: record.request,
                 chunk: record.chunk, kind: record.kind.id() }, record.bytes),
-            Ok(None) | Err(ScanError::Incomplete) => { self.reader = None; Read::End }
-            Err(_) => { self.reader = None; self.metrics.read_failed.store(true, Ordering::Relaxed); Read::Failed }
+            Ok(None) | Err(ScanError::Incomplete) => Read::End,
+            Err(_) => { self.metrics.read_failed.store(true, Ordering::Relaxed); Read::Failed }
         }
     }
 

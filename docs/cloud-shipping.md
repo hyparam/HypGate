@@ -217,3 +217,15 @@ with the time of day decomposed exactly, and the formatters to print RFC 3339
 text of exactly those fields; the rows' `conversation_started_at`, `date`,
 and `message_created_at` are proved to be that text of the exchange's start
 and completion times.
+
+## Rotated logs
+
+Live shipping and `hypgate ship ROOT.json LOG` follow the numbered segments from
+`LOG`. Rotation preserves the session ID, assembler, batch identities, and
+checkpoint sequence, so requests spanning files are assembled normally. The
+verified session recovery driver rechecks a sealed predecessor after discovering
+its successor, preserving records appended during the handoff. On restart
+the shipper reads the complete session from its original path and skips resolved
+exchanges using the existing checkpoint. Keep all segments in place until shipping
+and required replay finish; shipping an individual middle segment is not a
+replacement for shipping the complete session. No segments are deleted by shipping.

@@ -210,10 +210,22 @@ const ANTHROPIC_RESPONSE: &str = r#"{"id":"msg_1","type":"message","role":"assis
 
 #[test]
 fn ships_exchanges_once_with_stable_ids_and_resumes_from_checkpoint() {
+    shipping_resume(false);
+}
+
+#[test]
+fn ships_requests_across_rotations_and_resumes_without_duplicate_rows() {
+    shipping_resume(true);
+}
+
+fn shipping_resume(rotate: bool) {
     let (port, roots, state, _server) = fake_server(TOKEN);
     let dir = TempDir::new(); let state_dir = dir.0.join("state"); std::fs::create_dir(&state_dir).unwrap();
     let log_path = dir.0.join("audit.log");
-    let mut log = DiskLog::create(&log_path, 4, Duration::from_secs(2)).unwrap();
+    let mut log = if rotate {
+        DiskLog::create_rotating(&log_path, 4, Duration::from_secs(2), crate::disk_log::MAX_RECORD_BYTES,
+            crate::disk_log::Rotation { max_bytes: 128, ..Default::default() }).unwrap()
+    } else { DiskLog::create(&log_path, 4, Duration::from_secs(2)).unwrap() };
     write_exchange(&mut log, 1, "https://api.anthropic.com/v1/messages", ANTHROPIC_REQUEST.as_bytes(), 200, &[ANTHROPIC_RESPONSE.as_bytes()], 0);
     let shipper = Shipper::spawn_with_roots(shipping_config(port, &state_dir, json!({})), log_path.clone(), Some(roots.clone())).unwrap();
     let metrics = shipper.metrics();
@@ -288,7 +300,8 @@ fn ships_many_exchanges_in_bounded_batches_with_drain_mode() {
     let (port, roots, state, _server) = fake_server(TOKEN);
     let dir = TempDir::new(); let state_dir = dir.0.join("state"); std::fs::create_dir(&state_dir).unwrap();
     let log_path = dir.0.join("audit.log");
-    let mut log = DiskLog::create(&log_path, 8, Duration::from_secs(2)).unwrap();
+    let mut log = DiskLog::create_rotating(&log_path, 8, Duration::from_secs(2), crate::disk_log::MAX_RECORD_BYTES,
+        crate::disk_log::Rotation { max_bytes: 1024, ..Default::default() }).unwrap();
     let big = vec![b'x'; 300 * 1024];
     for request in 1..=20u64 {
         write_exchange(&mut log, request, "https://api.anthropic.com/v1/messages", &big, 200, &[&big], 0);

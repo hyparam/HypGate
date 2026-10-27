@@ -8,7 +8,7 @@ mod scan;
 mod signal;
 use gateway_runtime::{
     config::GatewayConfig,
-    disk_log::DiskLog,
+    disk_log::{DiskLog, Rotation},
     server::{self, Gateway, Shutdown},
     shipping::{self, Shipper, ShippingConfig},
     transport::HttpsTransport,
@@ -71,7 +71,8 @@ fn run() -> Result<(), &'static str> {
             routes,
             log,
             address,
-        } => serve(root, routes, log, address),
+            rotation,
+        } => serve(root, routes, log, address, rotation),
     }
 }
 
@@ -80,6 +81,7 @@ fn serve(
     routes_path: &str,
     log_path: &str,
     address: SocketAddr,
+    rotation: Rotation,
 ) -> Result<(), &'static str> {
     let (config, shipping) = {
         let root = bounded_file(root_path).map_err(|_| "cannot read root policy")?;
@@ -99,14 +101,15 @@ fn serve(
     let payload_limit = config
         .chunk_bytes()
         .max(gateway_core::metadata::MAX_PAYLOAD);
-    let log = DiskLog::create_with_payload_limit(
+    let log = DiskLog::create_rotating(
         Path::new(log_path),
         AUDIT_QUEUE_CAPACITY,
         AUDIT_TIMEOUT,
         payload_limit,
+        rotation,
     )
     .map_err(|_| "cannot create and sync new audit log")?;
-    // One extra thread that only ever reads this file.
+    // One extra thread that only ever reads this session’s segments.
     let shipping_limits = shipping
         .as_ref()
         .map(|s| (s.max_open_exchanges, s.max_exchange_bytes));
