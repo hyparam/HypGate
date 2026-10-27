@@ -89,6 +89,13 @@ exclude a thread stuck forever inside a system call that ignores shutdown or a
 permanently held mutex. They do not require network peers, disk syscalls, or DNS
 calls to make progress on their own.
 
+The accept loop is the verified `serve_driver::accept_step` repeated: each
+round terminates and records a step, and a round that sees the flag set ends
+the loop, so acceptance ends within one round of the trigger. What the round
+needs from the environment is only that its blocking `accept` returns, which
+the loopback wake below supplies. The other loops in the core carry
+termination measures ([liveness scope](liveness-scope.md)).
+
 When `Shutdown::trigger` fires or the listener fails, `serve` stops accepting
 (a loopback self-connection wakes the blocking accept) and permanently closes
 shared worker admission. Its finite set of at most C connection threads and R

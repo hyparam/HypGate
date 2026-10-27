@@ -106,7 +106,10 @@ QEMU guest power-cut trials on ext4 preserved every observed acknowledgment
 ([results](docs/storage-crash-contract.md#guest-power-cut-experiment)). Software
 crash validation is complete for this tested configuration. Physical storage
 durability is a deployment assumption: the storage stack must honor successful
-sync calls. Mechanized liveness remains open.
+sync calls. Every loop in the verified core terminates by proof except the
+two service loops, each a verified step that ends its loop within one round of
+the stop signal; that the signal arrives and that blocking calls return are
+environment assumptions ([liveness scope](docs/liveness-scope.md)).
 
 ## Run it
 

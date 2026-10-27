@@ -504,7 +504,7 @@ MUTATIONS = [
     ('serve_driver.rs', 'serve_spec_serves_unchecked_socket', '        Step::Served => if p.pending is Admitted {', '        Step::Served => if p.pending is Admitted || p.pending is Accepted {'),
     ('serve_driver.rs', 'serve_skips_wait_after_cancel', '        let _waited = effects.wait_drained(Window::Cancel);\n        d.record(Ghost(Step::Wait(Window::Cancel, _waited)));\n', ''),
     ('serve_driver.rs', 'serve_leaves_workers_open', '    effects.close_workers();\n    d.record(Ghost(Step::CloseWorkers));\n', ''),
-    ('serve_driver.rs', 'serve_admits_after_trigger', '                    if t {\n                        effects.discard_connection();\n                        self.record(Ghost(Step::Discarded));\n                        return true;\n                    }\n', ''),
+    ('serve_driver.rs', 'serve_admits_after_trigger', '                if t {\n                    effects.discard_connection();\n                    self.record(Ghost(Step::Discarded));\n                    return Some(true);\n                }\n', ''),
     ('json.rs', 'json_accepts_leading_zero', '    if s[j] == ZERO { j = j + 1; } else { j = skip_digits(s, j); }', '    j = skip_digits(s, j);'),
     ('json.rs', 'json_accepts_control_bytes', '        } else if b < 0x20 {\n            proof {', '        } else if b < 0x08 {\n            proof {'),
     ('json.rs', 'json_accepts_lone_low_surrogate', '                } else if 0xDC00 <= u && u <= 0xDFFF {\n                    proof {', '                } else if false {\n                    proof {'),

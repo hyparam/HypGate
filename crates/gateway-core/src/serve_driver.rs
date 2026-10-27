@@ -156,8 +156,55 @@ impl Driver {
         self.progress = Ghost(step_ok(self.progress@, s).unwrap());
     }
 
+    /// One accept round: read the flag, and if it is clear accept one
+    /// connection, recheck the flag, and admit and serve it. `Some(ok)` when
+    /// accepting is over: the flag was seen set (`true`) or accept failed
+    /// (`false`). A round that first sees the flag set returns at once, and
+    /// every round records at least one step.
+    fn accept_step<E: Effects>(&mut self, effects: &mut E) -> (out: Option<bool>)
+        requires old(self).inv(), old(self).progress@ == initial(),
+        ensures final(self).inv(), final(self).trace@.len() > old(self).trace@.len(),
+            match out {
+                Some(_) => final(self).progress@ == (Progress { stop_seen: true, ..initial() }),
+                None => final(self).progress@ == initial(),
+            },
+    {
+        let t = effects.triggered();
+        self.record(Ghost(Step::Triggered(t)));
+        if t { return Some(true); }
+        let a = effects.accept();
+        self.record(Ghost(Step::Accept(a)));
+        match a {
+            Accepted::Failed => Some(false),
+            Accepted::Interrupted => None,
+            Accepted::Connection => {
+                let t = effects.triggered();
+                self.record(Ghost(Step::Triggered(t)));
+                if t {
+                    effects.discard_connection();
+                    self.record(Ghost(Step::Discarded));
+                    return Some(true);
+                }
+                let ok = effects.admit_connection();
+                self.record(Ghost(Step::Admitted(ok)));
+                if ok {
+                    effects.serve_connection();
+                    self.record(Ghost(Step::Served));
+                }
+                None
+            }
+        }
+    }
+
     /// Accept until the flag is seen set or accept fails. Every connection
     /// served was accepted and then found the flag clear.
+    ///
+    /// This is a service loop: each round is the verified, terminating
+    /// `accept_step`, and the loop ends when a round reports the end. The
+    /// round after the flag is set ends the loop, so the loop ends within one
+    /// round of the trigger; that the trigger arrives and that `accept`
+    /// returns are the liveness assumptions on the environment, not theorems
+    /// here.
     #[verifier::exec_allows_no_decreases_clause]
     fn accept_loop<E: Effects>(&mut self, effects: &mut E) -> (ok: bool)
         requires old(self).inv(), old(self).progress@ == initial(),
@@ -166,29 +213,9 @@ impl Driver {
         loop
             invariant self.inv(), self.progress@ == initial(),
         {
-            let t = effects.triggered();
-            self.record(Ghost(Step::Triggered(t)));
-            if t { return true; }
-            let a = effects.accept();
-            self.record(Ghost(Step::Accept(a)));
-            match a {
-                Accepted::Failed => return false,
-                Accepted::Interrupted => {}
-                Accepted::Connection => {
-                    let t = effects.triggered();
-                    self.record(Ghost(Step::Triggered(t)));
-                    if t {
-                        effects.discard_connection();
-                        self.record(Ghost(Step::Discarded));
-                        return true;
-                    }
-                    let ok = effects.admit_connection();
-                    self.record(Ghost(Step::Admitted(ok)));
-                    if ok {
-                        effects.serve_connection();
-                        self.record(Ghost(Step::Served));
-                    }
-                }
+            match self.accept_step(effects) {
+                Some(ok) => return ok,
+                None => {}
             }
         }
     }

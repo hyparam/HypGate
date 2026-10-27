@@ -1,73 +1,61 @@
-# Mechanized liveness: scope
+# Mechanized liveness: scope and status
 
-What it would take to close the "mechanized liveness remains open" item in the
-README. This is a scoping note, not a proof.
+What "mechanized liveness" means for this code base, how far the proofs now
+take it, and what stays an assumption about the environment.
 
-## Where termination is already checked
+## Where termination is checked
 
 Verus requires a `decreases` measure on every exec loop unless the function
-opts out with `#[verifier::exec_allows_no_decreases_clause]`. The core crate
-had about 260 measures and exactly eight opt-outs, all in the driver modules,
-when this note was written; the table marks the ones since closed.
-Everything else in the core (codec, JSON, config, exchange machines, queues)
-already terminates by proof. The runtime crate is trusted Rust and is not
-checked either way.
+opts out with `#[verifier::exec_allows_no_decreases_clause]`. When this note
+was first written the core crate had about 260 measures and exactly eight
+opt-outs, all in the driver modules. Six of the eight now carry a measure. The
+two that remain are service loops, each reduced to a verified terminating
+step inside a loop of one `match`. Everything else in the core (codec, JSON,
+config, exchange machines, queues) terminates by proof. The runtime crate is
+trusted Rust and is not checked either way.
 
-## The eight unmeasured loops
+## The eight loops
 
-| Loop | What bounds it | Class |
-|------|----------------|-------|
-| `body_reader::read_request_head` | `fill_head` strictly grows the buffer and never past `MAX_BYTES`; the parser returns `Incomplete` only below `MAX_BYTES` | A: done, measure `MAX_BYTES - buffer.len()` |
-| `body_reader::read_status_head` | Same | A: done |
-| `body_reader::BodyReader::read` | Chunk size lines are now capped at `MAX_SIZE_LINE` bytes, and the chunked decoder exposes a `framing_budget` that every framing step lowers; the loop decreases on that budget, then on whether the buffer is spent | B: done, after capping extension length in the grammar |
-| `shipping_driver::flush` | Each `Some` from `Machine::flush` evicts one open exchange, and numbering, enqueueing, and settling leave the open count alone | A: done, measure `open_count` |
-| `shipping_driver::pump` | `wants_records` is false once the queue is full or the log ends or fails. A log of unbounded no-op records (bad headers go to `log_failed` and stop it, but admitted records that open nothing do not) is not bounded by the machine | C: needs a finite-log fuel on `Effects::read` |
-| `exchange_driver::final_head` | Capped at `MAX_INTERIM_HEADS` interim heads; one more is `Fault::Http` | C: done by enforcing the cap, measure `MAX_INTERIM_HEADS - interim` |
-| `serve_driver::accept_loop` | Exits only on trigger or accept failure. A service loop; termination is the wrong theorem | D: reactive loop |
-| `shipping_driver::drive` | Exits on stop, revoke, or drained. Same | D |
+| Loop | What bounds it now | How it was closed |
+|------|--------------------|-------------------|
+| `body_reader::read_request_head` | `fill_head` strictly grows the buffer and never past `MAX_BYTES`; the parser returns `Incomplete` only below it | Measure `MAX_BYTES - buffer.len()` |
+| `body_reader::read_status_head` | Same | Same |
+| `body_reader::BodyReader::read` | Chunk size lines, with any extension, are capped at `MAX_SIZE_LINE` (1024) bytes, and the chunked decoder exposes a `framing_budget` that every framing step lowers | Grammar cap, then a lexicographic measure: the budget, then whether the buffer is spent |
+| `shipping_driver::flush` | Each `Some` from `Machine::flush` evicts one open exchange; numbering, enqueueing, and settling leave the open count alone | Measure `open_count` |
+| `shipping_driver::pump` | Reads at most `PUMP_BATCH` (1024) records a round, so a stop request is seen within a bounded batch whatever the log holds | Batch cap, measure `PUMP_BATCH - count` |
+| `exchange_driver::final_head` | At most `MAX_INTERIM_HEADS` (8) interim heads; one more is `Fault::Http`, answered 502 | Cap, measure `MAX_INTERIM_HEADS - interim` |
+| `serve_driver::accept_loop` | Each round is `accept_step`, verified to terminate and to record at least one trace step; a round that sees the flag set ends the loop | Service loop: opt-out kept on a one-`match` loop |
+| `shipping_driver::drive` | Each round is `drive_step`, verified to terminate (its read and flush loops are measured); a round that sees `stop_requested` ends the loop | Service loop: opt-out kept on a one-`match` loop |
 
-Class A: a measure exists in the current contracts. Class B: a measure exists
-but a verified component must expose it. Class C: termination is false without
-an assumption about the environment; the assumption can be a small spec change
-(a cap) or a ghost fuel on an effect. Class D: the loop is meant to run until
-told to stop.
+Three of the closures changed behavior, each a cap that bounds a peer's
+ability to keep the gateway busy without progress: interim heads, chunk
+extension length, and records per pump round. Each has a test at the cap and
+one past it, and a mutation that loosens the cap by one is rejected by proof.
 
-## What the liveness theorem would say
+## What is proved
 
-Three layers, each conditional on the one below.
-
-1. Body termination. Every class A, B, and C loop terminates. For C this is
-   under a stated fuel: the log is finite, the upstream sends at most N interim
-   heads. After this, every call into the core from the runtime returns.
+1. Body termination. Every call into the verified core from the runtime
+   returns, provided each `Effects` or `Source` call it makes returns. There
+   is no fuel and no fairness assumption inside the core.
 2. Per-exchange liveness. `exchange_driver::drive` returns and the exchange
    reaches a terminal lifecycle state with its credit released, given that
-   every `Effects` call returns. The exchange machine already proves this
-   shape for the trace; what is missing is only layer 1.
-3. Service liveness. For the two class D loops: each iteration terminates,
-   each iteration appends at least one step to the trace, and the loop exits
-   within one iteration after the trigger is observed. That is the honest
-   statement; "the server eventually stops" additionally needs the trusted
-   scheduler and the deadline-bounded socket calls to deliver the trigger.
+   every effect returns. The exchange machine proves the shape of the trace;
+   layer 1 supplies the termination of the loops around it.
+3. Service liveness, per round. For the two service loops: each round
+   terminates, the accept round appends at least one step to the trace, and
+   the loop ends within one round of observing its stop signal. "The server
+   eventually stops" additionally needs the environment to deliver the signal
+   and to return from the blocking call the round is in.
 
 ## The assumptions that stay trusted
 
 - Every socket, TLS, and disk call returns within its deadline or errors. The
-  verified deadline driver already makes this honest for mediated calls; the
-  accept call, DNS, and the handshake remain to be checked against it.
-- The OS scheduler eventually runs each thread.
-- Interim-head cap and finite-log fuel, if taken as assumptions rather than
-  enforced.
+  verified deadline driver makes this honest for mediated calls; the accept
+  call is woken by the loopback self-connection at shutdown, and DNS and the
+  TLS handshake sit behind their own timeouts.
+- The OS scheduler eventually runs each runnable thread.
+- The shutdown signal and the shipper's stop flag are delivered.
 
-These cannot be proved inside Verus. They belong in the trust list next to
-effect truthfulness.
-
-## Suggested order
-
-1. Class A (three loops, half a day): remove the opt-outs with measures.
-2. `final_head` cap: add `MAX_INTERIM_HEADS`, refuse beyond it, then measure.
-3. Class B: add a framing budget to `BodyDecoder`, measure `read`.
-4. `pump` fuel: a ghost remaining-records count on the shipping `Effects`.
-5. Class D: state and prove the per-iteration progress theorem; update
-   `docs/shutdown-proof.md` so the conditional termination argument cites it.
-6. README: replace "mechanized liveness remains open" with the conditional
-   statement and the remaining trusted assumptions.
+These cannot be proved inside Verus. They are stated with the other effect
+assumptions in the [shutdown proof](shutdown-proof.md#conditional-termination-argument)
+and the [shipping trust assumptions](cloud-shipping.md#trust-assumptions).
