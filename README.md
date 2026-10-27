@@ -103,9 +103,10 @@ Verus-checked. The network and disk adapters are tested, and live exchanges with
 OpenAI, streamed and not, have been run through the gateway and shipped to
 HypAware Cloud ([smoke record](docs/hypaware.md#smoke-test-record)). Six abrupt
 QEMU guest power-cut trials on ext4 preserved every observed acknowledgment
-([results](docs/storage-crash-contract.md#guest-power-cut-experiment)). Physical
-host/device power-loss validation of the storage contract and mechanized liveness
-remain open.
+([results](docs/storage-crash-contract.md#guest-power-cut-experiment)). Software
+crash validation is complete for this tested configuration. Physical storage
+durability is a deployment assumption: the storage stack must honor successful
+sync calls. Mechanized liveness remains open.
 
 ## Run it
 

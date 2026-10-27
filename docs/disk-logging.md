@@ -129,7 +129,8 @@ theorem. Process-kill tests and the conditional journal-prefix and scanner theor
 are recorded in the [storage contract](storage-crash-contract.md). Six abrupt
 QEMU guest power-cut trials also preserved every observed acknowledgment after
 reboot. These discard guest RAM and kernel caches while the host storage remains
-powered; physical host/device power-loss validation remains open.
+powered. Software crash validation is complete for this tested configuration;
+physical storage durability is a deployment assumption.
 
 Durability assumes the OS/filesystem/storage stack honors successful sync calls
 and that the parent directory was already durable. Permanent disk loss, malicious

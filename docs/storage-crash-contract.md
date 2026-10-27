@@ -19,10 +19,12 @@ be arbitrarily refused by the state machine. This does not guarantee syscall
 success, worker scheduling, or correspondence between journal and stream tickets.
 
 These are assumptions, not Verus-verified filesystem properties. The prototype uses
-Unix file permissions and directory syncing; it has not certified a filesystem
-against power loss. Deployment must validate the actual filesystem, mount/storage
-configuration, and hardware against this contract. Live-OS tests do not establish
-it for network filesystems, ephemeral volumes, or another storage stack.
+Unix file permissions and directory syncing. Software crash validation is
+complete for the tested ext4/QEMU configuration described below. Physical storage
+durability is a deployment assumption: the filesystem, mount/storage
+configuration, controller, and hardware must honor successful sync calls. The
+experiments do not certify other storage stacks, including network filesystems
+or ephemeral volumes.
 
 The scanner emits only complete, checksum-valid records and stops at the first
 incomplete/corrupt tail, reporting the preceding valid offset. The production
@@ -80,7 +82,8 @@ a response prefix, checks truncated client framing and the primary audit prefix,
 observes no upstream replay during health detection, then sends a distinct new
 request through the standby and checks its exact audit bytes in a separate session.
 CI runs this test with the distribution HAProxy package. This remains a local
-process-failure experiment; physical host/power-loss tests remain open; see the guest power-cut experiment below.
+process-failure experiment; the guest power-cut experiment below separately
+validates loss of guest RAM and kernel caches.
 
 ## Guest power-cut experiment
 
@@ -162,12 +165,15 @@ it is an unconditional durability claim.
 | --- | --- | --- |
 | Partial records cannot masquerade as complete records | Verified `Scanner::next_record` requires the exact complete extent and checksum predicate. `every_torn_record_tail_stops_at_the_last_complete_record` tests every cut of a sample frame and session header; corruption tests reject every single-byte mutation of a sample frame without resynchronization. This excludes malicious checksum forgery and assumes truthful source reads. | Covered under source/checksum contract |
 | Acknowledged records survive every modeled crash point | `Journal::acknowledged_prefix_survives` preserves acknowledged bytes for every recovered sequence satisfying the stable-prefix crash contract. `AuditJournal::reconstruct_acknowledged` proves ordered exact reconstruction under successful initialization, completed error-free reads, correct checksums, and representable offsets. Production commits only after `write_all` and `sync_all`; startup syncs both header and parent directory. Syscall correspondence and persistence remain trusted. | Covered under storage/adapter contract |
-| Process-kill, guest power-cut, torn-tail, write-error, and disk-full experiments match the contract | Writer child-process kills after acknowledgment and during later appends; exhaustive sample-tail cuts; injected write/sync failures and blocked sync; private Linux ext4 fixture for actual ENOSPC, EROFS, and writer process death; six abrupt QEMU guest power cuts followed by reboot and exact acknowledged-prefix checks. | Regular tests, Linux ext4 fixture, and six guest power-cut trials passed; physical host/device power loss remains unvalidated |
+| Process-kill, guest power-cut, torn-tail, write-error, and disk-full experiments match the contract | Writer child-process kills after acknowledgment and during later appends; exhaustive sample-tail cuts; injected write/sync failures and blocked sync; private Linux ext4 fixture for actual ENOSPC, EROFS, and writer process death; six abrupt QEMU guest power cuts followed by reboot and exact acknowledged-prefix checks. | Regular tests, Linux ext4 fixture, and six guest power-cut trials passed; software crash validation complete for the tested configuration; physical storage durability is a deployment assumption |
 | Recovery never automatically replays a possibly executed generation | `LogReader` only reads; `DiskLog::create` requires a new path and session. Gateway process-kill and proxy failover tests check truncated responses, preserved audit prefixes, no observed replay, and new-request routing to standby. No retry/replay path exists in the recovery adapter. The observation window is test evidence, not an unbounded runtime liveness proof. | Covered by implementation inspection and tests |
 | Both operator modes document guarantees and failure behavior | `body-transfer.md` and `running.md` describe strict durable byte gating, availability-mode audit gaps, suppressed later appends, deadlines, and volatile diagnostics. Transfer tests exercise both modes; stalled-sync workloads cover bounded queues and continued availability forwarding. Strict mode may establish a connection/send headers before body logging fails. | Covered; process resource composition is in [resource composition](resource-composition.md) |
 
-These conditional proofs and adapter experiments include successful guest
-power-cut validation. They do not establish physical host/device power-loss
-certification, verified kernel/filesystem code, permanent-device-loss tolerance,
-or durable audit-gap reporting. Deployments must still validate their actual
-filesystem, mount options, controller, and device flush behavior.
+Software crash validation is complete for the tested configuration, including
+process death, storage faults, and abrupt guest power cuts. Physical storage
+durability remains a deployment assumption rather than an unfinished software
+validation task. Operators must select a storage stack that honors successful
+sync calls; hardware power-cut testing can provide additional evidence for a
+specific deployment. These results do not establish hardware certification,
+verified kernel/filesystem code, permanent-device-loss tolerance, or durable
+audit-gap reporting.

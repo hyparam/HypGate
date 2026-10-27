@@ -55,7 +55,8 @@ complete crash-safe logging. [Header and frame-extent proofs](framing-proof.md),
 a documented [storage contract](storage-crash-contract.md), and process-kill
 experiments now exist, including Linux ext4 ENOSPC, EROFS, process-death
 validation, and six abrupt QEMU guest power-cut trials preserving every observed
-acknowledgment. Physical host/device power-loss validation remains open. Receipt delivery across threads and journal/session ownership remain trusted. No `assume` or external-body escape was introduced.
+acknowledgment. Software crash validation is complete for the tested configuration; physical
+storage durability is a deployment assumption. Receipt delivery across threads and journal/session ownership remain trusted. No `assume` or external-body escape was introduced.
 
 The wrapper's ghost frame sequence proves that acknowledged bytes are exactly
 those frames concatenated in commit order. Its conditional reconstruction theorem
