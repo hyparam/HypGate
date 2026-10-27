@@ -145,7 +145,7 @@ impl<S: Sink> ChunkWriter<S> {
 
     /// The sink and the stream back, for the machine that issued the stream.
     pub fn into_parts(self) -> (out: (S, ChunkStream))
-        ensures out.1.valid() == self.inv() || out.1.valid(), out.1.ended() == self.ended(), out.1.body() == self.body(), out.1.out() == self.framed(),
+        ensures self.inv() ==> out.1.valid(), out.1.ended() == self.ended(), out.1.body() == self.body(), out.1.out() == self.framed(),
     { (self.sink, self.stream) }
 }
 

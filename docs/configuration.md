@@ -82,9 +82,12 @@ built from a credential, with its `Bearer ` prefix, holds no control byte, so
 no line break can enter a request head; the shipping limits and state
 directory are within their ranges). Destination validation is verified, as is
 the check that a bracketed host is an IPv6 address (`gateway_core::ipv6`, the
-RFC 4291 text grammar as the standard library reads it) and the check that
-every configuration string is UTF-8 (`gateway_core::utf8::is_valid`). SHA-256
-hashing is verified against the core FIPS 180-4 specification.
+RFC 4291 text grammar as the standard library reads it). The root policy's
+strings need no separate UTF-8 check: each is held to a stricter ASCII rule
+(hex digest, destination grammar, secret name, exact keyword); the `shipping`
+section's strings are checked by the verified UTF-8 predicate
+(`gateway_core::utf8::is_valid`). SHA-256 hashing is verified against the core
+FIPS 180-4 specification.
 The assembly of all of it is verified too (`gateway_core::config_build`):
 identity, destination, and credential `i` of the loaded configuration come
 from entry `i` of the file, the credential's header name is the one its kind

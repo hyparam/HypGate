@@ -3,9 +3,11 @@
 //! `gateway_core::config_schema`, and the normalized grant relation is checked
 //! by the verified core, including selection of concrete destination/credential
 //! values; destinations are parsed by the verified core and a bracketed host
-//! checked by the verified IPv6 grammar; strings are checked by the verified
-//! UTF-8 predicate; digests, secret names and values, and the credential
-//! header value follow the verified rules in `gateway_core::config_values`;
+//! checked by the verified IPv6 grammar; digests, secret names and values,
+//! and the credential header value follow the verified rules in
+//! `gateway_core::config_values` (each stricter than UTF-8, so the root
+//! policy's strings need no separate UTF-8 check; the shipping section's get
+//! one);
 //! and the assembly of all of it, each list in file order with credential
 //! `i` formed from the secret fetched under entry `i`'s name, is the verified
 //! `gateway_core::config_build`. Reading an environment variable and the
