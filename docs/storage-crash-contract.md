@@ -38,7 +38,9 @@ SHA-256 (`gateway_core::sha256`). File reads, session randomness/uniqueness, and
 conversion to the public runtime record remain trusted. The [scanner refinement](recovery-proof.md) proves
 per-step source correspondence under explicit adapter contracts; ordered
 acknowledged-prefix reconstruction is proved under its explicit read/checksum
-and preserved-byte assumptions. The named ext4 validation below covers live-OS errors and process death. Checksums defend against accidental corruption, not malicious changes.
+and preserved-byte assumptions. The named ext4 validation below covers live-OS
+errors and process death; the guest power-cut experiment additionally discards
+guest RAM and kernel caches. Checksums defend against accidental corruption, not malicious changes.
 EOF exactly at a record boundary cannot reveal whether later records were lost.
 
 Restart creates a new file and session ID. It never appends to an existing file,
@@ -78,7 +80,58 @@ a response prefix, checks truncated client framing and the primary audit prefix,
 observes no upstream replay during health detection, then sends a distinct new
 request through the standby and checks its exact audit bytes in a separate session.
 CI runs this test with the distribution HAProxy package. This remains a local
-process-failure experiment; host/power-loss tests remain open.
+process-failure experiment; physical host/power-loss tests remain open; see the guest power-cut experiment below.
+
+## Guest power-cut experiment
+
+`scripts/check_power_cut.py` boots a minimal Linux guest under QEMU with a fresh
+private 128 MiB ext4 image (`data=ordered,barrier=1`), virtio block storage, and
+`cache=writeback` (flushes enabled). It runs the real `DiskLog` through
+`crates/gateway-runtime/examples/power_cut.rs`. The host observes flushed serial
+ACK lines emitted only after `append` succeeds, then sends SIGKILL to QEMU without
+letting the guest shut down, sync, or unmount. A fresh guest boots against the
+same disk, allowing ext4 journal recovery before the LogGate scanner runs.
+
+The first trial pauses after ACK 1; later trials continue appending while the host
+cuts power at ACK thresholds 3, 8, 17, 32, and 63. Every recovered record must have
+its exact expected 64 KiB payload, tenant, request, kind, and sequential chunk ID.
+Recovery must include every externally observed acknowledgment. Additional valid
+records or an incomplete suffix are allowed. Scanning must leave log bytes
+unchanged; reuse of the old path must fail, and a new path must get a new session.
+
+This discards guest RAM and kernel caches. The host OS and backing storage remain
+powered, so it does **not** validate loss of host page cache, physical device
+volatile caches, torn sectors, or dishonest flush completion. It tests the disk
+writer/recovery adapter, not the full HTTP gateway, and samples cut points rather
+than exhaustively enumerating them.
+
+To reproduce on Linux x86-64, install QEMU, static BusyBox, cpio, gzip, e2fsprogs,
+and squashfs-tools, then prepare a matching kernel and module tree. For the Alpine
+netboot images used here:
+
+```sh
+mkdir -p /tmp/loggate-power
+curl -fL https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/x86_64/netboot/vmlinuz-virt -o /tmp/loggate-power/kernel
+curl -fL https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/x86_64/netboot/modloop-virt -o /tmp/loggate-power/modloop
+unsquashfs -d /tmp/loggate-power/modules /tmp/loggate-power/modloop
+cargo build --locked -p gateway-runtime --example power_cut
+python3 scripts/check_power_cut.py /tmp/loggate-power/kernel /tmp/loggate-power/modules/modules 6
+```
+
+A local run on 2026-10-26 against base commit `213c477` (with only this fixture
+and documentation added) passed all six thresholds: 1, 3, 8, 17, 32, and 63
+acknowledged records, with exactly that many recovered in each trial. QEMU was
+8.2.2 (Ubuntu `1:8.2.2+ds-0ubuntu1.18`), software TCG emulation; guest Linux was
+`6.12.114-0-virt`. The kernel SHA-256 was
+`26f146f664ad057be3b39b211422b03b1f94cb2c3d66522fd4841811a224bfd5`, and modloop
+SHA-256 was `a996c7584302c2c4dee8dd7ba26ed8e4e2e5c3c670a124ada0ad6cfb852d2967`.
+The build used installed Rust 1.93.1 (`cargo +1.93.1 ...`) because the pinned
+1.99.1 toolchain was unavailable locally. All three existing process-crash harness
+cases also passed. A supplemental Clippy run with `-D warnings` failed on existing
+core lints under this older toolchain; it was not a successful release check.
+
+The netboot URLs are mutable: record the hashes and guest version for each run.
+The fixture requires no root privileges, host mounts, or networking in the guest.
 
 ## Named filesystem validation
 
@@ -109,9 +162,12 @@ it is an unconditional durability claim.
 | --- | --- | --- |
 | Partial records cannot masquerade as complete records | Verified `Scanner::next_record` requires the exact complete extent and checksum predicate. `every_torn_record_tail_stops_at_the_last_complete_record` tests every cut of a sample frame and session header; corruption tests reject every single-byte mutation of a sample frame without resynchronization. This excludes malicious checksum forgery and assumes truthful source reads. | Covered under source/checksum contract |
 | Acknowledged records survive every modeled crash point | `Journal::acknowledged_prefix_survives` preserves acknowledged bytes for every recovered sequence satisfying the stable-prefix crash contract. `AuditJournal::reconstruct_acknowledged` proves ordered exact reconstruction under successful initialization, completed error-free reads, correct checksums, and representable offsets. Production commits only after `write_all` and `sync_all`; startup syncs both header and parent directory. Syscall correspondence and persistence remain trusted. | Covered under storage/adapter contract |
-| Process-kill, torn-tail, write-error, and disk-full experiments match the contract | Writer child-process kills after acknowledgment and during later appends; exhaustive sample-tail cuts; injected write/sync failures and blocked sync; private Linux ext4 fixture for actual ENOSPC, EROFS, and writer process death. | Regular tests and Linux ext4 fixture passed |
+| Process-kill, guest power-cut, torn-tail, write-error, and disk-full experiments match the contract | Writer child-process kills after acknowledgment and during later appends; exhaustive sample-tail cuts; injected write/sync failures and blocked sync; private Linux ext4 fixture for actual ENOSPC, EROFS, and writer process death; six abrupt QEMU guest power cuts followed by reboot and exact acknowledged-prefix checks. | Regular tests, Linux ext4 fixture, and six guest power-cut trials passed; physical host/device power loss remains unvalidated |
 | Recovery never automatically replays a possibly executed generation | `LogReader` only reads; `DiskLog::create` requires a new path and session. Gateway process-kill and proxy failover tests check truncated responses, preserved audit prefixes, no observed replay, and new-request routing to standby. No retry/replay path exists in the recovery adapter. The observation window is test evidence, not an unbounded runtime liveness proof. | Covered by implementation inspection and tests |
 | Both operator modes document guarantees and failure behavior | `body-transfer.md` and `running.md` describe strict durable byte gating, availability-mode audit gaps, suppressed later appends, deadlines, and volatile diagnostics. Transfer tests exercise both modes; stalled-sync workloads cover bounded queues and continued availability forwarding. Strict mode may establish a connection/send headers before body logging fails. | Covered; process resource composition is in [resource composition](resource-composition.md) |
 
-These conditional proofs and adapter experiments are complete. This does not mean power-loss certification, verified kernel/filesystem
-code, permanent-device-loss tolerance, or durable audit-gap reporting.
+These conditional proofs and adapter experiments include successful guest
+power-cut validation. They do not establish physical host/device power-loss
+certification, verified kernel/filesystem code, permanent-device-loss tolerance,
+or durable audit-gap reporting. Deployments must still validate their actual
+filesystem, mount options, controller, and device flush behavior.

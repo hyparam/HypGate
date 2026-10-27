@@ -61,10 +61,10 @@ read out of bounds. The runtime around it is lint-checked panic-free: no
 unwrap, expect, panic, unreachable, indexing, or unchecked arithmetic in
 production code, so a bookkeeping fault refuses a request or strands a slot
 instead of crashing. Allocation failure and the internals of the standard
-library and rustls are the remaining ways the process can die; after any
-process kill, the scanner recovers the valid log prefix under the storage
-contract. Shipping runs on its own thread, so if it fails, the gateway keeps
-serving requests.
+library and rustls are the remaining ways the process can die; after a
+process kill or guest power cut, the scanner recovers the valid log prefix under
+the [storage contract](docs/storage-crash-contract.md). Shipping runs on its own
+thread, so if it fails, the gateway keeps serving requests.
 
 These are theorems about the verified core, plus a short list of things we
 trust and do not prove: rustls, the OS, DNS, TLS certificates, the
@@ -101,8 +101,11 @@ A runnable prototype. The core's authorization, configuration, streaming,
 shipping, HTTP/1.1 codec, exchange sequencing, and resource invariants are
 Verus-checked. The network and disk adapters are tested, and live exchanges with Anthropic and
 OpenAI, streamed and not, have been run through the gateway and shipped to
-HypAware Cloud ([smoke record](docs/hypaware.md#smoke-test-record)). Still open:
-physical power-loss validation of the storage contract and mechanized liveness.
+HypAware Cloud ([smoke record](docs/hypaware.md#smoke-test-record)). Six abrupt
+QEMU guest power-cut trials on ext4 preserved every observed acknowledgment
+([results](docs/storage-crash-contract.md#guest-power-cut-experiment)). Physical
+host/device power-loss validation of the storage contract and mechanized liveness
+remain open.
 
 ## Run it
 
@@ -140,7 +143,7 @@ for provider configuration, scanning logs, and shutdown behavior.
 | [Journal proof](docs/journal-proof.md) | Acknowledgment ordering and conditional synced-prefix survival |
 | [Recovery proof](docs/recovery-proof.md) | Scanner cursor transitions and acknowledged-prefix reconstruction |
 | [Shutdown proof](docs/shutdown-proof.md) | Verified drain rank and the conditional shutdown/resource release argument |
-| [Storage crash contract](docs/storage-crash-contract.md) | Storage assumptions, process-death experiments, and the evidence behind the recovery claims |
+| [Storage crash contract](docs/storage-crash-contract.md) | Storage assumptions, process-death and guest power-cut experiments, and the evidence behind the recovery claims |
 | [Resource accounting](docs/resource-accounting.md) | Source-level inventory of application buffers and queues |
 | [Resource composition](docs/resource-composition.md) | Budget ownership and the conditional requested-allocation bound |
 | [HTTP/1.1 codec](docs/http1-codec.md) | The verified head parser and writer, framing selection, chunked coding, and exchange machines; the adapter and what stays trusted |

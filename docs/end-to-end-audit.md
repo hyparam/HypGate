@@ -288,7 +288,10 @@ log path; nothing is resumed from the previous process.
   Origin confinement is not an IP-range or SSRF theorem.
 - Acceptance into the HTTP channel is not peer receipt, and a logged request is
   not evidence the provider executed or finished it.
-- The storage contract excludes power loss, device lies, and malicious rewriting.
+- Crash recovery assumes storage preserves the synced prefix, including after
+  power loss. Six QEMU guest power-cut trials passed; physical host/device
+  power-loss validation remains open. Device lies, permanent device loss, and
+  malicious rewriting are outside the [storage contract](storage-crash-contract.md).
 - Bodies are logged verbatim; nothing here is a secrecy property for body
   contents, and timing is not constant.
 - Metadata records are structurally verified but their values are trusted: the
