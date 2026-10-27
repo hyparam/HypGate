@@ -34,6 +34,7 @@ pub const K_ROUTES: [u8; 6] = *b"routes";
 pub const K_SERVER: [u8; 6] = *b"server";
 pub const K_TOKEN_ENV: [u8; 9] = *b"token_env";
 pub const K_STATE_DIR: [u8; 9] = *b"state_dir";
+// Concrete arrays expose byte distinctions to the checkpoint codec proof across modules.
 pub const K_MAX_OPEN_EXCHANGES: [u8; 18] = [b'm', b'a', b'x', b'_', b'o', b'p', b'e', b'n', b'_', b'e', b'x', b'c', b'h', b'a', b'n', b'g', b'e', b's'];
 pub const K_MAX_EXCHANGE_BYTES: [u8; 18] = [b'm', b'a', b'x', b'_', b'e', b'x', b'c', b'h', b'a', b'n', b'g', b'e', b'_', b'b', b'y', b't', b'e', b's'];
 pub const K_S3_REGION: [u8; 9] = *b"s3_region";

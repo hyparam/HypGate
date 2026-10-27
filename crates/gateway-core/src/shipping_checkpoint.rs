@@ -127,6 +127,14 @@ pub proof fn identity_injective(a: Config, b: Config, s: Seq<u8>, t: Seq<u8>)
     assert(x.subrange(j, k) =~= a.region@); assert(y.subrange(j, k) =~= b.region@);
     assert(x.subrange(k, x.len() as int) =~= s); assert(y.subrange(k, y.len() as int) =~= t);
 }
+/// A checkpoint from any other endpoint, prefix, region, or log session cannot be accepted.
+pub proof fn foreign_scope_rejected(a: Config, b: Config, s: Seq<u8>, t: Seq<u8>, saved: Checkpoint, open: usize, bytes: usize)
+    requires a.valid(), b.valid(), s.len() == 16, t.len() == 16, saved.session@ == identity_spec(a, s),
+        a.authority@ != b.authority@ || a.prefix@ != b.prefix@ || a.region@ != b.region@ || s != t,
+    ensures !matches(saved, identity_spec(b, t), open, bytes),
+{
+    if saved.session@ == identity_spec(b, t) { identity_injective(a, b, s, t); }
+}
 pub open spec fn matches(c: Checkpoint, identity: Seq<u8>, open: usize, bytes: usize) -> bool {
     c.session@ == identity && c.max_open_exchanges == open && c.max_exchange_bytes == bytes
 }

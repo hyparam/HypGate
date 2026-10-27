@@ -79,7 +79,7 @@ fn s3_signed_put_retries_resumes_and_scopes_checkpoints_to_destination() {
     assert_eq!(metrics.batches_acknowledged(), 1); assert_eq!(metrics.poisoned_batches(), 0);
     assert!(!state_dir.join("identity.json").exists());
     let checkpoint = load_checkpoint(&state_dir).unwrap();
-    assert_eq!(checkpoint.resolved, 1); assert!(checkpoint.session.starts_with("s3:"));
+    assert_eq!(checkpoint.resolved, 1); assert!(checkpoint.session.starts_with(b"s3-v2:"));
     assert_eq!(received.lock().unwrap().len(), 3);
     assert_eq!(ship("bucket/logs").batches_acknowledged(), 0);
     assert_eq!(received.lock().unwrap().len(), 3);

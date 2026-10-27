@@ -1,27 +1,19 @@
-//! Thin SigV4 adapter over the same HTTPS socket and verified shipper driver.
-use super::{client::Client, config::ShippingConfig};
-use gateway_core::{calendar, s3, shipper::{Path, Reply, Request}};
+//! S3 effects only. Backend choice, credentials, dates, headers, replies and checkpoints are core decisions.
+use super::{Engine, now_ms, state};
+use gateway_core::{s3_delivery::{Put, Response, Transport}, s3_driver::Store, shipping_checkpoint::Checkpoint};
 
-fn text(bytes: Vec<u8>) -> Option<String> { String::from_utf8(bytes).ok() }
-
-pub(super) fn send(config: &ShippingConfig, client: Option<&Client>, request: Request, now_ms: u64) -> Reply {
-    // Activation is local: no AWS secret is ever passed through HypAware enrollment.
-    if request.path != Path::Ingest { return s3::activation(); }
-    let failed = || s3::upload_reply(0, None);
-    let (Some(aws), Some(client), Some(batch)) = (&config.s3, client, request.batch_id.as_deref()) else { return failed(); };
-    if batch.len() > 1024 || request.body.len() > 4 * 1024 * 1024 { return failed(); }
-    let Some(path) = text(s3::object_path(aws.prefix.as_bytes(), batch, &request.body)) else { return failed(); };
-    let civil = calendar::civil(now_ms);
-    if civil.year > 9999 { return failed(); }
-    let date = format!("{:04}{:02}{:02}T{:02}{:02}{:02}Z", civil.year, civil.month, civil.day, civil.hour, civil.minute, civil.second);
-    let signed = s3::sign(config.server.authority().as_bytes(), path.as_bytes(), date.as_bytes(), aws.region.as_bytes(),
-        aws.access_key.as_bytes(), config.token(), aws.session_token.as_bytes(), &request.body);
-    let (Some(auth), Some(hash)) = (text(signed.authorization), text(signed.payload_hash)) else { return failed(); };
-    let mut headers = vec![("authorization", auth), ("x-amz-content-sha256", hash), ("x-amz-date", date),
-        ("content-type", "application/x-ndjson".to_owned())];
-    if !aws.session_token.is_empty() { headers.push(("x-amz-security-token", aws.session_token.clone())); }
-    match client.request("PUT", &path, None, &headers, request.body) {
-        Ok(reply) => s3::upload_reply(reply.status, reply.retry_after),
-        Err(_) => failed(),
+impl Transport for Engine {
+    fn milliseconds(&mut self) -> u64 { now_ms() }
+    fn put(&mut self, request: Put) -> Response {
+        let failed = Response { status: 0, retry_after: None };
+        let Some(client) = self.client.as_ref() else { return failed; };
+        match client.put(request) {
+            Ok(reply) => Response { status: reply.status, retry_after: reply.retry_after },
+            Err(_) => failed,
+        }
     }
+}
+impl Store for Engine {
+    fn load(&mut self) -> Option<Checkpoint> { state::load_checkpoint(&self.config.state_dir) }
+    fn save(&mut self, value: Checkpoint) -> bool { state::save_checkpoint(&self.config.state_dir, &value).is_ok() }
 }

@@ -69,6 +69,9 @@ fn checkpoint_scope_is_exact_and_legacy_or_malformed_progress_replays() {
     let bytes = json::write(&cp::value(&saved)).unwrap();
     assert_eq!(cp::parse(&json::parse(&bytes).unwrap()).unwrap(), saved);
     assert_eq!(s3_driver::restore(&c, session, 64, 4096, &Some(saved)).progress(), (7,2));
+    let mut wrong_limits = cp::parse(&json::parse(&bytes).unwrap()).unwrap();
+    wrong_limits.max_open_exchanges = 65;
+    assert_eq!(s3_driver::restore(&c, session, 64, 4096, &Some(wrong_limits)).progress(), (0,0));
     let legacy = cp::Checkpoint { session: b"s3:old-hash".to_vec(), resolved: 7, poisoned: 2, max_open_exchanges: 64, max_exchange_bytes: 4096 };
     assert_eq!(s3_driver::restore(&c, session, 64, 4096, &Some(legacy)).progress(), (0,0));
     for malformed in [br#"{"session":"x","resolved":7,"resolved":99,"poisoned":0,"max_open_exchanges":64,"max_exchange_bytes":4096}"#.as_slice(),

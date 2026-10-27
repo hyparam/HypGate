@@ -244,7 +244,7 @@ fn shipping_resume(rotate: bool) {
         assert_eq!(std::fs::metadata(state_dir.join("checkpoint.json")).unwrap().permissions().mode() & 0o777, 0o600); }
     let checkpoint = load_checkpoint(&state_dir).expect("checkpoint persisted");
     assert_eq!((checkpoint.resolved, checkpoint.poisoned), (2, 0));
-    assert_eq!(checkpoint.session, hex(&log.session()));
+    assert_eq!(checkpoint.session, hex(&log.session()).as_bytes());
 
     let batches = state.lock().unwrap().batches.clone();
     assert_eq!(batches.len(), 2);
@@ -449,7 +449,7 @@ fn state_files_round_trip_and_jwt_claims_are_read_without_verification() {
     let identity = Identity { jwt: fake_jwt("gw-abc", 99, 1), expires_at: 99, gateway_id: "gw-abc".into(), server: "https://h/".into(), token_fingerprint: "ff".into() };
     save_identity(&dir.0, &identity).unwrap();
     assert_eq!(load_identity(&dir.0).unwrap(), identity);
-    let checkpoint = Checkpoint { session: "00".repeat(16), resolved: 5, poisoned: 1, max_open_exchanges: 64, max_exchange_bytes: 4096 };
+    let checkpoint = Checkpoint { session: "00".repeat(16).into_bytes(), resolved: 5, poisoned: 1, max_open_exchanges: 64, max_exchange_bytes: 4096 };
     save_checkpoint(&dir.0, &checkpoint).unwrap();
     assert_eq!(load_checkpoint(&dir.0).unwrap(), checkpoint);
     assert!(!dir.0.join("identity.json.tmp").exists());

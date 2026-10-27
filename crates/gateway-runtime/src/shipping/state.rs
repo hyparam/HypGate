@@ -3,7 +3,7 @@
 //! renamed into place, mode 0600 on Unix. The identity file holds the server's
 //! gateway credential and a fingerprint of the operator token, never the token.
 use gateway_core::json::{self, Value};
-use crate::json_build::{self, object, size, write};
+use crate::json_build::{self, object, write};
 use std::{fs, io::{self, Write}, path::Path};
 
 pub const IDENTITY_FILE: &str = "identity.json";
@@ -19,16 +19,7 @@ pub struct Identity {
     pub token_fingerprint: String,
 }
 
-/// Progress is a count of emitted exchanges resolved on the server, plus the
-/// assembler limits that make exchange numbering reproducible from the file.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Checkpoint {
-    pub session: String,
-    pub resolved: u64,
-    pub poisoned: u64,
-    pub max_open_exchanges: usize,
-    pub max_exchange_bytes: usize,
-}
+pub use gateway_core::shipping_checkpoint::Checkpoint;
 
 /// Lowercase hex from the verified encoder; every byte it returns is ASCII.
 pub fn hex(bytes: &[u8]) -> String { gateway_core::shipping_identity::hex(bytes).into_iter().map(char::from).collect() }
@@ -70,15 +61,10 @@ pub fn save_identity(dir: &Path, identity: &Identity) -> io::Result<()> {
     write_private(&dir.join(IDENTITY_FILE), &write(&value))
 }
 pub fn load_checkpoint(dir: &Path) -> Option<Checkpoint> {
-    let value = read_bounded(&dir.join(CHECKPOINT_FILE))?;
-    Some(Checkpoint { session: text(&value, "session")?, resolved: number(&value, "resolved")?, poisoned: number(&value, "poisoned")?,
-        max_open_exchanges: usize::try_from(number(&value, "max_open_exchanges")?).ok()?,
-        max_exchange_bytes: usize::try_from(number(&value, "max_exchange_bytes")?).ok()? })
+    gateway_core::shipping_checkpoint::parse(&read_bounded(&dir.join(CHECKPOINT_FILE))?)
 }
 pub fn save_checkpoint(dir: &Path, checkpoint: &Checkpoint) -> io::Result<()> {
-    let value = object(vec![("session", json_build::text(&checkpoint.session)), ("resolved", json_build::number(checkpoint.resolved)),
-        ("poisoned", json_build::number(checkpoint.poisoned)), ("max_open_exchanges", size(checkpoint.max_open_exchanges)),
-        ("max_exchange_bytes", size(checkpoint.max_exchange_bytes))]);
+    let value = gateway_core::shipping_checkpoint::value(checkpoint);
     write_private(&dir.join(CHECKPOINT_FILE), &write(&value))
 }
 

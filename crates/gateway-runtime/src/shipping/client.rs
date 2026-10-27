@@ -80,6 +80,26 @@ impl Client {
     pub fn request(&self, method: &str, path: &str, bearer: Option<&str>, headers: &[(&str, String)], body: Vec<u8>)
         -> Result<Reply, ClientError>
     {
+        let mut fields = vec![
+            http1::field(b"host", self.server.authority().as_bytes().to_vec()),
+            http1::field(b"connection", b"close".to_vec()),
+            http1::field(b"content-length", body.len().to_string().into_bytes()),
+        ];
+        if let Some(token) = bearer {
+            fields.push(Field { name: b"authorization".to_vec(), value: format!("Bearer {token}").into_bytes(), sensitive: true });
+        }
+        for (name, value) in headers { fields.push(Field { name: name.as_bytes().to_vec(), value: value.as_bytes().to_vec(), sensitive: name.eq_ignore_ascii_case("authorization") || name.eq_ignore_ascii_case("x-amz-security-token") }); }
+        self.request_fields(method.as_bytes(), path.as_bytes(), fields, body)
+    }
+
+    /// Send the verified S3 request verbatim, under this client's sole egress permit.
+    pub(super) fn put(&self, request: gateway_core::s3_delivery::Put) -> Result<Reply, ClientError> {
+        if request.authority != self.server.authority().as_bytes() { return Err(ClientError::Http); }
+        self.request_fields(&request.method, &request.path, request.headers, request.body)
+    }
+
+    fn request_fields(&self, method: &[u8], path: &[u8], fields: Vec<Field>, body: Vec<u8>) -> Result<Reply, ClientError> {
+        if !wire_ok(&fields) || !path.starts_with(b"/") || path.iter().any(|b| !(33..=126).contains(b)) { return Err(ClientError::Http); }
         let deadline = Deadline::start(self.deadline).map_err(|_| ClientError::Timeout)?;
         let permit = Egress::cloud(&self.server);
         let addresses = self.resolve(&deadline)?;
@@ -90,18 +110,8 @@ impl Client {
         let shaken = tls.handshake();
         shaken.map_err(|_| failure(&tls, ClientError::Tls))?;
 
-        let mut fields = vec![
-            http1::field(b"host", self.server.authority().as_bytes().to_vec()),
-            http1::field(b"connection", b"close".to_vec()),
-            http1::field(b"content-length", body.len().to_string().into_bytes()),
-        ];
-        if let Some(token) = bearer {
-            fields.push(Field { name: b"authorization".to_vec(), value: format!("Bearer {token}").into_bytes(), sensitive: true });
-        }
-        for (name, value) in headers { fields.push(Field { name: name.as_bytes().to_vec(), value: value.as_bytes().to_vec(), sensitive: name.eq_ignore_ascii_case("authorization") || name.eq_ignore_ascii_case("x-amz-security-token") }); }
-        if !wire_ok(&fields) || !path.starts_with('/') || path.bytes().any(|b| !(33..=126).contains(&b)) { return Err(ClientError::Http); }
         let mut head = Vec::new();
-        write_request_head(method.as_bytes(), path.as_bytes(), &fields, &mut head);
+        write_request_head(method, path, &fields, &mut head);
         head.extend_from_slice(&body);
         let sent = tls.write_all(&head).and_then(|()| tls.flush());
         sent.map_err(|_| failure(&tls, ClientError::Http))?;

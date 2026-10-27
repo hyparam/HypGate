@@ -8,9 +8,10 @@ verus! {
 /// Persistence remains an external effect. The executable codec and all selection/capture decisions are verified.
 pub trait Store {
     spec fn saved(&self) -> Seq<Checkpoint>;
+    // Reads may fail and return None; successful writes must persist the captured value.
     spec fn persisted(&self) -> Option<Checkpoint>;
     fn load(&mut self) -> (out: Option<Checkpoint>)
-        ensures out == old(self).persisted(), final(self).persisted() == old(self).persisted(), final(self).saved() == old(self).saved();
+        ensures out.is_some() ==> out == old(self).persisted(), final(self).persisted() == old(self).persisted(), final(self).saved() == old(self).saved();
     fn save(&mut self, value: Checkpoint) -> (ok: bool)
         ensures final(self).saved() == old(self).saved().push(value),
             ok ==> final(self).persisted() == Some(value),
