@@ -5,17 +5,20 @@
 //! values; destinations are parsed by the verified core and a bracketed host
 //! checked by the verified IPv6 grammar; strings are checked by the verified
 //! UTF-8 predicate; digests, secret names and values, and the credential
-//! header value follow the verified rules in `gateway_core::config_values`.
-//! Hashing and secret provisioning remain trusted.
+//! header value follow the verified rules in `gateway_core::config_values`;
+//! and the assembly of all of it, each list in file order with credential
+//! `i` formed from the secret fetched under entry `i`'s name, is the verified
+//! `gateway_core::config_build`. Reading an environment variable and the
+//! hash function's strength remain trusted.
 use crate::admission::{Admission, AdmissionError, Request};
+use gateway_core::config_build as build;
 use gateway_core::config_schema as schema;
-use gateway_core::config_values as values;
 use gateway_core::json;
-use gateway_core::policy::{Identity, Policy, Route};
 
 const MAX_CONFIG: usize = 1024 * 1024;
 #[cfg(test)]
 pub(crate) const MAX_DESTINATION_BYTES: usize = 8192;
+#[cfg(test)]
 pub(crate) use gateway_core::config_values::MAX_CREDENTIAL_BYTES;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -28,43 +31,32 @@ pub(crate) fn utf8(bytes: Vec<u8>) -> Result<String, ConfigError> {
     String::from_utf8(bytes).map_err(|_| ConfigError::Syntax)
 }
 
-struct Root {
-    identities: Vec<IdentityInput>,
-    destinations: Vec<String>,
-    credentials: Vec<CredentialInput>,
-    grants: Vec<Route>,
-    limits: Limits,
-    logging: Logging,
+/// The root policy through the verified reader and schema. `shipping` is
+/// read separately by `shipping::ShippingConfig`; the gateway's own
+/// configuration never holds the cloud token or server.
+fn read_root(bytes: &[u8]) -> Result<schema::Root, ConfigError> {
+    let value = json::parse(bytes).ok_or(ConfigError::Syntax)?;
+    schema::read_root(&value).ok_or(ConfigError::Syntax)
 }
-impl Root {
-    /// The root policy through the verified reader and schema. `shipping` is
-    /// read separately by `shipping::ShippingConfig`; the gateway's own
-    /// configuration never holds the cloud token or server.
-    fn read(bytes: &[u8]) -> Result<Self, ConfigError> {
-        let value = json::parse(bytes).ok_or(ConfigError::Syntax)?;
-        let root = schema::read_root(&value).ok_or(ConfigError::Syntax)?;
-        let identities = root.identities.into_iter().map(|i| Ok(IdentityInput { tenant: i.tenant, sha256: utf8(i.sha256)? }))
-            .collect::<Result<Vec<_>, ConfigError>>()?;
-        let destinations = root.destinations.into_iter().map(utf8).collect::<Result<Vec<_>, _>>()?;
-        let credentials = root.credentials.into_iter().map(|c| Ok(CredentialInput { tenant: c.tenant, kind: c.kind, env: utf8(c.env)? }))
-            .collect::<Result<Vec<_>, ConfigError>>()?;
-        Ok(Root { identities, destinations, credentials, grants: root.grants, limits: root.limits, logging: root.logging })
-    }
+fn read_candidate(bytes: &[u8]) -> Result<schema::Candidate, ConfigError> {
+    let value = json::parse(bytes).ok_or(ConfigError::Syntax)?;
+    schema::read_candidate(&value).ok_or(ConfigError::Syntax)
 }
-struct IdentityInput { tenant: u64, sha256: String }
-struct CredentialInput { tenant: u64, kind: CredentialKind, env: String }
-pub(crate) use schema::{CredentialKind, Limits, Logging};
-struct Candidate { routes: Vec<Route> }
-impl Candidate {
-    fn read(bytes: &[u8]) -> Result<Self, ConfigError> {
-        let value = json::parse(bytes).ok_or(ConfigError::Syntax)?;
-        Ok(Candidate { routes: schema::read_candidate(&value).ok_or(ConfigError::Syntax)?.routes })
+pub(crate) use schema::Logging;
+
+/// The environment as the verified assembly's secret store. Names reach it
+/// only after the verified name rule, so they are ASCII.
+struct Env<F>(F);
+impl<F: FnMut(&str) -> Option<String>> build::Secrets for Env<F> {
+    fn get(&mut self, name: &[u8]) -> Option<Vec<u8>> {
+        let name = std::str::from_utf8(name).ok()?;
+        (self.0)(name).map(String::into_bytes)
     }
 }
 
-// Intentionally no Debug implementation: neither errors nor diagnostics should
-// accidentally format loaded credentials.
-struct Credential { kind: CredentialKind, value: Vec<u8> }
+// The verified assembly's credential: no Debug implementation, so neither
+// errors nor diagnostics can format a loaded value.
+type Credential = build::Credential;
 
 // A destination is the verified `gateway_core::destination::Parts`: the text the
 // operator wrote and the authority, host, port, and path proved to be its
@@ -90,19 +82,12 @@ pub struct RoutedRequest<'a> {
 /// `parse` accepted.
 fn ascii(bytes: &[u8]) -> &str { std::str::from_utf8(bytes).expect("verified destination part is ASCII") }
 
-/// Validate a destination with the verified parser. The parts are what the
-/// runtime connects to, names in TLS, writes as Host, and uses as the request target.
+/// Validate a destination with the verified parser and, for a bracketed
+/// host, the verified IPv6 grammar. The parts are what the runtime connects
+/// to, names in TLS, writes as Host, and uses as the request target.
 pub(crate) fn destination(text: &str) -> Result<Destination, ConfigError> {
-    let parts = gateway_core::destination::parse(text.as_bytes()).ok_or(ConfigError::Destination)?;
-    // A bracketed literal must also be a real IPv6 address, not just IPv6 characters (verified grammar).
-    if parts.authority.first() == Some(&b'[') && !gateway_core::ipv6::literal_ok(&parts.host) {
-        return Err(ConfigError::Destination);
-    }
-    Ok(parts)
+    build::destination_exec(text.as_bytes()).ok_or(ConfigError::Destination)
 }
-
-/// The verified decoding of a 64-digit hex digest.
-fn digest(text: &str) -> Result<Vec<u8>, ConfigError> { values::digest(text.as_bytes()).ok_or(ConfigError::Identity) }
 
 impl GatewayConfig {
     pub fn chunk_bytes(&self) -> usize { self.chunk_bytes }
@@ -115,35 +100,25 @@ impl GatewayConfig {
     pub(crate) fn requires_audit(&self) -> bool { self.admission.requires_audit() }
     /// Root policy and secret resolver are operator-controlled. Candidate JSON
     /// can select only grants already in root policy. Errors never echo inputs.
-    pub fn from_json(root: &[u8], candidate: &[u8], mut secret: impl FnMut(&str) -> Option<String>)
+    pub fn from_json(root: &[u8], candidate: &[u8], secret: impl FnMut(&str) -> Option<String>)
         -> Result<Self, ConfigError>
     {
         if root.len() > MAX_CONFIG || candidate.len() > MAX_CONFIG { return Err(ConfigError::Limits); }
-        let root = Root::read(root)?;
-        let candidate = Candidate::read(candidate)?;
-        if !gateway_core::resource::validate_limits(root.limits.requests, root.limits.chunk_bytes) {
-            return Err(ConfigError::Limits);
-        }
-        let identities = root.identities.into_iter().map(|i| Ok(Identity {
-            tenant: i.tenant, digest: digest(&i.sha256)?,
-        })).collect::<Result<Vec<_>, ConfigError>>()?;
-        let destinations = root.destinations.into_iter().map(|s| destination(&s))
-            .collect::<Result<Vec<_>, _>>()?;
-        let owners = root.credentials.iter().map(|c| c.tenant).collect();
-        let policy = Policy::validate(identities, root.grants, candidate.routes, destinations.len(), owners)
-            .ok_or(ConfigError::Policy)?;
-        let mut credentials = Vec::new();
-        // The secret name, the secret's bytes, and the header value built from
-        // them are checked and formed by the verified rules: the value is
-        // visible ASCII with the `Bearer ` prefix, so it cannot break a header.
-        for input in root.credentials {
-            if !values::secret_name_ok_exec(input.env.as_bytes()) { return Err(ConfigError::Credential); }
-            let raw = secret(&input.env).ok_or(ConfigError::Credential)?;
-            if !values::secret_ok_exec(raw.as_bytes(), MAX_CREDENTIAL_BYTES) { return Err(ConfigError::Credential); }
-            credentials.push(Credential { kind: input.kind, value: values::credential_value_exec(input.kind, raw.as_bytes()) });
-        }
-        Ok(Self { chunk_bytes: root.limits.chunk_bytes, admission: Admission::new(policy, root.limits.requests, root.limits.chunk_bytes,
-            matches!(root.logging, Logging::Strict)), destinations, credentials })
+        let root = read_root(root)?;
+        let candidate = read_candidate(candidate)?;
+        // The verified assembly: identity, destination, and credential `i`
+        // come from entry `i`, with the secret fetched under that entry's
+        // name and formed into the header value by the verified rules.
+        let built = build::build(root, candidate, &mut Env(secret)).map_err(|e| match e {
+            build::BuildError::Limits => ConfigError::Limits,
+            build::BuildError::Identity => ConfigError::Identity,
+            build::BuildError::Destination => ConfigError::Destination,
+            build::BuildError::Credential => ConfigError::Credential,
+            build::BuildError::Policy => ConfigError::Policy,
+        })?;
+        Ok(Self { chunk_bytes: built.limits.chunk_bytes,
+            admission: Admission::new(built.policy, built.limits.requests, built.limits.chunk_bytes, matches!(built.logging, Logging::Strict)),
+            destinations: built.destinations, credentials: built.credentials })
     }
 
     pub fn admit(&self, token: &[u8], selector: u64) -> Result<RoutedRequest<'_>, AdmissionError> {
@@ -179,11 +154,11 @@ impl<'a> RoutedRequest<'a> {
         gateway_core::exchange_lifecycle::start_record(self.request.authority(), &self.resolved, time_ms)
     }
 
-    // Only the trusted HTTP boundary may inject provider credentials.
-    pub(crate) fn credential_header(&self) -> (&'static [u8], &[u8]) {
+    // Only the trusted HTTP boundary may inject provider credentials. The
+    // header name and value are the verified assembly's for this credential.
+    pub(crate) fn credential_header(&self) -> (&[u8], &[u8]) {
         let credential = self.resolved.credential(self.request.authority()).expect("private request/route binding");
-        let name: &'static [u8] = match credential.kind { CredentialKind::Bearer => b"authorization", CredentialKind::ApiKey => b"x-api-key" };
-        (name, &credential.value)
+        (&credential.name, &credential.value)
     }
 }
 

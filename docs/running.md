@@ -11,6 +11,10 @@ The library accepts a caller-owned listener and leaves that boundary to the
 embedding application. See [deployment](deployment.md) for a tested HAProxy setup
 with TLS, readiness checks, a standby instance, and retries disabled.
 
+See [installation](installation.md) for a local installer or runtime container.
+For provider clients, see [SDK setup](sdks.md); for closed audit files, see
+[retention](retention.md).
+
 ## Configuration example
 
 Use the schema in [configuration](configuration.md). A root policy for an
@@ -44,7 +48,8 @@ Clients send `POST /routes/7` with `Authorization: Bearer <gateway-token>`, the
 provider's native headers such as Content-Type and Anthropic-Version, and the
 unmodified native JSON body. The gateway forwards to the fixed configured path. For
 an OpenAI-native endpoint, use its HTTPS URL and credential kind `bearer`. There is
-no provider-body translation. Anthropic Messages and OpenAI Responses, JSON and
+no provider-body translation. SDKs may append the exact configured endpoint path
+to `/routes/7`; see [SDK setup](sdks.md). Anthropic Messages and OpenAI Responses, JSON and
 SSE, were exercised live on 2026-10-25 and again on 2026-10-26 ([smoke record](hypaware.md#smoke-test-record)).
 Upload compression, trailers, query parameters, HTTP/2, and full duplex are not
 supported.

@@ -163,6 +163,9 @@ Operations:
 
 | Document | Purpose |
 | --- | --- |
+| [Installation](docs/installation.md) | Local installer and unprivileged runtime container |
+| [Provider SDKs](docs/sdks.md) | OpenAI and Anthropic clients, endpoint binding, and streaming checks |
+| [Audit retention](docs/retention.md) | Preview and delete expired, closed archive logs |
 | [Running the gateway](docs/running.md) | Configuration example, provider setup, log scanning, shutdown |
 | [Deployment](docs/deployment.md) | TLS termination, standby routing, clean-environment reproduction |
 | [Operational limits](docs/operational-limits.md) | Every fixed and configurable limit and what happens when it is reached |
@@ -204,7 +207,7 @@ cargo test -p gateway-runtime --release --locked server::tests::benchmark -- --i
 LOGGATE_HAPROXY=/path/to/haproxy cargo test -p gateway-runtime --locked proxy_gateway_process_failover -- --ignored --nocapture
 ```
 
-Validation on 2026-10-26: 1356 core verification checks passed, 353 workspace tests passed, all fourteen opt-in benchmark workloads passed on the blocking runtime, all 525
+Validation on 2026-10-26: 1371 core verification checks passed, 357 workspace tests passed, all fourteen opt-in benchmark workloads passed on the blocking runtime, all 530
 deliberate mutations failed their proof obligations, and the runtime passed its panic and effect-site
 lints with no async executor linked. The opt-in TLS proxy/gateway
 process-failover test and six load/fault workloads passed on 2026-10-23.

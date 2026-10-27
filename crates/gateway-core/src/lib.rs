@@ -74,6 +74,7 @@ pub mod calendar;
 pub mod ipv6;
 pub mod base64url;
 pub mod sha256;
+pub mod config_build;
 
 #[cfg(test)]
 #[path = "tests/streaming.rs"]
@@ -138,3 +139,6 @@ mod base64url_tests;
 #[cfg(test)]
 #[path = "tests/sha256.rs"]
 mod sha256_tests;
+#[cfg(test)]
+#[path = "tests/config_build.rs"]
+mod config_build_tests;

@@ -51,12 +51,12 @@ start_gateway() { # name log-path -> sets $address and appends pid
     address=${line#loggate listening on }
     echo "$name listening on $address"
 }
-stop_gateway() { # name -> SIGTERM; the executable deliberately has no signal handler
+stop_gateway() { # name -> SIGTERM and a successful cooperative drain
     local pid; eval "pid=\$${1}_pid"
     kill -TERM "$pid"
     local code=0; wait "$pid" || code=$?
-    [[ "$code" == 143 ]] || fail "$1 exited with status $code after SIGTERM: $(cat "$work/$1.err")"
-    echo "ok: $1 terminated with expected status 143 after SIGTERM"
+    [[ "$code" == 0 ]] || fail "$1 exited with status $code after SIGTERM: $(cat "$work/$1.err")"
+    echo "ok: $1 drained with status 0 after SIGTERM"
 }
 
 step 'Environment'

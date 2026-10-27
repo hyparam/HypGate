@@ -85,8 +85,12 @@ the check that a bracketed host is an IPv6 address (`gateway_core::ipv6`, the
 RFC 4291 text grammar as the standard library reads it) and the check that
 every configuration string is UTF-8 (`gateway_core::utf8::is_valid`). SHA-256
 hashing is verified against the core FIPS 180-4 specification.
-Secret resolution and the runtime mapping are trusted and tested, not
-formally verified. The core theorem still concerns
+The assembly of all of it is verified too (`gateway_core::config_build`):
+identity, destination, and credential `i` of the loaded configuration come
+from entry `i` of the file, the credential's header name is the one its kind
+takes, and its value is formed from the secret fetched under that entry's
+name, which is the `i`th fetch made; the policy is validated before any
+secret is fetched. Reading an environment variable is the one trusted step. The core theorem still concerns
 normalized route handles. The HTTP adapter consumes `RoutedRequest`; the verified
 header projection strips client credential headers and constructs Host from the
 fixed destination, while disabling redirects/proxies/retries and retaining request

@@ -42,8 +42,9 @@ Origins and credentials are numeric handles, not URLs or secrets. The transport
 consumes the routed wrapper and uses the same immutable mapping snapshot, without
 accepting independent destination or credential overrides; see the
 [end-to-end audit](end-to-end-audit.md) for implementation and test evidence.
-Fixed endpoint URI validation and secret loading are tested in the
-[configuration layer](configuration.md). DNS, TLS, and proxy/redirect disabling
+Fixed endpoint URI validation and the assembly of credentials from their
+named secrets are proved in the [configuration layer](configuration.md);
+reading the environment variable is trusted. DNS, TLS, and proxy/redirect disabling
 remain adapter obligations; header filtering and credential injection are proved in
 `headers`. Root-policy intent is a trusted input;
 candidate configuration cannot enlarge that policy.

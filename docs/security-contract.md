@@ -17,7 +17,7 @@ it grants principals/tenants access to approved origins and credential handles.
 Configuration may select within those grants, never enlarge them. A proof cannot
 establish that an arbitrary administrator-supplied root policy expresses the
 administrator's intended security policy. Root-policy provisioning, authentication
-evidence, and secret loading need explicit trust assumptions.
+evidence, and the environment that supplies secrets need explicit trust assumptions.
 
 The gateway uses static policy snapshots, fixed routes, no redirects, no fallback, and
 no automatic request replay. No general RBAC system or provider-body interpretation

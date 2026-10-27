@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""Preview or delete expired LogGate logs from a private, offline archive."""
+import argparse
+import hashlib
+import json
+import os
+import re
+import stat
+import sys
+import time
+
+NAME = re.compile(r"session-[A-Za-z0-9][A-Za-z0-9_-]*\.log\Z")
+DAY_NS = 86_400 * 1_000_000_000
+
+
+def archive_fd(path):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    info = os.fstat(fd)
+    if info.st_uid != os.geteuid() or info.st_mode & 0o077:
+        os.close(fd)
+        raise ValueError("archive must be owned by the current user and private (mode 700)")
+    return fd
+
+
+def prune(path, days, apply=False, now_ns=None):
+    """The archive must contain only closed logs; callers serialize maintenance."""
+    if days < 1:
+        raise ValueError("retention must be at least one day")
+    cutoff = (time.time_ns() if now_ns is None else now_ns) - days * DAY_NS
+    directory = archive_fd(path)
+    results = []
+    try:
+        for name in sorted(os.listdir(directory)):
+            if not NAME.fullmatch(name):
+                continue
+            info = os.stat(name, dir_fd=directory, follow_symlinks=False)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_mtime_ns >= cutoff:
+                continue
+            # Opening relative to the directory prevents parent-path substitution.
+            # O_NONBLOCK prevents a substituted FIFO from hanging maintenance.
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+            try:
+                opened = os.fstat(fd)
+                if (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns) != (
+                        info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns):
+                    raise ValueError("archive changed during inspection; retry with writers stopped")
+                header = os.read(fd, 56)
+                if len(header) != 56 or header[:8] != b"SGLOG001" or hashlib.sha256(header[:24]).digest() != header[24:]:
+                    results.append({"file": name, "action": "skip", "reason": "invalid log header"})
+                    continue
+                current = os.stat(name, dir_fd=directory, follow_symlinks=False)
+                if (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns, current.st_nlink) != (
+                        info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_nlink):
+                    raise ValueError("archive changed during inspection; retry with writers stopped")
+                if apply:
+                    os.unlink(name, dir_fd=directory)
+                results.append({"file": name, "action": "deleted" if apply else "would_delete", "bytes": info.st_size})
+            finally:
+                os.close(fd)
+        if apply:
+            os.fsync(directory)
+    finally:
+        os.close(directory)
+    return results
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("archive", help="private directory containing only closed, archived session-*.log files")
+    parser.add_argument("--days", type=int, required=True, help="retain files modified within this many days (at least 1)")
+    parser.add_argument("--apply", action="store_true", help="delete expired logs; default only previews")
+    args = parser.parse_args()
+    try:
+        for row in prune(args.archive, args.days, args.apply):
+            print(json.dumps(row))
+    except (OSError, ValueError) as error:
+        print(f"loggate-retain: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
