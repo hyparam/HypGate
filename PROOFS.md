@@ -73,8 +73,15 @@ contains no other network destination.
   bytes, object names binding the batch and full payload hash, and that only
   HTTP 200 resolves a PUT. All S3 errors retain the batch for retry. S3 uses
   local credential activation, never a network enrollment request. Signature
-  cryptographic security and S3 durability are external premises; AWS secrets,
-  clock formatting and network/state adapters remain trusted and tested.
+  cryptographic security and S3 durability are external premises.
+  `s3_config` proves which environment names are read and how credentials are
+  selected; `s3_delivery` proves UTC formatting, exact headers/body, and the
+  network-effect call. `s3_driver` joins this to the existing driver and proves
+  restore/capture decisions using the exact, injective `shipping_checkpoint`
+  scope and verified JSON codec. `shipping_driver::deliver` proves S3 errors
+  preserve the queue and progress without poisoning. Only named environment
+  lookup, clock input, TLS/file effects, OS behavior and AWS itself remain
+  external assumptions.
 - The HypAware shipper's enrollment machine refuses to upload without an unexpired
   server-issued credential; a revoked service account stops it for good.
 - Every outgoing HypAware shipper request is chosen by the verified machine

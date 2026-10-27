@@ -127,8 +127,11 @@ Each upload is an AWS Signature Version 4 PUT with `host`, `x-amz-date`,
 `x-amz-content-sha256`, and, when present, `x-amz-security-token` signed. The
 verified core implements HMAC using the existing verified SHA-256 and proves
 the canonical request, signing-key derivation, string to sign, and authorization
-bytes match their specifications. Time comes from the system clock, formatted
-using the verified calendar's civil fields by the runtime adapter.
+bytes match their specifications. Time comes from the system clock; `s3_delivery::date` proves the exact
+16-byte UTC representation of the verified calendar's civil fields, and rejects
+years beyond four digits. `s3_delivery::{prepare,send}` proves that only ingest
+creates a PUT, its body is unchanged, its headers are exactly the signed fields,
+and a successful ingest reply requires an observed HTTP 200.
 
 Object names are the prefix, hex batch identity, a hyphen, the full SHA-256
 payload hash, and `.ndjson`. A retry of identical data overwrites the same key.
@@ -140,8 +143,12 @@ machine's local poison rules. Credential activation is a local core action:
 no bootstrap or refresh request goes to S3, and AWS secrets never enter the
 machine's enrollment token or an identity file.
 
-Checkpoints bind the log session, assembler limits, S3 endpoint including its
-prefix, and region. Changing the destination replays the log. Keep each shipper's
+Checkpoints bind the log session, assembler limits, S3 authority, prefix, and
+region. The `s3-v2:` identity hex-encodes length-prefixed scope fields and the
+log session; injectivity is proved without a hash-collision assumption. The
+verified checkpoint codec rejects duplicate, unknown, missing, or wrongly typed
+fields. Old hash-based S3 checkpoints are deliberately ignored, causing safe
+replay with the same object identities. Changing the destination replays the log. Keep each shipper's
 state directory private and exclusive. A failed checkpoint write safely causes
 replay. Without an atomic server-side row ledger, changed batch boundaries after
 a restart can store overlapping rows in different objects: consumers needing
@@ -150,14 +157,53 @@ multiple versions of an overwritten object. S3 provides at-least-once delivery,
 not the HypAware server's exactly-once row-storage contract.
 
 The core's existing queue, driver, cursor, recovery, and bounded retry proofs
-are reused. `s3::{mac,sign,object_path,upload_reply,activation,safe_exec}` adds
-explicit contracts for S3; configuration shape and exact field extraction are
-proved by `config_schema`. HTTPS, clock formatting, environment resolution,
-checkpoint binding and filesystem effects remain the tested runtime boundary.
-Cryptographic collision resistance, AWS signature validation and successful PUT
-durability are external assumptions, not theorems about AWS. Regression tests
-use independent signature vectors and a local TLS server; no live AWS account
-was used for validation.
+are reused through `s3_driver::run`, an executable verified adapter implementing
+the existing `shipping_driver::Effects`. Its send method calls the verified
+S3 delivery code. `shipping_driver::deliver` composes the backend's reply
+contract with the actual machine transition: an S3 reply never poisons a batch,
+and every non-acknowledgment preserves both queue and progress. Restore and
+capture use the same exact scope; only matching checkpoints restore progress,
+and saved counters come from the machine itself.
+
+`s3_config::load` proves backend selection, credential validation, the exact
+configured name used for each secret, and a bounded read sequence (once per
+credential role). The only secret-source assumption is that a lookup returns
+the requested variable from a stable startup environment. The runtime never
+receives an AWS SDK credential chain and never puts an AWS secret into the
+shared machine's enrollment token.
+
+The remaining external assumptions are explicit effect contracts: the clock
+supplies its timestamp, environment lookup returns its named value, the TLS
+transport attempts the provided request against the configured authority and
+reports the peer's status, and the exclusive state directory implements atomic
+persistence (a failed read may cause replay; an unsuccessful save may leave old
+or new state). Header construction, date formatting, reply interpretation,
+checkpoint codecs, scope matching, and restore/save decisions are verified
+executable code, not runtime assumptions. Thread scheduling, OS/filesystem/TLS
+correctness, cryptographic security, and AWS durability remain external facts;
+Verus does not prove the implementation of AWS or the operating system.
+
+### Live S3 validation
+
+On 2026-10-26, the shipper was exercised with real credentials resolved from an
+operator-approved local AWS profile against an existing bucket in `us-west-1`.
+Only a unique `hypgate-smoke/` prefix and synthetic audit records were used.
+`examples/s3_smoke.rs` creates that synthetic five-record audit log without
+network access. The test ran the actual `hypgate ship` binary and independently
+read the resulting object through the AWS CLI:
+
+- First run acknowledged one object containing two NDJSON rows (2,298 bytes).
+- Both synthetic message texts matched, and the payload's SHA-256 matched the object key.
+- A restart with its checkpoint acknowledged zero new batches.
+- Removing the checkpoint caused one replay, with the same key and ETag and still only one object.
+- The local audit log was unchanged.
+- The object was deleted and a subsequent prefix listing contained zero objects.
+
+This was repeated after moving S3 orchestration into the verified core; both
+runs passed and both prefixes were cleaned. Credentials were passed only in
+process environments, never written into policy files or test reports. The
+live profile used long-lived keys; temporary session-token signing is covered
+by independent vectors and the local TLS integration test.
 
 ## HypAware protocol
 

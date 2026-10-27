@@ -203,15 +203,22 @@ and missing-file detection are not claimed as proved by this change.
 
 ## S3 shipping
 
-| Claim | Contracts | Runtime boundary |
+| Claim | Contracts | External premise |
 | --- | --- | --- |
-| HMAC is exactly SHA-256 over the standard normalized-key inner/outer pads | `s3::{pad,hmac,padded,mac}`; `sha256::digest` | Cryptographic strength is an assumption; RFC 4231 vectors test interoperability. |
-| SigV4 authorization binds the exact host, path, date, region, session token and payload hash | `s3::{canonical,scope,signing_key,string_to_sign,authorization,sign}` | Runtime supplies clock and configured fields and sends the returned headers. Independent signing vectors and a TLS server check wire signatures. |
-| Object path is exactly prefix + hex batch identity + full payload hash + suffix | `s3::object_path` | Runtime uses the configured prefix; identical batches overwrite the same S3 key. Changed batch boundaries can create overlapping objects. |
-| Only HTTP 200 resolves an uploaded batch; S3 errors never poison it | `s3::upload_reply`; shared `shipper::Machine::reply` and `shipping_driver::drive` | PUT status is from the configured TLS peer. Local oversized projections retain the shared poison policy. |
-| Credentials activate locally; path/region inputs reject unsafe characters; schema extracts the configured S3 strings exactly | `s3::{activation,safe_exec}`; `config_schema::{section_ok,reads_section,read_shipping}` | Runtime chooses the backend, resolves environment secrets, formats UTC civil fields, and binds checkpoint identity to endpoint/prefix and region. |
+| HMAC is exactly SHA-256 over the standard normalized-key inner/outer pads | `s3::{pad,hmac,padded,mac}`; `sha256::digest` | Cryptographic strength; RFC 4231 vectors check interoperability. |
+| SigV4 authorization binds exact host, path, date, region, session token and payload hash | `s3::{canonical,scope,signing_key,string_to_sign,authorization,sign}` | AWS signature validation and SHA-256 security. |
+| Backend selection reads only the configured secret names, at most once per role, and validates all values | `s3_config::{Secrets,permitted_reads,load,Config::is_valid}` | A stable startup environment and faithful lookup of the requested variable. |
+| Date text is exactly the civil UTC timestamp, 16 bytes; unsupported years are rejected | `s3_delivery::{two,date_text,date}`; `calendar::civil` | The clock's supplied milliseconds. |
+| Only ingest attempts a PUT; method, body, path, complete ordered headers and sensitivity flags are exact; activation stays local; acknowledgment requires an observed 200 | `s3_delivery::{can_put,put_matches,prepare,Transport,send,reply_policy}` | Transport attempts those bytes against the configured authority and faithfully reports its reply. A failed attempt can have been accepted remotely, so replay is allowed. |
+| Object path binds the batch identity and full payload hash | `s3::object_path` | S3 overwrite semantics; different batch boundaries can create overlapping objects. |
+| S3 replies never poison the machine; non-acknowledgments preserve queue and counters | `shipping_driver::{Effects::send,deliver}` composed with `shipper::Machine::reply` | The verified S3 adapter supplies the reply policy. |
+| Checkpoint JSON has exact field values and rejects malformed/duplicate/unknown fields | `shipping_checkpoint::{shape,reads,parse,value}`; `json::{parse,write}`; `config_schema::Schema::Checkpoint` | File bytes returned by the state adapter. |
+| Different authority, prefix, region or session cannot match a checkpoint, without assuming collision resistance | `shipping_checkpoint::{scope,identity,identity_injective,foreign_scope_rejected,select}` | Checkpoint contents originate from the exclusive operator-owned state directory. |
+| Restore uses only matching counts, the machine receives no AWS secret, and saved counters are its actual progress | `s3_driver::{restore,run,Adapter}`; `shipping_checkpoint::capture` | `Store` persistence contract: a read may fail; successful saves persist the value, failed atomic saves leave old or new state. |
 
-S3 uses the existing effect sites; no AWS SDK, new dependency, additional socket
-site, or unverified cryptographic implementation was introduced. Focused proof
-mutations reject changed HMAC padding, wrong signing service, missing payload
-binding, unsafe path acceptance, and acknowledgment of failed PUTs.
+The runtime uses these executable functions. S3 introduces no new dependency,
+external-body proof escape, or socket/file effect site. The runtime still
+performs TLS, file operations, environment lookup, clock reads, and threading;
+those operations and AWS itself are not verified by Verus. See the
+[live S3 validation](cloud-shipping.md#live-s3-validation) and the deliberate
+mutation checks in `scripts/check_mutations.py`.

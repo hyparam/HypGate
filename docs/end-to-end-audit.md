@@ -347,17 +347,31 @@ are still assumptions about the filesystem, not conclusions from trace legality.
 
 S3 reuses `shipping::client::open_socket` under the configured `ShippingServer`
 egress permit and `shipping::state::write_private`; the effect-site allowlist
-is unchanged. `shipping::s3::send` supplies the clock and configured fields to
-verified `s3::sign`, sends its authorization and payload-hash headers via the
-existing HTTPS client, then passes the peer's status to verified
-`s3::upload_reply`. No redirects or secondary credential endpoints are used.
-Authorization and session-token fields are marked sensitive. AWS credentials
-are read through the existing environment resolver and never persisted.
+is unchanged. The runtime implements `s3_config::Secrets`,
+`s3_delivery::Transport`, and `s3_driver::Store`. Their contracts are the
+remaining external joins: named environment lookup, clock milliseconds,
+attempting the supplied request and faithfully reporting its status, and
+atomic state persistence. They do not choose credentials, format dates, build
+S3 headers, interpret replies, match checkpoints, or advance counters.
 
-The same verified shipping driver, assembler, queue and cursor govern S3.
-The trusted joins are backend selection, UTC date formatting from verified civil
-fields, attaching the returned headers to PUT, and destination-scoped checkpoint
-loading/saving. Tests independently verify wire signatures over TLS, retry 503
-and 400 without poison, follow rotated logs, replay after a lost checkpoint,
-and replay after a prefix change. S3 storage durability, cryptographic security,
-and row deduplication by downstream consumers remain external premises.
+`shipping::s3` only implements these effects. `Client::put` checks that the
+verified request's authority equals its configured endpoint and passes its
+method, path, fields and body to the existing verified HTTP writer. No redirect
+or secondary credential endpoint is used. The verified header construction
+marks authorization and session tokens sensitive. Checkpoint JSON parsing and
+construction, scope encoding, scope injectivity, restore selection, and capture
+of machine counters all live in `shipping_checkpoint`.
+
+The runtime invokes `s3_driver::run`, which restores a machine with an empty
+enrollment token, builds the verified S3 implementation of the shared driver's
+`Effects`, and invokes `shipping_driver::drive`. `shipping_driver::deliver`
+checks the reply refinement against the actual machine transition. Runtime
+observations only update metrics; they do not decide progress.
+
+Tests independently verify wire signatures over TLS, retries without poison,
+rotated logs, replay after missing or mismatched checkpoints, credential-name
+selection, UTC leap/day/year boundaries, and checkpoint JSON rejection. A live
+AWS run with synthetic records also verified upload, resume, stable replay and
+cleanup; see [the smoke record](cloud-shipping.md#live-s3-validation). Thread
+scheduling, clock accuracy, environment/OS/filesystem/TLS behavior, cryptographic
+security, S3 durability, and downstream row deduplication remain external premises.
