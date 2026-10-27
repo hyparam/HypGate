@@ -32,11 +32,14 @@ pub const DRAIN_IDLE_POLLS: u32 = 5;
 /// What the runtime does for the driver. Every method is trusted; none of
 /// them decides anything about what is shipped.
 pub trait Effects {
+    /// S3 implementations must refine every reply to the S3 policy.
+    open spec fn is_s3(&self) -> bool { false }
     fn stop_requested(&mut self) -> bool;
     fn now(&mut self) -> u64;
     fn read(&mut self) -> Read;
     fn project(&mut self, exchange: &Exchange) -> Projected;
-    fn send(&mut self, request: Request) -> Reply;
+    fn send(&mut self, request: Request) -> (out: Reply)
+        ensures old(self).is_s3() ==> crate::s3_delivery::reply_policy(request.path, out);
     /// False when a stop was requested during the wait.
     fn sleep(&mut self, seconds: u64) -> bool;
     /// One poll interval; false when a stop was requested during the wait.
@@ -134,6 +137,22 @@ fn flush<E: Effects>(machine: &mut Machine, effects: &mut E) -> (remaining: bool
     emitted || machine.queue_len() > 0 || machine.open_exchanges() > 0
 }
 
+/// Compose backend reply refinement with the actual upload cursor transition.
+/// An S3 send can never poison a batch; anything other than acknowledgment preserves the queue and progress.
+pub fn deliver<E: Effects>(machine: &mut Machine, effects: &mut E, request: Request) -> (out: Outcome)
+    requires old(machine).valid(), old(machine).awaiting() == Some(request.path),
+    ensures final(machine).valid(), final(machine).awaiting().is_none(),
+        final(machine).counted() == old(machine).counted(), final(machine).emitted() == old(machine).emitted(),
+        old(effects).is_s3() ==> out != Outcome::Poisoned,
+        old(effects).is_s3() && !(out is Acknowledged) ==>
+            final(machine).resolved() == old(machine).resolved() && final(machine).poisoned() == old(machine).poisoned()
+                && final(machine).queue() == old(machine).queue(),
+{
+    let reply = effects.send(request);
+    let replied_at = effects.now();
+    machine.reply(replied_at, reply)
+}
+
 /// One round of the drive loop: a stop check, then the machine's next action
 /// performed against the effects. `Some` when the loop is over. Every round
 /// terminates: the read and flush loops inside it are measured.
@@ -174,9 +193,7 @@ fn drive_step<E: Effects>(machine: &mut Machine, effects: &mut E, mode: Mode, id
             effects.observe(Event::PoisonedUnsent, machine);
         }
         Action::Send(request) => {
-            let reply = effects.send(request);
-            let replied_at = effects.now();
-            let outcome = machine.reply(replied_at, reply);
+            let outcome = deliver(machine, effects, request);
             match outcome {
                 Outcome::Acknowledged(_) | Outcome::Poisoned => {
                     let (resolved, poisoned) = machine.progress();

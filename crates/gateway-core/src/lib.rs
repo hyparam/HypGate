@@ -79,6 +79,10 @@ pub mod ipv6;
 pub mod base64url;
 pub mod sha256;
 pub mod s3;
+pub mod s3_config;
+pub mod s3_delivery;
+pub mod s3_driver;
+pub mod shipping_checkpoint;
 pub mod config_build;
 pub mod deadline;
 

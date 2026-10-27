@@ -34,11 +34,14 @@ pub const K_ROUTES: [u8; 6] = *b"routes";
 pub const K_SERVER: [u8; 6] = *b"server";
 pub const K_TOKEN_ENV: [u8; 9] = *b"token_env";
 pub const K_STATE_DIR: [u8; 9] = *b"state_dir";
-pub const K_MAX_OPEN_EXCHANGES: [u8; 18] = *b"max_open_exchanges";
-pub const K_MAX_EXCHANGE_BYTES: [u8; 18] = *b"max_exchange_bytes";
+pub const K_MAX_OPEN_EXCHANGES: [u8; 18] = [b'm', b'a', b'x', b'_', b'o', b'p', b'e', b'n', b'_', b'e', b'x', b'c', b'h', b'a', b'n', b'g', b'e', b's'];
+pub const K_MAX_EXCHANGE_BYTES: [u8; 18] = [b'm', b'a', b'x', b'_', b'e', b'x', b'c', b'h', b'a', b'n', b'g', b'e', b'_', b'b', b'y', b't', b'e', b's'];
 pub const K_S3_REGION: [u8; 9] = *b"s3_region";
 pub const K_S3_ACCESS_KEY_ENV: [u8; 17] = *b"s3_access_key_env";
 pub const K_S3_SESSION_TOKEN_ENV: [u8; 20] = *b"s3_session_token_env";
+pub const K_SESSION: [u8; 7] = *b"session";
+pub const K_RESOLVED: [u8; 8] = [b'r', b'e', b's', b'o', b'l', b'v', b'e', b'd'];
+pub const K_POISONED: [u8; 8] = [b'p', b'o', b'i', b's', b'o', b'n', b'e', b'd'];
 pub const K_POLL_MS: [u8; 7] = *b"poll_ms";
 pub const V_BEARER: [u8; 6] = *b"bearer";
 pub const V_API_KEY: [u8; 7] = *b"api_key";
@@ -50,7 +53,7 @@ pub const DEFAULT_MAX_EXCHANGE_BYTES: usize = 1024 * 1024;
 pub const DEFAULT_POLL_MS: u64 = 1000;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub enum Schema { Root, Identity, Credential, Route, Limits, Candidate, Shipping }
+pub enum Schema { Root, Identity, Credential, Route, Limits, Candidate, Shipping, Checkpoint }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum CredentialKind { Bearer, ApiKey }
@@ -90,6 +93,7 @@ pub open spec fn allowed_keys(schema: Schema) -> Seq<Seq<u8>> {
         Schema::Route => seq![K_TENANT@, K_SELECTOR@, K_ORIGIN@, K_CREDENTIAL@],
         Schema::Limits => seq![K_REQUESTS@, K_CHUNK_BYTES@],
         Schema::Candidate => seq![K_ROUTES@],
+        Schema::Checkpoint => seq![K_SESSION@, K_RESOLVED@, K_POISONED@, K_MAX_OPEN_EXCHANGES@, K_MAX_EXCHANGE_BYTES@],
         Schema::Shipping => seq![K_SERVER@, K_TOKEN_ENV@, K_STATE_DIR@, K_MAX_OPEN_EXCHANGES@, K_MAX_EXCHANGE_BYTES@, K_POLL_MS@, K_S3_REGION@, K_S3_ACCESS_KEY_ENV@, K_S3_SESSION_TOKEN_ENV@],
     }
 }
@@ -227,7 +231,7 @@ proof fn lemma_distinct_unique(v: Value, key: Seq<u8>)
     }
 }
 /// Canonical decimals name one integer.
-proof fn lemma_u64_of(v: Value, n: u64)
+pub(crate) proof fn lemma_u64_of(v: Value, n: u64)
     requires v is Number, v->Number_0@ == crate::inbound::decimal(n as nat),
     ensures is_u64(v), u64_of(v) == n,
 {
@@ -266,6 +270,8 @@ fn key_allowed_exec(schema: Schema, key: &[u8]) -> (out: bool)
         Schema::Route => bytes_eq(key, K_TENANT.as_slice()) || bytes_eq(key, K_SELECTOR.as_slice()) || bytes_eq(key, K_ORIGIN.as_slice()) || bytes_eq(key, K_CREDENTIAL.as_slice()),
         Schema::Limits => bytes_eq(key, K_REQUESTS.as_slice()) || bytes_eq(key, K_CHUNK_BYTES.as_slice()),
         Schema::Candidate => bytes_eq(key, K_ROUTES.as_slice()),
+        Schema::Checkpoint => bytes_eq(key, K_SESSION.as_slice()) || bytes_eq(key, K_RESOLVED.as_slice()) || bytes_eq(key, K_POISONED.as_slice())
+            || bytes_eq(key, K_MAX_OPEN_EXCHANGES.as_slice()) || bytes_eq(key, K_MAX_EXCHANGE_BYTES.as_slice()),
         Schema::Shipping => bytes_eq(key, K_SERVER.as_slice()) || bytes_eq(key, K_TOKEN_ENV.as_slice()) || bytes_eq(key, K_STATE_DIR.as_slice())
             || bytes_eq(key, K_MAX_OPEN_EXCHANGES.as_slice()) || bytes_eq(key, K_MAX_EXCHANGE_BYTES.as_slice()) || bytes_eq(key, K_POLL_MS.as_slice()) || bytes_eq(key, K_S3_REGION.as_slice()) || bytes_eq(key, K_S3_ACCESS_KEY_ENV.as_slice()) || bytes_eq(key, K_S3_SESSION_TOKEN_ENV.as_slice()),
     };
@@ -281,6 +287,8 @@ fn key_allowed_exec(schema: Schema, key: &[u8]) -> (out: bool)
             Schema::Route => { assert(keys[0] == K_TENANT@); assert(keys[1] == K_SELECTOR@); assert(keys[2] == K_ORIGIN@); assert(keys[3] == K_CREDENTIAL@); }
             Schema::Limits => { assert(keys[0] == K_REQUESTS@); assert(keys[1] == K_CHUNK_BYTES@); }
             Schema::Candidate => { assert(keys[0] == K_ROUTES@); }
+            Schema::Checkpoint => { assert(keys[0] == K_SESSION@); assert(keys[1] == K_RESOLVED@); assert(keys[2] == K_POISONED@);
+                assert(keys[3] == K_MAX_OPEN_EXCHANGES@); assert(keys[4] == K_MAX_EXCHANGE_BYTES@); }
             Schema::Shipping => {
                 assert(keys[0] == K_SERVER@); assert(keys[1] == K_TOKEN_ENV@); assert(keys[2] == K_STATE_DIR@);
                 assert(keys[3] == K_MAX_OPEN_EXCHANGES@); assert(keys[4] == K_MAX_EXCHANGE_BYTES@); assert(keys[5] == K_POLL_MS@); assert(keys[6] == K_S3_REGION@); assert(keys[7] == K_S3_ACCESS_KEY_ENV@); assert(keys[8] == K_S3_SESSION_TOKEN_ENV@);
@@ -296,7 +304,7 @@ fn key_allowed_exec(schema: Schema, key: &[u8]) -> (out: bool)
 }
 /// The members of `v` when it is an object of `schema`'s shape.
 #[verifier::loop_isolation(false)]
-fn object(v: &Value, schema: Schema) -> (out: Option<&Vec<Member>>)
+pub(crate) fn object(v: &Value, schema: Schema) -> (out: Option<&Vec<Member>>)
     ensures match out { Some(members) => object_ok(*v, schema) && members@ == ms(*v), None => !object_ok(*v, schema) },
 {
     let members = match v { Value::Object(members) => members, _ => return None };
@@ -360,19 +368,19 @@ fn str_exec(v: &Value) -> (out: Option<Vec<u8>>)
 {
     match v { Value::Str(t) => Some(slice_to_vec(t.as_slice())), _ => None }
 }
-fn required_u64(v: &Value, key: &[u8]) -> (out: Option<u64>)
+pub(crate) fn required_u64(v: &Value, key: &[u8]) -> (out: Option<u64>)
     requires distinct_keys(*v),
     ensures match out { Some(n) => has_key(*v, key@) && is_u64(at(*v, key@)) && u64_of(at(*v, key@)) == n, None => !(has_key(*v, key@) && is_u64(at(*v, key@))) },
 {
     match field(v, key) { Some(x) => u64_exec(x), None => None }
 }
-fn required_usize(v: &Value, key: &[u8]) -> (out: Option<usize>)
+pub(crate) fn required_usize(v: &Value, key: &[u8]) -> (out: Option<usize>)
     requires distinct_keys(*v),
     ensures match out { Some(n) => has_key(*v, key@) && is_usize(at(*v, key@)) && u64_of(at(*v, key@)) == n as u64, None => !(has_key(*v, key@) && is_usize(at(*v, key@))) },
 {
     match field(v, key) { Some(x) => usize_exec(x), None => None }
 }
-fn required_str(v: &Value, key: &[u8]) -> (out: Option<Vec<u8>>)
+pub(crate) fn required_str(v: &Value, key: &[u8]) -> (out: Option<Vec<u8>>)
     requires distinct_keys(*v),
     ensures match out { Some(t) => has_key(*v, key@) && at(*v, key@) is Str && t@ == text_of(at(*v, key@)), None => !(has_key(*v, key@) && at(*v, key@) is Str) },
 {

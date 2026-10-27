@@ -22,6 +22,14 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("s3_delivery.rs", "s3_date_uses_month_as_day", "push_two(&mut out, c.day as u64)", "push_two(&mut out, c.month as u64)"),
+    ("s3_delivery.rs", "s3_omits_signed_date_header", 'headers.push(field(b"x-amz-date", date, false));', 'headers.push(field(b"wrong-header", date, false));'),
+    ("s3_delivery.rs", "s3_fabricates_success_without_put", "let response = io.put(put);", "let response = Response { status: 200, retry_after: None };"),
+    ("s3_config.rs", "s3_reads_wrong_secret_name", "secrets.read(s.token_env.as_slice())", "secrets.read(s.s3_access_key_env.as_slice())"),
+    ("shipping_checkpoint.rs", "s3_checkpoint_omits_prefix", "append(&mut raw, c.prefix.as_slice());", ""),
+    ("shipping_checkpoint.rs", "s3_checkpoint_ignores_limits", "if crate::headers::eq(c.session.as_slice(), identity) && c.max_open_exchanges == open && c.max_exchange_bytes == bytes", "if crate::headers::eq(c.session.as_slice(), identity)"),
+    ("shipping_checkpoint.rs", "s3_checkpoint_fabricates_progress", "session: vstd::slice::slice_to_vec(identity), resolved, poisoned,", "session: vstd::slice::slice_to_vec(identity), resolved: 0, poisoned,"),
+    ("s3_driver.rs", "s3_driver_bypasses_delivery", "s3_delivery::send(self.config, self.io, request, ms)", "crate::s3::activation()"),
     ("s3.rs", "s3_accepts_failed_put", "if status == 200 { 200 }", "if status == 403 { 200 }"),
     ("s3.rs", "s3_changes_hmac_pad", "padded(k.as_slice(), 0x36)", "padded(k.as_slice(), 0x5c)"),
     ("s3.rs", "s3_signs_wrong_service", 'mac(k_region.as_slice(), b"s3")', 'mac(k_region.as_slice(), b"ec2")'),

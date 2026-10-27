@@ -786,6 +786,7 @@ impl Machine {
             final(self).skip() == old(self).skip(), final(self).token() == old(self).token(),
             final(self).session() == old(self).session(), final(self).read_failed() == old(self).read_failed(),
             !final(self).at_end(),
+            old(self).awaiting() != Some(Path::Ingest) ==> out != Outcome::Poisoned,
             // Enrollment replies never move progress.
             old(self).awaiting() != Some(Path::Ingest) ==> final(self).queue() == old(self).queue()
                 && final(self).resolved() == old(self).resolved() && final(self).poisoned() == old(self).poisoned(),
