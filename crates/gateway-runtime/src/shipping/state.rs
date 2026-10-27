@@ -68,26 +68,6 @@ pub fn save_checkpoint(dir: &Path, checkpoint: &Checkpoint) -> io::Result<()> {
     write_private(&dir.join(CHECKPOINT_FILE), &write(&value))
 }
 
-/// The `sub` and `exp` claims of a compact JWS, read without verifying the
-/// signature: the shipper only needs to know which gateway it is and when to
-/// renew. The server verifies the signature on every request.
-pub fn jwt_claims(jwt: &str) -> Option<(String, u64)> {
-    let mut parts = jwt.split('.');
-    let (_, payload, _) = (parts.next()?, parts.next()?, parts.next()?);
-    if parts.next().is_some() || payload.len() > 16 * 1024 { return None; }
-    let claims = json::parse(&base64url_decode(payload)?)?;
-    let sub = text(&claims, "sub")?;
-    if sub.is_empty() || sub.len() > 128 { return None; }
-    Some((sub, number(&claims, "exp")?))
-}
-
-/// The verified decoder: the bytes whose base64url encoding this is, or
-/// nothing for a text that encodes nothing.
-fn base64url_decode(text: &str) -> Option<Vec<u8>> { gateway_core::base64url::decode(text.as_bytes()) }
-
-#[cfg(test)]
-pub(crate) fn base64url_decode_for_test(text: &str) -> Option<Vec<u8>> { base64url_decode(text) }
-
 #[cfg(test)]
 pub(crate) fn base64url_encode(bytes: &[u8]) -> String {
     String::from_utf8(gateway_core::base64url::encode(bytes)).unwrap_or_default()

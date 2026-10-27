@@ -69,6 +69,8 @@ pub mod upload_cursor;
 pub mod enrollment;
 pub mod shipper;
 pub mod shipping_driver;
+pub mod shipping_wire;
+pub mod client_exchange;
 pub mod projection;
 
 // Shared codecs.
@@ -149,6 +151,12 @@ mod base64url_tests;
 #[cfg(test)]
 #[path = "tests/sha256.rs"]
 mod sha256_tests;
+#[cfg(test)]
+#[path = "tests/shipping_wire.rs"]
+mod shipping_wire_tests;
+#[cfg(test)]
+#[path = "tests/client_exchange.rs"]
+mod client_exchange_tests;
 #[cfg(test)]
 #[path = "tests/config_build.rs"]
 mod config_build_tests;

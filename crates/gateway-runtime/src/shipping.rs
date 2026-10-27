@@ -21,11 +21,14 @@ mod lookup;
 pub mod state;
 mod s3;
 pub use config::ShippingConfig;
-use client::{Client, Reply};
+use client::Client;
 use state::{hex, Checkpoint, Identity};
 
+#[cfg(test)]
 const INGEST_PATH: &str = "/v1/ingest/proxy";
+#[cfg(test)]
 const BOOTSTRAP_PATH: &str = "/v1/identity/bootstrap";
+#[cfg(test)]
 const REFRESH_PATH: &str = "/v1/identity/refresh";
 const REQUEST_DEADLINE: Duration = Duration::from_secs(30);
 const STACK_BYTES: usize = 2 * 1024 * 1024;
@@ -138,16 +141,18 @@ struct Engine {
 fn now_seconds() -> u64 { SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) }
 fn now_ms() -> u64 { SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_millis().min(u64::MAX as u128) as u64).unwrap_or(0) }
 
-/// A credential parsed from an enrollment reply, with the gateway id for the identity file.
+/// A credential from an enrollment reply, as the identity file stores it:
+/// the verified reader's token, subject, and expiry, as text.
 struct Issued { jwt: String, gateway_id: String, expires_at: u64 }
 
+/// The verified reader decides what the reply carries; this only turns its
+/// bytes into the identity file's strings (a token or subject that is not
+/// UTF-8 is treated as absent).
 fn parse_credential(body: &[u8]) -> Option<Issued> {
-    let value = gateway_core::json::parse(body)?;
-    let jwt = String::from_utf8(value.get(b"jwt")?.as_str()?.clone()).ok()?;
-    let expires_at = value.get(b"expires_at")?.as_u64()?;
-    if jwt.len() > 16 * 1024 { return None; }
-    let (gateway_id, exp) = state::jwt_claims(&jwt)?;
-    Some(Issued { jwt, gateway_id, expires_at: expires_at.min(exp) })
+    let issued = gateway_core::shipping_wire::issued(body)?;
+    let jwt = String::from_utf8(issued.jwt).ok()?;
+    let gateway_id = String::from_utf8(issued.subject).ok()?;
+    Some(Issued { jwt, gateway_id, expires_at: issued.expires_at })
 }
 
 impl Engine {
@@ -255,22 +260,14 @@ impl Effects for Engine {
     }
 
     /// Send the request the machine chose to the configured server.
+    /// The head is the verified request head for the machine's request; the
+    /// reply's revocation code and credential are read by the verified readers.
     fn send(&mut self, request: Request) -> MachineReply {
-        let path = match request.path { ShipPath::Bootstrap => BOOTSTRAP_PATH, ShipPath::Refresh => REFRESH_PATH, ShipPath::Ingest => INGEST_PATH };
-        let bearer = request.bearer.as_deref().and_then(|b| std::str::from_utf8(b).ok());
-        let mut headers: Vec<(&str, String)> = Vec::new();
-        match request.path {
-            ShipPath::Bootstrap => headers.push(("content-type", "application/json".to_owned())),
-            ShipPath::Ingest => {
-                headers.push(("content-type", "application/x-ndjson".to_owned()));
-                headers.push(("x-hyp-batch-id", hex(request.batch_id.as_deref().unwrap_or(&[]))));
-            }
-            ShipPath::Refresh => {}
-        }
         let failed = MachineReply { status: 0, retry_after: None, revocation: false, credential: None };
         let Some(client) = self.client.as_ref() else { return failed; };
-        let Ok(reply) = client.request("POST", path, bearer, &headers, request.body) else { return failed; };
-        let revocation = is_revocation(&reply);
+        let Some(head) = gateway_core::shipping_wire::request_head(self.config.server.authority().as_bytes(), &request) else { return failed; };
+        let Ok(reply) = client.request(&head, &request.body) else { return failed; };
+        let revocation = gateway_core::shipping_wire::revocation(&reply.body);
         self.issued = if request.path != ShipPath::Ingest && reply.status == 200 { parse_credential(&reply.body) } else { None };
         let credential = self.issued.as_ref().map(|i| Credential { jwt: i.jwt.as_bytes().to_vec(), expires_at: i.expires_at });
         MachineReply { status: reply.status, retry_after: reply.retry_after, revocation, credential }
@@ -312,10 +309,6 @@ impl Effects for Engine {
             Event::Waiting => self.metrics.lag.store(machine.queue_len() as u64, Ordering::Relaxed),
         }
     }
-}
-
-fn is_revocation(reply: &Reply) -> bool {
-    matches!(reply.error_code().as_deref(), Some("service_token_revoked" | "service_account_disabled"))
 }
 
 #[cfg(test)]

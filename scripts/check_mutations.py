@@ -650,6 +650,19 @@ MUTATIONS = [
     ("exchange_lifecycle.rs", "lifecycle_drops_download_count", "self.download = copy.accepted_bytes();", "self.download = 0;"),
     ("exchange_lifecycle.rs", "lifecycle_fault_leaves_exchange_open", "        self.outcome = outcome_code(fault);\n        self.state = State::Terminal;", "        self.outcome = outcome_code(fault);"),
     ("shipping_driver.rs", "driver_checkpoints_stale_progress", "            let (resolved, poisoned) = machine.progress();\n            effects.checkpoint(machine, resolved, poisoned);\n            effects.observe(Event::PoisonedUnsent, machine);", "            let (resolved, poisoned) = machine.progress();\n            effects.checkpoint(machine, 0, poisoned);\n            effects.observe(Event::PoisonedUnsent, machine);"),
+
+    ("shipping_wire.rs", "wire_jws_accepts_four_segments", "                (Some(_), Some(_)) => return None,", "                (Some(_), Some(_)) => {}"),
+    ("shipping_wire.rs", "wire_jws_accepts_empty_subject", "if subject.len() < 1 || subject.len() > MAX_SUBJECT_BYTES { return None; }", "if subject.len() > MAX_SUBJECT_BYTES { return None; }"),
+    ("shipping_wire.rs", "wire_issued_ignores_token_expiry", "let expires_at = if e <= c.expires { e } else { c.expires };", "let expires_at = e;"),
+    ("shipping_wire.rs", "wire_revocation_misses_disabled", "let out = eq(code.as_slice(), REVOKED.as_slice()) || eq(code.as_slice(), DISABLED.as_slice());", "let out = eq(code.as_slice(), REVOKED.as_slice());"),
+    ("shipping_wire.rs", "wire_retry_after_keeps_trailing_blanks", "    while b > a + 1 && (value[b - 1] == 32 || value[b - 1] == 9)", "    while false"),
+    ("shipping_wire.rs", "wire_retry_after_skips_first_field", "        if eq(fields[i].name.as_slice(), RETRY_AFTER.as_slice()) {", "        if eq(fields[i].name.as_slice(), RETRY_AFTER.as_slice()) && i > 0 {"),
+    ("shipping_wire.rs", "wire_request_head_drops_batch_id", "            fields.push(field(BATCH_ID.as_slice(), encoded_id, false));", ""),
+    ("shipping_wire.rs", "wire_request_head_skips_wire_check", "if !wire_ok(&fields) || !target_ok_exec(target) { return None; }", "if !target_ok_exec(target) { return None; }"),
+    ("client_exchange.rs", "client_sends_head_twice", "    let written = write_all(wire, body);\n    let ghost sent = head@ + written.sent@;", "    let written = write_all(wire, head);\n    let ghost sent = head@ + written.sent@;"),
+    ("client_exchange.rs", "client_unbounded_interim_heads", "if interim == MAX_INTERIM_HEADS { return Err(ClientFault::Refused); }", ""),
+    ("client_exchange.rs", "client_body_over_cap", "if n > cap - out.len() { return Exchanged { result: Err(ClientFault::TooLarge), sent: Ghost(sent) }; }", ""),
+    ("client_exchange.rs", "client_truncated_body_as_reply", "Read::Truncated | Read::Malformed | Read::Failed => return Exchanged { result: Err(ClientFault::Body), sent: Ghost(sent) },", "Read::Truncated | Read::Malformed | Read::Failed => return Exchanged { result: Ok(Reply { head: read.head, body: out }), sent: Ghost(sent) },"),
 ]
 
 

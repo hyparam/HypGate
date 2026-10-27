@@ -1,7 +1,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 use super::*;
 use super::config::ShippingConfig;
-use super::state::{base64url_encode, jwt_claims, load_checkpoint, load_identity, save_checkpoint, save_identity};
+use super::state::{base64url_encode, load_checkpoint, load_identity, save_checkpoint, save_identity};
+use gateway_core::shipping_wire::jws_claims;
 use crate::disk_log::DiskLog;
 use crate::test_support::{self_signed, wait_until, TempDir};
 use crate::transfer::{AuditLog, LogRecord, RecordKind};
@@ -181,7 +182,7 @@ fn cloud_client_classifies_handshake_and_record_trickles_as_timeouts() {
         });
         let client = client::Client::with_roots(roots, &config.server, Duration::from_millis(300)).unwrap();
         let started = std::time::Instant::now();
-        let result = client.request("GET", "/", None, &[], vec![]);
+        let result = client.request(b"GET / HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\n\r\n", b"");
         assert_eq!(result.unwrap_err(), client::ClientError::Timeout);
         assert!(started.elapsed() < Duration::from_millis(900));
         peer.join().unwrap();
@@ -456,16 +457,9 @@ fn state_files_round_trip_and_jwt_claims_are_read_without_verification() {
     std::fs::write(dir.0.join("checkpoint.json"), b"not json").unwrap();
     assert!(load_checkpoint(&dir.0).is_none());
     assert!(load_identity(&dir.0.join("missing")).is_none());
-    assert_eq!(jwt_claims(&fake_jwt("gw-0123456789abcdef", 1_800_000_000, 1)), Some(("gw-0123456789abcdef".into(), 1_800_000_000)));
-    assert!(jwt_claims("not.a").is_none());
-    assert!(jwt_claims("a.b.c.d").is_none());
-    assert!(jwt_claims(&format!("x.{}.y", base64url_encode(br#"{"exp":1}"#))).is_none(), "no sub");
-    assert!(jwt_claims(&format!("x.{}.y", base64url_encode(br#"{"sub":"g"}"#))).is_none(), "no exp");
-    assert!(jwt_claims(&format!("x.{}.y", base64url_encode(br#"{"sub":"","exp":1}"#))).is_none());
-    assert!(jwt_claims("x.!!!!.y").is_none());
-    for bytes in [&b""[..], b"a", b"ab", b"abc", b"abcd", &[0xff, 0x00, 0x80]] {
-        assert_eq!(state::base64url_decode_for_test(&base64url_encode(bytes)).unwrap(), bytes);
-    }
+    // The verified reader is what the shipper enrolls with; the fixture's tokens are read as expected.
+    let claims = jws_claims(fake_jwt("gw-0123456789abcdef", 1_800_000_000, 1).as_bytes()).unwrap();
+    assert_eq!((claims.subject.as_slice(), claims.expires), (&b"gw-0123456789abcdef"[..], 1_800_000_000));
 }
 
 // ---- projection ------------------------------------------------------------

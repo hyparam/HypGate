@@ -14,7 +14,10 @@ writer, and a metrics sink, with no decisions in it. The projection of an
 exchange into HypAware rows is verified too (`gateway_core::projection`, see
 [the projection](#the-projection)), reading provider bodies through the
 verified JSON reader and writing rows through the verified writer, with
-timestamps from the verified calendar. The HTTPS client, the state files'
+timestamps from the verified calendar. The request head and the reading of
+each reply are verified too (`gateway_core::shipping_wire`), and the HTTPS
+exchange runs under a verified client driver (`gateway_core::client_exchange`);
+the TLS connection, name resolution, the state files'
 I/O, and the server's own behavior are trusted and tested; the whole
 runtime, these adapters included, is held to a panic-free standard by clippy
 denies on unwrap, expect, panic, unreachable, indexing, and unchecked
@@ -210,9 +213,14 @@ by independent vectors and the local TLS integration test.
 Enrollment: `POST /v1/identity/bootstrap` with `{"bootstrap_token": ...}`
 returns `{jwt, expires_at, org}`. The gateway id is the credential's `sub`
 claim; the shipper reads `sub` and `exp` without verifying the signature, which
-the server does on every request. The payload segment is decoded by the
-verified base64url codec (`gateway_core::base64url`), which accepts exactly
-the encodings of some bytes, and parsed by the verified JSON reader. `POST /v1/identity/refresh` with the current
+the server does on every request. That reading is verified
+(`shipping_wire::jws_claims`): a result is always the claims of the token's
+one payload segment, found by its exactly two dots, decoded by the verified
+base64url codec (`gateway_core::base64url`), which accepts exactly the
+encodings of some bytes, and parsed by the verified JSON reader; the subject
+is 1 to 128 bytes. The credential document is read the same way
+(`shipping_wire::issued`), its expiry the earlier of `expires_at` and `exp`.
+`POST /v1/identity/refresh` with the current
 credential renews it; the shipper refreshes when less than 24 hours remain or
 once after a rejected upload, and re-enrolls when a refresh is rejected.
 `service_token_revoked` and `service_account_disabled` stop the shipper
@@ -280,8 +288,13 @@ implemented.
 - The HypAware server honors its documented ledger and dedup semantics and
   issues credentials only to holders of a valid operator token.
 - rustls, DNS, the OS socket timeouts that enforce the deadline, and the
-  filesystem; nothing in the process uses an async executor. The HTTPS client's
-  head parsing, framing, and chunk decoding are the verified codec.
+  filesystem; nothing in the process uses an async executor. The HTTPS
+  client's head parsing, framing, and chunk decoding are the verified codec,
+  and its exchange order is the verified `client_exchange` driver: the head
+  and body are handed to the wire once and in order, at most eight interim
+  heads are skipped, a head with ambiguous framing is refused, and the reply
+  body is exactly one body of the head's framing within the 64 KiB cap. What
+  remains trusted is that the wire moves the bytes it reports.
 - The system clock for renewal decisions and row timestamps.
 - The `Effects` implementation performs what it is asked: `send` reaches the
   configured server and returns that server's reply, `read` returns the log's

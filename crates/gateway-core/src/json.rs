@@ -1184,6 +1184,7 @@ fn string(s: &[u8], i: usize) -> (out: Option<(Vec<u8>, usize)>)
                 text.push(d);
                 proof {
                     let esc = s@.subrange(p as int, p + 2);
+                    assert(text@.len() == text_before.len() + 1); // the escape decoded to one byte, pushed above
                     let dec = text@.subrange(text_before.len() as int, text@.len() as int);
                     assert(dec =~= seq![d]);
                     assert(text@.subrange(0, text_before.len() as int) =~= text_before);

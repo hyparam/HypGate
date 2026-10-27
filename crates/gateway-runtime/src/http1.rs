@@ -142,6 +142,16 @@ pub(crate) fn write_fully<W: Write + ?Sized>(io: &mut W, bytes: &[u8]) -> io::Re
     }
 }
 
+/// One client exchange over `io` under the verified driver: the head and
+/// body written once, in order, the reply head read past interim ones, and
+/// the reply body read within `cap`. The socket's own error, if the wire
+/// failed, is not needed by the caller, who classifies by its deadline.
+pub(crate) fn client_exchange<IO: Read + Write>(io: &mut IO, head: &[u8], body: &[u8], cap: usize)
+    -> Result<gateway_core::client_exchange::Reply, gateway_core::client_exchange::ClientFault>
+{
+    gateway_core::client_exchange::exchange(&mut Wire::new(io), head, body, cap).result
+}
+
 /// A field for the writers.
 pub(crate) fn field(name: &'static [u8], value: Vec<u8>) -> Field { Field { name: name.to_vec(), value, sensitive: false } }
 /// The reason phrase for a status a test fixture writes; the production
