@@ -28,11 +28,15 @@ The root grant includes the exact tenant, selector, origin, and credential tuple
 
 ## Assumptions and remaining obligations
 
-The runtime configuration layer hashes gateway tokens with SHA-256 before
-authentication. This hashing and its cryptographic security are not verified.
+The runtime configuration layer hashes gateway tokens with the verified SHA-256
+(`gateway_core::sha256`) before authentication; the hash function's
+cryptographic strength is the standard's, not a theorem here.
 HTTP authentication header parsing is tested in the [HTTP boundary](http-boundary.md);
 secure token provisioning remains an operator obligation. Digest comparison
-scans every byte but carries no constant-time theorem. Tests use synthetic digests.
+(`framing::equal_bytes`) XORs every byte pair into one accumulator and tests
+only the accumulator, so no data-dependent branch depends on the matching
+prefix; it is proved to be equality, and carries no constant-time theorem
+about the compiled code. Tests use synthetic digests.
 
 Origins and credentials are numeric handles, not URLs or secrets. The transport
 consumes the routed wrapper and uses the same immutable mapping snapshot, without

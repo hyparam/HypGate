@@ -147,23 +147,30 @@ pub proof fn encoded_header_roundtrip(h: Header)
     ensures encoding(h).len() == 33, decoded(encoding(h)) == Some(h),
 { encoding_decodes(h); }
 
-// No early mismatch exit, so digest comparison does not leak the matching prefix
-// length through control flow. This is a functional equality proof, not a
-// constant-time proof.
+/// Equality of two byte strings without a data-dependent exit: every byte
+/// pair is XORed into one accumulator and only the accumulator is tested, so
+/// the matching prefix length does not steer control flow. Lengths are
+/// compared first; they are not secret (digests are 32 bytes). This is a
+/// functional equality theorem; what the compiler and the hardware do with
+/// the straight-line loop is outside the proof.
 pub(crate) fn equal_bytes(a: &[u8], b: &[u8]) -> (equal: bool)
     ensures equal == (a@ == b@),
 {
     if a.len() != b.len() { return false; }
     let mut i: usize = 0;
-    let mut equal = true;
+    let mut diff: u8 = 0;
     while i < a.len()
         invariant i <= a.len(), a.len() == b.len(),
-            equal == (forall|j: int| 0 <= j < i ==> #[trigger] a@[j] == b@[j]),
+            (diff == 0) == (forall|j: int| 0 <= j < i ==> #[trigger] a@[j] == b@[j]),
         decreases a.len() - i,
     {
-        equal = equal & (a[i] == b[i]);
+        let (x, y) = (a[i], b[i]);
+        let next = diff | (x ^ y);
+        proof { assert((next == 0) == (diff == 0 && x == y)) by (bit_vector) requires next == diff | (x ^ y); }
+        diff = next;
         i = i + 1;
     }
+    let equal = diff == 0;
     proof { if equal { assert(a@ =~= b@); } }
     equal
 }

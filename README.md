@@ -9,9 +9,9 @@ plugins, no other network destinations.
 ![LogGate forwards requests and responses between an AI client and provider, records exchanges in a local audit log, and optionally ships logs to HypAware Cloud.](docs/images/loggate-flow.png)
 
 What makes it different: the code that decides what the gateway does is
-proved correct with [Verus](https://github.com/verus-lang/verus). Other
-gateways are tested on examples. LogGate's core is proved for every input, and
-the code that talks to the network and disk is kept small and audited.
+proved correct with [Verus](https://github.com/verus-lang/verus). The proofs
+check the core against explicit contracts; the code that talks to the network
+and disk is tested and audited.
 
 ## Three guarantees
 
@@ -27,7 +27,7 @@ The gateway is a faithful pass-through with a faithful record.
 
 - **Bodies pass through unchanged.** The provider gets the client's request body
   byte for byte, and the client gets the provider's response byte for byte, in
-  order. Only the headers change: the gateway swaps in the provider credential
+  order. The gateway filters headers, swaps in the provider credential,
   and sets Host.
 - **Every exchange is recorded completely.** Each request gets a start record
   with the time, route, and destination; every request body chunk; the response
@@ -53,10 +53,11 @@ The gateway is a faithful pass-through with a faithful record.
 Strict mode is the guarantee. Availability mode is an opt-out that keeps
 forwarding after the log fails and counts each unrecorded request as a gap.
 
-### 3. It cannot crash
+### 3. Core safety and crash recovery
 
-The verified core cannot panic, overflow, or read out of bounds. If the
-process is killed at any moment, it restarts in a state that matches the log.
+Under its stated preconditions, the verified core cannot panic, overflow, or
+read out of bounds. This is not a process-wide crash guarantee. After a process
+kill, the scanner recovers the valid log prefix under the storage contract.
 Shipping runs on its own thread, so if it fails, the gateway keeps serving
 requests.
 
@@ -203,7 +204,7 @@ cargo test -p gateway-runtime --release --locked server::tests::benchmark -- --i
 LOGGATE_HAPROXY=/path/to/haproxy cargo test -p gateway-runtime --locked proxy_gateway_process_failover -- --ignored --nocapture
 ```
 
-Validation on 2026-10-26: 1355 core verification checks passed, 351 workspace tests passed, all fourteen opt-in benchmark workloads passed on the blocking runtime, all 524
+Validation on 2026-10-26: 1356 core verification checks passed, 353 workspace tests passed, all fourteen opt-in benchmark workloads passed on the blocking runtime, all 525
 deliberate mutations failed their proof obligations, and the runtime passed its panic and effect-site
 lints with no async executor linked. The opt-in TLS proxy/gateway
 process-failover test and six load/fault workloads passed on 2026-10-23.
@@ -216,3 +217,7 @@ for every pull request and every push to `master`.
 `bash scripts/check_deployment.sh` reproduces the documented deployment from a clean
 checkout, and `deploy/Dockerfile` repeats the build, tests, proofs, and that check in
 a digest-pinned container; see [clean-environment reproduction](docs/deployment.md#clean-environment-reproduction).
+
+## License
+
+[MIT](LICENSE).

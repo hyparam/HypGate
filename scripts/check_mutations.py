@@ -208,6 +208,7 @@ MUTATIONS = [
 
     ("stream.rs", "deny_matching_receipt", "if !receipt.matches_record(header, bytes)", "if true"),
     ("framing.rs", "receipt_ignores_payload", "let payload_ok = equal_bytes(slice_subrange(bytes, 33, bytes.len() - 32), payload);", "let payload_ok = true;"),
+    ("framing.rs", "equal_bytes_keeps_only_the_last_byte", "        let next = diff | (x ^ y);", "        let next = x ^ y;"),
     ("framing.rs", "receipt_ignores_header", "let header_ok = equal_bytes(slice_subrange(bytes, 0, 33), header.as_slice());", "let header_ok = true;"),
     ("stream.rs", "acknowledge_unmatched_receipt", "if !receipt.matches_record(header, bytes)", "if false"),
     ("journal.rs", "mint_receipt_without_commit", "if !self.record_durable(t, frame.bytes())", "if false"),
