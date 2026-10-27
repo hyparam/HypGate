@@ -186,28 +186,6 @@ executable code, not runtime assumptions. Thread scheduling, OS/filesystem/TLS
 correctness, cryptographic security, and AWS durability remain external facts;
 Verus does not prove the implementation of AWS or the operating system.
 
-### Live S3 validation
-
-On 2026-10-26, the shipper was exercised with real credentials resolved from an
-operator-approved local AWS profile against an existing bucket in `us-west-1`.
-Only a unique `hypgate-smoke/` prefix and synthetic audit records were used.
-`examples/s3_smoke.rs` creates that synthetic five-record audit log without
-network access. The test ran the actual `hypgate ship` binary and independently
-read the resulting object through the AWS CLI:
-
-- First run acknowledged one object containing two NDJSON rows (2,298 bytes).
-- Both synthetic message texts matched, and the payload's SHA-256 matched the object key.
-- A restart with its checkpoint acknowledged zero new batches.
-- Removing the checkpoint caused one replay, with the same key and ETag and still only one object.
-- The local audit log was unchanged.
-- The object was deleted and a subsequent prefix listing contained zero objects.
-
-This was repeated after moving S3 orchestration into the verified core; both
-runs passed and both prefixes were cleaned. Credentials were passed only in
-process environments, never written into policy files or test reports. The
-live profile used long-lived keys; temporary session-token signing is covered
-by independent vectors and the local TLS integration test.
-
 ## HypAware protocol
 
 Enrollment: `POST /v1/identity/bootstrap` with `{"bootstrap_token": ...}`

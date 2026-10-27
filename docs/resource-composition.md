@@ -161,7 +161,7 @@ checks this over 3,000 rounds.
 | Dedicated thread stacks: audit worker, four DNS workers, the 64 KiB signal thread | 10,551,296 | [Dedicated thread stacks](dependency-resources.md#dedicated-thread-stacks); the per-connection and watcher stacks are charged per inbound connection |
 | TLS session cache contents, 33 servers × 9 sessions × 131,119 | 38,942,343 | [Shared TLS session storage](dependency-resources.md#shared-tls-session-storage) |
 | Queued DNS jobs, 32 × (253 + 2,048) | 73,632 | DNS inventory |
-| Retained configuration content, bounded by both one-MiB input documents | 2,097,152 | [Configuration storage](configuration.md#configuration-storage-and-startup-scratch) |
+| Retained configuration content, bounded by both one-MiB input documents | 2,097,152 | [Configuration storage](configuration.md#validation-and-scope) |
 | Disk queue slot vector | Q × size of `Option<(RecordFrame, Sender)>` | [Audit ownership](audit-buffer-lifetimes.md#verified-fixed-queue-and-synchronization-obligations) |
 | Batch descriptor vectors (payloads charged in V) | 16 × (size of `Option<(RecordFrame, Sender)>` + size of `(Option<DurableFrame>, Sender)`) | `budget::BATCH_DESCRIPTORS`; bounded recursion uses the existing worker stack |
 | Root store trust-anchor descriptors | root count × size of `TrustAnchor` | `webpki-roots` static table, cloned descriptors over static DER |
@@ -175,12 +175,11 @@ where the per-connection term is the 512 KiB connection stack, the 64 KiB
 watcher stack, and the retained 933,901-byte adapter allowance. For the
 executable example (R = 32, K = 16,384, C = 128, Q = 16), V is
 6,820,993 bytes and B is about 380.9 MB; `budget::tests` pins the exact value
-from the sizes computed at build time. The isolated-process workload measured a
-kernel peak of 14,168,064 bytes on Linux with R = 8 ([benchmarks](benchmarks.md#isolated-gateway-process-memory)).
-The gap is expected: the bound charges every owner at its replacement peak
-simultaneously, including verifier failure diagnostics and a full session cache,
-while the workload exercises none of those extremes. The bound's purpose is to
-show that no owner is unaccounted, not to predict usage.
+from the sizes computed at build time. The bound charges every owner at its
+replacement peak simultaneously, including verifier failure diagnostics and a
+full session cache. It accounts for owners rather than predicting resident
+memory; use the [isolated-process fixture](benchmarks.md#isolated-gateway-process-memory)
+to measure your workload.
 
 ## Assumptions
 

@@ -2,11 +2,10 @@
 
 Every fixed or configurable limit in the runnable gateway, the behavior when a
 caller or peer reaches it, and the evidence behind that behavior. Values are
-those compiled into the `hypgate` executable or accepted by its configuration
-as of 2026-10-24; library callers may choose others within the stated ranges.
+those compiled into the `hypgate` executable or accepted by its configuration;
+library callers may choose others within the stated ranges.
 "Proved" means a Verus contract covers the count or transition; "tested" means a
-workspace or opt-in test exercises the limit; "measured" points at the
-[benchmarks](benchmarks.md). None of these limits is a measured memory or latency
+workspace or opt-in test exercises the limit. None of these limits is a measured memory or latency
 bound; see the [resource composition](resource-composition.md) for the
 requested-allocation accounting that follows from them.
 
@@ -14,7 +13,7 @@ requested-allocation accounting that follows from them.
 
 | Limit | Value | Reached | Evidence |
 | --- | --- | --- | --- |
-| Request slots (`limits.requests`) | 1 to 65,536; documented example 16 | Admission returns 503 before any upstream connection; readiness stays 200; a released slot is reusable. Slots above the audit queue depth add waiting per frame, not failures. | Proved acquire/release/occupancy; `repeated_overload_preserves_active_streams_health_and_reusable_capacity`, `sustained_overload_preserves_active_streams_and_health`; measured. |
+| Request slots (`limits.requests`) | 1 to 65,536; documented example 16 | Admission returns 503 before any upstream connection; readiness stays 200; a released slot is reusable. Slots above the audit queue depth add waiting per frame, not failures. | Proved acquire/release/occupancy; `repeated_overload_preserves_active_streams_health_and_reusable_capacity`, `sustained_overload_preserves_active_streams_and_health`; benchmark fixtures. |
 | Chunk size (`limits.chunk_bytes`) | 1 byte to 1 MiB; example 16 KiB; `requests × chunk_bytes` at most 128 MiB | Larger configurations are rejected at startup. The chunk size bounds every core stream chunk and every audit record payload. | `validate_limits` proved; configuration tests. |
 | Configuration file | 1 MiB | Startup fails with "invalid configuration". | `config.rs` tests. |
 | Destination URL | 8,192 bytes, `https://` only, no query, host at most 253 bytes | Rejected at startup; routing never uses caller URLs. | Configuration confinement proved and tested. |
@@ -29,7 +28,7 @@ requested-allocation accounting that follows from them.
 | Inbound connection slots | 128 per `Gateway` (library range 1 to 65,536; shared by every listener) | Excess connections are accepted and closed without a worker; canceled connections keep their slot until cleanup finishes. | Proved registry; `incomplete_connections_expire_without_workers_and_capacity_recovers`, `serve_invocations_share_connection_credit_and_reject_limit_changes`. |
 | Head read deadline | 10 s | Connection closed before dispatch with no response; no worker or request slot is used. | `incomplete_connections_expire_without_workers_and_capacity_recovers`. |
 | Inbound head size and field count | 32 KiB on the wire, 100 fields, one request per connection; the verified parser's limits | 431 before health or route dispatch for a head over either limit, 400 for a malformed head or ambiguous framing; duplicate security-relevant headers are 400. | `inbound_wire_head_and_header_count_limits_apply_before_health_dispatch`. |
-| Body read | 32 KiB per socket read into the body reader's one buffer, 16 KiB application mailbox | A slow reader bounds read-ahead to that buffer; chunk sizes are not limited by it. | Verified chunked decoder and framing; mailbox occupancy proved. |
+| Body read | 32 KiB per socket read into the body reader's buffer | A slow reader bounds read-ahead to that buffer; chunk sizes are not limited by it. | Verified body reader, chunked decoder, and framing. |
 | Connection deadline | 310 s (library range up to 3,600 s) | Connection aborted and its slot released; a truncated body is reported as an error, never a clean end. | `incomplete_connections_expire_without_workers_and_capacity_recovers`, `client_disconnect_before_headers_cancels_request_and_upstream_socket`. |
 | Worker slots | Equal to the request limit | 503 "workers unavailable" when exhausted; permanently closed by shutdown. | Drain registry proved; `worker_budget_covers_cleanup_without_consuming_request_slots`. |
 
@@ -48,10 +47,10 @@ requested-allocation accounting that follows from them.
 
 | Limit | Value | Reached | Evidence |
 | --- | --- | --- | --- |
-| Queued records | 16 (library range 1 to 1,024) | A full queue parks the append until the worker frees a slot; nothing is reserved, allocated, or encoded while waiting, and a canceled waiter leaves no reservation. The acknowledgment deadline covers the wait, so if no slot frees in time the append fails and health closes exactly as for a late acknowledgment (strict: 502 before headers or an aborted body, then readiness 503; availability: one gap). Each request has at most one append outstanding, so at most `limits.requests` appends ever wait. No worker is replaced. | FIFO and reservation proved; `production_enqueue_preserves_pairing_waits_while_full_and_refuses_closed_before_encoding`, `full_queue_parks_excess_work_before_allocation_and_serves_it_in_order`, `slot_wait_is_bounded_by_the_deadline_and_poisons_health`; measured by `queue_contention` and the sweep at 32 concurrent requests. |
+| Queued records | 16 (library range 1 to 1,024) | A full queue parks the append until the worker frees a slot; nothing is reserved, allocated, or encoded while waiting, and a canceled waiter leaves no reservation. The acknowledgment deadline covers the wait, so if no slot frees in time the append fails and health closes exactly as for a late acknowledgment (strict: 502 before headers or an aborted body, then readiness 503; availability: one gap). Each request has at most one append outstanding, so at most `limits.requests` appends ever wait. No worker is replaced. | FIFO and reservation proved; `production_enqueue_preserves_pairing_waits_while_full_and_refuses_closed_before_encoding`, `full_queue_parks_excess_work_before_allocation_and_serves_it_in_order`, `slot_wait_is_bounded_by_the_deadline_and_poisons_health`; `queue_contention` and concurrency-sweep fixtures. |
 | Record payload | The larger of `chunk_bytes` and 8,210 bytes; hard maximum 1 MiB | Larger records cannot be constructed. Body chunks are at most `chunk_bytes`; the request-start record is 18 bytes plus the destination, the response head 10 bytes, the completion 25 bytes. A library logger whose limit is below a metadata payload refuses that append without poisoning health (`failed_start_record_refuses_in_strict_mode_and_forwards_with_one_gap_in_availability_mode`). | Framing and codec proofs; `metadata_records_roundtrip_through_disk_and_scanner`. |
 | Recorded destination | 1 to 8,192 bytes, the configured text | Bounded by the destination limit above, so the executable never exceeds it. | Codec proof; `request_start_roundtrips_within_destination_bounds`. |
-| Group commit | Up to 16 already-queued records per sync; no batching timer | One worker writes complete frames in FIFO order, syncs once, then delivers receipts. Rotation adds predecessor seals. A lone record still needs its own sync; concurrent records can share it. The active payload bound is 16 times the record payload limit plus framing. | `BatchWorker` proofs, blocked-sync and cross-rotation batch tests; [batched benchmarks](benchmarks.md#bounded-group-commit-2026-10-27). |
+| Group commit | Up to 16 already-queued records per sync; no batching timer | One worker writes complete frames in FIFO order, syncs once, then delivers receipts. Rotation adds predecessor seals. A lone record still needs its own sync; concurrent records can share it. The active payload bound is 16 times the record payload limit plus framing. | `BatchWorker` proofs, blocked-sync and cross-rotation batch tests; [benchmark guidance](benchmarks.md#group-commit). |
 | Acknowledgment deadline | 2 s (library range up to 300 s), measured from the append call and including any wait for a queue slot | Health closes permanently. Strict: a request whose start record expires gets 503 with no upstream connection; one whose body or response-head append expires gets 502 before headers or an aborted body; later requests are refused with 503 at dispatch, and readiness becomes 503. Availability: gap counter increments once per request. | `stalled_log_under_load_preserves_health_deadlines_and_mode_policy`. |
 | Storage faults | Full or read-only filesystem, process death, abrupt guest power cut | Acknowledged prefix survives; scan reports a complete, incomplete, or corrupt tail without modifying the file. | `filesystem_full_preserves_acknowledged_prefix_and_fails_closed`, `filesystem_read_only_refuses_logger_startup`, crash tests on Linux ext4; six [QEMU guest power-cut trials](storage-crash-contract.md#guest-power-cut-experiment). Software crash validation is complete for the tested configuration; physical storage durability is a deployment assumption. |
 | Segment rotation | 128 MiB or 24 hours by default; CLI-configurable | Before the next whole frame; one oversized frame can exceed the target. No automatic deletion or bound on total disk use. A failed rotation poisons logging health. | Verified `log_rotation::RotatingStorage`; rotation, strict-transfer, and shipping-resume tests. |
@@ -79,14 +78,9 @@ requested-allocation accounting that follows from them.
 | Drain window | 10 s after SIGTERM or SIGINT | Remaining connections are aborted and remaining workers canceled through the shared token; admission stays closed. | Permanent closure and rank proved; `shutdown_with_blocked_disk_returns_error_without_replacement_or_replay`; [shutdown proof](shutdown-proof.md). |
 | Logger join window | 2 s after workers stop | `serve` returns an error; the blocked worker is never replaced and a running syscall is not interrupted. | Same tests. |
 
-## Measured behavior at and below these limits
+## Measuring your deployment
 
-The [benchmarks](benchmarks.md) report throughput, first-byte and completion
-latency, client-observed inter-frame gaps, and gateway-only resident memory for
-both logging modes at concurrency one through 32, with paced 4 MiB and 32 MiB
-streams, 1 MiB uploads, 128 requests at 32 concurrent against the 16-record audit
-queue (all complete in both modes, with the frame gap doubling while appends wait
-for slots), permanent logging failure, a blocked disk worker, ten minutes of
-admission overload per mode, and 100-wave memory soaks. Those numbers are
-single-machine observations. No release performance threshold has been set,
-and no table above turns a logical limit into a memory, CPU, or latency guarantee.
+The [benchmark guide](benchmarks.md) provides commands for throughput, latency,
+queue contention, overload, and isolated gateway memory workloads. Measure on
+your deployment hardware; logical limits do not establish memory, CPU, or
+latency guarantees.

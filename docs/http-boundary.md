@@ -59,9 +59,7 @@ Boundary tests exercise the same rules end to end: fixed destination/credential
 binding, caller header overrides, duplicate/malformed authentication, forbidden
 paths and methods, Connection nominations, header limits, admission cleanup, and
 response filtering.
-Workspace test totals are maintained in the [README](../README.md). Live Anthropic
-and OpenAI exchanges are recorded in the [HypAware setup](hypaware.md#smoke-test-record)
-smoke test. Network dispatch, body forwarding, and logging are covered by the
+Network dispatch, body forwarding, and logging are covered by the
 [HTTPS transport](https-transport.md), [body transfer](body-transfer.md), and
 [running](running.md) notes.
 

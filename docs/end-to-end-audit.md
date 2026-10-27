@@ -370,8 +370,6 @@ observations only update metrics; they do not decide progress.
 
 Tests independently verify wire signatures over TLS, retries without poison,
 rotated logs, replay after missing or mismatched checkpoints, credential-name
-selection, UTC leap/day/year boundaries, and checkpoint JSON rejection. A live
-AWS run with synthetic records also verified upload, resume, stable replay and
-cleanup; see [the smoke record](cloud-shipping.md#live-s3-validation). Thread
+selection, UTC leap/day/year boundaries, and checkpoint JSON rejection. Thread
 scheduling, clock accuracy, environment/OS/filesystem/TLS behavior, cryptographic
 security, S3 durability, and downstream row deduplication remain external premises.

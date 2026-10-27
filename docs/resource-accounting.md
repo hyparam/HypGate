@@ -166,7 +166,7 @@ identifies excluded metadata and active owners.
   18 MiB of dedicated background stacks, excluding OS overhead and its main stack.
 - Immutable identity/route tables, URI and credential storage, configuration
   parsing scratch, metrics strings, and error/header metadata. The
-  [configuration inventory](configuration.md#configuration-storage-and-startup-scratch)
+  [configuration inventory](configuration.md#validation-and-scope)
   separates retained data from startup scratch: root proof snapshots are erased,
   and the CLI drops its JSON input buffers before serving.
 - Filesystem page cache and storage-controller state. Audit-file disk usage grows

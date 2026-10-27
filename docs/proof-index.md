@@ -224,5 +224,5 @@ The runtime uses these executable functions. S3 introduces no new dependency,
 external-body proof escape, or socket/file effect site. The runtime still
 performs TLS, file operations, environment lookup, clock reads, and threading;
 those operations and AWS itself are not verified by Verus. See the
-[live S3 validation](cloud-shipping.md#live-s3-validation) and the deliberate
+[S3 destination guide](cloud-shipping.md#s3-destination) and the deliberate
 mutation checks in `scripts/check_mutations.py`.

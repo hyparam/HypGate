@@ -10,7 +10,7 @@ in the runtime; moving a decision into an adapter removes it from verification.
 - `crates/gateway-runtime`: blocking network, TLS, disk, and thread adapters.
   The binary composes these adapters; `cli.rs` parses commands and `scan.rs`
   renders audit metadata.
-- `docs`: operator guides, proof boundaries, and measured workload results.
+- `docs`: operator guides, proof boundaries, and benchmark reproduction guides.
 - `scripts`: effect-site checks, proof mutations, and deployment/storage fixtures.
 - `deploy`: the HAProxy configuration and reproducible deployment container.
 

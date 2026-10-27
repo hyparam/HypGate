@@ -58,9 +58,8 @@ fingerprint of it beside the gateway credential.
 
 ## 2. Configure shipping
 
-Add a `shipping` section to the root policy. The example below also shows two
-provider routes, one Anthropic and one OpenAI, which is the configuration the
-smoke test below used:
+Add a `shipping` section to your configuration. This example includes
+Anthropic and OpenAI routes:
 
 ```json
 {
@@ -175,28 +174,3 @@ HYPAWARE_TOKEN=... target/release/hypgate ship config.json logs/session-001.log
 
 It exits when every exchange is resolved. The server stores each exchange once
 even if a batch is sent twice, so re-running is safe.
-
-## Smoke test record
-
-Live checks on 2026-10-25 and 2026-10-26 exercised Anthropic Messages and OpenAI
-Responses, both JSON and SSE, against the providers and HypAware Cloud.
-The latest recorded release-build run on 2026-10-26 used the threaded server,
-verified exchange driver, socket write drivers, base64url codec, and SHA-256:
-
-- Without shipping, all four requests returned 200 with outcome 0 and intact
-  provider bytes. A bad token returned 401, no exchanges failed, and the log
-  scanned complete with 38 records.
-- With a service-account token, the gateway enrolled, emitted one exchange,
-  and had its batch acknowledged before shutdown. The server query returned
-  that exchange's user and assistant rows under the new gateway id.
-
-Earlier checks covered CI enrollment and service-account tokens, preserved
-provider/model/session/usage fields, and `Expect: 100-continue` followed by a
-successful response. Re-uploading a finished four-exchange log after removing
-local identity and checkpoint state left eight server rows rather than sixteen,
-confirming deduplication for that fixture.
-
-These are dated integration observations, not evidence that every later change
-has been exercised against live providers. Reproduce setup and row checks with
-the steps above; protocol and trust boundaries are in
-[cloud shipping](cloud-shipping.md).

@@ -125,8 +125,11 @@ request completes through the standby. Both gateways' strict audit logs are chec
 for exact payloads and distinct sessions. Only ports and the certificate path are
 substituted; retry and health-check policy are unchanged.
 
-Run it with an installed HAProxy (CI uses the distribution package) using the
-failover command from the [README](../README.md#development).
+With HAProxy and OpenSSL installed, run:
+
+```sh
+HYPGATE_HAPROXY=/path/to/haproxy cargo test -p gateway-runtime --locked proxy_gateway_process_failover -- --ignored --nocapture
+```
 
 The child processes run the gateway runtime in a test binary so a fixture CA can
 be supplied; this does not test CLI provisioning or real provider connectivity.

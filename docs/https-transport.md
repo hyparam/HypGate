@@ -75,8 +75,7 @@ credential headers, certificate rejection, redirects without another connection,
 deadline cleanup, and truncated responses. Body-bridge tests cover explicit
 EOF, canceled uploads, trailer rejection, and input-frame limits. The
 test logger records events in memory; real-disk integration is separately tested
-through the same transfer driver. Live Anthropic and OpenAI exchanges are recorded
-in the [HypAware setup](hypaware.md#smoke-test-record) smoke test.
+through the same transfer driver.
 
 Network code, TLS, DNS, thread scheduling, and socket timeouts remain trusted
 and tested rather than Verus-verified; HTTP head parsing and writing, framing
