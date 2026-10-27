@@ -78,6 +78,7 @@ pub mod calendar;
 pub mod ipv6;
 pub mod base64url;
 pub mod sha256;
+pub mod s3;
 pub mod config_build;
 pub mod deadline;
 

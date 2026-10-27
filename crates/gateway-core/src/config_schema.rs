@@ -36,6 +36,9 @@ pub const K_TOKEN_ENV: [u8; 9] = *b"token_env";
 pub const K_STATE_DIR: [u8; 9] = *b"state_dir";
 pub const K_MAX_OPEN_EXCHANGES: [u8; 18] = *b"max_open_exchanges";
 pub const K_MAX_EXCHANGE_BYTES: [u8; 18] = *b"max_exchange_bytes";
+pub const K_S3_REGION: [u8; 9] = *b"s3_region";
+pub const K_S3_ACCESS_KEY_ENV: [u8; 17] = *b"s3_access_key_env";
+pub const K_S3_SESSION_TOKEN_ENV: [u8; 20] = *b"s3_session_token_env";
 pub const K_POLL_MS: [u8; 7] = *b"poll_ms";
 pub const V_BEARER: [u8; 6] = *b"bearer";
 pub const V_API_KEY: [u8; 7] = *b"api_key";
@@ -66,6 +69,9 @@ pub struct Root {
 }
 pub struct Candidate { pub routes: Vec<Route> }
 pub struct Shipping {
+    pub s3_session_token_env: Vec<u8>,
+    pub s3_access_key_env: Vec<u8>,
+    pub s3_region: Vec<u8>,
     pub server: Vec<u8>,
     pub token_env: Vec<u8>,
     pub state_dir: Vec<u8>,
@@ -84,7 +90,7 @@ pub open spec fn allowed_keys(schema: Schema) -> Seq<Seq<u8>> {
         Schema::Route => seq![K_TENANT@, K_SELECTOR@, K_ORIGIN@, K_CREDENTIAL@],
         Schema::Limits => seq![K_REQUESTS@, K_CHUNK_BYTES@],
         Schema::Candidate => seq![K_ROUTES@],
-        Schema::Shipping => seq![K_SERVER@, K_TOKEN_ENV@, K_STATE_DIR@, K_MAX_OPEN_EXCHANGES@, K_MAX_EXCHANGE_BYTES@, K_POLL_MS@],
+        Schema::Shipping => seq![K_SERVER@, K_TOKEN_ENV@, K_STATE_DIR@, K_MAX_OPEN_EXCHANGES@, K_MAX_EXCHANGE_BYTES@, K_POLL_MS@, K_S3_REGION@, K_S3_ACCESS_KEY_ENV@, K_S3_SESSION_TOKEN_ENV@],
     }
 }
 pub open spec fn key_allowed(schema: Schema, key: Seq<u8>) -> bool { allowed_keys(schema).contains(key) }
@@ -151,6 +157,10 @@ pub open spec fn section_ok(s: Value) -> bool {
         && (has_key(s, K_MAX_OPEN_EXCHANGES@) ==> is_usize(at(s, K_MAX_OPEN_EXCHANGES@)))
         && (has_key(s, K_MAX_EXCHANGE_BYTES@) ==> is_usize(at(s, K_MAX_EXCHANGE_BYTES@)))
         && (has_key(s, K_POLL_MS@) ==> is_u64(at(s, K_POLL_MS@)))
+        && (has_key(s, K_S3_REGION@) ==> at(s, K_S3_REGION@) is Str)
+        && (has_key(s, K_S3_ACCESS_KEY_ENV@) ==> at(s, K_S3_ACCESS_KEY_ENV@) is Str)
+        && (has_key(s, K_S3_SESSION_TOKEN_ENV@) ==> at(s, K_S3_SESSION_TOKEN_ENV@) is Str)
+
 }
 /// A root policy with no `shipping` section, or a null one.
 pub open spec fn shipping_absent(v: Value) -> bool {
@@ -188,7 +198,10 @@ pub open spec fn reads_root(v: Value, out: Root) -> bool {
         && out.logging == logging_of(at(v, K_LOGGING@))
 }
 pub open spec fn reads_section(s: Value, out: Shipping) -> bool {
-    out.server@ == text_of(at(s, K_SERVER@)) && out.token_env@ == text_of(at(s, K_TOKEN_ENV@)) && out.state_dir@ == text_of(at(s, K_STATE_DIR@))
+    out.s3_region@ == (if has_key(s, K_S3_REGION@) { text_of(at(s, K_S3_REGION@)) } else { Seq::empty() }) &&
+        out.s3_access_key_env@ == (if has_key(s, K_S3_ACCESS_KEY_ENV@) { text_of(at(s, K_S3_ACCESS_KEY_ENV@)) } else { Seq::empty() }) &&
+        out.s3_session_token_env@ == (if has_key(s, K_S3_SESSION_TOKEN_ENV@) { text_of(at(s, K_S3_SESSION_TOKEN_ENV@)) } else { Seq::empty() }) &&
+        out.server@ == text_of(at(s, K_SERVER@)) && out.token_env@ == text_of(at(s, K_TOKEN_ENV@)) && out.state_dir@ == text_of(at(s, K_STATE_DIR@))
         && out.max_open_exchanges == (if has_key(s, K_MAX_OPEN_EXCHANGES@) { u64_of(at(s, K_MAX_OPEN_EXCHANGES@)) as usize } else { DEFAULT_MAX_OPEN_EXCHANGES })
         && out.max_exchange_bytes == (if has_key(s, K_MAX_EXCHANGE_BYTES@) { u64_of(at(s, K_MAX_EXCHANGE_BYTES@)) as usize } else { DEFAULT_MAX_EXCHANGE_BYTES })
         && out.poll_ms == (if has_key(s, K_POLL_MS@) { u64_of(at(s, K_POLL_MS@)) } else { DEFAULT_POLL_MS })
@@ -254,7 +267,7 @@ fn key_allowed_exec(schema: Schema, key: &[u8]) -> (out: bool)
         Schema::Limits => bytes_eq(key, K_REQUESTS.as_slice()) || bytes_eq(key, K_CHUNK_BYTES.as_slice()),
         Schema::Candidate => bytes_eq(key, K_ROUTES.as_slice()),
         Schema::Shipping => bytes_eq(key, K_SERVER.as_slice()) || bytes_eq(key, K_TOKEN_ENV.as_slice()) || bytes_eq(key, K_STATE_DIR.as_slice())
-            || bytes_eq(key, K_MAX_OPEN_EXCHANGES.as_slice()) || bytes_eq(key, K_MAX_EXCHANGE_BYTES.as_slice()) || bytes_eq(key, K_POLL_MS.as_slice()),
+            || bytes_eq(key, K_MAX_OPEN_EXCHANGES.as_slice()) || bytes_eq(key, K_MAX_EXCHANGE_BYTES.as_slice()) || bytes_eq(key, K_POLL_MS.as_slice()) || bytes_eq(key, K_S3_REGION.as_slice()) || bytes_eq(key, K_S3_ACCESS_KEY_ENV.as_slice()) || bytes_eq(key, K_S3_SESSION_TOKEN_ENV.as_slice()),
     };
     proof {
         let keys = allowed_keys(schema);
@@ -270,7 +283,7 @@ fn key_allowed_exec(schema: Schema, key: &[u8]) -> (out: bool)
             Schema::Candidate => { assert(keys[0] == K_ROUTES@); }
             Schema::Shipping => {
                 assert(keys[0] == K_SERVER@); assert(keys[1] == K_TOKEN_ENV@); assert(keys[2] == K_STATE_DIR@);
-                assert(keys[3] == K_MAX_OPEN_EXCHANGES@); assert(keys[4] == K_MAX_EXCHANGE_BYTES@); assert(keys[5] == K_POLL_MS@);
+                assert(keys[3] == K_MAX_OPEN_EXCHANGES@); assert(keys[4] == K_MAX_EXCHANGE_BYTES@); assert(keys[5] == K_POLL_MS@); assert(keys[6] == K_S3_REGION@); assert(keys[7] == K_S3_ACCESS_KEY_ENV@); assert(keys[8] == K_S3_SESSION_TOKEN_ENV@);
             }
         }
         if found {
@@ -552,7 +565,19 @@ pub fn read_shipping(v: &Value) -> (out: Result<Option<Shipping>, ()>)
         Some(x) => match u64_exec(x) { Some(n) => n, None => return Err(()) },
         None => DEFAULT_POLL_MS,
     };
-    Ok(Some(Shipping { server, token_env, state_dir, max_open_exchanges, max_exchange_bytes, poll_ms }))
+    let s3_region = match field(section, K_S3_REGION.as_slice()) {
+        Some(x) => match x.as_str() { Some(t) => t.clone(), None => return Err(()) },
+        None => Vec::new(),
+    };
+    let s3_access_key_env = match field(section, K_S3_ACCESS_KEY_ENV.as_slice()) {
+        Some(x) => match x.as_str() { Some(t) => t.clone(), None => return Err(()) },
+        None => Vec::new(),
+    };
+    let s3_session_token_env = match field(section, K_S3_SESSION_TOKEN_ENV.as_slice()) {
+        Some(x) => match x.as_str() { Some(t) => t.clone(), None => return Err(()) },
+        None => Vec::new(),
+    };
+    Ok(Some(Shipping { s3_region, s3_access_key_env, s3_session_token_env, server, token_env, state_dir, max_open_exchanges, max_exchange_bytes, poll_ms }))
 }
 
 } // verus!
