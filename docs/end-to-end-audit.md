@@ -317,6 +317,7 @@ named above outside `#[cfg(test)]` modules and `tests/` directories:
 grep -rn --include='*.rs' -E 'TcpStream::connect|connect_timeout|complete_io|OpenOptions|File::open|File::create|write_all|write_fully|\.sync\(|sync_all|TcpListener::bind|thread::Builder|std::thread::spawn|process::exit|std::env::var|to_socket_addrs|fs::rename|fs::remove_file' crates/gateway-runtime/src
 grep -rn --include='*.rs' -E 'unsafe|assume\(|external_body' crates/gateway-core/src crates/gateway-runtime/src
 bash scripts/check_effect_sites.sh
+python3 scripts/check_blocking_sites.py
 ```
 
 Tests, proofs, and deliberate defects are checked by the commands in the

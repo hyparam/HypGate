@@ -42,6 +42,8 @@ jobs:
           HYPGATE_SDK_PYTHON="$RUNNER_TEMP/hypgate-sdks/bin/python" cargo test -p gateway-runtime --locked --lib real_python_sdks -- --ignored --nocapture
       - name: Panic lints and pinned effect sites
         run: rustup component add clippy && bash scripts/check_effect_sites.sh
+      - name: Pinned blocking sites
+        run: python3 scripts/check_blocking_sites.py
       - name: Concurrent logging failure workloads
         run: cargo test -p gateway-runtime --locked failed_log -- --ignored --nocapture --test-threads=1
       - name: Isolated gateway memory workload

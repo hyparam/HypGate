@@ -56,6 +56,10 @@ one past it, and a mutation that loosens the cap by one is rejected by proof.
 - The OS scheduler eventually runs each runnable thread.
 - The shutdown signal and the shipper's stop flag are delivered.
 
-These cannot be proved inside Verus. They are stated with the other effect
+These cannot be proved inside Verus. The first is made auditable instead:
+[blocking sites](blocking-sites.md) lists every call in the runtime that can
+block a thread, what unblocks it, its bound, its test, and the one kernel
+fact it rests on, and `scripts/check_blocking_sites.py` fails CI when a
+blocking call appears without a row. The others are stated with the effect
 assumptions in the [shutdown proof](shutdown-proof.md#conditional-termination-argument)
 and the [shipping trust assumptions](cloud-shipping.md#trust-assumptions).
