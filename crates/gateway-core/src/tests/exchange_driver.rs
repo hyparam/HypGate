@@ -146,12 +146,14 @@ fn a_streamed_exchange_takes_the_audited_order_and_ends_with_the_last_chunk() {
 
 #[test]
 fn a_bodiless_status_is_complete_at_its_head() {
-    let script = Script { statuses: vec![StatusHead { status: 204, fields: vec![field("content-type", "text/plain"), field("set-cookie", "s")] }], ..Script::default() };
-    let (fake, recorded) = run(script);
-    assert!(recorded);
-    assert_eq!(client_text(&fake), "HTTP/1.1 204 No Content\r\ncontent-type: text/plain\r\nconnection: close\r\ncontent-length: 0\r\n\r\n");
-    assert!(fake.calls.contains(&"download Length(0)".to_owned()));
-    assert!(fake.calls.iter().filter(|c| *c == "write_client").count() == 1);
+    for (status, reason) in [(204, "No Content"), (304, "Not Modified")] {
+        let script = Script { statuses: vec![StatusHead { status, fields: vec![field("content-type", "text/plain"), field("set-cookie", "s"), field("content-length", "123")] }], ..Script::default() };
+        let (fake, recorded) = run(script);
+        assert!(recorded);
+        assert_eq!(client_text(&fake), format!("HTTP/1.1 {status} {reason}\r\ncontent-type: text/plain\r\nconnection: close\r\n\r\n"));
+        assert!(fake.calls.contains(&"download Length(0)".to_owned()));
+        assert!(fake.calls.iter().filter(|c| *c == "write_client").count() == 1);
+    }
 }
 
 #[test]

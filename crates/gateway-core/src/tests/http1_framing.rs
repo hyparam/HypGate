@@ -28,8 +28,8 @@ fn refuses_ambiguous_or_unsupported_framing() {
     for coding in ["gzip", "chunked, gzip", "gzip, chunked", "chunked;q=1", " chunked", "identity", ""] {
         assert_eq!(framing(&vec![field("transfer-encoding", coding)], false), bad, "{coding:?}");
     }
-    // Content-Length that is not a canonical u64.
-    for length in ["", "-1", "+5", "05", "00", "5 ", " 5", "5,5", "0x10", "18446744073709551616", "99999999999999999999", "1e3"] {
+    // Malformed or overflowing Content-Length.
+    for length in ["", "-1", "+5", "5 ", " 5", "5,5", "0x10", "18446744073709551616", "99999999999999999999", "1e3"] {
         assert_eq!(framing(&vec![field("content-length", length)], true), bad, "{length:?}");
     }
 }
@@ -43,4 +43,24 @@ fn parses_canonical_decimals_only() {
     assert_eq!(parse_decimal(b"18446744073709551616"), None);
     assert_eq!(parse_decimal(b"184467440737095516150"), None);
     assert_eq!(parse_decimal(b"01"), None);
+}
+
+#[test]
+fn http_lengths_accept_zero_padding_without_weakening_other_grammars() {
+    for (text, n) in [("00", 0), ("0005", 5), ("00018446744073709551615", u64::MAX)] {
+        assert_eq!(parse_content_length(text.as_bytes()), Some(n));
+        assert_eq!(parse_decimal(text.as_bytes()), None);
+        for request in [false, true] {
+            assert_eq!(framing(&vec![field("content-length", text)], request), Ok(Framing::Length(n)));
+        }
+    }
+    assert_eq!(parse_content_length("0".repeat(32700).as_bytes()), Some(0));
+    for text in ["", "00018446744073709551616", "0005x", "+005", "00 5"] {
+        assert_eq!(parse_content_length(text.as_bytes()), None);
+    }
+    // Padding must not relax the existing smuggling checks.
+    for request in [false, true] {
+        assert_eq!(framing(&vec![field("content-length", "0005"), field("transfer-encoding", "chunked")], request), Err(Rejection::BadRequest));
+        assert_eq!(framing(&vec![field("content-length", "0005"), field("content-length", "5")], request), Err(Rejection::BadRequest));
+    }
 }

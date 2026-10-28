@@ -132,3 +132,29 @@ fn decimal_bytes_spell_canonical_numbers() {
     assert_eq!(decimal_bytes(1024), b"1024".to_vec());
     assert_eq!(decimal_bytes(u64::MAX), b"18446744073709551615".to_vec());
 }
+
+#[test]
+fn bodiless_responses_have_no_framing_headers_on_the_wire() {
+    for status in [204, 304] {
+        let mut connection = Connection::new();
+        let bytes = connection.respond_fixed(status, b"", vec![field("cache-control", "max-age=60")], b"").unwrap();
+        assert_eq!(bytes, format!("HTTP/1.1 {status} \r\ncache-control: max-age=60\r\nconnection: close\r\n\r\n").into_bytes());
+        assert!(connection.is_done());
+        for (name, value) in [("content-length", "0"), ("content-length", "5"), ("transfer-encoding", "chunked")] {
+            let mut connection = Connection::new();
+            assert!(connection.respond_fixed(status, b"", vec![field(name, value)], b"").is_none());
+            assert!(connection.is_open());
+        }
+    }
+    // Ordinary empty responses still announce zero length.
+    let bytes = Connection::new().respond_fixed(200, b"OK", vec![], b"").unwrap();
+    assert!(String::from_utf8(bytes).unwrap().contains("content-length: 0\r\n"));
+}
+
+#[test]
+fn zero_padded_provider_length_reaches_body_framing() {
+    let wire = b"HTTP/1.1 200 OK\r\nContent-Length: 0005\r\n\r\nhello";
+    let StatusProgress::Complete(head, end) = parse_status(wire) else { panic!("valid head refused") };
+    assert_eq!(&wire[end..], b"hello");
+    assert_eq!(upstream_status(head.status, &head.fields), UpstreamStatus::Framed(Framing::Length(5)));
+}

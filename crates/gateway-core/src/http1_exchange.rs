@@ -9,8 +9,8 @@
 //!   refused protocol switch, bodiless, or framed by its fields;
 //! - the response a connection writes (`Connection`): at most one head, only
 //!   while nothing else has been written, always with `Connection: close`
-//!   and a framing field that matches the body that follows, never a body
-//!   after 204 or 304, and a streamed body that ends cleanly only through
+//!   and framing matching the body, except that 204/304 have neither a body
+//!   nor framing headers; a streamed body ends cleanly only through
 //!   the last chunk;
 //! - the request the transport writes (`Upstream`): one head with the
 //!   verified projection's fields plus chunked framing and `Connection:
@@ -295,6 +295,20 @@ pub open spec fn head_fields_ok(all: Seq<Field>, given: Seq<Field>, chunked: boo
         && (if chunked { is_chunked(all[given.len() as int + 1]) } else { is_length(all[given.len() as int + 1], length) })
 }
 
+/// No Content-Length or Transfer-Encoding on a bodiless forwarded response.
+/// A 304 length would describe the selected representation, which this writer
+/// does not know, so it omits the optional field rather than inventing zero.
+pub open spec fn no_framing(fields: Seq<Field>) -> bool {
+    forall|i: int| 0 <= i < fields.len() ==> #[trigger] fields[i].name@ != CONTENT_LENGTH@
+        && fields[i].name@ != TRANSFER_ENCODING@
+}
+pub open spec fn fixed_head_fields_ok(all: Seq<Field>, given: Seq<Field>, status: u16, length: nat) -> bool {
+    if status == 204 || status == 304 {
+        length == 0 && no_framing(all) && all.len() == given.len() + 1
+            && all.take(given.len() as int) == given && is_close(all[given.len() as int])
+    } else { head_fields_ok(all, given, false, length) }
+}
+
 /// What one connection has written: at most one response head, and after it
 /// either the fixed body it announced or a stream of chunks.
 pub struct Connection {
@@ -322,14 +336,17 @@ impl Connection {
     pub closed spec fn interim_sent(&self) -> bool { self.interim }
     /// A head has been written: the status, reason, and fields it carries are
     /// well formed and within the parser's limits, and the fields end with
-    /// `Connection: close` and a framing field.
+    /// `Connection: close` and a framing field (only `Connection` for 204/304).
     pub closed spec fn headed(&self) -> bool { self.phase == Phase::Streaming || self.phase == Phase::Done }
     pub closed spec fn valid(&self) -> bool {
         (self.headed() ==> (
             200 <= self.status@ <= 599 && crate::http1_write::reason_ok(self.reason@) && crate::http1_write::fields_wire_ok(self.fields@)
             && self.fields@.len() <= MAX_FIELDS && self.head@.len() <= MAX_BYTES
             && self.head@ == crate::http1_write::status_head_bytes(self.status@, self.reason@, self.fields@)
-            && self.fields@.len() >= 2 && is_close(self.fields@[self.fields@.len() - 2])
+            && (if self.status@ == 204 || self.status@ == 304 {
+                self.phase == Phase::Done && self.fields@.len() >= 1
+                    && is_close(self.fields@[self.fields@.len() - 1]) && no_framing(self.fields@)
+            } else { self.fields@.len() >= 2 && is_close(self.fields@[self.fields@.len() - 2]) })
             && (self.phase == Phase::Streaming ==> is_chunked(self.fields@[self.fields@.len() - 1]))))
     }
     pub fn new() -> (out: Self)
@@ -364,27 +381,30 @@ impl Connection {
     }
 
     /// The whole response for a body known in full: the head with
-    /// `Connection: close` and `Content-Length`, then the body. Refused when the
-    /// status is outside 200 to 599, a 204 or 304 is given a body, the fields
-    /// or reason are not writable, or the head would exceed the parser's limits.
+    /// `Connection: close` and, except for 204/304, `Content-Length`, then the
+    /// body. Refused for statuses outside 200 to 599, a body or framing fields
+    /// on 204/304, unwritable fields or reason, or a head over parser limits.
     pub fn respond_fixed(&mut self, status: u16, reason: &[u8], fields: Vec<Field>, body: &[u8]) -> (out: Option<Vec<u8>>)
         requires old(self).valid(),
         ensures final(self).valid(), match out {
             Some(bytes) => old(self).open() && final(self).done() && !final(self).open() && !final(self).streaming() && 200 <= status <= 599
                 && ((status == 204 || status == 304) ==> body@.len() == 0)
-                && final(self).status() == status && head_fields_ok(final(self).head_fields(), fields@, false, body@.len())
+                && final(self).status() == status && fixed_head_fields_ok(final(self).head_fields(), fields@, status, body@.len())
                 && final(self).head() == crate::http1_write::status_head_bytes(status, reason@, final(self).head_fields())
                 && bytes@ == final(self).head() + body@ && final(self).out() == old(self).out() + bytes@,
             None => final(self).open() == old(self).open() && final(self).out() == old(self).out(),
         },
     {
         if self.phase != Phase::Open || status < 200 || status > 599 { return None; }
-        if (status == 204 || status == 304) && body.len() > 0 { return None; }
+        if status == 204 || status == 304 {
+            if body.len() > 0 || crate::headers::has(&fields, CONTENT_LENGTH.as_slice())
+                || crate::headers::has(&fields, TRANSFER_ENCODING.as_slice()) { return None; }
+        }
         if !reason_fits(reason) { return None; }
         let ghost given = fields@;
         let mut all = fields;
         all.push(close_field());
-        all.push(length_field(body.len()));
+        if status != 204 && status != 304 { all.push(length_field(body.len())); }
         if !wire_ok(&all) || all.len() > MAX_FIELDS { return None; }
         let mut bytes: Vec<u8> = Vec::new();
         write_status_head(status, reason, &all, &mut bytes);

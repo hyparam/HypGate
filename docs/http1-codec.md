@@ -24,8 +24,8 @@ carries both Content-Length and Transfer-Encoding is refused.
 | --- | --- | --- |
 | `http1_head` | A request or status head is accepted exactly when it satisfies the relational grammar (`request_head_ok`, `status_head_ok`): the parser is sound (a returned head satisfies the grammar for exactly the bytes consumed) and complete (when none is returned, no prefix of the buffer satisfies it). Heads are bounded to 32 KiB and 100 fields. Names come out lowercased and values trimmed of surrounding blanks. | `parse_request`, `parse_status` |
 | `http1_write` | A written head is the bytes the specification names, and those bytes satisfy the parser's grammar for the same start line and fields (`lemma_request_roundtrip`, `lemma_status_roundtrip`). The wire conditions on names and values exclude line-break injection by construction; `wire_ok` checks them at run time. | `write_request_head`, `write_status_head`, `wire_ok` |
-| `http1_framing` | A head selects exactly one framing. Both Content-Length and Transfer-Encoding present, repeated fields, and any coding but `chunked` alone are refused. A Content-Length is accepted exactly when it is the canonical decimal of a `u64`. | `framing`, `parse_decimal` |
-| `http1_exchange` | The gateway's own exchange decisions. Statuses come from total tables (`refusal_status`: 431, 400, 401, 405, 503; `failure_status`: 504 for a passed deadline, 502 otherwise); `wants_continue` and `upstream_status` (interim, refused 101, bodiless 204 and 304, or framed by the fields) are total. A `Connection` writes at most one response head, only while open, always with `Connection: close` and a framing field that matches the body (`Content-Length` of the fixed body, or chunked), never a body after 204 or 304, and its head parses back as the status and fields it meant (`lemma_head_well_formed`). An `Upstream` writes one `POST` head with the projection's fields plus chunked framing and `Connection: close`, likewise well formed. A `ChunkStream` yields bytes that are one well-formed chunked encoding of exactly the frames given; a stream ends cleanly only through its last chunk, and an aborted connection adds nothing. | `Connection::{interim_continue,respond_fixed,respond_stream,finish,abort}`, `Upstream::{request,finish}`, `ChunkStream::{frame,end}` |
+| `http1_framing` | A head selects exactly one framing. Both Content-Length and Transfer-Encoding present, repeated fields, and any coding but `chunked` alone are refused. A Content-Length is accepted exactly when it is the nonempty decimal digit string fitting a `u64`, including leading zeros. | `framing`, `parse_content_length` |
+| `http1_exchange` | The gateway's own exchange decisions. Statuses come from total tables (`refusal_status`: 431, 400, 401, 405, 503; `failure_status`: 504 for a passed deadline, 502 otherwise); `wants_continue` and `upstream_status` (interim, refused 101, bodiless 204 and 304, or framed by the fields) are total. A `Connection` writes at most one response head, only while open, always with `Connection: close` and, except for 204/304, a framing field that matches the body (`Content-Length` of the fixed body, or chunked), neither a body nor Content-Length/Transfer-Encoding after 204 or 304, and its head parses back as the status and fields it meant (`lemma_head_well_formed`). An `Upstream` writes one `POST` head with the projection's fields plus chunked framing and `Connection: close`, likewise well formed. A `ChunkStream` yields bytes that are one well-formed chunked encoding of exactly the frames given; a stream ends cleanly only through its last chunk, and an aborted connection adds nothing. | `Connection::{interim_continue,respond_fixed,respond_stream,finish,abort}`, `Upstream::{request,finish}`, `ChunkStream::{frame,end}` |
 | `http1_chunked` | The decoder accepts exactly the grammar. Soundness: its invariant ties the bytes it consumed to complete chunks of exactly the body it emitted, so a finished body is one well-formed chunked encoding (`chunked_ok`) of the emitted bytes: nothing added, dropped, or reordered. Completeness: when the bytes still to come complete a well-formed chunked body, a step never rejects, consumes no more than those bytes, is done exactly when it has consumed them all, and has then emitted exactly the body the encoding carries (`lemma_complete`); the proof rests on chunk boundaries being determined by the bytes, since a size line ends at the first CRLF and its digits at the first non-hex byte. Sizes have at most sixteen hex digits, so the count cannot overflow, and a size line with any extension is at most `MAX_SIZE_LINE` (1024) bytes, so the framing between two data steps is bounded: every framing step lowers a `framing_budget`, which is what the reading driver's loop decreases on. Trailers and malformed delimiters are refused. Each chunk the encoder writes is a chunk of that grammar, and its last chunk is the grammar's last chunk. | `ChunkDecoder::feed`, `lemma_done_is_chunked`, `ChunkDecoder::lemma_complete`, `write_chunk_header`, `lemma_chunk_bytes_ok` |
 
 Mutation guards for all five modules are in `scripts/check_mutations.py`.
@@ -117,3 +117,25 @@ a grammar small enough to read in a sitting, and the properties that matter
 for a gateway are theorems: no head is misread, a message can never be
 delimited two ways, a body arrives at the copy exactly as framed, and a
 well-formed chunked body is never refused.
+
+## HTTP length and bodiless-response contracts
+
+RFC 9110 section 8.6 defines Content-Length as one or more decimal digits;
+leading zeros are valid. `decimal_length` and `parse_content_length` prove
+soundness and completeness for that grammar within the supported `u64` range.
+`framing` composes this through request and response selection, retaining the
+refusals for duplicate fields and simultaneous Content-Length/Transfer-Encoding.
+The separate `parse_decimal` contract remains canonical for JSON numbers and
+configuration consumers; route selectors also retain their canonical grammar.
+
+RFC 9110 forbids Content-Length on 204 responses. On 304 it describes the
+selected representation, not the empty message body. HypGate omits that optional
+304 field rather than fabricating a zero length. `fixed_head_fields_ok` and
+`Connection::valid` require no framing headers on either status, and the emitted
+wire bytes are proved to serialize those exact fields. Supplied framing fields
+are rejected too. The provider-header projection already strips them.
+
+Regression fixtures check the RFC examples independently of the contracts.
+The `http_length_` and `http_bodiless_` proof mutations restore the old bugs,
+bypass parser dispatch, discard its result, and reintroduce supplied framing
+headers; verification must reject each mutation.

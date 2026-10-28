@@ -739,8 +739,8 @@ fn bodyless_upstream_statuses_reach_the_client_as_a_complete_fixed_head() {
         let text = std::str::from_utf8(&answer).unwrap();
         let phrase = if status == 204 { "No Content" } else { "Not Modified" };
         assert!(text.starts_with(&format!("HTTP/1.1 {status} {phrase}\r\n")), "{text}");
-        assert!(text.ends_with("connection: close\r\ncontent-length: 0\r\n\r\n"), "the head is the whole response: {text}");
-        assert!(!text.contains("chunked") && !text.contains("set-cookie"), "{text}");
+        assert!(text.ends_with("connection: close\r\n\r\n"), "the head is the whole response: {text}");
+        assert!(!text.contains("content-length") && !text.contains("transfer-encoding") && !text.contains("set-cookie"), "{text}");
         wait_workers_idle(&app);
         gateway.stop().unwrap();
         assert_eq!(app.failed_exchanges(), 0);

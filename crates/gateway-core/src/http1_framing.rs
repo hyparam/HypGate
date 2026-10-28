@@ -5,8 +5,8 @@
 //! Transfer-Encoding is refused, so the two can never disagree about where a
 //! message ends (the request-smuggling ambiguity); repeated fields are
 //! refused; the only transfer coding accepted is `chunked` alone; and a
-//! Content-Length is accepted exactly when it is the canonical decimal of a
-//! `u64`, so every well-formed count is accepted and nothing else is.
+//! Content-Length accepts exactly the nonempty decimal digit strings fitting
+//! a `u64`, including leading zeros.
 use vstd::prelude::*;
 use crate::headers::{Field, Rejection, count, eq, lowercase};
 
@@ -23,7 +23,7 @@ pub open spec fn value_is_chunked(fields: Seq<Field>, i: int) -> bool {
     0 <= i < fields.len() && fields[i].name@ == TRANSFER_ENCODING@ && crate::headers::lower_seq(fields[i].value@) == CHUNKED@
 }
 pub open spec fn value_is_length(fields: Seq<Field>, i: int, n: u64) -> bool {
-    0 <= i < fields.len() && fields[i].name@ == CONTENT_LENGTH@ && fields[i].value@ == crate::inbound::decimal(n as nat)
+    0 <= i < fields.len() && fields[i].name@ == CONTENT_LENGTH@ && decimal_length(fields[i].value@, n)
 }
 /// Some Transfer-Encoding field says `chunked`.
 pub open spec fn some_chunked(fields: Seq<Field>) -> bool { exists|i: int| #[trigger] value_is_chunked(fields, i) }
@@ -79,7 +79,7 @@ pub fn framing(fields: &Vec<Field>, request: bool) -> (out: Result<Framing, Reje
     }
     if cl == 1 {
         let i = find_named(fields, CONTENT_LENGTH.as_slice());
-        match parse_decimal(fields[i].value.as_slice()) {
+        match parse_content_length(fields[i].value.as_slice()) {
             Some(n) => {
                 proof {
                     assert(value_is_length(fields@, i as int, n));
@@ -117,6 +117,68 @@ fn find_named(fields: &Vec<Field>, name: &[u8]) -> (out: usize)
     proof { crate::headers::lemma_filter_none(fields@, name@); }
     // Unreachable: the count is one, so some field carries the name.
     0
+}
+
+/// RFC 9110 Content-Length = 1*DIGIT, bounded by the supported u64 range.
+/// Leading zeros do not change the value. JSON and route selectors keep their
+/// separate canonical-decimal grammar.
+pub open spec fn decimal_length(value: Seq<u8>, n: u64) -> bool {
+    value.len() > 0 && crate::inbound::all_digits(value) && crate::inbound::value_of(value) == n
+}
+
+proof fn digit_prefix_value(value: Seq<u8>, end: int)
+    requires crate::inbound::all_digits(value), 0 <= end <= value.len(),
+    ensures crate::inbound::value_of(value.subrange(0, end)) <= crate::inbound::value_of(value),
+    decreases value.len() - end,
+{
+    if end < value.len() {
+        digit_prefix_value(value.drop_last(), end);
+        assert(value.drop_last().subrange(0, end) =~= value.subrange(0, end));
+    } else { assert(value.subrange(0, end) =~= value); }
+}
+
+/// Sound and complete for every supported HTTP decimal length, including
+/// zero padding; malformed and overflowing values are rejected.
+pub fn parse_content_length(value: &[u8]) -> (out: Option<u64>)
+    ensures match out {
+        Some(n) => decimal_length(value@, n),
+        None => forall|n: u64| !decimal_length(value@, n),
+    },
+{
+    if value.len() == 0 { return None; }
+    let mut acc: u64 = 0;
+    let mut i: usize = 0;
+    while i < value.len()
+        invariant i <= value.len(), value.len() > 0,
+            crate::inbound::all_digits(value@.subrange(0, i as int)),
+            acc == crate::inbound::value_of(value@.subrange(0, i as int)),
+        decreases value.len() - i,
+    {
+        let b = value[i];
+        if b < 48 || b > 57 { return None; }
+        let d = (b - 48) as u64;
+        proof {
+            assert(value@.subrange(0, i as int + 1).drop_last() =~= value@.subrange(0, i as int));
+            assert(crate::inbound::all_digits(value@.subrange(0, i as int + 1)));
+        }
+        if acc > (u64::MAX - d) / 10 {
+            proof {
+                assert forall|n: u64| !decimal_length(value@, n) by {
+                    if decimal_length(value@, n) {
+                        digit_prefix_value(value@, i as int + 1);
+                        assert(acc * 10 + d > u64::MAX) by (nonlinear_arith)
+                            requires acc > (u64::MAX - d) / 10, d < 10;
+                    }
+                }
+            }
+            return None;
+        }
+        proof { assert(acc * 10 <= u64::MAX - d) by (nonlinear_arith) requires acc <= (u64::MAX - d) / 10; }
+        acc = acc * 10 + d;
+        i = i + 1;
+    }
+    proof { assert(value@.subrange(0, value.len() as int) =~= value@); }
+    Some(acc)
 }
 
 /// The `u64` whose canonical decimal is `value`, if any.
