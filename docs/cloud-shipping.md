@@ -306,8 +306,8 @@ and the executable prints the figure at startup. See
 ## What is not covered
 
 No proof connects the thread's loop to the verified transitions; that is the
-same trusted-join situation as the gateway's threaded shell. The projection's
-choice of provider fields is a heuristic and lossy by design. gzip, dataset
+same trusted-join situation as the gateway's threaded shell. The remaining provider text/model selection is heuristic and lossy; usage and
+streamed chat choice grouping have the semantic contracts described below. gzip, dataset
 registration, config pulls, diagnostics,
 and fan-out to several servers are not implemented.
 
@@ -352,19 +352,44 @@ must reject reinstating the prefix gate, skipping events, erasing failure,
 ignoring nested errors, or discarding the result when serializing either row.
 Tests independently exercise protocol variants and failure positions.
 
-`usage_of` and `parse_json_response` prove that usage is present exactly when
-the first `usage` field is an object. Missing, null, and non-object values do
-not fabricate zero usage. For chat-style events without a `type` field,
-`sse_event` proves that absent/non-object usage preserves both the previous
-counts and whether usage has been observed. Explicit zero counts in an object
-remain valid observations. Mutation checks reintroduce omitted joins, dropped
-data, premature dispatch, bad spacing/CRLF handling, skipped JSON, and false
-or erased usage, and require the verifier to reject each defect.
+Usage now has an end-to-end semantic contract in `response_usage`. The
+specification states the supported Anthropic/OpenAI field spellings, cache
+normalization, cumulative event updates and saturated total. The executable
+reader proves exact agreement with that specification; the complete SSE fold
+and `rows` preserve it into all five fields of `attributes.usage`. In particular,
+`message_start` retains every reported count, including output; `message_delta`
+replaces the cumulative output count without changing input/cache counts. An
+explicit zero replaces a previous count. Missing/null/non-object observations,
+malformed events and unrelated events preserve the accounting state. Within a
+recognized full usage object, absent or invalid numeric fields still default to
+zero; counts use canonical nonnegative integers fitting u64.
 
-Other provider field selection (`model`, `messages`/`input` and the
-last user message's content blocks, `usage` in its Anthropic and OpenAI
-spellings, the SSE event types) is a choice pinned by tests against recorded
-bodies, not a theorem. The timestamps are the verified calendar's
+Streamed chat text has a separate contract in `response_choices`. Each nonempty
+string fragment belongs to its explicit choice index; missing indexes mean
+legacy choice zero, while invalid indexes are ignored. For any sequence of
+complete events, each alternative contains exactly its own fragments in arrival
+order. Alternatives are rendered once, in first-appearance order, separated by
+LF in the existing assistant `content_text` field. Thus interleaved fragments
+for “Hello” and “World” become “Hello\nWorld”, never “HeWollorld”. Numeric indexes
+are not exported as separate rows. The proof reaches the serialized text and
+its longest UTF-8 prefix under the configured cap. A separate pass buffers
+recognized fragments for grouping; this transient storage scales with retained
+response bytes and is outside the visible payload subtotal, like JSON parse
+scratch. Rendering currently scans fragments per alternative.
+
+These are general sequence contracts, not case-specific assertions. Mutation
+checks must reject dropped start counts, erased partial counts, ignored zeros,
+wrong cache arithmetic, skipped events/items, changed indexes, mixed choices,
+duplicate alternatives, missing separators and discarded serialized results.
+Protocol fixtures independently check provider-shaped input, malformed or
+unsupported fields, incomplete tails and interrupted streams. The specification
+still depends on the external providers using the documented vocabulary and
+cumulative-count semantics; proving implementation agreement does not prove
+those external assumptions.
+
+Other provider text/model selection (`model`, `messages`/`input`, user content
+blocks and non-chat response text) remains pinned by tests rather than a full
+semantic theorem. The timestamps are the verified calendar's
 (`gateway_core::calendar`): `civil` is proved to return the one proleptic
 Gregorian date whose day number is the day of the given Unix milliseconds,
 with the time of day decomposed exactly, and the formatters to print RFC 3339

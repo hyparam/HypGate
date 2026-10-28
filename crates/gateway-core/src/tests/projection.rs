@@ -27,7 +27,9 @@ fn names_providers_and_outcomes() {
     assert_eq!(s(outcome_name(200)), "other");
 }
 
-fn response(body: &[u8]) -> Value {
+fn response(body: &[u8]) -> Value { response_capped(body, 1 << 20) }
+
+fn response_capped(body: &[u8], max_text: usize) -> Value {
     use crate::{exchange_assembler::Assembler, framing::Header, metadata::*};
     let mut assembler = Assembler::new(4, 1 << 20);
     let start = encode_request_start(1_700_000_000_000, 7, b"https://api.openai.com/v1/chat/completions").unwrap();
@@ -35,7 +37,7 @@ fn response(body: &[u8]) -> Value {
     assembler.admit(Header { payload: body.len() as u32, tenant: 3, request: 42, chunk: 1, kind: 1 }, body);
     let done = encode_completion(1_700_000_000_900, 0, 0, 1).unwrap();
     let exchange = assembler.admit(Header { payload: done.len() as u32, tenant: 3, request: 42, chunk: 0, kind: 4 }, &done).unwrap();
-    rows(&[5; 16], &exchange, 1 << 20).pop().unwrap()
+    rows(&[5; 16], &exchange, max_text).pop().unwrap()
 }
 
 #[test]
@@ -123,4 +125,66 @@ fn provider_failures_survive_every_event_position_and_later_success() {
 fn incomplete_event_is_not_interpreted_and_json_strings_are_not_events() {
     assert!(!error(&response(b"data: {\"type\":\"error\"}\n")));
     assert!(!error(&response(br#"{"content":"data: {\"type\":\"error\"}\n\n","error":null}"#)));
+}
+
+#[test]
+fn chat_alternatives_keep_their_own_fragment_order() {
+    // Valid provider chunks: alternatives may appear in arbitrary event order,
+    // and array order need not agree with the choice index.
+    let events = [
+        r#"{"choices":[{"index":9,"delta":{"content":"He"}},{"index":2,"delta":{"content":"Wo"}}]}"#,
+        r#"{"choices":[{"index":2,"delta":{"content":"rld"}},{"index":9,"delta":{"content":"llo"}}]}"#,
+        r#"{"choices":[],"usage":{"prompt_tokens":2,"completion_tokens":2}}"#,
+    ];
+    let body = events.iter().map(|v| format!("data: {v}\n\n")).collect::<String>();
+    let row = response(body.as_bytes());
+    assert_eq!(row.get(b"content_text").unwrap().as_str().unwrap(), b"Hello\nWorld");
+    let usage = row.get(b"attributes").unwrap().get(b"usage").unwrap();
+    assert_eq!(usage.get(b"output_tokens").unwrap().as_u64(), Some(2));
+}
+
+#[test]
+fn choice_isolation_handles_sparse_indexes_unknown_events_and_incomplete_tails() {
+    let body = concat!(
+        "data: {\"choices\":[{\"index\":18446744073709551615,\"delta\":{\"content\":\"A\"}}]}\n\n",
+        "data: not json\n\n",
+        "data: {\"choices\":[{\"index\":-1,\"delta\":{\"content\":\"bad\"}},{\"index\":\"x\",\"delta\":{\"content\":\"bad\"}}]}\n\n",
+        "data: {\"type\":\"future.event\"}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"B\"}}]}\n\n",
+        "data: {\"choices\":[{\"index\":18446744073709551615,\"delta\":{\"content\":\"C\"}}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"unfinished\"}}]}\n",
+    );
+    let row = response(body.as_bytes());
+    assert_eq!(row.get(b"content_text").unwrap().as_str().unwrap(), b"AC\nB");
+}
+
+#[test]
+fn anthropic_start_usage_survives_every_interruption_prefix() {
+    let start = r#"{"type":"message_start","message":{"model":"claude","usage":{"input_tokens":10,"cache_read_input_tokens":20,"cache_creation_input_tokens":30,"output_tokens":1}}}"#;
+    for tail in ["", "data: malformed\n\n", "data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\"}}\n\n",
+        "data: {\"type\":\"message_delta\",\"usage\":null}\n\n", "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":5}}\n"] {
+        let row = response(format!("data: {start}\n\n{tail}").as_bytes());
+        let usage = row.get(b"attributes").unwrap().get(b"usage").unwrap();
+        for (key, expected) in [("input_tokens", 10), ("cache_read_tokens", 20), ("cache_write_tokens", 30), ("output_tokens", 1), ("total_tokens", 61)] {
+            assert_eq!(usage.get(key.as_bytes()).unwrap().as_u64(), Some(expected), "{tail:?} {key}");
+        }
+    }
+    for output in [0, 5, u64::MAX] {
+        let row = response(format!("data: {start}\n\ndata: {{\"type\":\"message_delta\",\"usage\":{{\"output_tokens\":{output}}}}}\n\n").as_bytes());
+        let usage = row.get(b"attributes").unwrap().get(b"usage").unwrap();
+        assert_eq!(usage.get(b"input_tokens").unwrap().as_u64(), Some(10));
+        assert_eq!(usage.get(b"cache_read_tokens").unwrap().as_u64(), Some(20));
+        assert_eq!(usage.get(b"cache_write_tokens").unwrap().as_u64(), Some(30));
+        assert_eq!(usage.get(b"output_tokens").unwrap().as_u64(), Some(output));
+        assert_eq!(usage.get(b"total_tokens").unwrap().as_u64(), Some(60_u64.saturating_add(output)));
+    }
+}
+
+#[test]
+fn grouped_choices_reach_serialization_with_utf8_capping() {
+    let body = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"é\"}},{\"index\":1,\"delta\":{\"content\":\"世界\"}}]}\n\n";
+    for (cap, expected) in [(0, ""), (1, ""), (2, "é"), (3, "é\n"), (4, "é\n"), (6, "é\n世"), (9, "é\n世界")] {
+        let row = response_capped(body.as_bytes(), cap);
+        assert_eq!(row.get(b"content_text").unwrap().as_str().unwrap(), expected.as_bytes());
+    }
 }

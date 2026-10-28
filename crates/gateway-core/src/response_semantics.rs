@@ -25,7 +25,7 @@ pub open spec fn field(v: Value, key: Seq<u8>) -> Option<Value> {
         Some(json::members_of(v)[choose|i: int| first(v, key, i)].value)
     } else { None }
 }
-fn get<'a>(v: &'a Value, key: &[u8]) -> (out: Option<&'a Value>)
+pub(crate) fn get<'a>(v: &'a Value, key: &[u8]) -> (out: Option<&'a Value>)
     ensures match out { Some(w) => field(*v, key@) == Some(*w), None => field(*v, key@).is_none() },
 {
     let out = v.get(key);

@@ -14,14 +14,17 @@
 //! fixed; the timestamps are the verified calendar's text of the exchange's
 //! start and completion times. Response error interpretation is composed from
 //! the JSON/SSE grammars through every event into both rows (response_semantics).
-//! Provider text/token field selection remains pinned by tests. SSE framing is
-//! proved in `sse`; usage objects are distinguished from missing/null usage,
-//! and unknown chat-chunk usage preserves the previous accounting state.
+//! Cumulative usage is specified in `response_usage` and proved through the
+//! complete JSON/SSE fold into serialized fields. `response_choices` proves
+//! chat alternatives retain their own fragment order through final text capping.
+//! Remaining provider text/model selection is pinned by protocol fixtures.
 use vstd::prelude::*;
 use vstd::slice::{slice_index_get, slice_subrange, slice_to_vec};
 use crate::exchange_assembler::Exchange;
 use crate::json::{Member, Value};
 use crate::response_semantics as semantics;
+use crate::response_usage as accounting;
+use crate::response_choices as choices;
 use crate::shipping_identity::{exchange_key, message_key, part_key, hex};
 
 verus! {
@@ -104,9 +107,9 @@ pub const P_CHOICES: [u8; 7] = *b"choices";
 pub const P_MESSAGE: [u8; 7] = *b"message";
 pub const P_DELTA: [u8; 5] = *b"delta";
 pub const P_RESPONSE: [u8; 8] = *b"response";
-pub const P_MESSAGE_START: [u8; 13] = *b"message_start";
+pub const P_MESSAGE_START: [u8; 13] = [109, 101, 115, 115, 97, 103, 101, 95, 115, 116, 97, 114, 116]; // message_start
 pub const P_CONTENT_BLOCK_DELTA: [u8; 19] = *b"content_block_delta";
-pub const P_MESSAGE_DELTA: [u8; 13] = *b"message_delta";
+pub const P_MESSAGE_DELTA: [u8; 13] = [109, 101, 115, 115, 97, 103, 101, 95, 100, 101, 108, 116, 97]; // message_delta
 pub const P_OUTPUT_TEXT_DELTA: [u8; 26] = *b"response.output_text.delta";
 pub const P_RESPONSE_COMPLETED: [u8; 18] = *b"response.completed";
 pub const SSE_DATA: [u8; 5] = *b"data:";
@@ -132,7 +135,7 @@ pub const O_OTHER: [u8; 5] = *b"other";
 #[derive(Debug, PartialEq, Eq)]
 pub struct Usage { pub input: u64, pub cache_read: u64, pub cache_write: u64, pub output: u64 }
 struct ParsedRequest { model: Option<Vec<u8>>, session_hint: Option<Vec<u8>>, user_text: Option<Vec<u8>> }
-struct ParsedResponse { text: Vec<u8>, usage: Option<Usage>, model: Option<Vec<u8>>, failed: bool }
+struct ParsedResponse { text: Vec<u8>, choices_known: bool, usage: Option<Usage>, model: Option<Vec<u8>>, failed: bool }
 
 // ---- what the rows look like ------------------------------------------------------------
 
@@ -215,10 +218,17 @@ fn text(bytes: &[u8]) -> (out: Value)
 {
     Value::Str(crate::utf8::sanitize(bytes))
 }
+/// Exact longest valid prefix, rather than merely an arbitrary short string.
+pub open spec fn capped_text(value: Value, source: Seq<u8>, max: usize) -> bool {
+    value is Str && value->Str_0@.len() <= max && crate::utf8::valid(value->Str_0@)
+        && value->Str_0@ == source.subrange(0, value->Str_0@.len() as int)
+        && (source.len() <= max ==> value->Str_0@ == source)
+        && (value->Str_0@.len() < source.len() ==> value->Str_0@.len() + crate::utf8::char_len(source, value->Str_0@.len() as int) > max)
+}
 /// A string value cut to `max` bytes at a character boundary.
 fn capped(bytes: &[u8], max: usize) -> (out: Value)
     requires crate::utf8::valid(bytes@),
-    ensures is_text(out, max as int), values_valid(out), crate::json::well_formed(out),
+    ensures is_text(out, max as int), values_valid(out), crate::json::well_formed(out), capped_text(out, bytes@, max),
 {
     Value::Str(crate::utf8::cap(bytes, max))
 }
@@ -310,9 +320,9 @@ fn option_number(value: Option<u64>) -> (out: Value)
 }
 
 /// A valid text followed by a line feed and another valid text.
-fn append_line(out: &mut Vec<u8>, separate: bool, more: &[u8])
+pub(crate) fn append_line(out: &mut Vec<u8>, separate: bool, more: &[u8])
     requires crate::utf8::valid(old(out)@), crate::utf8::valid(more@),
-    ensures crate::utf8::valid(final(out)@),
+    ensures crate::utf8::valid(final(out)@), final(out)@ == old(out)@ + (if separate { seq![10u8] } else { Seq::empty() }) + more@,
 {
     if separate {
         proof {
@@ -331,19 +341,31 @@ fn append_line(out: &mut Vec<u8>, separate: bool, more: &[u8])
 // ---- reading provider bodies ------------------------------------------------------------
 
 /// The sanitized bytes of a string value.
+pub open spec fn string(value: Option<Value>) -> Option<Seq<u8>> {
+    match value { Some(Value::Str(t)) => Some(crate::utf8::sanitized(t@)), _ => None }
+}
 fn str_of(value: &Value) -> (out: Option<Vec<u8>>)
-    ensures match out { Some(t) => crate::utf8::valid(t@), None => true },
+    ensures match out { Some(t) => string(Some(*value)) == Some(t@), None => string(Some(*value)).is_none() }, match out { Some(t) => crate::utf8::valid(t@), None => true },
 {
     match value { Value::Str(s) => Some(crate::utf8::sanitize(s.as_slice())), _ => None }
 }
-fn get2<'a>(value: &'a Value, a: &[u8], b: &[u8]) -> Option<&'a Value> {
-    match value.get(a) { Some(inner) => inner.get(b), None => None }
+pub open spec fn nested(value: Value, a: Seq<u8>, b: Seq<u8>) -> Option<Value> {
+    match semantics::field(value, a) { Some(inner) => semantics::field(inner, b), None => None }
 }
-fn u64_at(value: &Value, key: &[u8]) -> Option<u64> {
-    match value.get(key) { Some(v) => v.as_u64(), None => None }
+fn get2<'a>(value: &'a Value, a: &[u8], b: &[u8]) -> (out: Option<&'a Value>)
+    ensures match out { Some(w) => nested(*value, a@, b@) == Some(*w), None => nested(*value, a@, b@).is_none() },
+{
+    match semantics::get(value, a) { Some(inner) => semantics::get(inner, b), None => None }
 }
-fn u64_at2(value: &Value, a: &[u8], b: &[u8]) -> Option<u64> {
-    match get2(value, a, b) { Some(v) => v.as_u64(), None => None }
+fn u64_at(value: &Value, key: &[u8]) -> (out: Option<u64>)
+    ensures out == accounting::at(*value, key@),
+{
+    match semantics::get(value, key) { Some(v) => crate::config_schema::u64_exec(v), None => None }
+}
+fn u64_at2(value: &Value, a: &[u8], b: &[u8]) -> (out: Option<u64>)
+    ensures out == accounting::at2(*value, a@, b@),
+{
+    match semantics::get(value, a) { Some(v) => u64_at(v, b), None => None }
 }
 pub open spec fn has_field(value: Value, key: Seq<u8>) -> bool {
     exists|i: int| 0 <= i < crate::json::members_of(value).len()
@@ -352,8 +374,9 @@ pub open spec fn has_field(value: Value, key: Seq<u8>) -> bool {
 fn str_at(value: &Value, key: &[u8]) -> (out: Option<Vec<u8>>)
     ensures match out { Some(t) => crate::utf8::valid(t@), None => true },
         !has_field(*value, key@) ==> out.is_none(),
+        match out { Some(t) => string(semantics::field(*value, key@)) == Some(t@), None => string(semantics::field(*value, key@)).is_none() },
 {
-    match value.get(key) { Some(v) => str_of(v), None => None }
+    match semantics::get(value, key) { Some(v) => str_of(v), None => None }
 }
 fn str_at2(value: &Value, a: &[u8], b: &[u8]) -> (out: Option<Vec<u8>>)
     ensures match out { Some(t) => crate::utf8::valid(t@), None => true },
@@ -447,20 +470,19 @@ fn parse_request(bytes: &[u8]) -> (out: ParsedRequest)
     ParsedRequest { model, session_hint, user_text }
 }
 
-fn first_u64(a: Option<u64>, b: Option<u64>, c: Option<u64>) -> u64 {
+fn first_u64(a: Option<u64>, b: Option<u64>, c: Option<u64>) -> (out: u64)
+    ensures out == accounting::first(a, b, c),
+{
     match a { Some(n) => n, None => match b { Some(n) => n, None => match c { Some(n) => n, None => 0 } } }
 }
 /// Usage is known only when the first usage field is an object; null is unknown.
 pub open spec fn has_usage_object(value: Value) -> bool {
-    let ms = crate::json::members_of(value);
-    exists|i: int| 0 <= i < ms.len() && ms[i].key@ == P_USAGE@
-        && (forall|j: int| 0 <= j < i ==> ms[j].key@ != P_USAGE@)
-        && ms[i].value is Object
+    match semantics::field(value, P_USAGE@) { Some(u) => u is Object, None => false }
 }
 fn usage_of(value: &Value) -> (out: Option<Usage>)
-    ensures out.is_some() == has_usage_object(*value),
+    ensures out.is_some() == has_usage_object(*value), out == accounting::observation(*value),
 {
-    let usage = match value.get(P_USAGE.as_slice()) { Some(u) => u, None => return None };
+    let usage = match semantics::get(value, P_USAGE.as_slice()) { Some(u) => u, None => return None };
     if !matches!(usage, Value::Object(_)) { return None; }
     let cache_read = first_u64(u64_at(usage, P_CACHE_READ_INPUT_TOKENS.as_slice()),
         u64_at2(usage, P_INPUT_TOKENS_DETAILS.as_slice(), P_CACHED_TOKENS.as_slice()),
@@ -468,7 +490,7 @@ fn usage_of(value: &Value) -> (out: Option<Usage>)
     let total_input = first_u64(u64_at(usage, P_INPUT_TOKENS.as_slice()), u64_at(usage, P_PROMPT_TOKENS.as_slice()), None);
     let output = first_u64(u64_at(usage, P_OUTPUT_TOKENS.as_slice()), u64_at(usage, P_COMPLETION_TOKENS.as_slice()), None);
     // Anthropic reports input net of cache; OpenAI reports cached tokens inside input.
-    let anthropic = usage.get(P_CACHE_READ_INPUT_TOKENS.as_slice()).is_some() || usage.get(P_CACHE_CREATION_INPUT_TOKENS.as_slice()).is_some();
+    let anthropic = semantics::get(usage, P_CACHE_READ_INPUT_TOKENS.as_slice()).is_some() || semantics::get(usage, P_CACHE_CREATION_INPUT_TOKENS.as_slice()).is_some();
     let input = if anthropic { total_input } else if total_input >= cache_read { total_input - cache_read } else { 0 };
     let cache_write = first_u64(u64_at(usage, P_CACHE_CREATION_INPUT_TOKENS.as_slice()), None, None);
     Some(Usage { input, cache_read, cache_write, output })
@@ -501,7 +523,7 @@ fn join_contents(items: &Vec<Value>, inner: bool) -> (out: Vec<u8>)
 }
 fn parse_json_response(value: &Value) -> (out: ParsedResponse)
     ensures crate::utf8::valid(out.text@), match out.model { Some(t) => crate::utf8::valid(t@), None => true },
-        out.usage.is_some() == has_usage_object(*value), out.failed == semantics::failure(*value),
+        !out.choices_known, out.usage == accounting::observation(*value), out.usage.is_some() == has_usage_object(*value), out.failed == semantics::failure(*value),
 {
     let model = str_at(value, P_MODEL.as_slice());
     let text: Vec<u8> = if let Some(content) = value.get(P_CONTENT.as_slice()) {
@@ -514,7 +536,7 @@ fn parse_json_response(value: &Value) -> (out: ParsedResponse)
         Vec::new()
     };
     proof { assert(crate::utf8::valid(Seq::<u8>::empty())); }
-    ParsedResponse { text, usage: usage_of(value), model, failed: semantics::failed(value) }
+    ParsedResponse { text, choices_known: false, usage: usage_of(value), model, failed: semantics::failed(value) }
 }
 
 /// Whether the SSE grammar dispatches at least one complete data event.
@@ -529,19 +551,22 @@ pub fn is_sse(bytes: &[u8]) -> (out: bool)
 #[verifier::loop_isolation(false)]
 fn sse_event(event: &Value, out: &mut ParsedResponse, usage: &mut Usage, saw_usage: &mut bool)
     requires crate::utf8::valid(old(out).text@), match old(out).model { Some(t) => crate::utf8::valid(t@), None => true },
-    ensures crate::utf8::valid(final(out).text@), match final(out).model { Some(t) => crate::utf8::valid(t@), None => true },
+        !*old(saw_usage) ==> *old(usage) == accounting::zero(),
+    ensures !*final(saw_usage) ==> *final(usage) == accounting::zero(),
+        crate::utf8::valid(final(out).text@), match final(out).model { Some(t) => crate::utf8::valid(t@), None => true },
         final(out).failed == (old(out).failed || semantics::failure(*event)),
+        (if *final(saw_usage) { Some(*final(usage)) } else { None }) == accounting::step(*event, if *old(saw_usage) { Some(*old(usage)) } else { None }),
         !has_field(*event, P_TYPE@) && !has_usage_object(*event) ==>
             *final(usage) == *old(usage) && *final(saw_usage) == *old(saw_usage),
 {
     out.failed = out.failed || semantics::failed(event);
-    let kind: Vec<u8> = match str_at(event, P_TYPE.as_slice()) { Some(k) => k, None => Vec::new() };
+    let kind: Vec<u8> = match semantics::get(event, P_TYPE.as_slice()) { Some(Value::Str(k)) => k.clone(), _ => Vec::new() };
     proof { assert(!has_field(*event, P_TYPE@) ==> kind@.len() == 0); }
     if bytes_eq(kind.as_slice(), P_MESSAGE_START.as_slice()) {
-        if let Some(message) = event.get(P_MESSAGE.as_slice()) {
+        if let Some(message) = semantics::get(event, P_MESSAGE.as_slice()) {
             out.model = str_at(message, P_MODEL.as_slice());
             if let Some(u) = usage_of(message) {
-                usage.input = u.input; usage.cache_read = u.cache_read; usage.cache_write = u.cache_write; *saw_usage = true;
+                *usage = u; *saw_usage = true;
             }
         }
     } else if bytes_eq(kind.as_slice(), P_CONTENT_BLOCK_DELTA.as_slice()) {
@@ -553,24 +578,12 @@ fn sse_event(event: &Value, out: &mut ParsedResponse, usage: &mut Usage, saw_usa
     } else if bytes_eq(kind.as_slice(), P_RESPONSE_COMPLETED.as_slice())
         || bytes_eq(kind.as_slice(), semantics::RESPONSE_FAILED.as_slice())
         || bytes_eq(kind.as_slice(), semantics::RESPONSE_INCOMPLETE.as_slice()) {
-        if let Some(response) = event.get(P_RESPONSE.as_slice()) {
+        if let Some(response) = semantics::get(event, P_RESPONSE.as_slice()) {
             out.model = str_at(response, P_MODEL.as_slice());
             if let Some(u) = usage_of(response) { *usage = u; *saw_usage = true; }
         }
     } else {
-        // Chat-completions style chunks carry text in choices[].delta.content.
-        if let Some(Value::Array(choices)) = event.get(P_CHOICES.as_slice()) {
-            let mut k: usize = 0;
-            while k < choices.len()
-                invariant crate::utf8::valid(out.text@), match out.model { Some(t) => crate::utf8::valid(t@), None => true },
-                    *usage == *old(usage), *saw_usage == *old(saw_usage),
-                decreases choices.len() - k,
-            {
-                let c = slice_index_get(choices.as_slice(), k);
-                if let Some(t) = str_at2(c, P_DELTA.as_slice(), P_CONTENT.as_slice()) { append_line(&mut out.text, false, t.as_slice()); }
-                k = k + 1;
-            }
-        }
+        // Chat text is interpreted separately, preserving choice identity.
         if let Some(u) = usage_of(event) { *usage = u; *saw_usage = true; }
         proof { assert(!has_usage_object(*event) ==> *usage == *old(usage) && *saw_usage == *old(saw_usage)); }
     }
@@ -580,25 +593,37 @@ fn sse_event(event: &Value, out: &mut ParsedResponse, usage: &mut Usage, saw_usa
 fn parse_sse(bytes: &[u8]) -> (out: ParsedResponse)
     ensures crate::utf8::valid(out.text@), match out.model { Some(t) => crate::utf8::valid(t@), None => true },
         semantics::stream(crate::sse::event_data(bytes@), out.failed),
+        accounting::stream(crate::sse::event_data(bytes@), None, out.usage),
+        exists|t: Seq<u8>| choices::interpretation(bytes@, t, out.choices_known) && (out.choices_known ==> out.text@ == t),
 {
-    let mut out = ParsedResponse { text: Vec::new(), usage: None, model: None, failed: false };
+    let mut out = ParsedResponse { text: Vec::new(), choices_known: false, usage: None, model: None, failed: false };
     let mut usage = Usage { input: 0, cache_read: 0, cache_write: 0, output: 0 };
     let mut saw_usage = false;
     proof { assert(crate::utf8::valid(out.text@)); }
     let mut events = crate::sse::Reader::new(bytes);
     loop
-        invariant events.valid(), crate::utf8::valid(out.text@), match out.model { Some(t) => crate::utf8::valid(t@), None => true },
+        invariant events.valid(), !saw_usage ==> usage == accounting::zero(),
+            forall|end: Option<Usage>| accounting::stream(events.remaining(), if saw_usage { Some(usage) } else { None }, end) ==>
+                accounting::stream(crate::sse::event_data(bytes@), None, end),
+            crate::utf8::valid(out.text@), match out.model { Some(t) => crate::utf8::valid(t@), None => true },
             forall|tail: bool| semantics::stream(events.remaining(), tail) ==>
                 semantics::stream(crate::sse::event_data(bytes@), out.failed || tail),
         decreases events.left() + 1,
     {
         let ghost before = events.remaining();
+        let ghost previous = if saw_usage { Some(usage) } else { None };
         let event = events.next_json();
         match event {
             Some(Some(value)) => sse_event(&value, &mut out, &mut usage, &mut saw_usage),
             Some(None) => {},
             None => {
-                proof { semantics::empty_stream(); assert(before =~= Seq::<Seq<u8>>::empty()); }
+                proof {
+                    semantics::empty_stream();
+                    assert(before =~= Seq::<Seq<u8>>::empty());
+                    accounting::empty(previous);
+                    assert(accounting::stream(before, previous, previous));
+                    assert(accounting::stream(crate::sse::event_data(bytes@), None, previous));
+                }
                 break;
             }
         }
@@ -606,6 +631,10 @@ fn parse_sse(bytes: &[u8]) -> (out: ParsedResponse)
             let value = event.unwrap();
             assert(semantics::parsed(before[0], value));
             assert(events.remaining() =~= before.drop_first());
+            assert forall|end: Option<Usage>| accounting::stream(events.remaining(), if saw_usage { Some(usage) } else { None }, end) implies
+                accounting::stream(crate::sse::event_data(bytes@), None, end) by {
+                accounting::prepend(before, value, previous, end);
+            }
             assert forall|tail: bool| semantics::stream(events.remaining(), tail) implies
                 semantics::stream(crate::sse::event_data(bytes@), out.failed || tail) by {
                 semantics::prepend(before, value, tail);
@@ -613,12 +642,22 @@ fn parse_sse(bytes: &[u8]) -> (out: ParsedResponse)
             }
         }
     }
-    if saw_usage { out.usage = Some(usage); }
+    proof { assert(accounting::stream(crate::sse::event_data(bytes@), None, if saw_usage { Some(usage) } else { None })); }
+    out.usage = if saw_usage { Some(usage) } else { None };
+    let (text, known) = choices::parse(bytes);
+    let ghost rendered = text@;
+    out.choices_known = known;
+    if known { out.text = text; }
+    proof {
+        assert(choices::interpretation(bytes@, rendered, out.choices_known));
+        assert(out.choices_known ==> out.text@ == rendered);
+    }
     out
 }
 fn parse_response(bytes: &[u8]) -> (out: (ParsedResponse, bool))
     ensures crate::utf8::valid(out.0.text@), match out.0.model { Some(t) => crate::utf8::valid(t@), None => true },
-        semantics::interpretation(bytes@, out.0.failed),
+        semantics::interpretation(bytes@, out.0.failed), accounting::interpretation(bytes@, out.0.usage),
+        choices::response_interpretation(bytes@, out.0.text@, out.0.choices_known),
 {
     match crate::json::parse(bytes) {
         Some(value) => {
@@ -690,7 +729,7 @@ fn gateway_object(exchange: &Exchange, exchange_id: &[u8], host: &[u8], path: &[
     out
 }
 fn usage_object(usage: &Usage) -> (out: Value)
-    ensures crate::json::well_formed(out), values_valid(out),
+    ensures crate::json::well_formed(out), values_valid(out), accounting::payload(out, *usage),
 {
     let mut ms: Vec<Member> = Vec::new();
     push_member(&mut ms, K_INPUT_TOKENS.as_slice(), number(usage.input));
@@ -699,7 +738,9 @@ fn usage_object(usage: &Usage) -> (out: Value)
     push_member(&mut ms, K_OUTPUT_TOKENS.as_slice(), number(usage.output));
     let total = saturating_add(saturating_add(saturating_add(usage.input, usage.cache_read), usage.cache_write), usage.output);
     push_member(&mut ms, K_TOTAL_TOKENS.as_slice(), number(total));
-    object(ms)
+    let out = object(ms);
+    proof { assert(keys_of(out) =~= seq![K_INPUT_TOKENS@, K_CACHE_READ_TOKENS@, K_CACHE_WRITE_TOKENS@, K_OUTPUT_TOKENS@, K_TOTAL_TOKENS@]); }
+    out
 }
 fn saturating_add(a: u64, b: u64) -> (out: u64)
     ensures out == if a + b <= u64::MAX { a + b } else { u64::MAX as int },
@@ -785,6 +826,9 @@ fn hex_text(key: &[u8]) -> (out: Value)
 #[verifier::rlimit(100)]
 pub fn rows(session: &[u8; 16], exchange: &Exchange, max_text: usize) -> (out: Vec<Value>)
     ensures out@.len() == 2,
+        exists|usage: Option<Usage>| accounting::interpretation(exchange.download@, usage) && accounting::serialized(out@[1], usage),
+        exists|source: Seq<u8>, known: bool| choices::response_interpretation(exchange.download@, source, known)
+            && (known ==> capped_text(value_at(out@[1], 21), source, max_text)),
         exists|failed: bool| semantics::interpretation(exchange.download@, failed)
             && value_at(out@[0], 16) == Value::Bool(semantics::exchange_error(*exchange, failed))
             && value_at(out@[1], 16) == Value::Bool(semantics::exchange_error(*exchange, failed)),
@@ -833,14 +877,23 @@ pub fn rows(session: &[u8; 16], exchange: &Exchange, max_text: usize) -> (out: V
     push_member(&mut assistant, K_MESSAGE_CREATED_AT.as_slice(), time_text(finished));
     push_member(&mut assistant, K_PREVIOUS_MESSAGE_ID.as_slice(), single(hex_text(message_key(session, exchange.request, 0).as_slice())));
     // Nothing recognizable parsed: ship the raw response text instead of nothing.
-    let unparsed = response.text.len() == 0 && response.usage.is_none() && exchange.download.len() > 0;
+    let unparsed = !response.choices_known && response.text.len() == 0 && response.usage.is_none() && exchange.download.len() > 0;
     let assistant_text = if unparsed { truncated_text(exchange.download.as_slice(), max_text) } else { capped(response.text.as_slice(), max_text) };
     push_member(&mut assistant, K_CONTENT_TEXT.as_slice(), assistant_text);
     let mut assistant_attributes: Vec<Member> = Vec::new();
     push_member(&mut assistant_attributes, K_GATEWAY.as_slice(), gateway_object(exchange, shared.exchange_id.as_slice(), shared.host.as_slice(), shared.path.as_slice(), status, outcome, sse));
     if let Some(usage) = &response.usage { push_member(&mut assistant_attributes, K_USAGE.as_slice(), usage_object(usage)); }
+    proof {
+        assert(keys_of(Value::Object(assistant_attributes)) =~= if response.usage.is_some() { seq![K_GATEWAY@, K_USAGE@] } else { seq![K_GATEWAY@] });
+    }
     push_member(&mut assistant, K_ATTRIBUTES.as_slice(), object(assistant_attributes));
     let assistant_row = object(assistant);
+    proof {
+        assert(accounting::serialized(assistant_row, response.usage));
+        assert(accounting::interpretation(exchange.download@, response.usage));
+        assert(choices::response_interpretation(exchange.download@, response.text@, response.choices_known));
+        assert(response.choices_known ==> capped_text(value_at(assistant_row, 21), response.text@, max_text));
+    }
 
     proof {
         assert(keys_of(user_row) =~= user_keys());

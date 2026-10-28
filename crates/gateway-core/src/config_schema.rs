@@ -358,7 +358,7 @@ fn field<'a>(v: &'a Value, key: &[u8]) -> (out: Option<&'a Value>)
     }
     out
 }
-fn u64_exec(v: &Value) -> (out: Option<u64>)
+pub(crate) fn u64_exec(v: &Value) -> (out: Option<u64>)
     ensures match out { Some(n) => is_u64(*v) && u64_of(*v) == n, None => !is_u64(*v) },
 {
     match v {
