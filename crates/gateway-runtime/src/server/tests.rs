@@ -1111,3 +1111,5 @@ fn shipping_uploads_forwarded_exchanges_without_touching_readiness() {
         }
     }
 }
+
+mod lifetime;

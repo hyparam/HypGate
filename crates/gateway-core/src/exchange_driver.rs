@@ -37,13 +37,17 @@ pub enum ConnectFailure { Resolve, Tcp, Tls, Timeout, Cancelled }
 pub enum Body { Fixed, Stream(ChunkStream) }
 #[derive(PartialEq, Eq, Structural, Clone, Copy, Debug)]
 pub enum Event { Failed(Fault) }
+/// Failure replies use the connection budget so a timed-out exchange can
+/// still report 504; forwarded response bytes use the exchange budget.
+#[derive(PartialEq, Eq, Structural, Clone, Copy, Debug)]
+pub enum WriteScope { Control, Exchange }
 
 /// What the runtime does for the driver. Every method is trusted to perform
 /// exactly the effect named and report what happened; none decides anything.
 pub trait Effects {
     fn read_head(&mut self) -> HeadRead;
     /// Hand bytes to the client; false when the client is gone.
-    fn write_client(&mut self, bytes: &Vec<u8>) -> bool;
+    fn write_client(&mut self, bytes: &Vec<u8>, scope: WriteScope) -> bool;
     fn close_client(&mut self);
     /// An operator endpoint for a GET target, answered without a worker.
     fn endpoint(&mut self, target: &Vec<u8>) -> Option<FixedResponse>;
@@ -85,7 +89,7 @@ pub trait Effects {
 /// One step the driver took, as the trace records it.
 pub ghost enum Step {
     /// Bytes the driver handed to the client.
-    Client(Seq<u8>),
+    Client(Seq<u8>, WriteScope),
     /// Bytes the download effect handed to the client: a chunk stream's frames.
     Streamed(Seq<u8>),
     Worker(bool), Admit(bool), Strict(bool), RequestStart(bool), Connect(bool),
@@ -123,7 +127,8 @@ pub open spec fn record_allows_forward(p: Progress, status: u16) -> bool {
 /// The one step relation: which step may follow which progress.
 pub open spec fn step_ok(p: Progress, s: Step) -> Option<Progress> {
     match s {
-        Step::Client(_) | Step::Streamed(_) => Some(p),
+        Step::Client(_, scope) => if p.forwarded && scope != WriteScope::Exchange { None } else { Some(p) },
+        Step::Streamed(_) => Some(p),
         Step::Worker(ok) => if !p.worker && !p.admitted { Some(Progress { worker: ok, ..p }) } else { None },
         Step::Admit(ok) => if p.worker && !p.admitted && p.strict.is_none() { Some(Progress { admitted: ok, ..p }) } else { None },
         Step::Strict(b) => if p.admitted && p.strict.is_none() { Some(Progress { strict: Some(b), ..p }) } else { None },
@@ -155,7 +160,7 @@ pub open spec fn client_writes(trace: Seq<Step>) -> Seq<u8>
     if trace.len() == 0 { Seq::empty() }
     else { client_writes(trace.drop_last()) + written_by(trace.last()) }
 }
-pub open spec fn written_by(s: Step) -> Seq<u8> { match s { Step::Client(bytes) => bytes, Step::Streamed(bytes) => bytes, _ => Seq::empty() } }
+pub open spec fn written_by(s: Step) -> Seq<u8> { match s { Step::Client(bytes, _) => bytes, Step::Streamed(bytes) => bytes, _ => Seq::empty() } }
 
 proof fn lemma_run_push(t: Seq<Step>, s: Step)
     ensures run(t.push(s)) == (match run(t) { Some(p) => step_ok(p, s), None => None }),
@@ -222,7 +227,7 @@ impl Driver {
     spec fn inv(&self) -> bool {
         run(self.trace@) == Some(self.progress@) && self.connection.valid()
         && self.connection.out() + self.streamed@ == client_writes(self.trace@) + self.pending@
-        && (self.connection.open() ==> self.streamed@.len() == 0)
+        && (self.connection.open() ==> self.streamed@.len() == 0 && !self.progress@.forwarded)
     }
     spec fn settled(&self) -> bool { self.inv() && self.pending@.len() == 0 }
 
@@ -237,6 +242,7 @@ impl Driver {
     /// Record a step the progress allows.
     fn record(&mut self, Ghost(s): Ghost<Step>)
         requires old(self).inv(), step_ok(old(self).progress@, s).is_some(), !(s is Client), !(s is Streamed),
+            s is Forward ==> !old(self).connection.open(),
         ensures final(self).inv(), final(self).progress@ == step_ok(old(self).progress@, s).unwrap(),
             final(self).trace@ == old(self).trace@.push(s), final(self).connection == old(self).connection,
             final(self).pending@ == old(self).pending@, final(self).streamed@ == old(self).streamed@,
@@ -247,14 +253,15 @@ impl Driver {
     }
 
     /// Hand the machine's pending bytes to the client and record them.
-    fn emit<E: Effects>(&mut self, effects: &mut E, bytes: Vec<u8>) -> (ok: bool)
+    fn emit<E: Effects>(&mut self, effects: &mut E, bytes: Vec<u8>, scope: WriteScope) -> (ok: bool)
         requires old(self).inv(), bytes@ == old(self).pending@,
+            old(self).progress@.forwarded ==> scope == WriteScope::Exchange,
         ensures final(self).settled(), final(self).progress@ == old(self).progress@, final(self).connection == old(self).connection,
             final(self).streamed@ == old(self).streamed@,
     {
-        let ok = effects.write_client(&bytes);
-        proof { lemma_run_push(self.trace@, Step::Client(bytes@)); lemma_writes_push(self.trace@, Step::Client(bytes@)); }
-        self.trace = Ghost(self.trace@.push(Step::Client(bytes@)));
+        let ok = effects.write_client(&bytes, scope);
+        proof { lemma_run_push(self.trace@, Step::Client(bytes@, scope)); lemma_writes_push(self.trace@, Step::Client(bytes@, scope)); }
+        self.trace = Ghost(self.trace@.push(Step::Client(bytes@, scope)));
         self.pending = Ghost(Seq::empty());
         ok
     }
@@ -272,7 +279,7 @@ impl Driver {
 
     /// A complete fixed response, then the client's write side is closed.
     fn respond_fixed<E: Effects>(&mut self, effects: &mut E, status: u16, fields: Vec<Field>, body: &[u8])
-        requires old(self).settled(),
+        requires old(self).settled(), !old(self).progress@.forwarded,
         ensures final(self).settled(), final(self).progress@ == old(self).progress@,
     {
         let reason = reason(status);
@@ -280,7 +287,7 @@ impl Driver {
             Some(bytes) => {
                 self.pending = Ghost(bytes@);
                 proof { assert(self.connection.out() + self.streamed@ =~= client_writes(self.trace@) + self.pending@); }
-                let _ = self.emit(effects, bytes);
+                let _ = self.emit(effects, bytes, WriteScope::Control);
             }
             None => {}
         }
@@ -288,7 +295,7 @@ impl Driver {
     }
     /// A refusal or failure: the status alone.
     fn refuse<E: Effects>(&mut self, effects: &mut E, status: u16)
-        requires old(self).settled(),
+        requires old(self).settled(), !old(self).progress@.forwarded,
         ensures final(self).settled(), final(self).progress@ == old(self).progress@,
     {
         let empty: Vec<u8> = Vec::new();
@@ -372,7 +379,7 @@ impl Driver {
                     self.pending = Ghost(bytes@);
                     proof { assert(self.connection.out() + self.streamed@ =~= client_writes(self.trace@) + self.pending@); }
                     self.record(Ghost(Step::Forward(status)));
-                    if !self.emit(effects, bytes) { return Err(Fault::Client); }
+                    if !self.emit(effects, bytes, WriteScope::Exchange) { return Err(Fault::Client); }
                 }
                 None => return Err(Fault::Metadata),
             }
@@ -384,7 +391,7 @@ impl Driver {
             self.pending = Ghost(head@);
             proof { assert(self.connection.out() + self.streamed@ =~= client_writes(self.trace@) + self.pending@); }
             self.record(Ghost(Step::Forward(status)));
-            if !self.emit(effects, head) { return Err(Fault::Client); }
+            if !self.emit(effects, head, WriteScope::Exchange) { return Err(Fault::Client); }
             effects.download(body_framing, Body::Stream(stream))
         };
         // Whatever the stream framed, the effect handed to the client.
@@ -402,7 +409,7 @@ impl Driver {
                 self.streamed = Ghost(self.streamed@ + last@);
                 self.pending = Ghost(last@);
                 proof { assert(self.connection.out() + self.streamed@ =~= client_writes(self.trace@) + self.pending@); }
-                let delivered = self.emit(effects, last);
+                let delivered = self.emit(effects, last, WriteScope::Exchange);
                 self.connection.finish(stream);
                 self.streamed = Ghost(Seq::empty());
                 proof { assert(self.connection.out() + self.streamed@ =~= client_writes(self.trace@) + self.pending@); }
@@ -468,7 +475,7 @@ pub fn drive<E: Effects>(effects: &mut E) -> (out: Driven)
             Some(bytes) => {
                 d.pending = Ghost(bytes@);
                 proof { assert(d.connection.out() + d.streamed@ =~= client_writes(d.trace@) + d.pending@); }
-                let _ = d.emit(effects, bytes);
+                let _ = d.emit(effects, bytes, WriteScope::Control);
             }
             None => {}
         }
@@ -551,6 +558,18 @@ pub proof fn lemma_prefix_runs(t: Seq<Step>, n: int)
     } else {
         assert(t.take(n) =~= t);
     }
+}
+
+/// Every explicit write after forwarding begins uses the exchange scope,
+/// regardless of status, body length, interim responses, or failure position.
+pub proof fn lemma_forwarded_writes_use_exchange_budget(t: Seq<Step>, i: int)
+    requires run(t).is_some(), 0 <= i < t.len(), run(t.take(i)).unwrap().forwarded,
+    ensures match t[i] { Step::Client(_, scope) => scope == WriteScope::Exchange, _ => true },
+{
+    lemma_prefix_runs(t, i + 1);
+    let prefix = t.take(i + 1);
+    assert(prefix.drop_last() =~= t.take(i));
+    assert(prefix.last() == t[i]);
 }
 
 /// The progress fields that are set have the step that set them in the trace.

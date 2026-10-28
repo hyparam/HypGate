@@ -102,3 +102,35 @@ the joins specific to this composition are:
   which issues all four HTTP roles from the connection's own worker. The
   test-only `transport::exchange` module recomposes the provider side for the
   transport tests with a worker it constructs.
+
+## Deadline and registration scope
+
+A connection owns a root deadline. Admission creates one shorter exchange
+budget from that same clock origin, before logging the start or resolving the
+provider. `deadline::Budget::limit` proves that descendants preserve the root
+and never extend their parent's end, including overflowing duration additions;
+`Budget::run` composes that invariant with primitive I/O mediation. The actual
+runtime passes this one exchange deadline to upload reads, provider DNS/TCP/TLS,
+forwarded response heads/chunks, and audit queue/acknowledgment waits.
+The driver's trace proves every explicit write after forwarding starts uses
+`WriteScope::Exchange`; a mutation using `Control` fails verification.
+
+Timeout replies still use the connection deadline. Completion records use the
+logger's own acknowledgment deadline, so recording an expired exchange remains
+possible. Thus resource teardown may outlast the exchange budget. Expiry of a
+shorter exchange audit wait alone does not poison logger health; queued and
+active work retain their credits until actually completed. A logger's own
+acknowledgment timeout still permanently fails its health.
+
+`scope::run` invokes cleanup exactly once after any returned body result. The
+production `ConnectionScope` puts all fallible socket cloning inside that body,
+so setup errors cannot skip unregistering and releasing cancellation clones.
+An idempotent Rust destructor covers unwinding, and watcher destruction shuts
+down its socket and joins its thread. Panic may still strand task credit under
+the existing conservative credit policy; these changes do not prove otherwise.
+
+These are general contracts over arbitrary budgets and result values, used by
+the production code. They do not prove OS timeout enforcement, scheduler
+fairness, mutex acquisition time, destructor termination, or that every runtime
+adapter satisfies its contract. Those bindings are tested and audited; a full
+runtime refinement and end-to-end temporal liveness proof remain open.

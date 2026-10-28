@@ -14,6 +14,51 @@ pub fn remaining(end: u128, now: u128) -> (out: Option<u128>)
     if now < end { Some(end - now) } else { None }
 }
 
+/// A deadline lineage: descendants may shorten the end, never renew the root.
+/// All times are measured from the same origin supplied by the adapter.
+#[derive(Clone, Copy, Debug)]
+pub struct Budget { root: u128, end: u128 }
+impl Budget {
+    pub closed spec fn root(&self) -> u128 { self.root }
+    pub closed spec fn end(&self) -> u128 { self.end }
+    pub open spec fn valid(&self) -> bool { self.end() <= self.root() }
+
+    pub fn new(end: u128) -> (out: Self)
+        ensures out.valid(), out.root() == end, out.end() == end,
+    { Self { root: end, end } }
+
+    /// Overflow cannot renew a deadline; the ancestor remains the upper bound.
+    pub fn limit(&self, now: u128, duration: u128) -> (out: Self)
+        requires self.valid(),
+        ensures out.valid(), out.root() == self.root(), out.end() <= self.end(),
+            out.end() == if now + duration < self.end() { now + duration } else { self.end() as int },
+    {
+        let end = if now < self.end && duration < self.end - now { now + duration } else { self.end };
+        Self { root: self.root, end }
+    }
+
+    pub fn remaining(&self, now: u128) -> (out: Option<u128>)
+        requires self.valid(),
+        ensures out.is_some() == (now < self.end()),
+            out is Some ==> now + out.unwrap() == self.end() && now + out.unwrap() <= self.root(),
+    { remaining(self.end, now) }
+
+    pub fn end_value(&self) -> (out: u128) ensures out == self.end(), { self.end }
+
+    /// Every descendant operation is capped by both its end and its ancestor.
+    /// The I/O effect is still trusted to honor the supplied timeout.
+    pub fn run<I: Io>(&self, io: &mut I) -> (out: Option<I::Output>)
+        requires self.valid(),
+        ensures old(io).calls() <= final(io).calls() <= old(io).calls() + 1,
+            old(io).clock() >= self.end() ==> final(io).calls() == old(io).calls(),
+            final(io).calls() > old(io).calls() ==> final(io).last_start() < self.end()
+                && final(io).last_start() + final(io).last_budget() == self.end()
+                && final(io).last_start() + final(io).last_budget() <= self.root(),
+            out is Some ==> final(io).clock() < self.end() && final(io).clock() < self.root(),
+            out is None ==> final(io).clock() >= self.end(),
+    { run(io, self.end) }
+}
+
 /// One primitive operation attempt, not a TLS operation containing hidden retries.
 /// `calls` counts attempts, including timeout-installation failures before I/O.
 /// The ghost observations make the driver's mediation guarantee explicit.

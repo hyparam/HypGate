@@ -11,7 +11,7 @@
 use crate::{config::GatewayConfig, disk_log::DiskLog, http1, http_body, http_boundary, net::{Cancel, Deadline, Timed},
     transport::{HttpsTransport, Session}, transfer::{AuditLog, LogRecord, TransferError}};
 use gateway_core::body_copy::BodyCopy;
-use gateway_core::exchange_driver::{self, Admit, Body, ConnectFailure, Effects, Event, Failure, FixedResponse, HeadRead};
+use gateway_core::exchange_driver::{self, Admit, Body, ConnectFailure, Effects, Event, Failure, FixedResponse, HeadRead, WriteScope};
 use gateway_core::headers::Field;
 use gateway_core::http1_exchange::{Refusal, refusal_status};
 use gateway_core::http1_framing::Framing;
@@ -107,11 +107,14 @@ fn fixed(status: u16, text: Vec<u8>) -> FixedResponse { FixedResponse { status, 
 // Report potential audit loss at the first failed append, not only after a
 // successful response: cancellation and provider failures must not hide it.
 // The verified observer decides when an append counts; this only adds one.
-struct ObservedLog<'a> { log: DiskLog, gaps: &'a AtomicU64, observer: GapObserver }
+struct ObservedLog<'a> { deadline: Option<Deadline>, log: DiskLog, gaps: &'a AtomicU64, observer: GapObserver }
 impl AuditLog for ObservedLog<'_> {
     fn session_id(&self) -> u128 { self.log.session_id() }
     fn append(&mut self, record: LogRecord<'_>) -> io::Result<crate::transfer::AuditReceipt> {
-        let result = self.log.append(record);
+        let result = match self.deadline {
+            Some(deadline) => deadline.remaining().and_then(|_| deadline.end()).and_then(|end| self.log.append_until(record, Some(end))),
+            None => self.log.append(record),
+        };
         if self.observer.observe(result.is_err()) { self.gaps.fetch_add(1, Ordering::Relaxed); }
         result
     }
@@ -130,6 +133,7 @@ impl Write for NoBody {
 struct ConnectionEffects<'a> {
     app: &'a Gateway,
     deadline: Deadline,
+    exchange_deadline: Option<Deadline>,
     reader: Option<Timed<TcpStream>>,
     writer: Timed<TcpStream>,
     leftover: Vec<u8>,
@@ -150,9 +154,9 @@ impl<'a> ConnectionEffects<'a> {
         let write_half = socket.try_clone()?;
         let probe = socket.try_clone()?;
         Ok(Self {
-            app, deadline, reader: Some(Timed::new(socket, Deadline::start(HEAD_DEADLINE)?.min(deadline))), writer: Timed::new(write_half, deadline),
+            app, deadline, exchange_deadline: None, reader: Some(Timed::new(socket, deadline.cap(HEAD_DEADLINE))), writer: Timed::new(write_half, deadline),
             leftover: Vec::new(), lease: None, http: None, prepared: None, input: None, session: None,
-            log: ObservedLog { log: app.log.clone(), gaps: &app.audit_gaps, observer: GapObserver::new(!app.config.requires_audit()) }, cancel,
+            log: ObservedLog { deadline: None, log: app.log.clone(), gaps: &app.audit_gaps, observer: GapObserver::new(!app.config.requires_audit()) }, cancel,
             probe: Some(probe), watcher: None,
         })
     }
@@ -170,8 +174,13 @@ impl Effects for ConnectionEffects<'_> {
             Err(_) => HeadRead::Closed, // closed or silent before a complete head
         }
     }
-    fn write_client(&mut self, bytes: &Vec<u8>) -> bool {
-        http1::write_fully(&mut self.writer, bytes).and_then(|()| self.writer.flush()).is_ok()
+    fn write_client(&mut self, bytes: &Vec<u8>, scope: WriteScope) -> bool {
+        let deadline = match scope {
+            WriteScope::Control => self.deadline,
+            WriteScope::Exchange => match self.exchange_deadline { Some(deadline) => deadline, None => return false },
+        };
+        let mut writer = Timed::new(self.writer.inner(), deadline);
+        http1::write_fully(&mut writer, bytes).and_then(|()| writer.flush()).is_ok()
     }
     fn close_client(&mut self) { let _ = self.writer.inner().shutdown(SocketShutdown::Write); }
     fn endpoint(&mut self, target: &Vec<u8>) -> Option<FixedResponse> { self.app.endpoint(target) }
@@ -187,7 +196,15 @@ impl Effects for ConnectionEffects<'_> {
     }
     fn admit(&mut self, head: &RequestHead) -> Admit {
         match http_boundary::prepare(&self.app.config, head) {
-            Ok(prepared) => { self.prepared = Some(prepared); Admit::Admitted }
+            Ok(prepared) => {
+                // One descendant budget is created at dispatch, before audit or DNS.
+                // The same value reaches both client directions, audit waits, and TLS.
+                let deadline = self.app.transport.deadline(self.deadline);
+                self.exchange_deadline = Some(deadline);
+                self.log.deadline = Some(deadline);
+                self.prepared = Some(prepared);
+                Admit::Admitted
+            }
             Err(error) => Admit::Refused(error.refusal()),
         }
     }
@@ -200,6 +217,8 @@ impl Effects for ConnectionEffects<'_> {
     }
     fn bind_input(&mut self, framing: Framing) -> bool {
         let (Some(reader), Some(http)) = (self.reader.take(), self.http.as_ref()) else { return false; };
+        let Some(deadline) = self.exchange_deadline else { return false; };
+        let reader = Timed::new(reader.into_inner(), deadline);
         let body = http1::BodyReader::new(reader, std::mem::take(&mut self.leftover), framing);
         match http.input(body) { Some(input) => { self.input = Some(input); true } None => false }
     }
@@ -209,7 +228,7 @@ impl Effects for ConnectionEffects<'_> {
     }
     fn connect(&mut self) -> Result<(), ConnectFailure> {
         let Some(prepared) = self.prepared.as_mut() else { return Err(ConnectFailure::Resolve); };
-        self.session = Some(self.app.transport.connect(prepared, &self.cancel)?);
+        self.session = Some(self.app.transport.connect(prepared, &self.cancel, self.exchange_deadline.ok_or(ConnectFailure::Timeout)?)?);
         Ok(())
     }
     fn write_upstream(&mut self, bytes: &Vec<u8>) -> bool {
@@ -234,7 +253,7 @@ impl Effects for ConnectionEffects<'_> {
         }
     }
     fn download(&mut self, framing: Framing, body: Body) -> (Result<BodyCopy, Failure>, Body) {
-        let Self { session, prepared, log, http, writer, .. } = self;
+        let Self { session, prepared, log, http, writer, exchange_deadline, .. } = self;
         let (Some(session), Some(prepared), Some(http)) = (session.as_mut(), prepared.as_mut(), http.as_ref()) else {
             return (Err(Failure::Io), body);
         };
@@ -242,7 +261,9 @@ impl Effects for ConnectionEffects<'_> {
             Body::Fixed => (session.download(prepared, log, http, framing, &mut NoBody), Body::Fixed),
             Body::Stream(stream) => {
                 // The chunks go to the client through the worker's response role.
-                let mut sink = match http.response_writer(http1::ChunkedWriter::new(&mut *writer, stream)) {
+                let Some(deadline) = *exchange_deadline else { return (Err(Failure::Io), Body::Stream(stream)); };
+                let mut timed = Timed::new(writer.inner(), deadline);
+                let mut sink = match http.response_writer(http1::ChunkedWriter::new(&mut timed, stream)) {
                     Ok(sink) => sink,
                     Err(sink) => { let (_, stream) = sink.into_parts(); return (Err(Failure::Io), Body::Stream(stream)); }
                 };
@@ -253,6 +274,9 @@ impl Effects for ConnectionEffects<'_> {
         }
     }
     fn audit_completion(&mut self, payload: &Vec<u8>) -> bool {
+        // Teardown records must remain possible after exchange expiry; the
+        // logger's own acknowledgment deadline bounds this separate phase.
+        self.log.deadline = None;
         let Some(prepared) = self.prepared.as_mut() else { return false; };
         prepared.audit_completion(&mut self.log, payload).is_ok()
     }
@@ -284,7 +308,10 @@ impl ClientWatch {
         Ok(Self { thread: Some(thread), finished, socket })
     }
     /// The exchange is over: stop watching and join.
-    fn finish(mut self) {
+    fn finish(self) { drop(self); }
+}
+impl Drop for ClientWatch {
+    fn drop(&mut self) {
         self.finished.store(true, Ordering::Release);
         let _ = self.socket.shutdown(SocketShutdown::Both);
         if let Some(thread) = self.thread.take() { let _ = thread.join(); }
@@ -294,22 +321,43 @@ impl ClientWatch {
 /// Serve one connection: hand it to the verified driver and perform what it
 /// asks. The worker lease, if one was taken, returns its credit only after
 /// every stream the worker issued is gone.
+struct ConnectionScope {
+    app: Arc<Gateway>, cancel: Cancel, id: Option<u64>,
+    socket: Option<TcpStream>, deadline: Deadline,
+}
+impl ConnectionScope {
+    fn cleanup(&mut self) {
+        if let Some(id) = self.id.take() {
+            self.app.untrack(id);
+            self.cancel.release_sockets();
+        }
+    }
+}
+// Rust unwinding is outside the core model; the same cleanup runs on unwind.
+impl Drop for ConnectionScope { fn drop(&mut self) { self.cleanup(); } }
+impl gateway_core::scope::Effects for ConnectionScope {
+    type Output = io::Result<()>;
+    fn body(&mut self) -> Self::Output {
+        let socket = self.socket.take().ok_or(io::ErrorKind::InvalidInput)?;
+        let mut effects = ConnectionEffects::new(&self.app, socket, self.deadline, self.cancel.clone())?;
+        let driven = exchange_driver::drive(&mut effects);
+        let lease = effects.lease.take();
+        let watcher = effects.watcher.take();
+        drop(effects); // all issued HTTP streams are gone before returning worker credit
+        if let Some(lease) = lease { lease.finish(); }
+        let _closed = driven.closed;
+        if let Some(watcher) = watcher { watcher.finish(); }
+        Ok(())
+    }
+    fn cleanup(&mut self) { self.cleanup(); }
+}
 fn serve_connection(socket: TcpStream, app: Arc<Gateway>, connection_deadline: Duration) -> io::Result<()> {
     let deadline = Deadline::start(connection_deadline)?;
     let cancel = Cancel::new();
-    cancel.watch_socket(&socket)?; // gateway shutdown closes the client too
+    cancel.watch_socket(&socket)?;
     let id = app.track(&cancel);
-    let mut effects = ConnectionEffects::new(&app, socket, deadline, cancel.clone())?;
-    let driven = exchange_driver::drive(&mut effects);
-    let lease = effects.lease.take();
-    let watcher = effects.watcher.take();
-    drop(effects); // every stream the worker issued is gone before its credit returns
-    if let Some(lease) = lease { lease.finish(); }
-    let _closed = driven.closed;
-    app.untrack(id);
-    cancel.release_sockets();
-    if let Some(watcher) = watcher { watcher.finish(); }
-    Ok(())
+    let mut scope = ConnectionScope { app, cancel, id: Some(id), socket: Some(socket), deadline };
+    gateway_core::scope::run(&mut scope)
 }
 
 /// Asks a running `serve` to stop accepting and drain. Triggering before

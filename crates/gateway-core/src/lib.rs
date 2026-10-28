@@ -177,3 +177,5 @@ mod snapshot_tests;
 pub mod batch_worker;
 
 pub mod audit_receipt;
+
+pub mod scope;

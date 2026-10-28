@@ -11,19 +11,25 @@ use gateway_core::cancellation::{self, Decision, Observation, Permit};
 
 /// One immutable origin and end, shared by TCP and all TLS operations.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct Deadline { origin: Instant, end: Instant }
+pub(crate) struct Deadline { origin: Instant, budget: gateway_core::deadline::Budget }
 impl Deadline {
     pub(crate) fn start(total: Duration) -> io::Result<Self> {
         let origin = Instant::now();
-        Ok(Self { origin, end: origin.checked_add(total).ok_or(io::ErrorKind::InvalidInput)? })
+        origin.checked_add(total).ok_or(io::ErrorKind::InvalidInput)?;
+        Ok(Self { origin, budget: gateway_core::deadline::Budget::new(total.as_nanos()) })
     }
-    fn budget(&self) -> u128 { self.end.duration_since(self.origin).as_nanos() }
+    /// Preserve the clock origin and root budget across every phase.
+    pub(crate) fn cap(self, total: Duration) -> Self {
+        Self { origin: self.origin, budget: self.budget.limit(self.elapsed(), total.as_nanos()) }
+    }
+    pub(crate) fn end(&self) -> io::Result<Instant> {
+        self.origin.checked_add(duration(self.budget.end_value())).ok_or_else(|| io::ErrorKind::InvalidInput.into())
+    }
     fn elapsed(&self) -> u128 { self.origin.elapsed().as_nanos() }
     pub(crate) fn remaining(&self) -> io::Result<Duration> {
-        gateway_core::deadline::remaining(self.budget(), self.elapsed())
+        self.budget.remaining(self.elapsed())
             .map(duration).ok_or_else(|| io::ErrorKind::TimedOut.into())
     }
-    pub(crate) fn min(self, other: Deadline) -> Deadline { if self.end <= other.end { self } else { other } }
 }
 
 // A Duration's nanoseconds fit u128; the remaining budget cannot exceed the
@@ -49,14 +55,14 @@ impl<T, F: FnMut(&TcpStream) -> io::Result<T>> gateway_core::deadline::Io for So
 /// Only raw TCP implements this adapter's I/O. In particular, a TLS stream
 /// cannot accidentally be wrapped here instead of wrapping its raw socket.
 pub(crate) struct Timed<S> { inner: S, deadline: Deadline, expired: bool }
-impl Timed<TcpStream> {
-    pub(crate) fn new(inner: TcpStream, deadline: Deadline) -> Self { Self { inner, deadline, expired: false } }
-    pub(crate) fn inner(&self) -> &TcpStream { &self.inner }
-    pub(crate) fn into_inner(self) -> TcpStream { self.inner }
+impl<S: std::borrow::Borrow<TcpStream>> Timed<S> {
+    pub(crate) fn new(inner: S, deadline: Deadline) -> Self { Self { inner, deadline, expired: false } }
+    pub(crate) fn inner(&self) -> &TcpStream { self.inner.borrow() }
+    pub(crate) fn into_inner(self) -> S { self.inner }
     pub(crate) fn expired(&self) -> bool { self.expired }
     fn operate<T>(&mut self, operation: impl FnMut(&TcpStream) -> io::Result<T>) -> io::Result<T> {
-        let mut effect = SocketIo { socket: &self.inner, deadline: self.deadline, operation };
-        let result = gateway_core::deadline::run(&mut effect, self.deadline.budget())
+        let mut effect = SocketIo { socket: self.inner.borrow(), deadline: self.deadline, operation };
+        let result = self.deadline.budget.run(&mut effect)
             .unwrap_or_else(|| Err(io::ErrorKind::TimedOut.into()));
         if let Err(e) = &result {
             if matches!(e.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock) { self.expired = true; }
@@ -64,10 +70,10 @@ impl Timed<TcpStream> {
         result
     }
 }
-impl Read for Timed<TcpStream> {
+impl<S: std::borrow::Borrow<TcpStream>> Read for Timed<S> {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> { self.operate(|mut socket| socket.read(out)) }
 }
-impl Write for Timed<TcpStream> {
+impl<S: std::borrow::Borrow<TcpStream>> Write for Timed<S> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> { self.operate(|mut socket| socket.write(bytes)) }
     fn flush(&mut self) -> io::Result<()> { self.operate(|mut socket| socket.flush()) }
 }
@@ -83,7 +89,7 @@ impl Tls {
     pub(crate) fn new(conn: rustls::ClientConnection, socket: TcpStream, deadline: Deadline) -> Self {
         Self { inner: rustls::StreamOwned::new(conn, Timed::new(socket, deadline)), deadline, expired: false }
     }
-    pub(crate) fn expired(&self) -> bool { self.expired || self.inner.sock.expired() }
+    pub(crate) fn expired(&self) -> bool { self.expired || self.inner.sock.expired() || self.deadline.remaining().is_err() }
     fn check(&mut self) -> io::Result<()> {
         if self.deadline.remaining().is_err() { self.expired = true; Err(io::ErrorKind::TimedOut.into()) } else { Ok(()) }
     }

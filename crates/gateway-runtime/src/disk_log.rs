@@ -233,7 +233,11 @@ impl DiskLog {
 
 impl AuditLog for DiskLog {
     fn session_id(&self) -> u128 { u128::from_le_bytes(self.session) }
-    fn append(&mut self, record: LogRecord<'_>) -> io::Result<AuditReceipt> {
+    fn append(&mut self, record: LogRecord<'_>) -> io::Result<AuditReceipt> { self.append_until(record, None) }
+}
+impl DiskLog {
+    /// An exchange may shorten, but never extend, the acknowledgment deadline.
+    pub(crate) fn append_until(&mut self, record: LogRecord<'_>, until: Option<Instant>) -> io::Result<AuditReceipt> {
         if !self.healthy() { return Err(io::ErrorKind::BrokenPipe.into()); }
         if record.bytes.len() > self.payload_limit || record.request == 0 {
             return Err(io::ErrorKind::InvalidInput.into());
@@ -247,13 +251,22 @@ impl AuditLog for DiskLog {
         // One deadline covers waiting for a free slot and waiting for the sync
         // acknowledgment: a worker that stops freeing slots fails the append and
         // poisons health exactly as a worker that stops acknowledging does.
-        let deadline = Instant::now().checked_add(self.deadline).unwrap_or_else(Instant::now);
+        let own_deadline = Instant::now().checked_add(self.deadline).unwrap_or_else(Instant::now);
+        let deadline = until.map_or(own_deadline, |end| end.min(own_deadline));
+        if deadline <= Instant::now() { return Err(io::ErrorKind::TimedOut.into()); }
         let outcome = queue.enqueue(record, deadline).and_then(|completion| {
             let left = deadline.saturating_duration_since(Instant::now());
-            completion.recv_timeout(left).map_err(|_| io::Error::from(io::ErrorKind::TimedOut))
+            completion.recv_timeout(left).map_err(|error| io::Error::from(match error {
+                mpsc::RecvTimeoutError::Timeout => io::ErrorKind::TimedOut,
+                mpsc::RecvTimeoutError::Disconnected => io::ErrorKind::BrokenPipe,
+            }))
         });
         match outcome {
-            Ok(Some(receipt)) => Ok(receipt),
+            Ok(Some(receipt)) if Instant::now() <= deadline => Ok(receipt),
+            Ok(Some(_)) if deadline < own_deadline => Err(io::ErrorKind::TimedOut.into()),
+            // An exchange expiring does not establish logger failure. Pending
+            // jobs retain their queue/worker credit until actual completion.
+            Err(error) if error.kind() == io::ErrorKind::TimedOut && deadline < own_deadline => Err(error),
             // Only a verified-reservation refusal that the permit should have
             // prevented; the logger stays usable and nothing was lost.
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => Err(error),

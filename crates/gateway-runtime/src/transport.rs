@@ -60,12 +60,13 @@ impl HttpsTransport {
         Ok(Self { config: Arc::new(config), deadline, resolver: resolver::Resolver::new()? })
     }
 
+    pub(crate) fn deadline(&self, connection: Deadline) -> Deadline { connection.cap(self.deadline) }
+
     /// Resolve, connect, and complete the TLS handshake for the request's
-    /// resolved destination, under a fresh exchange deadline. The host and
+    /// resolved destination, under the caller's shared exchange deadline. The host and
     /// port come from the verified destination parts of the permit's target,
     /// never from the request. `cancel` can end the session from another thread.
-    pub(crate) fn connect(&self, prepared: &mut PreparedRequest<'_>, cancel: &Cancel) -> Result<Session, ConnectFailure> {
-        let deadline = Deadline::start(self.deadline).map_err(|_| ConnectFailure::Timeout)?;
+    pub(crate) fn connect(&self, prepared: &mut PreparedRequest<'_>, cancel: &Cancel, deadline: Deadline) -> Result<Session, ConnectFailure> {
         let (host, port) = {
             let permit = prepared.egress();
             let target = permit.target();
@@ -102,7 +103,7 @@ impl Session {
         if self.cancel.is_cancelled() { Failure::Cancelled } else if self.tls.expired() { Failure::Timeout } else { Failure::Io }
     }
     fn transfer_failure(&self, error: TransferError) -> Failure {
-        if error == TransferError::Log { Failure::Log } else { self.failure() }
+        if self.tls.expired() { Failure::Timeout } else if error == TransferError::Log { Failure::Log } else { self.failure() }
     }
     pub(crate) fn write(&mut self, bytes: &[u8]) -> bool {
         http1::write_fully(&mut self.tls, bytes).and_then(|()| self.tls.flush()).is_ok()
@@ -173,7 +174,7 @@ pub(crate) mod exchange {
             log: &mut L, http: &http_body::WorkerHttp, cancel: &Cancel) -> Result<ExchangeStats, Fault>
         {
             let upstream = prepared.take_upstream().map_err(|_| Fault::Metadata)?;
-            let mut session = self.connect(prepared, cancel).map_err(|failure| match failure {
+            let mut session = self.connect(prepared, cancel, Deadline::start(self.deadline).map_err(|_| Fault::Timeout)?).map_err(|failure| match failure {
                 ConnectFailure::Resolve | ConnectFailure::Tcp => Fault::Connect, ConnectFailure::Tls => Fault::Tls,
                 ConnectFailure::Timeout => Fault::Timeout, ConnectFailure::Cancelled => Fault::Cancelled })?;
             let mut machine = Upstream::new();

@@ -732,3 +732,22 @@ fn buffered_rotation_recovers_all_written_records_after_clean_shutdown() {
     }
     assert!(scanner.next_record().unwrap().is_none()); assert_eq!(scanner.segment(), 8);
 }
+
+#[test]
+fn exchange_expiry_bounds_queue_and_ack_waits_without_poisoning_log() {
+    let (mut log, entered, release, _) = DiskLog::stalled_for_test(1, Duration::from_secs(5));
+    // First append stalls in sync; the second fills the waiting queue; the
+    // third cannot enqueue. Every call obeys the shorter exchange budget.
+    for chunk in 1..=3 {
+        let started = Instant::now();
+        let result = log.append_until(record(b"abc", chunk), Some(started + Duration::from_millis(50)));
+        assert!(matches!(result, Err(ref e) if e.kind() == io::ErrorKind::TimedOut));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        if chunk == 1 { entered.recv_timeout(Duration::from_secs(1)).unwrap(); }
+        assert!(log.healthy(), "exchange expiry is not disk failure");
+    }
+    assert_eq!(log.queued_for_test(), 1);
+    release.send(()).unwrap();
+    log.append(record(b"after", 4)).unwrap();
+    log.shutdown(Duration::from_secs(2)).unwrap();
+}

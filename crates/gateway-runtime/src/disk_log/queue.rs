@@ -44,9 +44,9 @@ impl Queue {
         let mut state = self.state.lock().map_err(|_| io::ErrorKind::BrokenPipe)?;
         loop {
             if state.is_closed() { return Err(io::ErrorKind::BrokenPipe.into()); }
-            if !state.is_full() { break; }
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() { return Err(io::ErrorKind::TimedOut.into()); }
+            if !state.is_full() { break; }
             let (guard, _) = self.space.wait_timeout(state, left).map_err(|_| io::ErrorKind::BrokenPipe)?;
             state = guard;
         }

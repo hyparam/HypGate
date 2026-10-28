@@ -23,6 +23,12 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("deadline.rs", "scope_budget_renews_descendant", "Self { root: self.root, end }", "Self { root: self.root, end: self.root }"),
+    ("deadline.rs", "scope_budget_uses_ancestor_for_io", "{ run(io, self.end) }", "{ run(io, self.root) }"),
+    ("scope.rs", "scope_budget_skips_cleanup", "    effects.cleanup();", "    // cleanup omitted"),
+    ("scope.rs", "scope_budget_cleans_twice", "    effects.cleanup();", "    effects.cleanup(); effects.cleanup();"),
+    ("exchange_driver.rs", "scope_budget_forwards_with_control_deadline",
+        "if !self.emit(effects, head, WriteScope::Exchange)", "if !self.emit(effects, head, WriteScope::Control)"),
     ("cancellation.rs", "cancellation_eof_closes_receive_side",
         "Observation::EndOfInput => !world.peer_sends,",
         "Observation::EndOfInput => !world.peer_sends && !world.peer_receives,"),

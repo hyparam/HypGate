@@ -66,7 +66,7 @@ impl Effects for Fake {
             HeadKind::Closed => HeadRead::Closed,
         }
     }
-    fn write_client(&mut self, bytes: &Vec<u8>) -> bool { self.note("write_client"); self.client.extend_from_slice(bytes); true }
+    fn write_client(&mut self, bytes: &Vec<u8>, _scope: WriteScope) -> bool { self.note("write_client"); self.client.extend_from_slice(bytes); true }
     fn close_client(&mut self) { self.note("close_client"); self.closed += 1; }
     fn endpoint(&mut self, _target: &Vec<u8>) -> Option<FixedResponse> {
         self.note("endpoint");

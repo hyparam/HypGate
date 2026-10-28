@@ -25,3 +25,19 @@ fn a_successful_but_late_effect_is_rejected() {
     assert_eq!(run(&mut effect, 100), None);
     assert_eq!(effect.budgets, [99]);
 }
+
+#[test]
+fn descendants_cannot_renew_the_root_even_on_overflow() {
+    use gateway_core::deadline::Budget;
+    let root = Budget::new(100);
+    let child = root.limit(10, 40);
+    assert_eq!(child.end_value(), 50);
+    let descendant = child.limit(40, u128::MAX);
+    assert_eq!(descendant.end_value(), 50);
+    let mut effect = Effect { now: 45, finish: 49, budgets: vec![] };
+    assert_eq!(descendant.run(&mut effect), Some(()));
+    assert_eq!(effect.budgets, [5]);
+    effect.now = 50;
+    assert_eq!(descendant.run(&mut effect), None);
+    assert_eq!(effect.budgets, [5]);
+}
