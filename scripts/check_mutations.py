@@ -23,6 +23,15 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("sse.rs", "projection_sse_drops_valid_json", 'Some(crate::json::parse(data.as_slice()))', 'Some(None)'),
+    ("projection.rs", "projection_null_usage_as_zero", '    if !matches!(usage, Value::Object(_)) { return None; }', ''),
+    ("projection.rs", "projection_unknown_usage_erases_known", 'if let Some(u) = usage_of(event) { *usage = u; *saw_usage = true; }', 'if let Some(u) = usage_of(event) { *usage = u; *saw_usage = true; } else { usage.input = 0; }'),
+    ("sse.rs", "projection_sse_omits_data_separator", 'if present { data.push(10); }', 'if present { data.push(32); }'),
+    ("sse.rs", "projection_sse_drops_data", 'crate::framing::append(&mut data, more);', '// Omitted data must violate the event grammar.'),
+    ("sse.rs", "projection_sse_dispatches_at_eof", 'if end == self.bytes.len() { self.start = end; return None; }', 'if end == self.bytes.len() { self.start = end; return Some(data); }'),
+    ("sse.rs", "projection_sse_dispatches_nonblank_line", 'if line.len() == 0 {\n                self.start = next;', 'if line.len() != 0 {\n                self.start = next;'),
+    ("sse.rs", "projection_sse_keeps_optional_space", 'let start = if line.len() > 5 && line[5] == 32 { 6 } else { 5 };', 'let start = 5;'),
+    ("sse.rs", "projection_sse_splits_crlf", 'let next = if end == bytes.len() { end }\n        else if bytes[end] == 13 && end + 1 < bytes.len() && bytes[end + 1] == 10 { end + 2 }', 'let next = if end == bytes.len() { end }\n        else if bytes[end] == 13 && end + 1 < bytes.len() && bytes[end + 1] == 10 { end + 1 }'),
     ("shipping_progress.rs", "progress_drain_skips_round", "successful_round(m, w.now, w.upload_at, w.expires_at, w.status);", "// Missing round must violate the decreasing rank."),
     ("enrollment.rs", "progress_fresh_token_refresh_loop", "(!self.fresh && expires_at - now <= RENEWAL_WINDOW_SECONDS)", "(expires_at - now <= RENEWAL_WINDOW_SECONDS)"),
     ("enrollment.rs", "progress_enrollment_never_fresh", "self.fresh = true;", "self.fresh = false;"),

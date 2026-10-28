@@ -13,7 +13,9 @@
 //! hex of the exchange key; the schema version and message indexes are
 //! fixed; the timestamps are the verified calendar's text of the exchange's
 //! start and completion times. Which provider fields are read is a choice
-//! pinned by tests, not a theorem.
+//! pinned by tests, not a theorem. SSE data framing and JSON composition are
+//! proved in `sse`; usage objects are distinguished from missing/null usage,
+//! and unknown chat-chunk usage preserves the previous accounting state.
 use vstd::prelude::*;
 use vstd::slice::{slice_index_get, slice_subrange, slice_to_vec};
 use crate::exchange_assembler::Exchange;
@@ -341,8 +343,13 @@ fn u64_at(value: &Value, key: &[u8]) -> Option<u64> {
 fn u64_at2(value: &Value, a: &[u8], b: &[u8]) -> Option<u64> {
     match get2(value, a, b) { Some(v) => v.as_u64(), None => None }
 }
+pub open spec fn has_field(value: Value, key: Seq<u8>) -> bool {
+    exists|i: int| 0 <= i < crate::json::members_of(value).len()
+        && crate::json::members_of(value)[i].key@ == key
+}
 fn str_at(value: &Value, key: &[u8]) -> (out: Option<Vec<u8>>)
     ensures match out { Some(t) => crate::utf8::valid(t@), None => true },
+        !has_field(*value, key@) ==> out.is_none(),
 {
     match value.get(key) { Some(v) => str_of(v), None => None }
 }
@@ -441,8 +448,18 @@ fn parse_request(bytes: &[u8]) -> (out: ParsedRequest)
 fn first_u64(a: Option<u64>, b: Option<u64>, c: Option<u64>) -> u64 {
     match a { Some(n) => n, None => match b { Some(n) => n, None => match c { Some(n) => n, None => 0 } } }
 }
-fn usage_of(value: &Value) -> Option<Usage> {
+/// Usage is known only when the first usage field is an object; null is unknown.
+pub open spec fn has_usage_object(value: Value) -> bool {
+    let ms = crate::json::members_of(value);
+    exists|i: int| 0 <= i < ms.len() && ms[i].key@ == P_USAGE@
+        && (forall|j: int| 0 <= j < i ==> ms[j].key@ != P_USAGE@)
+        && ms[i].value is Object
+}
+fn usage_of(value: &Value) -> (out: Option<Usage>)
+    ensures out.is_some() == has_usage_object(*value),
+{
     let usage = match value.get(P_USAGE.as_slice()) { Some(u) => u, None => return None };
+    if !matches!(usage, Value::Object(_)) { return None; }
     let cache_read = first_u64(u64_at(usage, P_CACHE_READ_INPUT_TOKENS.as_slice()),
         u64_at2(usage, P_INPUT_TOKENS_DETAILS.as_slice(), P_CACHED_TOKENS.as_slice()),
         u64_at2(usage, P_PROMPT_TOKENS_DETAILS.as_slice(), P_CACHED_TOKENS.as_slice()));
@@ -482,6 +499,7 @@ fn join_contents(items: &Vec<Value>, inner: bool) -> (out: Vec<u8>)
 }
 fn parse_json_response(value: &Value) -> (out: ParsedResponse)
     ensures crate::utf8::valid(out.text@), match out.model { Some(t) => crate::utf8::valid(t@), None => true },
+        out.usage.is_some() == has_usage_object(*value),
 {
     let model = str_at(value, P_MODEL.as_slice());
     let text: Vec<u8> = if let Some(content) = value.get(P_CONTENT.as_slice()) {
@@ -519,11 +537,15 @@ pub fn is_sse(bytes: &[u8]) -> bool {
 }
 
 /// One `data:` event of a stream.
+#[verifier::loop_isolation(false)]
 fn sse_event(event: &Value, out: &mut ParsedResponse, usage: &mut Usage, saw_usage: &mut bool)
     requires crate::utf8::valid(old(out).text@), match old(out).model { Some(t) => crate::utf8::valid(t@), None => true },
     ensures crate::utf8::valid(final(out).text@), match final(out).model { Some(t) => crate::utf8::valid(t@), None => true },
+        !has_field(*event, P_TYPE@) && !has_usage_object(*event) ==>
+            *final(usage) == *old(usage) && *final(saw_usage) == *old(saw_usage),
 {
     let kind: Vec<u8> = match str_at(event, P_TYPE.as_slice()) { Some(k) => k, None => Vec::new() };
+    proof { assert(!has_field(*event, P_TYPE@) ==> kind@.len() == 0); }
     if bytes_eq(kind.as_slice(), P_MESSAGE_START.as_slice()) {
         if let Some(message) = event.get(P_MESSAGE.as_slice()) {
             out.model = str_at(message, P_MODEL.as_slice());
@@ -548,6 +570,7 @@ fn sse_event(event: &Value, out: &mut ParsedResponse, usage: &mut Usage, saw_usa
             let mut k: usize = 0;
             while k < choices.len()
                 invariant crate::utf8::valid(out.text@), match out.model { Some(t) => crate::utf8::valid(t@), None => true },
+                    *usage == *old(usage), *saw_usage == *old(saw_usage),
                 decreases choices.len() - k,
             {
                 let c = slice_index_get(choices.as_slice(), k);
@@ -556,9 +579,10 @@ fn sse_event(event: &Value, out: &mut ParsedResponse, usage: &mut Usage, saw_usa
             }
         }
         if let Some(u) = usage_of(event) { *usage = u; *saw_usage = true; }
+        proof { assert(!has_usage_object(*event) ==> *usage == *old(usage) && *saw_usage == *old(saw_usage)); }
     }
 }
-/// The stream's text and usage, from its `data:` lines.
+/// The stream's text and usage, from complete, joined SSE event payloads.
 #[verifier::loop_isolation(false)]
 fn parse_sse(bytes: &[u8]) -> (out: ParsedResponse)
     ensures crate::utf8::valid(out.text@), match out.model { Some(t) => crate::utf8::valid(t@), None => true },
@@ -567,27 +591,16 @@ fn parse_sse(bytes: &[u8]) -> (out: ParsedResponse)
     let mut usage = Usage { input: 0, cache_read: 0, cache_write: 0, output: 0 };
     let mut saw_usage = false;
     proof { assert(crate::utf8::valid(out.text@)); }
-    let mut start: usize = 0;
+    let mut events = crate::sse::Reader::new(bytes);
     loop
-        invariant start <= bytes.len(), crate::utf8::valid(out.text@), match out.model { Some(t) => crate::utf8::valid(t@), None => true },
-        decreases bytes.len() - start,
+        invariant events.valid(), crate::utf8::valid(out.text@), match out.model { Some(t) => crate::utf8::valid(t@), None => true },
+        decreases events.left() + 1,
     {
-        let mut end: usize = start;
-        while end < bytes.len() && bytes[end] != LF
-            invariant start <= end <= bytes.len(),
-            decreases bytes.len() - end,
-        {
-            end = end + 1;
+        match events.next_json() {
+            Some(Some(event)) => sse_event(&event, &mut out, &mut usage, &mut saw_usage),
+            Some(None) => {},
+            None => break,
         }
-        let line = slice_subrange(bytes, start, end);
-        if starts_with(line, SSE_DATA.as_slice()) {
-            let data = slice_subrange(line, SSE_DATA.len(), line.len());
-            if let Some(event) = crate::json::parse(data) {
-                sse_event(&event, &mut out, &mut usage, &mut saw_usage);
-            }
-        }
-        if end >= bytes.len() { break; }
-        start = end + 1;
     }
     if saw_usage { out.usage = Some(usage); }
     out

@@ -322,7 +322,24 @@ keeps well-formed text and replaces each other byte with U+FFFD), each
 `content_text` at most `max_exchange_bytes` long and cut only at a character
 boundary, the message and part ids the hex of the verified keys, the request
 id the hex of the exchange key, and the schema version and message indexes
-fixed. Which provider fields it reads (`model`, `messages`/`input` and the
+fixed. SSE data framing is additionally proved by `sse::Reader`: data fields
+are joined with line feeds until a blank line dispatches the event, with LF,
+CRLF, and CR line endings and exactly one optional space removed after `data:`.
+An incomplete final event is discarded. Only one event payload is buffered;
+its length cannot exceed the input bytes consumed. `next_json` composes this
+with the JSON reader's soundness and depth-bounded completeness, so a valid
+multiline JSON event cannot be silently skipped by line-by-line parsing.
+
+`usage_of` and `parse_json_response` prove that usage is present exactly when
+the first `usage` field is an object. Missing, null, and non-object values do
+not fabricate zero usage. For chat-style events without a `type` field,
+`sse_event` proves that absent/non-object usage preserves both the previous
+counts and whether usage has been observed. Explicit zero counts in an object
+remain valid observations. Mutation checks reintroduce omitted joins, dropped
+data, premature dispatch, bad spacing/CRLF handling, skipped JSON, and false
+or erased usage, and require the verifier to reject each defect.
+
+Which provider fields it reads (`model`, `messages`/`input` and the
 last user message's content blocks, `usage` in its Anthropic and OpenAI
 spellings, the SSE event types) is a choice pinned by tests against recorded
 bodies, not a theorem. The timestamps are the verified calendar's

@@ -1771,7 +1771,8 @@ impl Value {
     #[verifier::loop_isolation(false)]
     pub fn get(&self, key: &[u8]) -> (out: Option<&Value>)
         ensures match out {
-            Some(v) => exists|k: int| 0 <= k < members_of(*self).len() && members_of(*self)[k].key@ == key@ && members_of(*self)[k].value == *v,
+            Some(v) => exists|k: int| 0 <= k < members_of(*self).len() && members_of(*self)[k].key@ == key@ && members_of(*self)[k].value == *v
+                && forall|j: int| 0 <= j < k ==> members_of(*self)[j].key@ != key@,
             None => forall|k: int| 0 <= k < members_of(*self).len() ==> members_of(*self)[k].key@ != key@,
         },
     {
