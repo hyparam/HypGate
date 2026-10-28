@@ -634,7 +634,7 @@ fn cancelling_tls_handshake_drops_socket_and_returns_owned_request_credit() {
         assert_eq!(record_header[0], 22); // TLS handshake record
         assert!(!exchange.is_finished(), "exchange finished during handshake");
         assert!(config.admit(b"gateway", 7).is_err());
-        cancel.cancel();
+        cancel.shutdown();
         let result = exchange.join().unwrap();
         let mut handshake_bytes = Vec::new();
         let _ = socket.read_to_end(&mut handshake_bytes);

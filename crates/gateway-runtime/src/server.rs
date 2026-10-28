@@ -71,7 +71,7 @@ impl Gateway {
     fn untrack(&self, id: u64) { if let Ok(mut live) = self.live.lock() { live.remove(&id); } }
     fn cancel_live(&self) {
         let cancels: Vec<Cancel> = match self.live.lock() { Ok(live) => live.values().cloned().collect(), Err(_) => return };
-        for cancel in cancels { cancel.cancel(); }
+        for cancel in cancels { cancel.shutdown(); }
     }
 
     /// The operator endpoints, answered without a worker.
@@ -261,11 +261,10 @@ impl Effects for ConnectionEffects<'_> {
     }
 }
 
-/// Watches the client socket while the exchange runs and cancels the exchange
-/// when the client leaves: EOF or an error on a peek, once the request bytes
-/// have been consumed. Stray bytes after the body are left in place and keep
-/// the watcher polling; a client that half-closes after its request is, as
-/// before, treated as gone.
+/// Watches for a reset while the exchange runs. EOF only means the client
+/// finished sending: the verified cancellation rule retires the watcher and
+/// preserves the response. A clean disconnect is indistinguishable from a
+/// half-close until a response write fails or the exchange deadline expires.
 struct ClientWatch { thread: Option<std::thread::JoinHandle<()>>, finished: Arc<AtomicBool>, socket: TcpStream }
 impl ClientWatch {
     fn start(socket: TcpStream, cancel: Cancel) -> io::Result<Self> {
@@ -276,16 +275,11 @@ impl ClientWatch {
             let mut byte = [0u8; 1];
             loop {
                 if flag.load(Ordering::Acquire) { return; }
-                match probe.peek(&mut byte) {
-                    Ok(0) => break, // EOF: the client is gone
-                    Ok(_) => std::thread::sleep(Duration::from_millis(20)), // request bytes still being consumed
-                    Err(e) if matches!(e.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted) => {
-                        std::thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(_) => break,
-                }
+                let result = probe.peek(&mut byte);
+                if flag.load(Ordering::Acquire) { return; }
+                if !cancel.observe_read(&result) { return; }
+                std::thread::sleep(Duration::from_millis(if result.is_ok() { 20 } else { 5 }));
             }
-            if !flag.load(Ordering::Acquire) { cancel.cancel(); }
         })?;
         Ok(Self { thread: Some(thread), finished, socket })
     }

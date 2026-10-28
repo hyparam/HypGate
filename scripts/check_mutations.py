@@ -23,6 +23,20 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ("cancellation.rs", "cancellation_eof_closes_receive_side",
+        "Observation::EndOfInput => !world.peer_sends,",
+        "Observation::EndOfInput => !world.peer_sends && !world.peer_receives,"),
+    ("cancellation.rs", "cancellation_eof_or_read_fault_cancels",
+        "Observation::EndOfInput | Observation::ReadFault => Decision::StopWatching,",
+        "Observation::EndOfInput | Observation::ReadFault => Decision::Cancel(Permit { observation }),"),
+    ("cancellation.rs", "cancellation_retries_cancel",
+        "Observation::Data | Observation::RetryRead => Decision::Continue,",
+        "Observation::Data | Observation::RetryRead => Decision::Cancel(Permit { observation }),"),
+    ("cancellation.rs", "cancellation_ignores_valid_evidence",
+        "Decision::Cancel(Permit { observation }),", "Decision::StopWatching,"),
+    ("cancellation.rs", "cancellation_forges_evidence",
+        "Decision::Cancel(Permit { observation }),",
+        "Decision::Cancel(Permit { observation: Observation::EndOfInput }),"),
     ('projection.rs', 'projection_response_prefix_gate', 'None => (parse_sse(bytes), is_sse(bytes)),', 'None => {\n            if bytes.len() < 5 || !bytes_eq(slice_subrange(bytes, 0, 5), b"data:") {\n                return (ParsedResponse { text: Vec::new(), usage: None, model: None, failed: false }, false);\n            }\n            (parse_sse(bytes), is_sse(bytes))\n        },'),
     ('projection.rs', 'projection_response_skips_event', 'Some(Some(value)) => sse_event(&value, &mut out, &mut usage, &mut saw_usage),', 'Some(Some(_value)) => {},'),
     ('projection.rs', 'projection_response_erases_failure', 'out.failed = out.failed || semantics::failed(event);', 'out.failed = semantics::failed(event);'),

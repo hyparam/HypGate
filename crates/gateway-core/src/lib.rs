@@ -90,6 +90,7 @@ pub mod s3_driver;
 pub mod shipping_checkpoint;
 pub mod config_build;
 pub mod deadline;
+pub mod cancellation;
 
 #[cfg(test)]
 #[path = "tests/streaming.rs"]

@@ -156,7 +156,7 @@ fn assert_trace(records: &[crate::disk_log::StoredRecord], destination: &str, st
 
 // One provider connection that streams a first event, then waits for `waiting`
 // before finishing cleanly or, when truncated, disconnecting without an End marker.
-fn stalling_provider(upstream: StdListener, config: Arc<ServerConfig>, waiting: mpsc::Receiver<()>, truncated: bool) -> JoinHandle<()> {
+fn stalling_provider(upstream: StdListener, config: Arc<ServerConfig>, waiting: mpsc::Receiver<()>, truncated: bool, disconnected: bool) -> JoinHandle<()> {
     std::thread::spawn(move || {
         let mut socket = accept_tls(&upstream, &config).unwrap();
         let request = read_request(&mut socket).unwrap();
@@ -168,6 +168,12 @@ fn stalling_provider(upstream: StdListener, config: Arc<ServerConfig>, waiting: 
         stream.send(b"data: hello\n\n").unwrap();
         if waiting.recv().is_err() { return; }
         if truncated { return; } // no last chunk: simulate a provider disconnect
+        if disconnected {
+            // Enough resumed output to expose the peer's closure even if a
+            // few writes succeed before the TCP reset reaches the gateway.
+            let _ = stream.send(&vec![b'x'; 1024 * 1024]);
+            return;
+        }
         if stream.send(b"data: [DONE]\n\n").is_ok() { let _ = stream.finish(); }
     })
 }
@@ -213,7 +219,7 @@ fn exercise(availability: bool, failed_log: bool, truncated: bool, stop: Stop) {
         return;
     }
     let (release, waiting) = mpsc::channel();
-    let upstream_task = stalling_provider(upstream, acceptor, waiting, truncated);
+    let upstream_task = stalling_provider(upstream, acceptor, waiting, truncated, matches!(stop, Stop::Disconnect));
     let mut response = send(port, "/routes/7", "gateway", "POST");
     assert_eq!(response.status, 200);
     assert!(response.header("set-cookie").is_none());
@@ -274,18 +280,19 @@ fn exercise(availability: bool, failed_log: bool, truncated: bool, stop: Stop) {
     }
     if matches!(stop, Stop::Disconnect) {
         drop(response); // the client leaves mid-stream
-        // No new provider output is needed to make cancellation observable.
+        // A FIN is ambiguous; resumed output exposes the failed delivery.
+        release.send(()).unwrap();
         wait_workers_idle(&app);
         assert!(app.config.admit(b"gateway", 7).is_ok());
         drop(release); upstream_task.join().unwrap();
         gateway.stop().unwrap();
         assert!(workers_idle(&app));
-        // The canceled exchange still closed its trace: outcome 5 after the head
-        // and the one download chunk the client had already received.
+        // Failed delivery still closes its trace with outcome 5; the log may
+        // include further bytes attempted after the client left.
         let (upload, download) = assert_trace(&audit_records(&path), &destination, Some(200),
             gateway_core::metadata::OUTCOME_CLIENT_DISCONNECT);
         assert_eq!(upload, b"{\"stream\":true}");
-        assert!(download.starts_with(&first) && b"data: hello\n\ndata: [DONE]\n\n".starts_with(&download), "{download:?}");
+        assert!(download.starts_with(&first));
         return;
     }
     release.send(()).unwrap();
@@ -345,7 +352,7 @@ fn failed_start_record_refuses_in_strict_mode_and_forwards_with_one_gap_in_avail
         let port = gateway.port;
         let (release, waiting) = mpsc::channel();
         let (quiet_tx, quiet_rx) = mpsc::channel::<()>();
-        let upstream_task = if availability { Some(stalling_provider(upstream, acceptor, waiting, false)) } else {
+        let upstream_task = if availability { Some(stalling_provider(upstream, acceptor, waiting, false, false)) } else {
             // No provider connection may be opened without the start record.
             let listener = upstream;
             Some(std::thread::spawn(move || { assert!(no_connection(&listener, Duration::from_millis(300))); let _ = quiet_tx.send(()); }))
@@ -492,7 +499,7 @@ fn concurrent_tenants_keep_credentials_bodies_and_audit_records_isolated() {
 }
 
 #[test]
-fn client_disconnect_cancels_stalled_provider_and_releases_request() { exercise(false, false, false, Stop::Disconnect); }
+fn client_disconnect_during_response_cancels_and_releases_request() { exercise(false, false, false, Stop::Disconnect); }
 
 #[test]
 fn shutdown_drains_active_response_without_truncation() {
@@ -510,13 +517,89 @@ fn shutdown_cancels_stalled_workers_owned_by_another_listener() {
 }
 
 #[test]
-fn client_disconnect_before_headers_cancels_request_and_upstream_socket() {
+fn half_closed_client_receives_complete_response_before_and_after_headers() {
+    for chunked in [false, true] {
+        for after_headers in [false, true] {
+            let (upstream, acceptor, roots) = tls();
+            let port = upstream.local_addr().unwrap().port();
+            let dir = TempDir::new();
+            let path = dir.0.join("audit.log");
+            let app = Gateway::new(config(port, false),
+                HttpsTransport::with_roots(roots, Duration::from_secs(5)).unwrap(),
+                DiskLog::create(&path, 4, Duration::from_secs(2)).unwrap());
+            let gateway = spawn_gateway(&app, 4, Duration::from_secs(6));
+            let (release, waiting) = mpsc::channel();
+            let provider = std::thread::spawn(move || {
+                let mut socket = accept_tls(&upstream, &acceptor).unwrap();
+                assert_eq!(read_request(&mut socket).unwrap().body, b"test");
+                if after_headers {
+                    let mut response = start_streaming(socket, 200, &[]).unwrap();
+                    response.send(b"first").unwrap();
+                    waiting.recv_timeout(Duration::from_secs(3)).unwrap();
+                    response.send(b"second").unwrap();
+                    response.finish().unwrap();
+                } else {
+                    waiting.recv_timeout(Duration::from_secs(3)).unwrap();
+                    write_response(&mut socket, 200, &[], b"firstsecond").unwrap();
+                }
+            });
+            let mut client = connect(gateway.port);
+            let control = client.try_clone().unwrap();
+            client.write_all(b"POST /routes/7 HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer gateway\r\n").unwrap();
+            client.write_all(if chunked { b"Transfer-Encoding: chunked\r\n\r\n4\r\ntest\r\n0\r\n\r\n" }
+                else { b"Content-Length: 4\r\n\r\ntest" }).unwrap();
+            let mut bytes = Vec::new();
+            let mut response = if after_headers {
+                let mut response = crate::test_support::http::read_response(client.try_clone().unwrap()).unwrap();
+                bytes.extend_from_slice(&response.chunk().unwrap().unwrap());
+                Some(response)
+            } else { None };
+            control.shutdown(SocketShutdown::Write).unwrap();
+            // Give the watcher an opportunity to consume FIN before the next response bytes.
+            std::thread::sleep(Duration::from_millis(50));
+            release.send(()).unwrap();
+            let response = response.take().unwrap_or_else(|| crate::test_support::http::read_response(client).unwrap());
+            assert_eq!(response.status, 200);
+            bytes.extend_from_slice(&response.collect().unwrap());
+            assert_eq!(bytes, b"firstsecond");
+            provider.join().unwrap();
+            wait_workers_idle(&app);
+            gateway.stop().unwrap();
+            let (upload, download) = assert_trace(&audit_records(&path), &format!("https://localhost:{port}/v1/messages"), Some(200), 0);
+            assert_eq!(upload, b"test");
+            assert_eq!(download, b"firstsecond");
+            assert_eq!(app.failed_exchanges(), 0);
+        }
+    }
+}
+
+#[test]
+fn half_close_retires_watcher_without_cancelling_receive_side() {
+    let listener = StdListener::bind("127.0.0.1:0").unwrap();
+    let mut client = connect(listener.local_addr().unwrap().port());
+    let (mut server, _) = listener.accept().unwrap();
+    let cancel = Cancel::new();
+    cancel.watch_socket(&server).unwrap();
+    let watcher = ClientWatch::start(server.try_clone().unwrap(), cancel.clone()).unwrap();
+    client.shutdown(SocketShutdown::Write).unwrap();
+    assert!(wait_until(Duration::from_secs(2), || watcher.thread.as_ref().unwrap().is_finished()));
+    assert!(!cancel.is_cancelled());
+    server.write_all(b"still receiving").unwrap();
+    let mut bytes = [0; 15];
+    client.read_exact(&mut bytes).unwrap();
+    assert_eq!(&bytes, b"still receiving");
+    watcher.finish();
+}
+
+#[test]
+fn clean_client_close_before_headers_waits_for_deadline() {
     let (upstream, acceptor, roots) = tls();
+    let upstream_port = upstream.local_addr().unwrap().port();
     let dir = TempDir::new();
     let app = Gateway::new(config(upstream.local_addr().unwrap().port(), false),
-        HttpsTransport::with_roots(roots, Duration::from_secs(60)).unwrap(),
+        HttpsTransport::with_roots(roots, Duration::from_millis(800)).unwrap(),
         DiskLog::create(&dir.0.join("audit.log"), 4, Duration::from_secs(2)).unwrap());
-    let gateway = spawn_gateway(&app, 4, Duration::from_secs(65));
+    let gateway = spawn_gateway(&app, 4, Duration::from_secs(5));
     let (received, request_received) = mpsc::channel();
     let provider = std::thread::spawn(move || {
         let mut socket = accept_tls(&upstream, &acceptor).unwrap();
@@ -532,7 +615,7 @@ fn client_disconnect_before_headers_cancels_request_and_upstream_socket() {
         }
         received.send(()).unwrap();
         let mut byte = [0];
-        // TLS may report an unclean EOF when cancellation shuts the socket.
+        // TLS may report an unclean EOF when the expired exchange drops its socket.
         match socket.read(&mut byte) {
             Ok(0) => {},
             Err(error) => assert!(matches!(error.kind(), io::ErrorKind::UnexpectedEof
@@ -547,10 +630,16 @@ fn client_disconnect_before_headers_cancels_request_and_upstream_socket() {
     assert!(!workers_idle(&app));
     assert!(app.config.admit(b"gateway", 7).is_err());
     drop(client);
+    // FIN alone is also consistent with a client still awaiting a response.
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(!workers_idle(&app));
     wait_workers_idle(&app);
     assert!(app.config.admit(b"gateway", 7).is_ok());
     provider.join().unwrap();
     gateway.stop().unwrap();
+    let records = audit_records(&dir.0.join("audit.log"));
+    assert_trace(&records, &format!("https://localhost:{upstream_port}/v1/messages"), None,
+        gateway_core::metadata::OUTCOME_UPSTREAM_TIMEOUT);
 }
 
 #[test]
@@ -895,7 +984,7 @@ fn shipping_thread_panic_changes_only_metrics() {
     let gateway = spawn_gateway(&app, 4, Duration::from_secs(8));
     let port = gateway.port;
     let (release, waiting) = mpsc::channel();
-    let upstream_task = stalling_provider(upstream, acceptor, waiting, false);
+    let upstream_task = stalling_provider(upstream, acceptor, waiting, false, false);
     let response = send(port, "/routes/7", "gateway", "POST");
     assert_eq!(response.status, 200);
     release.send(()).unwrap();
@@ -981,7 +1070,7 @@ fn shipping_uploads_forwarded_exchanges_without_touching_readiness() {
         let gateway = spawn_gateway(&app, 4, Duration::from_secs(8));
         let port = gateway.port;
         let (release, waiting) = mpsc::channel();
-        let upstream_task = stalling_provider(upstream, acceptor, waiting, false);
+        let upstream_task = stalling_provider(upstream, acceptor, waiting, false, false);
         let response = send(port, "/routes/7", "gateway", "POST");
         assert_eq!(response.status, 200);
         release.send(()).unwrap();

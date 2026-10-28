@@ -269,6 +269,21 @@ an assumption we take on; the proofs that could be written have been.
   cancels exchanges by shutting their sockets and waits for them, so the
   only ways an admitted exchange ends without a record are a logger that is
   already unhealthy and process death, both reported by the record's absence.
+- *Cancellation requires sufficient evidence.* `cancellation::decide` issues
+  a private permit only when every duplex state consistent with an observation
+  authorizes cancellation: the peer cannot receive, delivery has failed, or the
+  operator requested shutdown. EOF closes only the peer's sending side.
+  `receive_only_history` proves that any sequence of data, EOF, transient read
+  failures, and generic read faults still admits a receiving peer;
+  `cancellation_is_justified` composes a permit with a truthful observation
+  history. The runtime's private socket-cancellation method consumes the permit
+  immediately on the same exchange. The adapter's classification of OS errors,
+  failed delivery and shutdown, exchange identity, mutex/atomic behavior, and
+  the kernel's shutdown behavior remain trusted. Half-close integration tests
+  cover response delivery before and after headers; proof mutations reject
+  cancellation on EOF, read faults, or retryable observations. A clean FIN
+  cannot guarantee prompt disconnect detection: the response write or the
+  existing exchange deadline resolves that ambiguity.
 - *Durability stops at the storage contract.* Acknowledged records survive
   every crash in the model; the model assumes the filesystem honors sync.
   Tested on ext4 with process kills, full or read-only disks, and six abrupt
@@ -338,8 +353,8 @@ denies on unwrap, expect, panic, unreachable, indexing, and unchecked arithmetic
 panic that does occur inside the standard library or rustls; the clock is monotone enough for the enrollment
 windows.
 
-The gateway's own cancellation across threads and whole-process memory are
-documented rather than mechanized; the table below records where.
+Cancellation evidence is mechanized; its cross-thread socket effects and
+whole-process memory remain documented assumptions. The table below records where.
 
 ## Where the proofs live
 
@@ -394,7 +409,7 @@ checked definitions for each row.
 | Byte integrity and ordering | Forwarded body bytes form an unchanged, ordered prefix of the input, across chunks and partial writes, without skipped or duplicated advancement. | Core byte-prefix and completion properties proved; HTTP integration over real sockets tested. Peer receipt is not proved. |
 | Strict audit-before-forwarding | Every submitted body range in strict mode is covered by a durable log acknowledgment for that request and chunk. | Core gate and exact journal-receipt/stream binding proved; disk sync adapter tested. Six ext4 QEMU guest power-cut trials passed; physical host/device power-loss durability remains an external assumption. |
 | Crash-safe recovery | Recovery exposes only complete records, and acknowledged records survive every crash in the specified storage model. | Journal acknowledgment ordering and conditional synced-prefix survival proved; header/payload encoding, header decoding, frame extents, scanner cursor transitions, whole-file emission, and the record checksum (SHA-256) proved; scanner I/O tested. Process-kill recovery tested and storage assumptions documented; conditional scanner steps proved; acknowledged-prefix reconstruction proved under preserved-byte/read/checksum assumptions. Linux ext4 error/process-death tests and six QEMU guest power-cut trials passed; software crash validation is complete for the tested configuration, with physical storage durability a deployment assumption. |
-| Cancellation and no replay | Cancellation prevents new submissions; uncertain effects, crashes, or failover never trigger automatic replay of a possibly executed generation. | Core cancellation/stale-event checks proved; transport has no replay path. Socket cancellation and recovery composition remain unproved. |
+| Cancellation and no replay | Cancellation requires sufficient evidence and prevents new submissions; uncertain effects, crashes, or failover never trigger automatic replay of a possibly executed generation. | Duplex evidence policy, arbitrary receive-only histories, and core cancellation/stale-event checks proved; transport has no replay path. Truthful runtime observations, socket cancellation effects, and recovery composition remain trusted. |
 | Resource bounds and safe release | Slots, buffers, queues, and outstanding operations stay within explicit budgets; capacity cannot be reused while work retaining it remains alive. | Logical slot limits, ID isolation, and combined payload bound under an explicit stream-to-slot mapping proved; fixed disk-FIFO order, slot capacity, permanent closure, and actual queued-frame byte bound proved; HTTP role occupancy proved; ownership and deadlines tested. Conditional allocation composition is documented and the accept loop and drain order are a verified driver (`serve_driver`); a mechanized refinement of the threaded runtime remains open. |
 | Logging-mode separation | Availability mode may lose audit coverage but cannot relax authorization, routing, or tenant isolation; logging failure cannot create unbounded replacement work. | Core logging-mode transitions proved; bounded logger and failure handling tested. Submission and lifecycle composition are checked under the documented adapter assumptions. |
 | Cloud shipping | The optional HypAware shipper cannot affect authorization, forwarding, or readiness; it never modifies the log; every request it sends is chosen by a verified machine and names no host; no exchange is dropped between the log and the acknowledged batch; delivery is at least once with idempotent batch and row identities, so the server stores each exchange once. | Isolation is structural and tested; tailing, exchange assembly bounds, batch limits, upload progress, identity injectivity, enrollment transitions, and the machine's conservation, request shape, and bounded waiting are core proved; the projection, the request head, the reading of the issued credential (the JWS split, its `sub` and `exp` claims, the earlier expiry), the revocation codes, and `Retry-After` are core proved (`shipping_wire`); the HTTPS exchange itself runs under a verified client driver (`client_exchange`: head and body sent once in order, interim heads bounded, the reply body read to its framing within the cap); TLS, DNS, the connect, and the server's ledger/dedup are trusted and tested. See [cloud shipping](docs/cloud-shipping.md). |

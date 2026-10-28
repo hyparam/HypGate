@@ -7,6 +7,7 @@
 //! next operation fail; the thread then reads the flag to tell cancellation
 //! from a fault. There is no executor anywhere in this crate.
 use std::{io::{self, Read, Write}, net::{Shutdown, TcpStream}, sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
+use gateway_core::cancellation::{self, Decision, Observation, Permit};
 
 /// One immutable origin and end, shared by TCP and all TLS operations.
 #[derive(Clone, Copy, Debug)]
@@ -138,8 +139,26 @@ impl Cancel {
         if self.is_cancelled() { let _ = handle.shutdown(Shutdown::Both); } else { sockets.push(handle); }
         Ok(())
     }
-    /// Fire: every registered socket is shut down, and later registrations too.
-    pub(crate) fn cancel(&self) {
+    /// The verified rule is the only route to firing cancellation. Return true
+    /// only when the watcher should keep polling; EOF retires the watcher.
+    fn observe(&self, observation: Observation) -> bool {
+        match cancellation::decide(observation) {
+            Decision::Continue => true,
+            Decision::StopWatching => false,
+            Decision::Cancel(permit) => { self.cancel(permit); false }
+        }
+    }
+    /// Trusted binding: the operator's drain window has ended, or a test
+    /// explicitly requests shutdown. This does not assert peer disconnection.
+    pub(crate) fn shutdown(&self) { self.observe(Observation::Shutdown); }
+    /// Trusted binding: a response write/flush failed, so delivery is aborted.
+    pub(crate) fn delivery_failed(&self) { self.observe(Observation::DeliveryFailed); }
+    pub(crate) fn observe_read(&self, result: &io::Result<usize>) -> bool {
+        self.observe(read_observation(result))
+    }
+    /// Fire only with a core-issued permit. Every registered socket is shut
+    /// down, including sockets registered after this call.
+    fn cancel(&self, _permit: Permit) {
         self.0.fired.store(true, Ordering::Release);
         if let Ok(mut sockets) = self.0.sockets.lock() {
             for socket in sockets.drain(..) { let _ = socket.shutdown(Shutdown::Both); }
@@ -148,6 +167,20 @@ impl Cancel {
     /// Forget the registered sockets without touching them; the exchange is over.
     pub(crate) fn release_sockets(&self) {
         if let Ok(mut sockets) = self.0.sockets.lock() { sockets.clear(); }
+    }
+}
+
+/// Raw socket results are classified conservatively. In particular, EOF and
+/// generic read faults provide no evidence about the peer's receive side.
+fn read_observation(result: &io::Result<usize>) -> Observation {
+    match result {
+        Ok(0) => Observation::EndOfInput,
+        Ok(_) => Observation::Data,
+        Err(error) => match error.kind() {
+            io::ErrorKind::ConnectionReset => Observation::ConnectionReset,
+            io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => Observation::RetryRead,
+            _ => Observation::ReadFault,
+        },
     }
 }
 
@@ -174,6 +207,25 @@ pub(crate) fn write_uninterrupted<W: Write + ?Sized>(io: &mut W, bytes: &[u8]) -
 mod tests {
     use super::*;
     use std::net::TcpListener;
+
+    #[test]
+    fn read_evidence_never_confuses_receive_eof_or_faults_with_reset() {
+        for result in [Ok(0), Ok(1), Err(io::ErrorKind::Interrupted.into()),
+            Err(io::ErrorKind::TimedOut.into()), Err(io::ErrorKind::WouldBlock.into()),
+            Err(io::ErrorKind::UnexpectedEof.into()), Err(io::ErrorKind::BrokenPipe.into()),
+            Err(io::ErrorKind::ConnectionAborted.into()), Err(io::ErrorKind::Other.into())] {
+            let cancel = Cancel::new();
+            let keep_watching = cancel.observe_read(&result);
+            assert!(!cancel.is_cancelled(), "{result:?}");
+            assert_eq!(keep_watching, matches!(read_observation(&result), Observation::Data | Observation::RetryRead));
+        }
+        let cancel = Cancel::new();
+        assert!(!cancel.observe_read(&Err(io::ErrorKind::ConnectionReset.into())));
+        assert!(cancel.is_cancelled());
+        let failed = Cancel::new();
+        failed.delivery_failed();
+        assert!(failed.is_cancelled());
+    }
 
     #[test]
     fn tls_handshake_and_application_record_trickles_expire() {
@@ -215,7 +267,7 @@ mod tests {
             socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
             socket.read(&mut [0; 4096]).unwrap();
             socket.write_all(&[22, 3, 3, 4, 0, 0]).unwrap();
-            signal.cancel();
+            signal.shutdown();
         });
         let config = rustls::ClientConfig::builder().with_root_certificates(roots).with_no_client_auth();
         let conn = rustls::ClientConnection::new(Arc::new(config), rustls::pki_types::ServerName::try_from("localhost").unwrap()).unwrap();
@@ -264,7 +316,7 @@ mod tests {
         let reader = cancel.clone();
         let waiter = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(20));
-            reader.cancel();
+            reader.shutdown();
         });
         let mut timed = Timed::new(socket, Deadline::start(Duration::from_secs(5)).unwrap());
         // The blocked read ends with EOF or an error once the socket is shut down.
