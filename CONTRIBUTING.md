@@ -26,6 +26,27 @@ Use the pinned tools and validation commands in the
 [README](README.md#development). Changes to executable behavior need regression
 tests; changes to verified contracts also need Verus and mutation checks.
 
+## Semantic contracts
+
+Prefer proofs over example-based tests for general correctness properties in
+the core. When a bug exposes a missing guarantee, strengthen the specification
+and its end-to-end proof to cover the whole class of failures, rather than
+relying only on another regression test. Use tests to check external protocol
+assumptions, runtime integration and trusted adapters; retain required regression
+tests and use proof mutations to confirm the strengthened contract rejects defects.
+
+For parser or classification changes, state the observable end-to-end property
+before changing the implementation. Cover valid, malformed, unsupported and
+incomplete inputs; compose parser completeness through dispatch, accumulation
+and serialization. A locally verified parser does not justify an unverified
+heuristic that decides whether to call it. Preserve observed failure evidence
+through later unknown or successful events.
+
+Keep external protocol assumptions explicit in the proof index. Add mutation
+checks that bypass dispatch, skip input, erase state and discard the result at
+the output boundary. Protocol fixtures independently check the specification;
+passing proofs alone cannot establish that it matches an external standard.
+
 ## Release checks
 
 Run the Linux CI workflow before tagging a release. It includes Verus, deliberate

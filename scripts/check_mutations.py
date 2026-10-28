@@ -23,6 +23,17 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ('projection.rs', 'projection_response_prefix_gate', 'None => (parse_sse(bytes), is_sse(bytes)),', 'None => {\n            if bytes.len() < 5 || !bytes_eq(slice_subrange(bytes, 0, 5), b"data:") {\n                return (ParsedResponse { text: Vec::new(), usage: None, model: None, failed: false }, false);\n            }\n            (parse_sse(bytes), is_sse(bytes))\n        },'),
+    ('projection.rs', 'projection_response_skips_event', 'Some(Some(value)) => sse_event(&value, &mut out, &mut usage, &mut saw_usage),', 'Some(Some(_value)) => {},'),
+    ('projection.rs', 'projection_response_erases_failure', 'out.failed = out.failed || semantics::failed(event);', 'out.failed = semantics::failed(event);'),
+    ('projection.rs', 'projection_response_json_ignores_failure', 'model, failed: semantics::failed(value)', 'model, failed: false'),
+    ('projection.rs', 'projection_response_rows_ignore_failure', 'let is_error = response.failed || (match status', 'let is_error = (match status'),
+    ('projection.rs', 'projection_response_serializes_success', 'push_member(&mut ms, K_IS_ERROR.as_slice(), boolean(shared.is_error));', 'push_member(&mut ms, K_IS_ERROR.as_slice(), boolean(false));'),
+    ('response_semantics.rs', 'projection_response_ignores_nested_failure', 'local(v) || match get(v, RESPONSE.as_slice()) { Some(w) => local(w), None => false }', 'local(v)'),
+    ('response_semantics.rs', 'projection_response_ignores_error_type', '|| is_named(kind, ERROR.as_slice()) || is_named(kind, RESPONSE_FAILED.as_slice())', '|| is_named(kind, ERROR.as_slice())'),
+    ('response_semantics.rs', 'projection_response_null_is_error', 'Some(w) => !matches!(w, Value::Null), None => false', 'Some(_w) => true, None => false'),
+    ('sse.rs', 'projection_response_keeps_bom', 'let start = if bytes.len() >= 3 && bytes[0] == 239 && bytes[1] == 187 && bytes[2] == 191 { 3 } else { 0 };', 'let start = 0;'),
+
     ("sse.rs", "projection_sse_drops_valid_json", 'Some(crate::json::parse(data.as_slice()))', 'Some(None)'),
     ("projection.rs", "projection_null_usage_as_zero", '    if !matches!(usage, Value::Object(_)) { return None; }', ''),
     ("projection.rs", "projection_unknown_usage_erases_known", 'if let Some(u) = usage_of(event) { *usage = u; *saw_usage = true; }', 'if let Some(u) = usage_of(event) { *usage = u; *saw_usage = true; } else { usage.input = 0; }'),

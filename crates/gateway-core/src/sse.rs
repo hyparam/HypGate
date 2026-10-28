@@ -58,7 +58,11 @@ pub open spec fn scan(bytes: Seq<u8>, start: int, data: Seq<u8>, present: bool) 
         }
     }
 }
-pub open spec fn event_data(bytes: Seq<u8>) -> Seq<Seq<u8>> { scan(bytes, 0, Seq::empty(), false) }
+/// SSE ignores one leading UTF-8 BOM before interpreting fields.
+pub open spec fn start(bytes: Seq<u8>) -> int {
+    if bytes.len() >= 3 && bytes[0] == 239 && bytes[1] == 187 && bytes[2] == 191 { 3 } else { 0 }
+}
+pub open spec fn event_data(bytes: Seq<u8>) -> Seq<Seq<u8>> { scan(bytes, start(bytes), Seq::empty(), false) }
 
 fn read_line(bytes: &[u8], start: usize) -> (out: (usize, usize))
     requires start < bytes.len(),
@@ -103,8 +107,11 @@ impl<'a> Reader<'a> {
     pub closed spec fn remaining(&self) -> Seq<Seq<u8>> { scan(self.bytes@, self.start as int, Seq::empty(), false) }
     pub closed spec fn left(&self) -> nat { (self.bytes.len() - self.start) as nat }
     pub fn new(bytes: &'a [u8]) -> (out: Self)
-        ensures out.valid(), out.remaining() == event_data(bytes@), out.left() == bytes.len(),
-    { Reader { bytes, start: 0 } }
+        ensures out.valid(), out.remaining() == event_data(bytes@), out.left() == bytes.len() - start(bytes@),
+    {
+        let start = if bytes.len() >= 3 && bytes[0] == 239 && bytes[1] == 187 && bytes[2] == 191 { 3 } else { 0 };
+        Reader { bytes, start }
+    }
 
     /// Compose framing with JSON soundness and completeness. Each call consumes
     /// exactly one event, even if its data is not JSON (for example `[DONE]`).

@@ -330,6 +330,28 @@ its length cannot exceed the input bytes consumed. `next_json` composes this
 with the JSON reader's soundness and depth-bounded completeness, so a valid
 multiline JSON event cannot be silently skipped by line-by-line parsing.
 
+Response interpretation now has a contract from the retained body bytes through
+both rows' `is_error` fields. A complete JSON document is interpreted first;
+otherwise every complete SSE data event is examined. There is no prefix-based
+parser gate. Event IDs, retry directives, comments, unknown fields and one leading
+UTF-8 BOM cannot prevent event parsing. An error observed anywhere in a stream
+is sticky, even across malformed JSON, unknown events and later success events.
+
+The provider error vocabulary is explicit: a non-null `error`, type `error`,
+`response.failed` or `response.incomplete`, or status `failed`, `incomplete` or
+`cancelled`, on the top-level object or its first `response` object. HTTP errors,
+transport faults and incomplete exchanges independently set `is_error` too.
+Unknown provider vocabulary does not establish success: `is_error: false` means
+no recognized error evidence in the retained bytes. Truncated logs can omit a
+later provider failure, and JSON recognition remains subject to the depth cap.
+These protocol assumptions must be reviewed when supporting new provider schemas.
+
+The proof uses a total JSON/SSE interpretation relation and an invariant over
+all remaining events, rather than a list of example streams. Mutation checks
+must reject reinstating the prefix gate, skipping events, erasing failure,
+ignoring nested errors, or discarding the result when serializing either row.
+Tests independently exercise protocol variants and failure positions.
+
 `usage_of` and `parse_json_response` prove that usage is present exactly when
 the first `usage` field is an object. Missing, null, and non-object values do
 not fabricate zero usage. For chat-style events without a `type` field,
@@ -339,7 +361,7 @@ remain valid observations. Mutation checks reintroduce omitted joins, dropped
 data, premature dispatch, bad spacing/CRLF handling, skipped JSON, and false
 or erased usage, and require the verifier to reject each defect.
 
-Which provider fields it reads (`model`, `messages`/`input` and the
+Other provider field selection (`model`, `messages`/`input` and the
 last user message's content blocks, `usage` in its Anthropic and OpenAI
 spellings, the SSE event types) is a choice pinned by tests against recorded
 bodies, not a theorem. The timestamps are the verified calendar's

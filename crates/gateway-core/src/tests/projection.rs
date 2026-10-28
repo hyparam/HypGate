@@ -7,9 +7,13 @@ use crate::projection::*;
 fn s(v: Value) -> String { match v { Value::Str(b) => String::from_utf8(b).unwrap(), other => panic!("{other:?}") } }
 
 #[test]
-fn recognizes_event_streams() {
-    for sse in [&b"event: message_start\ndata: {}\n"[..], b"data: {}\n", b": comment\n", b"  \r\n\tdata: x"] { assert!(is_sse(sse)); }
-    for not in [&b""[..], b"{}", b"{\"data\":1}", b" {\"event\":1}", b"dat"] { assert!(!is_sse(not)); }
+fn recognizes_complete_events_by_grammar() {
+    for prefix in ["", "id: 7\n", "retry: 1000\n", "unknown: value\n", ": comment\n", "\u{feff}"] {
+        assert!(is_sse(format!("{prefix}data: {{}}\n\n").as_bytes()));
+    }
+    for not in [&b""[..], b"{}", b": comment\n", b"data: {}\n", b"event: error\n\n"] {
+        assert!(!is_sse(not));
+    }
 }
 
 #[test]
@@ -68,4 +72,55 @@ fn sse_dispatches_only_complete_events_with_exact_data_spacing() {
     assert_eq!(reader.next(), Some(Vec::new()));
     assert_eq!(reader.next(), None);
     assert_eq!(reader.next(), None);
+}
+
+#[test]
+fn every_sse_prefix_and_line_ending_reaches_projection() {
+    let event = "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1}}\n\n";
+    for prefix in ["", "id: 7\n", "retry: 1000\n", "unknown: ignored\n", ": comment\n", "event: message\n", "data: invalid json\n\n", "data: [DONE]\n\n"] {
+        for newline in ["\n", "\r\n", "\r"] {
+            for bom in ["", "\u{feff}"] {
+                let body = format!("{bom}{prefix}{event}").replace('\n', newline);
+                let row = response(body.as_bytes());
+                assert_eq!(row.get(b"content_text").unwrap().as_str().unwrap(), b"Hello", "{body:?}");
+                let usage = row.get(b"attributes").unwrap().get(b"usage").unwrap();
+                assert_eq!(usage.get(b"total_tokens").unwrap().as_u64(), Some(3));
+            }
+        }
+    }
+}
+
+fn error(row: &Value) -> bool { matches!(row.get(b"is_error"), Some(Value::Bool(true))) }
+
+#[test]
+fn provider_failures_survive_every_event_position_and_later_success() {
+    let failures = [
+        r#"{"type":"error","error":{"type":"overloaded_error"}}"#,
+        r#"{"error":{"code":"server_error"}}"#,
+        r#"{"type":"response.failed","response":{"status":"failed"}}"#,
+        r#"{"type":"response.incomplete","response":{"status":"incomplete"}}"#,
+        r#"{"response":{"error":{"message":"failure"}}}"#,
+        r#"{"status":"failed"}"#, r#"{"status":"incomplete"}"#, r#"{"status":"cancelled"}"#,
+    ];
+    let others = ["{}", "null", "not json", "[DONE]", r#"{"type":"future.event"}"#,
+        r#"{"type":"response.completed","response":{"status":"completed","error":null}}"#];
+    for failure in failures {
+        assert!(error(&response(failure.as_bytes())), "JSON {failure}");
+        for other in others {
+            for (a, b) in [(failure, other), (other, failure)] {
+                let body = format!("id: 7\ndata: {a}\n\ndata: {b}\n\n");
+                assert!(error(&response(body.as_bytes())), "SSE {body}");
+            }
+        }
+    }
+    for other in others {
+        assert!(!error(&response(other.as_bytes())), "JSON {other}");
+        assert!(!error(&response(format!("data: {other}\n\n").as_bytes())), "SSE {other}");
+    }
+}
+
+#[test]
+fn incomplete_event_is_not_interpreted_and_json_strings_are_not_events() {
+    assert!(!error(&response(b"data: {\"type\":\"error\"}\n")));
+    assert!(!error(&response(br#"{"content":"data: {\"type\":\"error\"}\n\n","error":null}"#)));
 }

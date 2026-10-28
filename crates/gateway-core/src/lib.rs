@@ -73,6 +73,7 @@ pub mod shipping_driver;
 pub mod shipping_wire;
 pub mod client_exchange;
 pub mod projection;
+pub mod response_semantics;
 pub mod sse;
 
 // Shared codecs.

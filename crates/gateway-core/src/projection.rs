@@ -12,14 +12,16 @@
 //! and part ids are the hex of the verified keys and the request id is the
 //! hex of the exchange key; the schema version and message indexes are
 //! fixed; the timestamps are the verified calendar's text of the exchange's
-//! start and completion times. Which provider fields are read is a choice
-//! pinned by tests, not a theorem. SSE data framing and JSON composition are
+//! start and completion times. Response error interpretation is composed from
+//! the JSON/SSE grammars through every event into both rows (response_semantics).
+//! Provider text/token field selection remains pinned by tests. SSE framing is
 //! proved in `sse`; usage objects are distinguished from missing/null usage,
 //! and unknown chat-chunk usage preserves the previous accounting state.
 use vstd::prelude::*;
 use vstd::slice::{slice_index_get, slice_subrange, slice_to_vec};
 use crate::exchange_assembler::Exchange;
 use crate::json::{Member, Value};
+use crate::response_semantics as semantics;
 use crate::shipping_identity::{exchange_key, message_key, part_key, hex};
 
 verus! {
@@ -130,7 +132,7 @@ pub const O_OTHER: [u8; 5] = *b"other";
 #[derive(Debug, PartialEq, Eq)]
 pub struct Usage { pub input: u64, pub cache_read: u64, pub cache_write: u64, pub output: u64 }
 struct ParsedRequest { model: Option<Vec<u8>>, session_hint: Option<Vec<u8>>, user_text: Option<Vec<u8>> }
-struct ParsedResponse { text: Vec<u8>, usage: Option<Usage>, model: Option<Vec<u8>> }
+struct ParsedResponse { text: Vec<u8>, usage: Option<Usage>, model: Option<Vec<u8>>, failed: bool }
 
 // ---- what the rows look like ------------------------------------------------------------
 
@@ -499,7 +501,7 @@ fn join_contents(items: &Vec<Value>, inner: bool) -> (out: Vec<u8>)
 }
 fn parse_json_response(value: &Value) -> (out: ParsedResponse)
     ensures crate::utf8::valid(out.text@), match out.model { Some(t) => crate::utf8::valid(t@), None => true },
-        out.usage.is_some() == has_usage_object(*value),
+        out.usage.is_some() == has_usage_object(*value), out.failed == semantics::failure(*value),
 {
     let model = str_at(value, P_MODEL.as_slice());
     let text: Vec<u8> = if let Some(content) = value.get(P_CONTENT.as_slice()) {
@@ -512,28 +514,15 @@ fn parse_json_response(value: &Value) -> (out: ParsedResponse)
         Vec::new()
     };
     proof { assert(crate::utf8::valid(Seq::<u8>::empty())); }
-    ParsedResponse { text, usage: usage_of(value), model }
+    ParsedResponse { text, usage: usage_of(value), model, failed: semantics::failed(value) }
 }
 
-fn is_ascii_whitespace(b: u8) -> bool { b == 32 || b == 9 || b == 10 || b == 12 || b == 13 }
-fn starts_with(s: &[u8], prefix: &[u8]) -> (out: bool)
-    ensures out ==> prefix@.len() <= s@.len(),
+/// Whether the SSE grammar dispatches at least one complete data event.
+/// This is descriptive metadata, never a gate on response parsing.
+pub fn is_sse(bytes: &[u8]) -> (out: bool)
+    ensures out == (crate::sse::event_data(bytes@).len() > 0),
 {
-    if s.len() < prefix.len() { return false; }
-    bytes_eq(slice_subrange(s, 0, prefix.len()), prefix)
-}
-/// Whether a body is a server-sent event stream: after leading whitespace
-/// it begins with `event:`, `data:`, or a comment.
-pub fn is_sse(bytes: &[u8]) -> bool {
-    let mut i: usize = 0;
-    while i < bytes.len() && is_ascii_whitespace(bytes[i])
-        invariant i <= bytes.len(),
-        decreases bytes.len() - i,
-    {
-        i = i + 1;
-    }
-    let trimmed = slice_subrange(bytes, i, bytes.len());
-    starts_with(trimmed, SSE_EVENT.as_slice()) || starts_with(trimmed, SSE_DATA.as_slice()) || (trimmed.len() >= 1 && trimmed[0] == 58)
+    crate::sse::Reader::new(bytes).next().is_some()
 }
 
 /// One `data:` event of a stream.
@@ -541,9 +530,11 @@ pub fn is_sse(bytes: &[u8]) -> bool {
 fn sse_event(event: &Value, out: &mut ParsedResponse, usage: &mut Usage, saw_usage: &mut bool)
     requires crate::utf8::valid(old(out).text@), match old(out).model { Some(t) => crate::utf8::valid(t@), None => true },
     ensures crate::utf8::valid(final(out).text@), match final(out).model { Some(t) => crate::utf8::valid(t@), None => true },
+        final(out).failed == (old(out).failed || semantics::failure(*event)),
         !has_field(*event, P_TYPE@) && !has_usage_object(*event) ==>
             *final(usage) == *old(usage) && *final(saw_usage) == *old(saw_usage),
 {
+    out.failed = out.failed || semantics::failed(event);
     let kind: Vec<u8> = match str_at(event, P_TYPE.as_slice()) { Some(k) => k, None => Vec::new() };
     proof { assert(!has_field(*event, P_TYPE@) ==> kind@.len() == 0); }
     if bytes_eq(kind.as_slice(), P_MESSAGE_START.as_slice()) {
@@ -559,7 +550,9 @@ fn sse_event(event: &Value, out: &mut ParsedResponse, usage: &mut Usage, saw_usa
         if let Some(n) = u64_at2(event, P_USAGE.as_slice(), P_OUTPUT_TOKENS.as_slice()) { usage.output = n; *saw_usage = true; }
     } else if bytes_eq(kind.as_slice(), P_OUTPUT_TEXT_DELTA.as_slice()) {
         if let Some(t) = str_at(event, P_DELTA.as_slice()) { append_line(&mut out.text, false, t.as_slice()); }
-    } else if bytes_eq(kind.as_slice(), P_RESPONSE_COMPLETED.as_slice()) {
+    } else if bytes_eq(kind.as_slice(), P_RESPONSE_COMPLETED.as_slice())
+        || bytes_eq(kind.as_slice(), semantics::RESPONSE_FAILED.as_slice())
+        || bytes_eq(kind.as_slice(), semantics::RESPONSE_INCOMPLETE.as_slice()) {
         if let Some(response) = event.get(P_RESPONSE.as_slice()) {
             out.model = str_at(response, P_MODEL.as_slice());
             if let Some(u) = usage_of(response) { *usage = u; *saw_usage = true; }
@@ -586,20 +579,38 @@ fn sse_event(event: &Value, out: &mut ParsedResponse, usage: &mut Usage, saw_usa
 #[verifier::loop_isolation(false)]
 fn parse_sse(bytes: &[u8]) -> (out: ParsedResponse)
     ensures crate::utf8::valid(out.text@), match out.model { Some(t) => crate::utf8::valid(t@), None => true },
+        semantics::stream(crate::sse::event_data(bytes@), out.failed),
 {
-    let mut out = ParsedResponse { text: Vec::new(), usage: None, model: None };
+    let mut out = ParsedResponse { text: Vec::new(), usage: None, model: None, failed: false };
     let mut usage = Usage { input: 0, cache_read: 0, cache_write: 0, output: 0 };
     let mut saw_usage = false;
     proof { assert(crate::utf8::valid(out.text@)); }
     let mut events = crate::sse::Reader::new(bytes);
     loop
         invariant events.valid(), crate::utf8::valid(out.text@), match out.model { Some(t) => crate::utf8::valid(t@), None => true },
+            forall|tail: bool| semantics::stream(events.remaining(), tail) ==>
+                semantics::stream(crate::sse::event_data(bytes@), out.failed || tail),
         decreases events.left() + 1,
     {
-        match events.next_json() {
-            Some(Some(event)) => sse_event(&event, &mut out, &mut usage, &mut saw_usage),
+        let ghost before = events.remaining();
+        let event = events.next_json();
+        match event {
+            Some(Some(value)) => sse_event(&value, &mut out, &mut usage, &mut saw_usage),
             Some(None) => {},
-            None => break,
+            None => {
+                proof { semantics::empty_stream(); assert(before =~= Seq::<Seq<u8>>::empty()); }
+                break;
+            }
+        }
+        proof {
+            let value = event.unwrap();
+            assert(semantics::parsed(before[0], value));
+            assert(events.remaining() =~= before.drop_first());
+            assert forall|tail: bool| semantics::stream(events.remaining(), tail) implies
+                semantics::stream(crate::sse::event_data(bytes@), out.failed || tail) by {
+                semantics::prepend(before, value, tail);
+                assert(semantics::stream(before, semantics::optional_failure(value) || tail));
+            }
         }
     }
     if saw_usage { out.usage = Some(usage); }
@@ -607,14 +618,15 @@ fn parse_sse(bytes: &[u8]) -> (out: ParsedResponse)
 }
 fn parse_response(bytes: &[u8]) -> (out: (ParsedResponse, bool))
     ensures crate::utf8::valid(out.0.text@), match out.0.model { Some(t) => crate::utf8::valid(t@), None => true },
+        semantics::interpretation(bytes@, out.0.failed),
 {
-    if is_sse(bytes) { return (parse_sse(bytes), true); }
     match crate::json::parse(bytes) {
-        Some(value) => (parse_json_response(&value), false),
-        None => {
-            proof { assert(crate::utf8::valid(Seq::<u8>::empty())); }
-            (ParsedResponse { text: Vec::new(), usage: None, model: None }, false)
+        Some(value) => {
+            let response = parse_json_response(&value);
+            proof { assert(semantics::parsed(bytes@, Some(value))); }
+            (response, false)
         }
+        None => (parse_sse(bytes), is_sse(bytes)),
     }
 }
 
@@ -717,7 +729,7 @@ fn base_members(shared: &Shared<'_>, index: u32) -> (ms: Vec<Member>)
     ensures crate::json::well_formed_members(ms@), values_valid_members(ms@), ms@.len() == 18,
         is_timestamp(ms@[6].value, started_ms(*shared.exchange)), is_date(ms@[14].value, started_ms(*shared.exchange)),
         forall|k: int| 0 <= k < 18 ==> #[trigger] ms@[k].key@ == base_keys()[k],
-        is_number(ms@[0].value, SCHEMA_VERSION as nat),
+        is_number(ms@[0].value, SCHEMA_VERSION as nat), ms@[16].value == Value::Bool(shared.is_error),
         is_hex_of(ms@[9].value, crate::shipping_identity::message_key_encoding(shared.session@, shared.exchange.request, index)),
         is_number(ms@[10].value, index as nat),
         is_hex_of(ms@[11].value, crate::shipping_identity::part_key_encoding(shared.session@, shared.exchange.request, index, 0)),
@@ -773,6 +785,9 @@ fn hex_text(key: &[u8]) -> (out: Value)
 #[verifier::rlimit(100)]
 pub fn rows(session: &[u8; 16], exchange: &Exchange, max_text: usize) -> (out: Vec<Value>)
     ensures out@.len() == 2,
+        exists|failed: bool| semantics::interpretation(exchange.download@, failed)
+            && value_at(out@[0], 16) == Value::Bool(semantics::exchange_error(*exchange, failed))
+            && value_at(out@[1], 16) == Value::Bool(semantics::exchange_error(*exchange, failed)),
         is_timestamp(value_at(out@[0], 6), started_ms(*exchange)), is_timestamp(value_at(out@[1], 6), started_ms(*exchange)),
         is_date(value_at(out@[0], 14), started_ms(*exchange)), is_date(value_at(out@[1], 14), started_ms(*exchange)),
         is_timestamp(value_at(out@[0], 19), started_ms(*exchange)), is_timestamp(value_at(out@[1], 19), finished_ms(*exchange)),
@@ -799,7 +814,7 @@ pub fn rows(session: &[u8; 16], exchange: &Exchange, max_text: usize) -> (out: V
     let outcome = match &exchange.completion { Some(c) => Some(c.outcome), None => None };
     let session_id = match &request.session_hint { Some(h) => slice_to_vec(h.as_slice()), None => slice_to_vec(exchange_id.as_slice()) };
     let model = match &request.model { Some(m) => Some(slice_to_vec(m.as_slice())), None => match &response.model { Some(m) => Some(slice_to_vec(m.as_slice())), None => None } };
-    let is_error = (match status { Some(s) => s >= 400, None => false }) || (match outcome { Some(o) => o != 0, None => false }) || exchange.incomplete;
+    let is_error = response.failed || (match status { Some(s) => s >= 400, None => false }) || (match outcome { Some(o) => o != 0, None => false }) || exchange.incomplete;
     proof { assert(started == started_ms(*exchange)); assert(finished == finished_ms(*exchange)); }
     let shared = Shared { session, exchange, exchange_id, session_id, host, path, model, started, status, outcome, is_error };
 
