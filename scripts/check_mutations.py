@@ -23,6 +23,12 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ('body_reader.rs', 'reader_copy_repeats_first_byte', 'buffer[i] = self.buffer[start + i];', 'buffer[i] = self.buffer[start];'),
+    ('body_reader.rs', 'reader_copy_ignores_decoder_offset', 'buffer[i] = self.buffer[start + i];', 'buffer[i] = self.buffer[i];'),
+    ('body_reader.rs', 'reader_copy_skips_last_byte', 'while i < n\n', 'while i + 1 < n\n'),
+    ('body_reader.rs', 'reader_copy_fabricates_eof', 'let result = self.read(source, buffer.len());', 'let result = Read::End;'),
+    ('body_reader.rs', 'reader_invents_primitive_read', 'match source.fill(&mut self.buffer, READ_BYTES) {', 'self.buffer.push(65); match Fill::Bytes {'),
+    ('body_reader.rs', 'reader_consumes_hidden_extra_read', 'match source.fill(&mut self.buffer, READ_BYTES) {', 'let mut hidden = Vec::new(); let _ = source.fill(&mut hidden, READ_BYTES); match source.fill(&mut self.buffer, READ_BYTES) {'),
     ('sink.rs', 'sink_fabricates_success_without_put', 'match sink.put(piece) {', 'match Put::Wrote(piece.len()) {'),
     ('sink.rs', 'sink_sends_each_prefix_twice', 'match sink.put(piece) {', 'let _ = sink.put(piece); match sink.put(piece) {'),
     ('sink.rs', 'sink_chunk_rebases_accepted_history', 'self.sent = Ghost(self.sent@ + written.sent@);', 'self.base = Ghost(self.sink.accepted()); self.sent = Ghost(self.sent@ + written.sent@);'),

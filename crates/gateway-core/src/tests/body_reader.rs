@@ -20,9 +20,10 @@ impl Source for Scripted {
 
 fn drain(reader: &mut BodyReader, source: &mut Scripted, room: usize) -> (Vec<u8>, Read) {
     let mut out = Vec::new();
+    let mut buffer = vec![0; room];
     loop {
-        match reader.read(source, room) {
-            Read::Data(start, n) => out.extend_from_slice(&reader.buffer()[start..start + n]),
+        match reader.read_into(source, &mut buffer) {
+            Read::Data(_, n) => out.extend_from_slice(&buffer[..n]),
             other => return (out, other),
         }
     }
@@ -79,4 +80,21 @@ fn heads_are_parsed_from_the_bytes_received_and_the_rest_is_leftover() {
     let long = vec![b'x'; 32 * 1024];
     let mut source = Scripted::new(&[&long[..16 * 1024], &long[..16 * 1024]], Fill::Closed);
     assert_eq!(read_request_head(&mut source, Vec::new()).err(), Some(HeadError::TooLarge));
+}
+
+#[test]
+fn verified_copy_preserves_unused_buffer_and_changes_nothing_at_eof_or_error() {
+    let mut source = Scripted::new(&[b"abcEXTRA"], Fill::Closed);
+    let mut reader = BodyReader::new(Vec::new(), Framing::Length(3));
+    let mut buffer = [0xa5; 8];
+    assert!(matches!(reader.read_into(&mut source, &mut buffer), Read::Data(_, 3)));
+    assert_eq!(&buffer[..3], b"abc");
+    assert_eq!(&buffer[3..], &[0xa5; 5]);
+    let prior = buffer;
+    assert_eq!(reader.read_into(&mut source, &mut buffer), Read::End);
+    assert_eq!(buffer, prior);
+    let mut reader = BodyReader::new(Vec::new(), Framing::Length(1));
+    let mut failed = Scripted::new(&[], Fill::Failed);
+    assert_eq!(reader.read_into(&mut failed, &mut buffer), Read::Failed);
+    assert_eq!(buffer, prior);
 }

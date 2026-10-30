@@ -5,8 +5,9 @@
 //! order bytes are fed are the verified drivers in `body_reader`, and the
 //! write loop and chunk writer are the verified drivers in `sink`. This
 //! module only moves bytes between blocking sockets and those functions: one
-//! socket read appends to the driver's buffer, one body read copies the bytes
-//! the driver names, and one socket write takes the prefix the driver offers. It
+//! socket read appends to the driver's buffer, the verified body reader copies
+//! decoded bytes into the caller's buffer, and one socket write takes the prefix
+//! the driver offers. It
 //! makes no decision about what a byte means, and how long a read may take
 //! is the caller's stream's business (`net::Timed`).
 use crate::net::{read_uninterrupted, write_uninterrupted};
@@ -72,7 +73,7 @@ pub(crate) fn read_status_head<R: Read>(io: &mut R, leftover: Vec<u8>) -> Result
 /// end of the body is a clean EOF, and a body that stops early, a chunk
 /// coding fault, or data missing after a fixed length is an error. The
 /// buffer, its cursor, and the decoder are the verified driver's; this type
-/// owns the socket and copies the bytes a data read names.
+/// owns the socket; the verified driver's `read_into` copies decoded bytes.
 pub(crate) struct BodyReader<R> { wire: Wire<R>, driver: gateway_core::body_reader::BodyReader }
 
 impl<R> BodyReader<R> {
@@ -86,12 +87,8 @@ impl<R> BodyReader<R> {
 impl<R: Read> Read for BodyReader<R> {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
         if out.is_empty() { return Ok(0); }
-        match self.driver.read(&mut self.wire, out.len()) {
-            BodyRead::Data(start, n) => {
-                let bytes = self.driver.buffer().get(start..start.saturating_add(n)).ok_or(io::ErrorKind::InvalidData)?;
-                out.get_mut(..n).ok_or(io::ErrorKind::InvalidData)?.copy_from_slice(bytes);
-                Ok(n)
-            }
+        match self.driver.read_into(&mut self.wire, out) {
+            BodyRead::Data(_, n) => Ok(n),
             BodyRead::End => Ok(0),
             BodyRead::Truncated => Err(io::ErrorKind::UnexpectedEof.into()),
             BodyRead::Malformed => Err(io::ErrorKind::InvalidData.into()),

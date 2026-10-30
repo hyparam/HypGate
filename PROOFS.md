@@ -367,8 +367,11 @@ whole-program correctness.
   discharged, so a second head, bytes after an abort, or a last chunk on an
   incomplete body cannot be written by construction. The loops that feed the
   parsers from socket reads and hand the writers' bytes to socket writes are
-  verified too (`body_reader`, `sink`): nothing skipped, nothing read or
-  offered twice, a stream framed through only by the verified chunk coding.
+  verified too (`body_reader`, `sink`): their histories are bound to actual
+  primitive read/write histories, with nothing skipped or duplicated. The
+  production decoder-to-buffer copy is verified as well, including the
+  untouched suffix and EOF/error cases. Chunk writes bind their framed output
+  to the sink's accepted bytes.
   What remains trusted is that one socket read appends what the socket
   produced, one socket write accepts what it reports, and a shut-down or
   timed-out socket makes the blocked call return. The framing the reader decodes and the writer

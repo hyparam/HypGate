@@ -30,9 +30,13 @@ pub enum Fill { Bytes, Closed, Failed }
 /// `max` bytes to `buffer` and says `Bytes`, or appends nothing and says the
 /// peer closed or the read failed.
 pub trait Source {
+    /// Actual bytes returned by primitive reads, in order.
+    spec fn received(&self) -> Seq<u8>;
     fn fill(&mut self, buffer: &mut Vec<u8>, max: usize) -> (out: Fill)
         requires max >= 1,
-        ensures match out {
+        ensures final(self).received() == old(self).received()
+                + final(buffer)@.skip(old(buffer)@.len() as int),
+            match out {
             Fill::Bytes => old(buffer)@.len() < final(buffer)@.len() <= old(buffer)@.len() + max
                 && final(buffer)@.subrange(0, old(buffer)@.len() as int) == old(buffer)@,
             _ => final(buffer)@ == old(buffer)@,
@@ -49,7 +53,9 @@ pub struct HeadRead<H> { pub head: H, pub rest: Vec<u8>, pub received: Ghost<Seq
 /// Fill the head buffer, never past the head limit.
 fn fill_head<S: Source>(source: &mut S, buffer: &mut Vec<u8>) -> (out: Result<(), HeadError>)
     requires old(buffer)@.len() < MAX_BYTES,
-    ensures match out {
+    ensures final(source).received() == old(source).received()
+            + final(buffer)@.skip(old(buffer)@.len() as int),
+        match out {
         Ok(()) => old(buffer)@.len() < final(buffer)@.len() <= MAX_BYTES && final(buffer)@.subrange(0, old(buffer)@.len() as int) == old(buffer)@,
         Err(_) => final(buffer)@ == old(buffer)@,
     },
@@ -68,7 +74,8 @@ fn fill_head<S: Source>(source: &mut S, buffer: &mut Vec<u8>) -> (out: Result<()
 #[verifier::loop_isolation(false)]
 pub fn read_request_head<S: Source>(source: &mut S, leftover: Vec<u8>) -> (out: Result<HeadRead<RequestHead>, HeadError>)
     ensures match out {
-        Ok(r) => leftover@.len() <= r.received@.len() && r.received@.subrange(0, leftover@.len() as int) == leftover@
+        Ok(r) => final(source).received() == old(source).received() + r.received@.skip(leftover@.len() as int)
+            && leftover@.len() <= r.received@.len() && r.received@.subrange(0, leftover@.len() as int) == leftover@
             && 0 <= r.len@ <= r.received@.len() && crate::http1_head::request_head_ok(r.received@.subrange(0, r.len@), r.head)
             && r.rest@ == r.received@.subrange(r.len@, r.received@.len() as int),
         Err(_) => true,
@@ -78,6 +85,7 @@ pub fn read_request_head<S: Source>(source: &mut S, leftover: Vec<u8>) -> (out: 
     proof { assert(buffer@.subrange(0, leftover@.len() as int) =~= leftover@); }
     loop
         invariant buffer@.len() >= leftover@.len() && buffer@.subrange(0, leftover@.len() as int) == leftover@,
+            source.received() == old(source).received() + buffer@.skip(leftover@.len() as int),
         decreases MAX_BYTES - buffer@.len(),
     {
         match parse_request(buffer.as_slice()) {
@@ -90,7 +98,8 @@ pub fn read_request_head<S: Source>(source: &mut S, leftover: Vec<u8>) -> (out: 
             RequestProgress::Incomplete => {
                 let ghost before = buffer@;
                 match fill_head(source, &mut buffer) {
-                    Ok(()) => { proof { assert(buffer@.subrange(0, leftover@.len() as int) =~= before.subrange(0, leftover@.len() as int)); } }
+                    Ok(()) => { proof { assert(buffer@.subrange(0, leftover@.len() as int) =~= before.subrange(0, leftover@.len() as int));
+                        assert(source.received() =~= old(source).received() + buffer@.skip(leftover@.len() as int)); } }
                     Err(e) => return Err(e),
                 }
             }
@@ -101,7 +110,8 @@ pub fn read_request_head<S: Source>(source: &mut S, leftover: Vec<u8>) -> (out: 
 #[verifier::loop_isolation(false)]
 pub fn read_status_head<S: Source>(source: &mut S, leftover: Vec<u8>) -> (out: Result<HeadRead<StatusHead>, HeadError>)
     ensures match out {
-        Ok(r) => leftover@.len() <= r.received@.len() && r.received@.subrange(0, leftover@.len() as int) == leftover@
+        Ok(r) => final(source).received() == old(source).received() + r.received@.skip(leftover@.len() as int)
+            && leftover@.len() <= r.received@.len() && r.received@.subrange(0, leftover@.len() as int) == leftover@
             && 0 <= r.len@ <= r.received@.len() && crate::http1_head::status_head_ok(r.received@.subrange(0, r.len@), r.head)
             && r.rest@ == r.received@.subrange(r.len@, r.received@.len() as int),
         Err(_) => true,
@@ -111,6 +121,7 @@ pub fn read_status_head<S: Source>(source: &mut S, leftover: Vec<u8>) -> (out: R
     proof { assert(buffer@.subrange(0, leftover@.len() as int) =~= leftover@); }
     loop
         invariant buffer@.len() >= leftover@.len() && buffer@.subrange(0, leftover@.len() as int) == leftover@,
+            source.received() == old(source).received() + buffer@.skip(leftover@.len() as int),
         decreases MAX_BYTES - buffer@.len(),
     {
         match parse_status(buffer.as_slice()) {
@@ -123,7 +134,8 @@ pub fn read_status_head<S: Source>(source: &mut S, leftover: Vec<u8>) -> (out: R
             StatusProgress::Incomplete => {
                 let ghost before = buffer@;
                 match fill_head(source, &mut buffer) {
-                    Ok(()) => { proof { assert(buffer@.subrange(0, leftover@.len() as int) =~= before.subrange(0, leftover@.len() as int)); } }
+                    Ok(()) => { proof { assert(buffer@.subrange(0, leftover@.len() as int) =~= before.subrange(0, leftover@.len() as int));
+                        assert(source.received() =~= old(source).received() + buffer@.skip(leftover@.len() as int)); } }
                     Err(e) => return Err(e),
                 }
             }
@@ -201,12 +213,58 @@ impl BodyReader {
         self.decoder.lemma_done_delimits();
     }
 
+    /// Decode and copy the exact delivered prefix into the caller's buffer.
+    /// The runtime no longer selects or copies a decoder-owned byte range.
+    pub fn read_into<S: Source>(&mut self, source: &mut S, buffer: &mut [u8]) -> (out: Read)
+        requires old(self).inv(), old(buffer).len() >= 1,
+        ensures final(self).inv(), final(self).framing() == old(self).framing(),
+            final(buffer)@.len() == old(buffer)@.len(),
+            final(source).received() == old(source).received() + final(self).received().skip(old(self).received().len() as int),
+            old(self).received().is_prefix_of(final(self).received()),
+            match out {
+                Read::Data(_, n) => 1 <= n <= final(buffer).len()
+                    && final(self).delivered() == old(self).delivered() + final(buffer)@.take(n as int)
+                    && final(buffer)@.skip(n as int) == old(buffer)@.skip(n as int)
+                    && !final(self).failed(),
+                Read::End => final(self).done() && final(self).delivered() == old(self).delivered()
+                    && final(buffer)@ == old(buffer)@,
+                _ => final(self).failed() && final(self).delivered() == old(self).delivered()
+                    && final(buffer)@ == old(buffer)@,
+            },
+    {
+        let result = self.read(source, buffer.len());
+        if let Read::Data(start, n) = result {
+            let mut i = 0;
+            while i < n
+                invariant i <= n <= buffer.len(), start + n <= self.buffer.len(),
+                    buffer@.len() == old(buffer)@.len(),
+                    buffer@.take(i as int) == self.bytes().subrange(start as int, start + i),
+                    buffer@.skip(i as int) == old(buffer)@.skip(i as int),
+                decreases n - i,
+            {
+                let ghost before = buffer@;
+                let ghost at = i;
+                buffer[i] = self.buffer[start + i];
+                i = i + 1;
+                proof {
+                    assert(buffer@.take(i as int) =~= self.bytes().subrange(start as int, start + i));
+                    assert forall|k: int| i <= k < buffer@.len() implies buffer@[k] == old(buffer)@[k] by {
+                        assert(before.skip(at as int)[k - at] == old(buffer)@.skip(at as int)[k - at]);
+                    }
+                    assert(buffer@.skip(i as int) =~= old(buffer)@.skip(i as int));
+                }
+            }
+        }
+        result
+    }
+
     /// The next body bytes, at most `room` of them, reading from `source`
     /// only when the buffer is spent.
     #[verifier::loop_isolation(false)]
     pub fn read<S: Source>(&mut self, source: &mut S, room: usize) -> (out: Read)
         requires old(self).inv(), room >= 1,
         ensures final(self).inv(), final(self).framing() == old(self).framing(),
+            final(source).received() == old(source).received() + final(self).received().skip(old(self).received().len() as int),
             old(self).received().len() <= final(self).received().len(),
             final(self).received().subrange(0, old(self).received().len() as int) == old(self).received(),
             match out {
@@ -220,10 +278,12 @@ impl BodyReader {
             },
     {
         let ghost received0 = self.received@;
-        proof { assert(self.received@.subrange(0, received0.len() as int) =~= received0); }
+        proof { assert(self.received@.subrange(0, received0.len() as int) =~= received0);
+                        assert(source.received() =~= old(source).received() + self.received@.skip(received0.len() as int)); }
         loop
             invariant self.inv(), room >= 1, self.decoder.framing() == old(self).decoder.framing(), self.delivered@ == old(self).delivered@,
                 received0.len() <= self.received@.len(), self.received@.subrange(0, received0.len() as int) == received0,
+                source.received() == old(source).received() + self.received@.skip(received0.len() as int),
             // Each framing step spends decoder budget; a refill only moves from a spent buffer to a full one.
             decreases self.decoder.framing_budget(), (if self.pos < self.buffer@.len() { 0int } else { 1int }),
         {
@@ -277,6 +337,7 @@ impl BodyReader {
                             assert(prev.subrange(0, received0.len() as int)[k] == prev[k]);
                         }
                         assert(self.received@.subrange(0, received0.len() as int) =~= received0);
+                        assert(source.received() =~= old(source).received() + self.received@.skip(received0.len() as int));
                     }
                 }
                 Fill::Closed => {
