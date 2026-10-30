@@ -225,6 +225,10 @@ impl<'a> Context<'a> {
         requires self.valid(), old(copy).valid(old(stream)), old(copy).audited(),
         ensures final(copy).valid(final(stream)), final(copy).same_copy(old(copy)), final(copy).accepted() == old(copy).accepted(),
             final(stream).key() == old(stream).key(),
+            final(stream).state().input() == old(stream).state().input(),
+            final(stream).state().completed() == old(stream).state().completed(),
+            final(stream).state().body() == old(stream).state().body(),
+            final(stream).state().position() == old(stream).state().position(),
             match out {
                 Some(delivery) => final(copy).writing() && delivery.write_value().ticket() == final(copy).ticket()
                     && delivery.write_value().delivers(final(stream), &self.authority_value(), journal, old(copy).direction(), delivery.bytes_value())

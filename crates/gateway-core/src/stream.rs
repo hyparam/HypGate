@@ -116,6 +116,15 @@ impl StreamChunk {
             self.strict() ==> self.end() <= self.logged(),
     {}
 
+    pub proof fn data_partition(&self)
+        requires self.valid(),
+        ensures self.position() <= self.body().len(),
+            self.input() == self.completed() + self.body().subrange(self.position() as int, self.body().len() as int),
+            self.position() == self.body().len() ==> self.input() == self.completed(),
+    {
+        assert(self.input() =~= self.completed() + self.body().subrange(self.position() as int, self.body().len() as int));
+    }
+
     pub closed spec fn model(&self) -> Model {
         Model { owner: self.owner, capacity: self.capacity as nat, strict: self.strict, chunk: self.chunk,
             body: self.bytes@, input: self.prefix@ + self.bytes@, completed: self.prefix@ + self.bytes@.subrange(0, self.sent as int),

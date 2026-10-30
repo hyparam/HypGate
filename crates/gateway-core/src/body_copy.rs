@@ -97,8 +97,9 @@ impl BodyCopy {
 
     pub proof fn state_evidence(&self, stream: &OwnedStream)
         requires self.valid(stream),
-        ensures stream.valid(), self.direction() <= 1,
-    {}
+        ensures stream.valid(), stream.state().valid(), self.direction() <= 1,
+            (self.needs_read() || self.needs_flush() || self.is_done()) ==> stream.state().position() == stream.state().body().len(),
+    { stream.payload_bound(); }
     pub proof fn stable_phases(&self)
         ensures (self.needs_read() || self.filled() || self.audited() || self.needs_flush() || self.is_done() || self.failure().is_some())
             ==> !self.reading() && !self.auditing() && !self.writing(),
@@ -164,6 +165,10 @@ impl BodyCopy {
         ensures final(self).valid(final(stream)), final(self).failure() == Some(failure),
             final(self).accepted() == old(self).accepted(), final(self).same_copy(old(self)),
             final(stream).key() == old(stream).key(),
+            final(stream).state().input() == old(stream).state().input(),
+            final(stream).state().completed() == old(stream).state().completed(),
+            final(stream).state().body() == old(stream).state().body(),
+            final(stream).state().position() == old(stream).state().position(),
     {
         stream.cancel();
         self.phase = Phase::Failed;
@@ -176,6 +181,8 @@ impl BodyCopy {
         requires old(self).valid(old(stream)), old(self).needs_read(),
         ensures final(self).valid(final(stream)), final(self).accepted() == old(self).accepted(),
             final(self).same_copy(old(self)), final(stream).key() == old(stream).key(),
+            final(stream).state().input() == old(stream).state().input(),
+            final(stream).state().completed() == old(stream).state().completed(),
             ok ==> final(self).reading(), !ok ==> final(self).failure() == Some(Failure::InvalidState),
     {
         if stream.begin_read() { self.phase = Phase::Reading; true }
@@ -197,6 +204,9 @@ impl BodyCopy {
         requires old(self).valid(old(stream)), old(self).reading(),
         ensures final(self).valid(final(stream)), final(self).accepted() == old(self).accepted(),
             final(self).same_copy(old(self)), final(stream).key() == old(stream).key(),
+            final(stream).state().completed() == old(stream).state().completed(),
+            final(self).failure().is_none() ==> final(stream).state().input() == old(stream).state().input()
+                + old(stream).read_bytes().take(length.unwrap() as int),
             match length {
                 None => final(self).failure() == Some(Failure::Read),
                 Some(n) => if n == 0 {
@@ -229,6 +239,8 @@ impl BodyCopy {
         requires old(self).valid(old(stream)), old(self).filled(), authority.valid(),
         ensures final(self).valid(final(stream)), final(self).accepted() == old(self).accepted(),
             final(self).same_copy(old(self)), final(stream).key() == old(stream).key(),
+            final(stream).state().input() == old(stream).state().input(),
+            final(stream).state().completed() == old(stream).state().completed(),
             match out {
                 Some((header, bytes)) => final(self).auditing() && *final(stream) == *old(stream)
                     && final(journal).session() == Some(session)
@@ -262,6 +274,8 @@ impl BodyCopy {
             match receipt { Some(r) => r.valid(), None => true },
         ensures final(self).valid(final(stream)), final(self).accepted() == old(self).accepted(),
             final(self).same_copy(old(self)), final(stream).key() == old(stream).key(),
+            final(stream).state().input() == old(stream).state().input(),
+            final(stream).state().completed() == old(stream).state().completed(),
             match receipt {
                 None => final(stream).state().failed()
                     && if old(stream).state().strict() { final(self).failure() == Some(Failure::Log) }
@@ -296,6 +310,10 @@ impl BodyCopy {
         requires old(self).valid(old(stream)), old(self).audited(), authority.valid(),
         ensures final(self).valid(final(stream)), final(self).accepted() == old(self).accepted(),
             final(self).same_copy(old(self)), final(stream).key() == old(stream).key(),
+            final(stream).state().input() == old(stream).state().input(),
+            final(stream).state().completed() == old(stream).state().completed(),
+            final(stream).state().body() == old(stream).state().body(),
+            final(stream).state().position() == old(stream).state().position(),
             match out {
                 Some(delivery) => final(self).writing() && delivery.write_value().ticket() == final(self).ticket()
                     && delivery.write_value().delivers(final(stream), authority, journal, old(self).direction(), delivery.bytes_value())
@@ -334,6 +352,10 @@ impl BodyCopy {
         requires old(self).valid(old(stream)), old(self).writing(), write.ticket() == old(self).ticket(),
         ensures final(self).valid(final(stream)), final(self).same_copy(old(self)),
             final(stream).key() == old(stream).key(),
+            final(stream).state().input() == old(stream).state().input(),
+            final(self).failure().is_none() ==> count.is_some()
+                && final(stream).state().completed() == old(stream).state().completed()
+                    + old(stream).state().body().subrange(old(stream).state().position() as int, (old(stream).state().position() + count.unwrap()) as int),
             match count {
                 None => final(self).failure() == Some(Failure::Write) && final(self).accepted() == old(self).accepted(),
                 Some(n) => if n == 0 {
@@ -362,6 +384,8 @@ impl BodyCopy {
         requires old(self).valid(old(stream)), old(self).needs_flush(),
         ensures final(self).valid(final(stream)), final(self).accepted() == old(self).accepted(),
             final(self).same_copy(old(self)), final(stream).key() == old(stream).key(),
+            final(stream).state().input() == old(stream).state().input(),
+            final(stream).state().completed() == old(stream).state().completed(),
             ok ==> final(self).needs_read() && *final(stream) == *old(stream),
             !ok ==> final(self).failure() == Some(Failure::Flush),
     {

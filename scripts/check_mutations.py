@@ -23,6 +23,12 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ('body_driver.rs', 'body_conservation_changes_read_byte', 'let length = effects.read(buffer);', 'let length = effects.read(buffer); if buffer.len() > 0 { buffer[0] = 0; }'),
+    ('body_driver.rs', 'body_conservation_shortens_read', 'copy.finish_read(owner, length);', 'copy.finish_read(owner, match length { Some(n) => Some(n / 2), None => None });'),
+    ('body_driver.rs', 'body_conservation_replaces_read_with_eof', 'copy.finish_read(owner, length);', 'copy.finish_read(owner, Some(0));'),
+    ('body_driver.rs', 'body_conservation_erases_read_evidence', 'let ghost call = Call::Read(bytes, length);', 'let ghost call = Call::Read(Seq::empty(), length);'),
+    ('body_driver.rs', 'body_conservation_erases_completion_trace', 'Completed { copy, key, trace: Ghost(trace) }', 'Completed { copy, key, trace: Ghost(Seq::empty()) }'),
+    ('stream.rs', 'body_conservation_corrupts_input_history', 'input: self.prefix@ + self.bytes@,', 'input: self.bytes@,'),
     ('body_driver.rs', 'body_binding_skips_expected_key', 'if !key.same(expected)', 'if false && !key.same(expected)'),
     ('request_context.rs', 'body_binding_ignores_request', 'self.request != other.request || self.route.tenant', 'false || self.route.tenant'),
     ('request_context.rs', 'body_binding_ignores_token', '|| !equal(self.digest.as_slice(), other.digest.as_slice())', '|| false'),
@@ -32,7 +38,7 @@ MUTATIONS = [
     ('exchange_driver.rs', 'body_binding_discards_upload_evidence', 'Step::Uploaded(stream.out(), copy_summary(uploaded))', 'Step::Uploaded(stream.out(), None)'),
     ('body_driver.rs', 'body_binding_writes_wrong_direction', 'effects.write(context, &delivery, direction)', 'effects.write(context, &delivery, 0)'),
 
-    ('body_driver.rs', 'body_driver_invents_eof', 'effects.read(copy.read_buffer(owner))', 'Some(0usize)'),
+    ('body_driver.rs', 'body_driver_invents_eof', 'effects.read(buffer)', 'Some(0usize)'),
     ('body_driver.rs', 'body_driver_skips_audit', 'effects.audit(header, bytes)', 'None::<AuditReceipt>'),
     ('body_driver.rs', 'body_driver_skips_write', 'effects.write(context, &delivery, direction)', 'Some(delivery.bytes().len())'),
     ('body_driver.rs', 'body_driver_skips_flush', 'effects.flush()', 'true'),

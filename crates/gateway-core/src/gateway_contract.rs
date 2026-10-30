@@ -42,12 +42,16 @@ pub proof fn successful_exchange_is_authorized(before: Seq<Step>, after: Seq<Ste
 
 /// The completed upload and download belong to this provider request, not
 /// merely to some successful body copy with the same numerical byte count.
+/// In each direction the actual read bytes equal the accepted write bytes,
+/// including order, across every chunk and partial write.
 pub proof fn successful_body_copies_are_bound(before: Seq<Step>, after: Seq<Step>,
     obstacles_before: nat, obstacles_after: nat, transferred: (u64, u64), out: Driven)
     requires connection(before, after, obstacles_before, obstacles_after, transferred, out), succeeded(out),
     ensures driver::copies_match_counts(out.progress@, transferred.0, transferred.1),
         crate::body_driver::accepted(out.progress@.upload.unwrap().calls) == transferred.0,
         crate::body_driver::accepted(out.progress@.download.unwrap().calls) == transferred.1,
+        crate::body_driver::received(out.progress@.upload.unwrap().calls) == crate::body_driver::written(out.progress@.upload.unwrap().calls),
+        crate::body_driver::received(out.progress@.download.unwrap().calls) == crate::body_driver::written(out.progress@.download.unwrap().calls),
 {}
 
 /// An admitted request cannot silently fail on a supported, successful execution.

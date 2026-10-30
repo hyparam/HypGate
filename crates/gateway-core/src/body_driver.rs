@@ -1,5 +1,5 @@
 //! Production body-copy loop. The adapter performs only primitive effects;
-//! ordering, authorization, receipt checks and successful byte counts live here.
+//! ordering, authorization, receipt checks and exact successful byte transfer live here.
 use vstd::prelude::*;
 use crate::{body_copy::{Action, BodyCopy, Failure, Delivery}, request_context::{Context, TransferIdentity, TransferKey},
     owned_stream::OwnedStream, journal_binding::JournalBinding,
@@ -7,8 +7,24 @@ use crate::{body_copy::{Action, BodyCopy, Failure, Delivery}, request_context::{
 
 verus! {
 pub ghost enum Call {
-    Read(Option<usize>), Audit(Header, Seq<u8>),
+    Read(Seq<u8>, Option<usize>), Audit(Header, Seq<u8>),
     Write(Seq<u8>, Option<usize>, u64, Route, u8), Flush(bool),
+}
+pub open spec fn read_bytes(call: Call) -> Seq<u8> {
+    match call { Call::Read(bytes, Some(_)) => bytes, _ => Seq::empty() }
+}
+pub open spec fn written_bytes(call: Call) -> Seq<u8> {
+    match call { Call::Write(bytes, Some(n), _, _, _) => bytes.take(n as int), _ => Seq::empty() }
+}
+pub open spec fn received(calls: Seq<Call>) -> Seq<u8>
+    decreases calls.len(),
+{
+    if calls.len() == 0 { Seq::empty() } else { received(calls.drop_last()) + read_bytes(calls.last()) }
+}
+pub open spec fn written(calls: Seq<Call>) -> Seq<u8>
+    decreases calls.len(),
+{
+    if calls.len() == 0 { Seq::empty() } else { written(calls.drop_last()) + written_bytes(calls.last()) }
 }
 pub open spec fn accepted(calls: Seq<Call>) -> nat
     decreases calls.len(),
@@ -29,7 +45,9 @@ pub open spec fn belongs(calls: Seq<Call>, request: u64, route: Route, direction
 }
 proof fn append_call(before: Seq<Call>, trace: Seq<Call>, call: Call, request: u64, route: Route, direction: u8)
     requires belongs(trace, request, route, direction), call_belongs(call, request, route, direction),
-    ensures belongs(trace.push(call), request, route, direction), before + trace.push(call) == (before + trace).push(call),
+    ensures received(trace.push(call)) == received(trace) + read_bytes(call),
+        written(trace.push(call)) == written(trace) + written_bytes(call),
+        belongs(trace.push(call), request, route, direction), before + trace.push(call) == (before + trace).push(call),
         accepted(trace.push(call)) == accepted(trace) + match call {
             Call::Write(bytes, Some(n), _, _, _) => if n <= bytes.len() { n as nat } else { 0 }, _ => 0,
         },
@@ -48,7 +66,7 @@ pub trait Effects {
     fn read(&mut self, buffer: &mut [u8]) -> (out: Option<usize>)
         ensures final(buffer)@.len() == old(buffer)@.len(),
             out.is_some() ==> out.unwrap() <= old(buffer).len(),
-            final(self).calls() == old(self).calls().push(Call::Read(out));
+            final(self).calls() == old(self).calls().push(Call::Read(match out { Some(n) => final(buffer)@.take(n as int), None => Seq::empty() }, out));
     fn session(&self) -> u128;
     fn audit(&mut self, header: Header, bytes: &[u8]) -> (out: Option<AuditReceipt>)
         requires crate::framing::valid(header), header.payload == bytes.len(),
@@ -67,7 +85,7 @@ pub ghost struct CopySummary { pub identity: TransferIdentity, pub direction: u8
 impl CopySummary {
     pub open spec fn valid(&self) -> bool {
         self.direction <= 1 && belongs(self.calls, self.identity.request, self.identity.route, self.direction)
-            && accepted(self.calls) == self.accepted
+            && accepted(self.calls) == self.accepted && received(self.calls) == written(self.calls)
     }
     pub open spec fn matches(&self, identity: TransferIdentity, direction: u8) -> bool {
         self.valid() && self.identity == identity && self.direction == direction
@@ -102,7 +120,8 @@ impl Completed {
 
 /// May run indefinitely for an infinite source or a blocked external call.
 /// Every normal successful return is a clean EOF with exactly the accepted
-/// effect count, under one request's authorization for the entire loop.
+/// effect count, under one request's authorization for the entire loop. The
+/// concatenated accepted write prefixes equal the returned read bytes in order.
 #[verifier::exec_allows_no_decreases_clause]
 #[verifier::rlimit(100)]
 pub fn copy<E: Effects>(context: &Context, expected: &TransferKey, owner: &mut OwnedStream, journal: &mut JournalBinding,
@@ -130,7 +149,8 @@ pub fn copy<E: Effects>(context: &Context, expected: &TransferKey, owner: &mut O
     };
     let ghost base = effects.calls();
     let ghost mut trace = Seq::<Call>::empty();
-    proof { authority.binding_tenant(); }
+    let ghost initial = owner.state().input();
+    proof { authority.binding_tenant(); copy.state_evidence(owner); owner.state().data_partition(); }
     loop
         invariant context.valid(), key.identity() == expected.identity(), key.identity() == context.transfer_identity(),
             key.identity().request == authority.request(), key.identity().route == authority.binding(), authority.valid(), authority.tenant() == authority.binding().tenant, *authority == context.authority_value(), copy.valid(owner), copy.direction() == direction,
@@ -138,6 +158,8 @@ pub fn copy<E: Effects>(context: &Context, expected: &TransferKey, owner: &mut O
             copy.needs_read() || copy.filled() || copy.audited() || copy.needs_flush() || copy.is_done() || copy.failure().is_some(),
             effects.calls() == base + trace, base == old(effects).calls(),
             belongs(trace, authority.request(), authority.binding(), direction),
+            copy.failure().is_none() ==> owner.state().input() == initial + received(trace)
+                && owner.state().completed() == initial + written(trace),
             copy.failure().is_none() ==> accepted(trace) == copy.accepted()
                 && accepted(effects.calls()) == accepted(base) + copy.accepted(),
     {
@@ -145,10 +167,17 @@ pub fn copy<E: Effects>(context: &Context, expected: &TransferKey, owner: &mut O
         match copy.next() {
             Action::Read => {
                 if copy.begin_read(owner) {
-                    let length = effects.read(copy.read_buffer(owner));
-                    proof { append_call(base, trace, Call::Read(length), authority.request(), authority.binding(), direction); }
-                    proof { trace = trace.push(Call::Read(length)); }
+                    let buffer = copy.read_buffer(owner);
+                    let length = effects.read(buffer);
+                    let ghost bytes = match length { Some(n) => buffer@.take(n as int), None => Seq::empty() };
+                    let ghost call = Call::Read(bytes, length);
+                    proof { append_call(base, trace, call, authority.request(), authority.binding(), direction); }
+                    proof { trace = trace.push(call); }
                     copy.finish_read(owner, length);
+                    proof {
+                        assert(copy.failure().is_none() ==> owner.state().input() =~= initial + received(trace));
+                        assert(copy.failure().is_none() ==> owner.state().completed() =~= initial + written(trace));
+                    }
                 }
             }
             Action::Audit => {
@@ -169,7 +198,18 @@ pub fn copy<E: Effects>(context: &Context, expected: &TransferKey, owner: &mut O
                     proof { append_call(base, trace, call, authority.request(), authority.binding(), direction); }
                     proof { trace = trace.push(call); }
                     let write = delivery.into_write();
+                    proof {
+                        copy.state_evidence(owner); owner.state().payload_within_capacity();
+                        assert(given == owner.state().body().subrange(owner.state().position() as int, owner.state().end() as int));
+                        if count.is_some() {
+                            assert(given.take(count.unwrap() as int) =~= owner.state().body().subrange(owner.state().position() as int, (owner.state().position() + count.unwrap()) as int));
+                        }
+                    }
                     copy.finish_write(owner, &write, count);
+                    proof {
+                        assert(copy.failure().is_none() ==> owner.state().input() =~= initial + received(trace));
+                        assert(copy.failure().is_none() ==> owner.state().completed() =~= initial + written(trace));
+                    }
                 }
             }
             Action::Flush => {
@@ -179,6 +219,14 @@ pub fn copy<E: Effects>(context: &Context, expected: &TransferKey, owner: &mut O
                 copy.finish_flush(owner, ok);
             }
             Action::Done => {
+                proof {
+                    owner.state().data_partition();
+                    assert(received(trace).len() == written(trace).len());
+                    assert forall|i: int| 0 <= i < received(trace).len() implies received(trace)[i] == written(trace)[i] by {
+                        assert((initial + received(trace))[initial.len() + i] == (initial + written(trace))[initial.len() + i]);
+                    }
+                    assert(received(trace) =~= written(trace));
+                }
                 return Ok(Completed { copy, key, trace: Ghost(trace) });
             }
             Action::Failed(failure) => { proof { copy.failure_closes(owner); } return Err(failure); },
