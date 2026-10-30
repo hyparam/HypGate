@@ -10,9 +10,9 @@
 //! admitted exchange ends with exactly one completion record or one explicit
 //! skip while the logger is unhealthy. The effects themselves stay trusted.
 //!
-//! The driver keeps a ghost trace of the steps it took; `run` is the
-//! specification of which traces are allowed, and the lemmas at the end read
-//! the ordering properties off any allowed trace.
+//! The driver trace is bound to the effect-call history, erasing only internal
+//! forwarding/skip milestones. `run` specifies allowed traces; its ordering
+//! lemmas therefore apply to the calls made by `drive`, not a declared history.
 use vstd::prelude::*;
 use crate::body_copy::BodyCopy;
 use crate::exchange_lifecycle::{Closed, Fault, Lifecycle};
@@ -45,49 +45,60 @@ pub enum WriteScope { Control, Exchange }
 /// What the runtime does for the driver. Every method is trusted to perform
 /// exactly the effect named and report what happened; none decides anything.
 pub trait Effects {
-    fn read_head(&mut self) -> HeadRead;
-    /// Hand bytes to the client; false when the client is gone.
-    fn write_client(&mut self, bytes: &Vec<u8>, scope: WriteScope) -> bool;
-    fn close_client(&mut self);
-    /// An operator endpoint for a GET target, answered without a worker.
-    fn endpoint(&mut self, target: &Vec<u8>) -> Option<FixedResponse>;
-    fn acquire_worker(&mut self) -> bool;
-    /// Authenticate, authorize, and bind the route; builds the upstream head.
-    fn admit(&mut self, head: &RequestHead) -> Admit;
-    fn strict(&mut self) -> bool;
-    fn log_healthy(&mut self) -> bool;
-    fn now_ms(&mut self) -> u64;
-    /// Kind 2; false when the append failed.
-    fn audit_request_start(&mut self) -> bool;
-    /// Bind the request body, framed as given, to the worker's input role.
-    fn bind_input(&mut self, framing: Framing) -> bool;
-    /// The upstream path and projected fields the admission built.
-    fn upstream_head(&mut self) -> Option<(Vec<u8>, Vec<Field>)>;
-    /// Resolve, connect, and complete the TLS handshake under the permit.
-    fn connect(&mut self) -> Result<(), ConnectFailure>;
-    fn write_upstream(&mut self, bytes: &Vec<u8>) -> bool;
-    /// Copy the request body upstream as chunks of `stream`, which comes back
-    /// having only been framed through: the runtime is trusted to return the
-    /// stream it was given, so the stream's invariant holds.
+    /// Observable effect attempts. Runtime adapters must faithfully implement this boundary.
+    spec fn events(&self) -> Seq<Step>;
+    fn read_head(&mut self) -> HeadRead
+        ensures final(self).events() == old(self).events();
+    fn write_client(&mut self, bytes: &Vec<u8>, scope: WriteScope) -> bool
+        ensures final(self).events() == old(self).events().push(Step::Client(bytes@, scope));
+    fn close_client(&mut self)
+        ensures final(self).events() == old(self).events();
+    fn endpoint(&mut self, target: &Vec<u8>) -> Option<FixedResponse>
+        ensures final(self).events() == old(self).events();
+    fn acquire_worker(&mut self) -> (out: bool)
+        ensures final(self).events() == old(self).events().push(Step::Worker(out));
+    fn admit(&mut self, head: &RequestHead) -> (out: Admit)
+        ensures final(self).events() == old(self).events().push(Step::Admit(out is Admitted));
+    fn strict(&mut self) -> (out: bool)
+        ensures final(self).events() == old(self).events().push(Step::Strict(out));
+    fn log_healthy(&mut self) -> (out: bool)
+        ensures final(self).events() == old(self).events().push(Step::LogHealthy(out));
+    fn now_ms(&mut self) -> u64
+        ensures final(self).events() == old(self).events();
+    fn audit_request_start(&mut self) -> (out: bool)
+        ensures final(self).events() == old(self).events().push(Step::RequestStart(out));
+    fn bind_input(&mut self, framing: Framing) -> bool
+        ensures final(self).events() == old(self).events();
+    /// Adapter returns the head bound by validated admission; the driver must use it verbatim.
+    fn upstream_head(&mut self) -> (out: Option<(Vec<u8>, Vec<Field>)>)
+        ensures final(self).events() == match out {
+            Some((path, fields)) => old(self).events().push(Step::Prepared(path@, fields@)), None => old(self).events() };
+    fn connect(&mut self) -> (out: Result<(), ConnectFailure>)
+        ensures final(self).events() == old(self).events().push(Step::Connect(out.is_ok()));
+    fn write_upstream(&mut self, bytes: &Vec<u8>) -> bool
+        ensures final(self).events() == old(self).events().push(Step::UpstreamWrite(bytes@));
     fn upload(&mut self, stream: ChunkStream) -> (out: (Result<BodyCopy, Failure>, ChunkStream))
-        ensures out.1.valid();
-    fn read_status_head(&mut self) -> Result<StatusHead, Failure>;
-    /// Kind 3; false when the append failed.
-    fn audit_response_head(&mut self, status: u16) -> bool;
-    /// Copy the response body, framed as given, to the client through `body`;
-    /// `Ok` only when the body was complete as framed. A stream comes back
-    /// having only been framed through, as for `upload`.
+        ensures out.1.valid(), final(self).events() == old(self).events().push(Step::Uploaded(out.1.out()));
+    fn read_status_head(&mut self) -> (out: Result<StatusHead, Failure>)
+        ensures final(self).events() == match out {
+            Ok(head) => old(self).events().push(Step::Status(head.status)), Err(_) => old(self).events() };
+    fn audit_response_head(&mut self, status: u16) -> (out: bool)
+        ensures final(self).events() == old(self).events().push(Step::ResponseHead(status, out));
     fn download(&mut self, framing: Framing, body: Body) -> (out: (Result<BodyCopy, Failure>, Body))
-        ensures match out.1 { Body::Stream(stream) => stream.valid(), Body::Fixed => true };
-    /// Kind 4; false when the append failed.
-    fn audit_completion(&mut self, payload: &Vec<u8>) -> bool;
-    fn observe(&mut self, event: Event);
+        ensures match out.1 { Body::Stream(stream) => stream.valid(), Body::Fixed => true },
+            final(self).events() == match out.1 {
+                Body::Stream(stream) => old(self).events().push(Step::Streamed(stream.out())), Body::Fixed => old(self).events() };
+    fn audit_completion(&mut self, payload: &Vec<u8>) -> (out: bool)
+        ensures final(self).events() == old(self).events().push(Step::Completion(out));
+    fn observe(&mut self, event: Event)
+        ensures final(self).events() == old(self).events();
 }
 
 // ---- the allowed traces ------------------------------------------------------
 
 /// One step the driver took, as the trace records it.
 pub ghost enum Step {
+    Prepared(Seq<u8>, Seq<Field>), Status(u16), Uploaded(Seq<u8>),
     /// Bytes the driver handed to the client.
     Client(Seq<u8>, WriteScope),
     /// Bytes the download effect handed to the client: a chunk stream's frames.
@@ -107,11 +118,12 @@ pub ghost enum Step {
 
 /// What the trace so far has established.
 pub ghost struct Progress {
+    pub prepared: Option<(Seq<u8>, Seq<Field>)>, pub upstream_head_written: bool, pub last_status: Option<u16>,
     pub worker: bool, pub admitted: bool, pub strict: Option<bool>, pub started: Option<bool>, pub connected: bool,
     pub response_logged: Option<(u16, bool)>, pub forwarded: bool, pub log_healthy: Option<bool>, pub completion: Option<bool>,
 }
 pub open spec fn initial() -> Progress {
-    Progress { worker: false, admitted: false, strict: None, started: None, connected: false,
+    Progress { prepared: None, upstream_head_written: false, last_status: None, worker: false, admitted: false, strict: None, started: None, connected: false,
         response_logged: None, forwarded: false, log_healthy: None, completion: None }
 }
 /// Network effects may follow the request-start record: appended, or refused
@@ -124,9 +136,33 @@ pub open spec fn record_allows_dispatch(p: Progress) -> bool {
 pub open spec fn record_allows_forward(p: Progress, status: u16) -> bool {
     p.response_logged == Some((status, true)) || (p.response_logged == Some((status, false)) && p.strict == Some(false))
 }
+/// The prepared head plus precisely the two gateway framing fields.
+pub open spec fn provider_head(bytes: Seq<u8>, path: Seq<u8>, given: Seq<Field>) -> bool {
+    exists|all: Seq<Field>| all.len() == given.len() + 2 && all.take(given.len() as int) == given
+        && crate::http1_exchange::is_chunked(all[all.len() - 2]) && crate::http1_exchange::is_close(all.last())
+        && bytes == crate::http1_write::request_head_bytes(crate::http1_exchange::post(), path, all)
+}
+/// Only internal proof milestones are erased; every observed effect remains.
+pub open spec fn observed_after(events: Seq<Step>, s: Step) -> Seq<Step> {
+    match s { Step::Forward(_) | Step::CompletionSkipped => events, _ => events.push(s) }
+}
+pub open spec fn visible(s: Step) -> Seq<Step> {
+    match s { Step::Forward(_) | Step::CompletionSkipped => Seq::empty(), _ => seq![s] }
+}
+pub open spec fn observations(t: Seq<Step>) -> Seq<Step>
+    decreases t.len(),
+{ if t.len() == 0 { Seq::empty() } else { observations(t.drop_last()) + visible(t.last()) } }
+proof fn observations_push(base: Seq<Step>, t: Seq<Step>, s: Step)
+    ensures base + observations(t.push(s)) == observed_after(base + observations(t), s),
+{ assert(t.push(s).drop_last() =~= t);
+  assert(base + observations(t.push(s)) =~= observed_after(base + observations(t), s)); }
+
 /// The one step relation: which step may follow which progress.
 pub open spec fn step_ok(p: Progress, s: Step) -> Option<Progress> {
     match s {
+        Step::Prepared(path, fields) => if p.admitted && p.prepared.is_none() && !p.connected { Some(Progress { prepared: Some((path, fields)), ..p }) } else { None },
+        Step::Status(status) => if p.connected { Some(Progress { last_status: Some(status), ..p }) } else { None },
+        Step::Uploaded(_) => if p.connected && p.upstream_head_written { Some(p) } else { None },
         Step::Client(_, scope) => if p.forwarded && scope != WriteScope::Exchange { None } else { Some(p) },
         Step::Streamed(_) => Some(p),
         Step::Worker(ok) => if !p.worker && !p.admitted { Some(Progress { worker: ok, ..p }) } else { None },
@@ -136,8 +172,11 @@ pub open spec fn step_ok(p: Progress, s: Step) -> Option<Progress> {
             { Some(Progress { started: Some(ok), ..p }) } else { None },
         Step::Connect(ok) => if record_allows_dispatch(p) && !p.connected && p.response_logged.is_none()
             { Some(Progress { connected: ok, ..p }) } else { None },
-        Step::UpstreamWrite(_) => if p.connected { Some(p) } else { None },
-        Step::ResponseHead(status, ok) => if p.connected && p.response_logged.is_none()
+        Step::UpstreamWrite(bytes) => if p.connected && p.prepared.is_some() &&
+            (p.upstream_head_written || provider_head(bytes, p.prepared.unwrap().0, p.prepared.unwrap().1)) {
+                Some(Progress { upstream_head_written: true, ..p })
+            } else { None },
+        Step::ResponseHead(status, ok) => if p.connected && p.response_logged.is_none() && p.last_status == Some(status)
             { Some(Progress { response_logged: Some((status, ok)), ..p }) } else { None },
         Step::Forward(status) => if !p.forwarded && record_allows_forward(p, status) { Some(Progress { forwarded: true, ..p }) } else { None },
         Step::LogHealthy(b) => Some(Progress { log_healthy: Some(b), ..p }),
@@ -179,7 +218,7 @@ proof fn lemma_writes_push(t: Seq<Step>, s: Step)
 /// bytes the machine produced that have not yet been handed to the client,
 /// and the bytes a live chunk stream has framed that the connection machine
 /// has not yet absorbed (it does so at `finish`).
-struct Driver { trace: Ghost<Seq<Step>>, progress: Ghost<Progress>, connection: Connection, pending: Ghost<Seq<u8>>, streamed: Ghost<Seq<u8>> }
+struct Driver { base: Ghost<Seq<Step>>, trace: Ghost<Seq<Step>>, progress: Ghost<Progress>, connection: Connection, pending: Ghost<Seq<u8>>, streamed: Ghost<Seq<u8>> }
 
 /// The result: the worker's closing proof and the trace, for the theorems.
 pub struct Driven { pub closed: Closed, pub trace: Ghost<Seq<Step>>, pub progress: Ghost<Progress>, pub written: Ghost<Seq<u8>> }
@@ -231,47 +270,52 @@ impl Driver {
     }
     spec fn settled(&self) -> bool { self.inv() && self.pending@.len() == 0 }
 
-    fn new() -> (out: Self)
-        ensures out.settled(), out.progress@ == initial(), out.connection.open(), !out.connection.interim_sent(),
+    spec fn bound<E: Effects>(&self, effects: &E) -> bool { effects.events() == self.base@ + observations(self.trace@) }
+
+    fn new<E: Effects>(effects: &E) -> (out: Self)
+        ensures out.settled(), out.bound(effects), out.base@ == effects.events(), out.progress@ == initial(), out.connection.open(), !out.connection.interim_sent(),
     {
-        let out = Driver { trace: Ghost(Seq::empty()), progress: Ghost(initial()), connection: Connection::new(), pending: Ghost(Seq::empty()), streamed: Ghost(Seq::empty()) };
+        let out = Driver { base: Ghost(effects.events()), trace: Ghost(Seq::empty()), progress: Ghost(initial()), connection: Connection::new(), pending: Ghost(Seq::empty()), streamed: Ghost(Seq::empty()) };
         proof { assert(out.connection.out() + out.streamed@ =~= client_writes(out.trace@) + out.pending@); }
         out
     }
 
     /// Record a step the progress allows.
-    fn record(&mut self, Ghost(s): Ghost<Step>)
-        requires old(self).inv(), step_ok(old(self).progress@, s).is_some(), !(s is Client), !(s is Streamed),
-            s is Forward ==> !old(self).connection.open(),
-        ensures final(self).inv(), final(self).progress@ == step_ok(old(self).progress@, s).unwrap(),
+    fn record<E: Effects>(&mut self, effects: &E, Ghost(s): Ghost<Step>)
+        requires old(self).inv(), effects.events() == observed_after(old(self).base@ + observations(old(self).trace@), s),
+            step_ok(old(self).progress@, s).is_some(), !(s is Client), !(s is Streamed),
+            s is Forward ==> !old(self).connection.open() && old(self).connection.status() == s->Forward_0,
+        ensures final(self).inv(), final(self).bound(effects), final(self).base@ == old(self).base@,
+            final(self).progress@ == step_ok(old(self).progress@, s).unwrap(),
             final(self).trace@ == old(self).trace@.push(s), final(self).connection == old(self).connection,
             final(self).pending@ == old(self).pending@, final(self).streamed@ == old(self).streamed@,
     {
-        proof { lemma_run_push(self.trace@, s); lemma_writes_push(self.trace@, s); }
+        proof { lemma_run_push(self.trace@, s); lemma_writes_push(self.trace@, s); observations_push(self.base@, self.trace@, s); }
         self.trace = Ghost(self.trace@.push(s));
         self.progress = Ghost(step_ok(self.progress@, s).unwrap());
     }
 
     /// Hand the machine's pending bytes to the client and record them.
     fn emit<E: Effects>(&mut self, effects: &mut E, bytes: Vec<u8>, scope: WriteScope) -> (ok: bool)
-        requires old(self).inv(), bytes@ == old(self).pending@,
+        requires old(self).inv(), old(self).bound(old(effects)), bytes@ == old(self).pending@,
             old(self).progress@.forwarded ==> scope == WriteScope::Exchange,
-        ensures final(self).settled(), final(self).progress@ == old(self).progress@, final(self).connection == old(self).connection,
+        ensures final(self).settled(), final(self).bound(final(effects)), final(self).base@ == old(self).base@, final(self).progress@ == old(self).progress@, final(self).connection == old(self).connection,
             final(self).streamed@ == old(self).streamed@,
     {
         let ok = effects.write_client(&bytes, scope);
-        proof { lemma_run_push(self.trace@, Step::Client(bytes@, scope)); lemma_writes_push(self.trace@, Step::Client(bytes@, scope)); }
+        proof { observations_push(self.base@, self.trace@, Step::Client(bytes@, scope)); lemma_run_push(self.trace@, Step::Client(bytes@, scope)); lemma_writes_push(self.trace@, Step::Client(bytes@, scope)); }
         self.trace = Ghost(self.trace@.push(Step::Client(bytes@, scope)));
         self.pending = Ghost(Seq::empty());
         ok
     }
     /// The download effect handed these stream frames to the client.
-    fn note_streamed(&mut self, Ghost(bytes): Ghost<Seq<u8>>)
+    fn note_streamed<E: Effects>(&mut self, effects: &E, Ghost(bytes): Ghost<Seq<u8>>)
         requires old(self).settled(), !old(self).connection.open(),
-        ensures final(self).settled(), final(self).progress@ == old(self).progress@, final(self).connection == old(self).connection,
+            effects.events() == (old(self).base@ + observations(old(self).trace@)).push(Step::Streamed(bytes)),
+        ensures final(self).settled(), final(self).bound(effects), final(self).base@ == old(self).base@, final(self).progress@ == old(self).progress@, final(self).connection == old(self).connection,
             final(self).streamed@ == old(self).streamed@ + bytes,
     {
-        proof { lemma_run_push(self.trace@, Step::Streamed(bytes)); lemma_writes_push(self.trace@, Step::Streamed(bytes)); }
+        proof { observations_push(self.base@, self.trace@, Step::Streamed(bytes)); lemma_run_push(self.trace@, Step::Streamed(bytes)); lemma_writes_push(self.trace@, Step::Streamed(bytes)); }
         self.trace = Ghost(self.trace@.push(Step::Streamed(bytes)));
         self.streamed = Ghost(self.streamed@ + bytes);
         proof { assert(self.connection.out() + self.streamed@ =~= client_writes(self.trace@) + self.pending@); }
@@ -279,8 +323,8 @@ impl Driver {
 
     /// A complete fixed response, then the client's write side is closed.
     fn respond_fixed<E: Effects>(&mut self, effects: &mut E, status: u16, fields: Vec<Field>, body: &[u8])
-        requires old(self).settled(), !old(self).progress@.forwarded,
-        ensures final(self).settled(), final(self).progress@ == old(self).progress@,
+        requires old(self).settled(), old(self).bound(old(effects)), !old(self).progress@.forwarded,
+        ensures final(self).settled(), final(self).bound(final(effects)), final(self).base@ == old(self).base@, final(self).progress@ == old(self).progress@,
     {
         let reason = reason(status);
         match self.connection.respond_fixed(status, reason.as_slice(), fields, body) {
@@ -295,17 +339,18 @@ impl Driver {
     }
     /// A refusal or failure: the status alone.
     fn refuse<E: Effects>(&mut self, effects: &mut E, status: u16)
-        requires old(self).settled(), !old(self).progress@.forwarded,
-        ensures final(self).settled(), final(self).progress@ == old(self).progress@,
+        requires old(self).settled(), old(self).bound(old(effects)), !old(self).progress@.forwarded,
+        ensures final(self).settled(), final(self).bound(final(effects)), final(self).base@ == old(self).base@, final(self).progress@ == old(self).progress@,
     {
         let empty: Vec<u8> = Vec::new();
         self.respond_fixed(effects, status, Vec::new(), empty.as_slice());
     }
 
     /// A connection that never reached admission closes without a lifecycle.
-    fn close_without(self) -> (out: Driven)
-        requires self.settled(), !self.progress@.admitted,
-        ensures run(out.trace@) == Some(out.progress@), client_writes(out.trace@) == out.written@,
+    fn close_without<E: Effects>(self, effects: &E) -> (out: Driven)
+        requires self.settled(), self.bound(effects), !self.progress@.admitted,
+        ensures effects.events() == self.base@ + observations(out.trace@),
+            run(out.trace@) == Some(out.progress@), client_writes(out.trace@) == out.written@,
             out.progress@ == self.progress@, !out.closed.recorded(),
     {
         Driven { closed: Closed::without_request(), trace: self.trace, progress: self.progress, written: Ghost(self.connection.out() + self.streamed@) }
@@ -314,62 +359,77 @@ impl Driver {
     /// Kind 4 for a finished exchange, unless the logger is already unhealthy;
     /// then the skip is recorded instead. The lifecycle closes with the truth.
     fn complete<E: Effects>(mut self, effects: &mut E, life: Lifecycle) -> (out: Driven)
-        requires self.settled(), self.progress@.admitted, self.progress@.completion.is_none(), life.valid(), life.terminal(),
-        ensures run(out.trace@) == Some(out.progress@), client_writes(out.trace@) == out.written@,
+        requires self.settled(), self.bound(old(effects)), self.progress@.admitted, self.progress@.completion.is_none(), life.valid(), life.terminal(),
+        ensures final(effects).events() == self.base@ + observations(out.trace@),
+            run(out.trace@) == Some(out.progress@), client_writes(out.trace@) == out.written@,
             out.progress@.admitted, out.progress@.completion.is_some(),
             out.closed.recorded() == (out.progress@.completion == Some(true)),
     {
         if !effects.log_healthy() {
-            self.record(Ghost(Step::LogHealthy(false)));
-            self.record(Ghost(Step::CompletionSkipped));
+            self.record(effects, Ghost(Step::LogHealthy(false)));
+            self.record(effects, Ghost(Step::CompletionSkipped));
             return Driven { closed: life.close(false), trace: self.trace, progress: self.progress, written: Ghost(self.connection.out() + self.streamed@) };
         }
-        self.record(Ghost(Step::LogHealthy(true)));
+        self.record(effects, Ghost(Step::LogHealthy(true)));
         let payload = life.completion(effects.now_ms());
         let recorded = effects.audit_completion(&payload);
-        self.record(Ghost(Step::Completion(recorded)));
+        self.record(effects, Ghost(Step::Completion(recorded)));
         Driven { closed: life.close(recorded), trace: self.trace, progress: self.progress, written: Ghost(self.connection.out() + self.streamed@) }
     }
 
     /// The provider exchange: connect, upload, read the head, forward it, download.
     /// On `Err` nothing further has been promised to the client beyond what the
     /// connection machine already holds; the caller answers or aborts.
+    #[verifier::rlimit(30)]
     fn exchange<E: Effects>(&mut self, effects: &mut E, life: &mut Lifecycle, strict: bool) -> (out: Result<(), Fault>)
-        requires old(self).settled(), record_allows_dispatch(old(self).progress@), !old(self).progress@.connected,
+        requires old(self).settled(), old(self).bound(old(effects)), record_allows_dispatch(old(self).progress@), !old(self).progress@.connected,
             old(self).progress@.response_logged.is_none(), !old(self).progress@.forwarded, old(self).progress@.completion.is_none(),
+            old(self).progress@.prepared.is_none(), old(self).progress@.admitted,
             old(self).progress@.strict == Some(strict), old(self).connection.open(),
             old(life).valid(), old(life).open(), !old(life).uploaded(),
-        ensures final(self).settled(), final(self).progress@.admitted == old(self).progress@.admitted,
+        ensures final(self).settled(), final(self).bound(final(effects)), final(self).base@ == old(self).base@,
+            final(self).progress@.admitted == old(self).progress@.admitted,
             final(self).progress@.completion.is_none(), final(life).valid(),
             out.is_ok() ==> final(life).terminal() && final(self).connection.done(),
             out.is_err() ==> final(life).open(),
     {
         let (path, fields) = match effects.upstream_head() { Some(head) => head, None => return Err(Fault::Metadata) };
+        self.record(effects, Ghost(Step::Prepared(path@, fields@)));
         match effects.connect() {
-            Ok(()) => self.record(Ghost(Step::Connect(true))),
-            Err(failure) => { self.record(Ghost(Step::Connect(false))); return Err(connect_fault(failure)); }
+            Ok(()) => self.record(effects, Ghost(Step::Connect(true))),
+            Err(failure) => { self.record(effects, Ghost(Step::Connect(false))); return Err(connect_fault(failure)); }
         }
         let mut upstream = Upstream::new();
         let (head, stream) = match upstream.request(path.as_slice(), fields) { Some(pair) => pair, None => return Err(Fault::Metadata) };
-        self.record(Ghost(Step::UpstreamWrite(head@)));
-        if !effects.write_upstream(&head) { return Err(Fault::Http); }
+        proof {
+            assert(provider_head(head@, path@, fields@)) by {
+                let all = upstream.head_fields();
+                assert(crate::http1_exchange::is_chunked(all[all.len() - 2]));
+                assert(crate::http1_exchange::is_close(all.last()));
+            }
+        }
+        let written = effects.write_upstream(&head);
+        self.record(effects, Ghost(Step::UpstreamWrite(head@)));
+        if !written { return Err(Fault::Http); }
         let (uploaded, mut stream) = effects.upload(stream);
+        self.record(effects, Ghost(Step::Uploaded(stream.out())));
         let copy = match uploaded { Ok(copy) => copy, Err(failure) => return Err(fault_of(failure, Fault::Upload)) };
         if !copy.is_finished() || stream.is_ended() { return Err(Fault::Upload); }
         let last = stream.end();
-        self.record(Ghost(Step::UpstreamWrite(last@)));
-        if !effects.write_upstream(&last) { return Err(Fault::Upload); }
+        let written = effects.write_upstream(&last);
+        self.record(effects, Ghost(Step::UpstreamWrite(last@)));
+        if !written { return Err(Fault::Upload); }
         upstream.finish(stream);
         life.upload_finished(&copy);
 
         // Response heads until a final one; the machine classifies each.
-        let (status, fields, body_framing) = match final_head(effects) { Ok(head) => head, Err(fault) => return Err(fault) };
+        let (status, fields, body_framing) = match final_head(self, effects) { Ok(head) => head, Err(fault) => return Err(fault) };
         if status < 200 { return Err(Fault::Metadata); }
         let fields = match crate::headers::forward_response(&fields) { Ok(fields) => fields, Err(_) => return Err(Fault::Metadata) };
         // Kind 3 before the head reaches the client. Strict mode stops here on
         // a failed append; availability mode continues with a gap.
         let logged = effects.audit_response_head(status);
-        self.record(Ghost(Step::ResponseHead(status, logged)));
+        self.record(effects, Ghost(Step::ResponseHead(status, logged)));
         if !logged && strict { return Err(Fault::Log); }
         let reason = reason(status);
         let (copied, body) = if status == 204 || status == 304 {
@@ -378,7 +438,7 @@ impl Driver {
                 Some(bytes) => {
                     self.pending = Ghost(bytes@);
                     proof { assert(self.connection.out() + self.streamed@ =~= client_writes(self.trace@) + self.pending@); }
-                    self.record(Ghost(Step::Forward(status)));
+                    self.record(effects, Ghost(Step::Forward(status)));
                     if !self.emit(effects, bytes, WriteScope::Exchange) { return Err(Fault::Client); }
                 }
                 None => return Err(Fault::Metadata),
@@ -390,13 +450,13 @@ impl Driver {
             };
             self.pending = Ghost(head@);
             proof { assert(self.connection.out() + self.streamed@ =~= client_writes(self.trace@) + self.pending@); }
-            self.record(Ghost(Step::Forward(status)));
+            self.record(effects, Ghost(Step::Forward(status)));
             if !self.emit(effects, head, WriteScope::Exchange) { return Err(Fault::Client); }
             effects.download(body_framing, Body::Stream(stream))
         };
         // Whatever the stream framed, the effect handed to the client.
         let body = match body {
-            Body::Stream(stream) => { self.note_streamed(Ghost(stream.out())); Body::Stream(stream) }
+            Body::Stream(stream) => { self.note_streamed(effects, Ghost(stream.out())); Body::Stream(stream) }
             Body::Fixed => Body::Fixed,
         };
         let copy = match copied { Ok(copy) => copy, Err(failure) => return Err(fault_of(failure, Fault::Download)) };
@@ -428,14 +488,20 @@ pub const MAX_INTERIM_HEADS: u32 = 8;
 
 /// Read status heads until a final one, as the verified classification says.
 /// Reads at most `MAX_INTERIM_HEADS + 1` heads.
-fn final_head<E: Effects>(effects: &mut E) -> (out: Result<(u16, Vec<Field>, Framing), Fault>)
+fn final_head<E: Effects>(d: &mut Driver, effects: &mut E) -> (out: Result<(u16, Vec<Field>, Framing), Fault>)
+    requires old(d).settled(), old(d).bound(old(effects)), old(d).progress@.connected,
+    ensures final(d).settled(), final(d).bound(final(effects)), final(d).base@ == old(d).base@,
+        final(d).progress@ == (Progress { last_status: final(d).progress@.last_status, ..old(d).progress@ }),
+        out.is_ok() ==> final(d).progress@.last_status == Some(out.unwrap().0),
 {
     let mut interim: u32 = 0;
     loop
-        invariant interim <= MAX_INTERIM_HEADS,
+        invariant interim <= MAX_INTERIM_HEADS, d.settled(), d.bound(effects), d.progress@.connected, d.base@ == old(d).base@,
+            d.progress@ == (Progress { last_status: d.progress@.last_status, ..old(d).progress@ }),
         decreases MAX_INTERIM_HEADS - interim,
     {
         let status_head = match effects.read_status_head() { Ok(head) => head, Err(failure) => return Err(fault_of(failure, Fault::Http)) };
+        d.record(effects, Ghost(Step::Status(status_head.status)));
         match upstream_status(status_head.status, &status_head.fields) {
             UpstreamStatus::Interim => {
                 if interim == MAX_INTERIM_HEADS { return Err(Fault::Http); }
@@ -453,20 +519,20 @@ fn final_head<E: Effects>(effects: &mut E) -> (out: Result<(u16, Vec<Field>, Fra
 /// allows; an admitted exchange ends with a completion record or an explicit
 /// skip; and the closing proof says whether the record was appended.
 pub fn drive<E: Effects>(effects: &mut E) -> (out: Driven)
-    ensures run(out.trace@) == Some(out.progress@), client_writes(out.trace@) == out.written@,
+    ensures final(effects).events() == old(effects).events() + observations(out.trace@), run(out.trace@) == Some(out.progress@), client_writes(out.trace@) == out.written@,
         out.progress@.admitted ==> out.progress@.completion.is_some(),
         out.closed.recorded() == (out.progress@.completion == Some(true)),
 {
-    let mut d = Driver::new();
+    let mut d = Driver::new(effects);
     let head = match effects.read_head() {
         HeadRead::Head(head) => head,
-        HeadRead::TooLarge => { d.refuse(effects, refusal_status(Refusal::HeadTooLarge)); return d.close_without(); }
-        HeadRead::Malformed => { d.refuse(effects, refusal_status(Refusal::Malformed)); return d.close_without(); }
-        HeadRead::Closed => return d.close_without(),
+        HeadRead::TooLarge => { d.refuse(effects, refusal_status(Refusal::HeadTooLarge)); return d.close_without(effects); }
+        HeadRead::Malformed => { d.refuse(effects, refusal_status(Refusal::Malformed)); return d.close_without(effects); }
+        HeadRead::Closed => return d.close_without(effects),
     };
     let body_framing = match framing(&head.fields, true) {
         Ok(framing) => framing,
-        Err(_) => { d.refuse(effects, refusal_status(Refusal::Malformed)); return d.close_without(); }
+        Err(_) => { d.refuse(effects, refusal_status(Refusal::Malformed)); return d.close_without(effects); }
     };
     // A client waiting for permission to send its body gets it; the body is
     // read whether or not the request is then admitted.
@@ -482,30 +548,35 @@ pub fn drive<E: Effects>(effects: &mut E) -> (out: Driven)
     }
     if is_get(&head.method) {
         match effects.endpoint(&head.target) {
-            Some(response) => { d.respond_fixed(effects, response.status, response.fields, response.body.as_slice()); return d.close_without(); }
+            Some(response) => { d.respond_fixed(effects, response.status, response.fields, response.body.as_slice()); return d.close_without(effects); }
             None => {}
         }
     }
     if !effects.acquire_worker() {
-        d.record(Ghost(Step::Worker(false)));
+        d.record(effects, Ghost(Step::Worker(false)));
         d.respond_fixed(effects, refusal_status(Refusal::Unavailable), Vec::new(), b"workers unavailable\n");
-        return d.close_without();
+        return d.close_without(effects);
     }
-    d.record(Ghost(Step::Worker(true)));
+    d.record(effects, Ghost(Step::Worker(true)));
     match effects.admit(&head) {
         Admit::Refused(refusal) => {
-            d.record(Ghost(Step::Admit(false)));
+            d.record(effects, Ghost(Step::Admit(false)));
             d.refuse(effects, refusal_status(refusal));
-            return d.close_without();
+            return d.close_without(effects);
         }
-        Admit::Admitted => d.record(Ghost(Step::Admit(true))),
+        Admit::Admitted => d.record(effects, Ghost(Step::Admit(true))),
     }
     let strict = effects.strict();
-    d.record(Ghost(Step::Strict(strict)));
+    d.record(effects, Ghost(Step::Strict(strict)));
     let mut life = Lifecycle::begin();
     // If strict logging is already unavailable, do not even open an upstream
     // connection. Later failures still use the stream gate.
-    if strict && !effects.log_healthy() {
+    let healthy = if strict {
+        let healthy = effects.log_healthy();
+        d.record(effects, Ghost(Step::LogHealthy(healthy)));
+        healthy
+    } else { true };
+    if strict && !healthy {
         d.refuse(effects, refusal_status(Refusal::Unavailable));
         life.failed(Fault::Log);
         return d.complete(effects, life);
@@ -513,7 +584,7 @@ pub fn drive<E: Effects>(effects: &mut E) -> (out: Driven)
     // Kind 2 before any DNS, TCP, or TLS effect. Strict mode needs the
     // acknowledgment before dispatch; availability mode forwards with a gap.
     let started = effects.audit_request_start();
-    d.record(Ghost(Step::RequestStart(started)));
+    d.record(effects, Ghost(Step::RequestStart(started)));
     if !started && strict {
         d.refuse(effects, refusal_status(Refusal::Unavailable));
         life.failed(Fault::StartRefused);

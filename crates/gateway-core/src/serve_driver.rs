@@ -28,27 +28,28 @@ pub enum Window { Drain, Cancel }
 /// What the runtime does for the driver. Every method is trusted to perform
 /// exactly the effect named and report what happened; none decides anything.
 pub trait Effects {
-    /// Whether shutdown has been triggered.
-    fn triggered(&mut self) -> bool;
-    /// Block for the next inbound connection; the socket stays with the
-    /// effects until it is served or discarded.
-    fn accept(&mut self) -> Accepted;
-    /// Take a connection credit for the accepted socket; false closes it unanswered.
-    fn admit_connection(&mut self) -> bool;
-    /// Hand the admitted socket and its credit to a connection thread.
-    fn serve_connection(&mut self);
-    /// Drop the accepted socket: shutdown was triggered after it arrived.
-    fn discard_connection(&mut self);
-    /// Close the listening socket.
-    fn stop_accepting(&mut self);
-    /// Permanently close worker admission.
-    fn close_workers(&mut self);
-    /// Wait up to the window for connection and worker credits to drain; true when both did.
-    fn wait_drained(&mut self, window: Window) -> bool;
-    /// Cancel every in-flight exchange.
-    fn cancel_live(&mut self);
-    /// Close, drain, and join the logger; false when it did not finish in its window.
-    fn close_log(&mut self) -> bool;
+    /// The primitive call history, supplied by the adapter contract, never invented by the driver.
+    spec fn events(&self) -> Seq<Step>;
+    fn triggered(&mut self) -> (out: bool)
+        ensures final(self).events() == old(self).events().push(Step::Triggered(out));
+    fn accept(&mut self) -> (out: Accepted)
+        ensures final(self).events() == old(self).events().push(Step::Accept(out));
+    fn admit_connection(&mut self) -> (out: bool)
+        ensures final(self).events() == old(self).events().push(Step::Admitted(out));
+    fn serve_connection(&mut self)
+        ensures final(self).events() == old(self).events().push(Step::Served);
+    fn discard_connection(&mut self)
+        ensures final(self).events() == old(self).events().push(Step::Discarded);
+    fn stop_accepting(&mut self)
+        ensures final(self).events() == old(self).events().push(Step::StopAccepting);
+    fn close_workers(&mut self)
+        ensures final(self).events() == old(self).events().push(Step::CloseWorkers);
+    fn wait_drained(&mut self, window: Window) -> (out: bool)
+        ensures final(self).events() == old(self).events().push(Step::Wait(window, out));
+    fn cancel_live(&mut self)
+        ensures final(self).events() == old(self).events().push(Step::Cancel);
+    fn close_log(&mut self) -> (out: bool)
+        ensures final(self).events() == old(self).events().push(Step::CloseLog(out));
 }
 
 // ---- the allowed traces ------------------------------------------------------
@@ -130,7 +131,7 @@ proof fn lemma_run_push(t: Seq<Step>, s: Step)
 
 // ---- the driver state ----------------------------------------------------------
 
-struct Driver { trace: Ghost<Seq<Step>>, progress: Ghost<Progress> }
+struct Driver { base: Ghost<Seq<Step>>, trace: Ghost<Seq<Step>>, progress: Ghost<Progress> }
 
 /// The result: whether accepting ended by the flag rather than a failure,
 /// whether the logger finished, and the trace for the theorems.
@@ -138,17 +139,20 @@ pub struct Driven { pub accept_ok: bool, pub log_ok: bool, pub trace: Ghost<Seq<
 
 impl Driver {
     spec fn inv(&self) -> bool { run(self.trace@) == Some(self.progress@) }
+    spec fn bound<E: Effects>(&self, effects: &E) -> bool { effects.events() == self.base@ + self.trace@ }
 
-    fn new() -> (out: Self)
-        ensures out.inv(), out.progress@ == initial(),
+    fn new<E: Effects>(effects: &E) -> (out: Self)
+        ensures out.inv(), out.progress@ == initial(), out.bound(effects), out.base@ == effects.events(),
     {
-        Driver { trace: Ghost(Seq::empty()), progress: Ghost(initial()) }
+        Driver { base: Ghost(effects.events()), trace: Ghost(Seq::empty()), progress: Ghost(initial()) }
     }
 
     /// Record a step the progress allows.
-    fn record(&mut self, Ghost(s): Ghost<Step>)
+    fn record<E: Effects>(&mut self, effects: &E, Ghost(s): Ghost<Step>)
         requires old(self).inv(), step_ok(old(self).progress@, s).is_some(),
-        ensures final(self).inv(), final(self).progress@ == step_ok(old(self).progress@, s).unwrap(),
+            effects.events() == old(self).base@ + old(self).trace@.push(s),
+        ensures final(self).inv(), final(self).bound(effects), final(self).base@ == old(self).base@,
+            final(self).progress@ == step_ok(old(self).progress@, s).unwrap(),
             final(self).trace@ == old(self).trace@.push(s),
     {
         proof { lemma_run_push(self.trace@, s); }
@@ -162,34 +166,34 @@ impl Driver {
     /// (`false`). A round that first sees the flag set returns at once, and
     /// every round records at least one step.
     fn accept_step<E: Effects>(&mut self, effects: &mut E) -> (out: Option<bool>)
-        requires old(self).inv(), old(self).progress@ == initial(),
-        ensures final(self).inv(), final(self).trace@.len() > old(self).trace@.len(),
+        requires old(self).inv(), old(self).bound(old(effects)), old(self).progress@ == initial(),
+        ensures final(self).inv(), final(self).bound(final(effects)), final(self).base@ == old(self).base@, final(self).trace@.len() > old(self).trace@.len(),
             match out {
                 Some(_) => final(self).progress@ == (Progress { stop_seen: true, ..initial() }),
                 None => final(self).progress@ == initial(),
             },
     {
         let t = effects.triggered();
-        self.record(Ghost(Step::Triggered(t)));
+        self.record(effects, Ghost(Step::Triggered(t)));
         if t { return Some(true); }
         let a = effects.accept();
-        self.record(Ghost(Step::Accept(a)));
+        self.record(effects, Ghost(Step::Accept(a)));
         match a {
             Accepted::Failed => Some(false),
             Accepted::Interrupted => None,
             Accepted::Connection => {
                 let t = effects.triggered();
-                self.record(Ghost(Step::Triggered(t)));
+                self.record(effects, Ghost(Step::Triggered(t)));
                 if t {
                     effects.discard_connection();
-                    self.record(Ghost(Step::Discarded));
+                    self.record(effects, Ghost(Step::Discarded));
                     return Some(true);
                 }
                 let ok = effects.admit_connection();
-                self.record(Ghost(Step::Admitted(ok)));
+                self.record(effects, Ghost(Step::Admitted(ok)));
                 if ok {
                     effects.serve_connection();
-                    self.record(Ghost(Step::Served));
+                    self.record(effects, Ghost(Step::Served));
                 }
                 None
             }
@@ -207,11 +211,11 @@ impl Driver {
     /// here.
     #[verifier::exec_allows_no_decreases_clause]
     fn accept_loop<E: Effects>(&mut self, effects: &mut E) -> (ok: bool)
-        requires old(self).inv(), old(self).progress@ == initial(),
-        ensures final(self).inv(), final(self).progress@ == (Progress { stop_seen: true, ..initial() }),
+        requires old(self).inv(), old(self).bound(old(effects)), old(self).progress@ == initial(),
+        ensures final(self).inv(), final(self).bound(final(effects)), final(self).base@ == old(self).base@, final(self).progress@ == (Progress { stop_seen: true, ..initial() }),
     {
         loop
-            invariant self.inv(), self.progress@ == initial(),
+            invariant self.inv(), self.bound(effects), self.base@ == old(self).base@, self.progress@ == initial(),
         {
             match self.accept_step(effects) {
                 Some(ok) => return ok,
@@ -225,26 +229,27 @@ impl Driver {
 /// accepting, close worker admission, wait one window, cancel and wait once
 /// more if that did not drain, and close the logger.
 pub fn serve<E: Effects>(effects: &mut E) -> (out: Driven)
-    ensures run(out.trace@) == Some(out.progress@), out.progress@.stop_seen, out.progress@.stopped, out.progress@.workers_closed,
+    ensures final(effects).events() == old(effects).events() + out.trace@,
+        run(out.trace@) == Some(out.progress@), out.progress@.stop_seen, out.progress@.stopped, out.progress@.workers_closed,
         out.progress@.drained == Some(true) || out.progress@.cancel_waited, out.progress@.log_closed == Some(out.log_ok),
         out.progress@.pending is Idle,
 {
-    let mut d = Driver::new();
+    let mut d = Driver::new(effects);
     let accept_ok = d.accept_loop(effects);
     effects.stop_accepting();
-    d.record(Ghost(Step::StopAccepting));
+    d.record(effects, Ghost(Step::StopAccepting));
     effects.close_workers();
-    d.record(Ghost(Step::CloseWorkers));
+    d.record(effects, Ghost(Step::CloseWorkers));
     let drained = effects.wait_drained(Window::Drain);
-    d.record(Ghost(Step::Wait(Window::Drain, drained)));
+    d.record(effects, Ghost(Step::Wait(Window::Drain, drained)));
     if !drained {
         effects.cancel_live();
-        d.record(Ghost(Step::Cancel));
+        d.record(effects, Ghost(Step::Cancel));
         let _waited = effects.wait_drained(Window::Cancel);
-        d.record(Ghost(Step::Wait(Window::Cancel, _waited)));
+        d.record(effects, Ghost(Step::Wait(Window::Cancel, _waited)));
     }
     let log_ok = effects.close_log();
-    d.record(Ghost(Step::CloseLog(log_ok)));
+    d.record(effects, Ghost(Step::CloseLog(log_ok)));
     Driven { accept_ok, log_ok, trace: d.trace, progress: d.progress }
 }
 

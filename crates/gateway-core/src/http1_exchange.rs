@@ -541,6 +541,7 @@ impl Upstream {
         ensures final(self).valid(), match out {
             Some(pair) => !old(self).sent() && final(self).sent() && final(self).path() == path@
                 && final(self).head_fields().len() == fields@.len() + 2 && final(self).head_fields().take(fields@.len() as int) == fields@
+                && is_chunked(final(self).head_fields()[fields@.len() as int]) && is_close(final(self).head_fields().last())
                 && final(self).head() == crate::http1_write::request_head_bytes(post(), path@, final(self).head_fields())
                 && pair.0@ == final(self).head() && final(self).out() == old(self).out() + pair.0@
                 && pair.1.valid() && !pair.1.ended() && pair.1.out() == Seq::<u8>::empty() && pair.1.body() == Seq::<u8>::empty(),
