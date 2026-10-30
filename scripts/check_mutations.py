@@ -23,6 +23,16 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ('body_driver.rs', 'body_driver_invents_eof', 'effects.read(copy.read_buffer(owner))', 'Some(0usize)'),
+    ('body_driver.rs', 'body_driver_skips_audit', 'effects.audit(header, bytes)', 'None::<AuditReceipt>'),
+    ('body_driver.rs', 'body_driver_skips_write', 'effects.write(context, &delivery, direction)', 'Some(delivery.bytes().len())'),
+    ('body_driver.rs', 'body_driver_skips_flush', 'effects.flush()', 'true'),
+    ('body_driver.rs', 'body_driver_corrupts_accepted_count', 'copy.finish_write(owner, &write, count);', 'copy.finish_write(owner, &write, Some(1));'),
+    ('body_driver.rs', 'body_driver_accepts_foreign_owner', 'if owner.owner_id() != authority.request_id()', 'if false && owner.owner_id() != authority.request_id()'),
+    ('body_driver.rs', 'body_driver_mislabels_request', 'request: authority.request_id(), route:', 'request: 0, route:'),
+    ('body_driver.rs', 'body_driver_mislabels_direction', 'BodyCopy::begin(owner, direction)', 'BodyCopy::begin(owner, 0)'),
+    ('body_copy.rs', 'body_driver_releases_empty_slice', 'Some(Delivery { write, bytes, owner:', 'Some(Delivery { write, bytes: &[], owner:'),
+
     ('exchange_driver.rs', 'context_driver_admits_another_input', 'effects.admit(&head)', 'effects.admit(&RequestHead { method: Vec::new(), target: Vec::new(), fields: Vec::new() })'),
     ('exchange_driver.rs', 'context_driver_forgets_observed_input', 'Step::ReadHead(input) => input, _ => received_input(events.drop_last()),', 'Step::ReadHead(input) => None, _ => received_input(events.drop_last()),'),
 

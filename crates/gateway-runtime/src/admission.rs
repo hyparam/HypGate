@@ -1,7 +1,7 @@
 //! This module is trusted Rust, not Verus-verified. It owns registry keys and
 //! stream storage so callers cannot return a credit while retaining its stream.
 use crate::transfer::{AuditLog, Direction, LogRecord, RecordKind, TransferError};
-use gateway_core::policy::{AuthorizedRequest, Policy};
+use gateway_core::policy::Policy;
 use gateway_core::resource::{RequestKey, ResourceAdmission};
 use gateway_core::owned_stream::OwnedStream;
 use gateway_core::stream::StreamChunk;
@@ -153,12 +153,6 @@ impl<'a> Request<'a> {
 
     fn stream(&self) -> Option<&StreamChunk> { self.lease.stream().map(OwnedStream::stream) }
     fn stream_mut(&mut self) -> Option<&mut OwnedStream> { self.lease.stream_mut() }
-    pub(crate) fn owned(&self) -> Option<&OwnedStream> { self.lease.stream() }
-    /// The verified owner, its authority, and its journal designation, for the
-    /// body-copy machine. The lease keeps ownership; nothing is extracted.
-    pub(crate) fn parts(&mut self) -> Option<(&mut OwnedStream, &AuthorizedRequest<'a>, &mut gateway_core::journal_binding::JournalBinding)> {
-        Some((self.lease.stream_mut()?, self.context.authority(), &mut self.journal))
-    }
     /// The stream this ticket was prepared against, if the ticket is ours.
     fn bound_stream(&self, ticket: &WriteTicket<'_>) -> Option<&OwnedStream> {
         if std::ptr::eq(ticket.admission, self.lease.admission) { self.lease.stream() } else { None }

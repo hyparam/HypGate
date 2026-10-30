@@ -187,6 +187,10 @@ impl OwnedStream {
         ensures out == (registry.owns(&self.key()) && !self.state().closed()),
     { registry.capacity(&self.key).is_some() && !self.stream.is_closed() }
 
+    pub proof fn owner_evidence(&self)
+        requires self.valid(),
+        ensures self.state().owner() == self.key().id(),
+    {}
     pub fn owner_id(&self) -> (out: u64)
         requires self.valid(),
         ensures out == self.key().id(), out == self.state().owner(),

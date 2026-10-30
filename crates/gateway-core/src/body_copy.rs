@@ -24,6 +24,21 @@ pub enum Action { Read, Audit, Write, Flush, Done, Failed(Failure) }
 #[derive(PartialEq, Eq, Structural, Clone, Copy, Debug)]
 enum Phase { NeedRead, Reading, Filled, Auditing, Audited, Writing, NeedFlush, Done, Failed }
 
+/// The exact borrowed bytes released by the gate, together with their ticket
+/// and the source/receipt evidence at release. Its fields cannot be replaced.
+pub struct Delivery<'a> {
+    write: AuthorizedWrite, bytes: &'a [u8], owner: Ghost<OwnedStream>, journal: Ghost<JournalBinding>,
+}
+impl<'a> Delivery<'a> {
+    pub closed spec fn write_value(&self) -> AuthorizedWrite { self.write }
+    pub closed spec fn bytes_value(&self) -> Seq<u8> { self.bytes@ }
+    pub closed spec fn permits(&self, authority: &AuthorizedRequest, direction: u8) -> bool {
+        self.write.delivers(&self.owner@, authority, &self.journal@, direction, self.bytes@)
+    }
+    pub fn bytes(&self) -> (out: &[u8]) ensures out@ == self.bytes_value(), { self.bytes }
+    pub fn into_write(self) -> (out: AuthorizedWrite) ensures out == self.write_value(), { self.write }
+}
+
 pub struct BodyCopy {
     direction: u8,
     accepted: u64,
@@ -80,6 +95,18 @@ impl BodyCopy {
         }
     }
 
+    pub proof fn state_evidence(&self, stream: &OwnedStream)
+        requires self.valid(stream),
+        ensures stream.valid(), self.direction() <= 1,
+    {}
+    pub proof fn stable_phases(&self)
+        ensures (self.needs_read() || self.filled() || self.audited() || self.needs_flush() || self.is_done() || self.failure().is_some())
+            ==> !self.reading() && !self.auditing() && !self.writing(),
+    {}
+    pub proof fn failure_closes(&self, stream: &OwnedStream)
+        requires self.valid(stream), self.failure().is_some(),
+        ensures stream.state().closed(),
+    {}
     pub fn accepted_bytes(&self) -> (out: u64)
         ensures out == self.accepted(),
     { self.accepted }
@@ -207,7 +234,7 @@ impl BodyCopy {
                     && final(stream).state().auditable(authority, old(self).direction())
                     && crate::framing::valid(header)
                     && header == final(stream).state().audit_header(authority.tenant(), old(self).direction())
-                    && bytes@ == final(stream).state().body(),
+                    && bytes@ == final(stream).state().body() && header.payload == bytes.len(),
                 None => (final(self).audited() && *final(stream) == *old(stream) && final(stream).state().failed())
                     || final(self).failure() == Some(Failure::InvalidState),
             },
@@ -264,15 +291,16 @@ impl BodyCopy {
     /// covered by a matching logged receipt. The ticket comes back with the
     /// bytes and must be returned to `finish_write`.
     pub fn write_bytes<'a, D, C>(&mut self, stream: &'a mut OwnedStream, authority: &AuthorizedRequest,
-        journal: &JournalBinding, route: Option<&ResolvedRoute<'_, D, C>>) -> (out: Option<(AuthorizedWrite, &'a [u8])>)
+        journal: &JournalBinding, route: Option<&ResolvedRoute<'_, D, C>>) -> (out: Option<Delivery<'a>>)
         requires old(self).valid(old(stream)), old(self).audited(), authority.valid(),
         ensures final(self).valid(final(stream)), final(self).accepted() == old(self).accepted(),
             final(self).same_copy(old(self)), final(stream).key() == old(stream).key(),
             match out {
-                Some((write, bytes)) => final(self).writing() && write.ticket() == final(self).ticket()
-                    && write.delivers(final(stream), authority, journal, old(self).direction(), bytes@)
-                    && bytes@.len() > 0 && authority.grants(write.route())
-                    && match route { Some(route) => route.bound_to(authority) && write.route() == route.route(), None => true },
+                Some(delivery) => final(self).writing() && delivery.write_value().ticket() == final(self).ticket()
+                    && delivery.write_value().delivers(final(stream), authority, journal, old(self).direction(), delivery.bytes_value())
+                    && delivery.permits(authority, old(self).direction())
+                    && delivery.bytes_value().len() > 0 && authority.grants(delivery.write_value().route())
+                    && match route { Some(route) => route.bound_to(authority) && delivery.write_value().route() == route.route(), None => true },
                 None => final(self).failure() == Some(Failure::InvalidState),
             },
     {
@@ -287,12 +315,13 @@ impl BodyCopy {
         self.ticket = Ghost(write.ticket());
         self.phase = Phase::Writing;
         proof { stream.payload_bound(); stream.state().payload_within_capacity(); }
+        let ghost released = *stream;
         let bytes = match route {
             Some(route) => route.write_bytes(&write, stream, authority, journal, self.direction),
             None => write.bytes(stream, authority, journal, self.direction),
         };
         match bytes {
-            Some(bytes) => Some((write, bytes)),
+            Some(bytes) => Some(Delivery { write, bytes, owner: Ghost(released), journal: Ghost(*journal) }),
             None => { proof { assert(false); } None }
         }
     }

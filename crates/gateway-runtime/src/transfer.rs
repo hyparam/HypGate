@@ -4,7 +4,7 @@
 use crate::admission::{CancelOnDrop, Request};
 use crate::net::{read_uninterrupted, write_uninterrupted};
 pub use gateway_core::audit_receipt::AuditReceipt;
-use gateway_core::{body_copy::{Action, BodyCopy, Failure}};
+use gateway_core::{body_copy::{BodyCopy, Failure}};
 use std::io::{self, Read, Write};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -96,43 +96,26 @@ pub(crate) fn copy_body_bound<R, W, L>(request: &mut Request<'_>, reader: &mut R
     writer: &mut W, log: &mut L, direction: Direction) -> Result<BodyCopy, TransferError>
 where R: Read, W: Write, L: AuditLog {
     let mut guard = CancelOnDrop { request, armed: true };
-    let owner = guard.request.owned().ok_or(TransferError::InvalidState)?;
-    let mut copy = BodyCopy::begin(owner, direction.id()).ok_or(TransferError::InvalidState)?;
-    loop {
-        match copy.next() {
-            Action::Read => {
-                let Some((stream, _, _)) = guard.request.parts() else { return Err(TransferError::InvalidState) };
-                if copy.begin_read(stream) {
-                    let length = read_uninterrupted(reader, copy.read_buffer(stream)).ok();
-                    copy.finish_read(stream, length);
-                }
-            }
-            Action::Audit => {
-                let session = log.session_id();
-                let Some((stream, authority, journal)) = guard.request.parts() else { return Err(TransferError::InvalidState) };
-                if let Some((header, bytes)) = copy.audit_record(stream, authority, journal, session) {
-                    let record = LogRecord { tenant: header.tenant, request: header.request, chunk: header.chunk,
-                        kind: direction.into(), bytes };
-                    let receipt = log.append(record).ok();
-                    copy.finish_audit(stream, authority, journal, receipt.as_ref());
-                }
-            }
-            Action::Write => {
-                let Some((stream, context, journal)) = guard.request.copy_parts() else { return Err(TransferError::InvalidState) };
-                if let Some((write, bytes)) = context.write_bytes(&mut copy, stream, journal) {
-                    let count = write_uninterrupted(writer, bytes).ok();
-                    copy.finish_write(stream, &write, count);
-                }
-            }
-            Action::Flush => {
-                let ok = writer.flush().is_ok();
-                let Some((stream, _, _)) = guard.request.parts() else { return Err(TransferError::InvalidState) };
-                copy.finish_flush(stream, ok);
-            }
-            Action::Done => { guard.armed = false; return Ok(copy); }
-            Action::Failed(failure) => return Err(failure.into()),
-        }
+    let (owner, context, journal) = guard.request.copy_parts().ok_or(TransferError::InvalidState)?;
+    let completed = gateway_core::body_driver::copy(context, owner, journal,
+        &mut BodyEffects { reader, writer, log }, direction.id()).map_err(TransferError::from)?;
+    guard.armed = false;
+    Ok(completed.into_copy())
+}
+
+struct BodyEffects<'a, R, W, L> { reader: &'a mut R, writer: &'a mut W, log: &'a mut L }
+impl<R: Read, W: Write, L: AuditLog> gateway_core::body_driver::Effects for BodyEffects<'_, R, W, L> {
+    fn read(&mut self, buffer: &mut [u8]) -> Option<usize> { read_uninterrupted(self.reader, buffer).ok() }
+    fn session(&self) -> u128 { self.log.session_id() }
+    fn audit(&mut self, header: gateway_core::framing::Header, bytes: &[u8]) -> Option<AuditReceipt> {
+        self.log.append(LogRecord { tenant: header.tenant, request: header.request, chunk: header.chunk,
+            kind: RecordKind::from_id(header.kind)?, bytes }).ok()
     }
+    fn write(&mut self, _context: &gateway_core::request_context::Context<'_>,
+        delivery: &gateway_core::body_copy::Delivery<'_>, _direction: u8) -> Option<usize> {
+        write_uninterrupted(self.writer, delivery.bytes()).ok()
+    }
+    fn flush(&mut self) -> bool { self.writer.flush().is_ok() }
 }
 
 #[cfg(test)]

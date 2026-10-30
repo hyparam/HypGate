@@ -6,7 +6,7 @@ use crate::{config_build::{self as build, Credential, Secrets, BuildError},
     destination::Parts, resolved_route::ResolvedRoute, egress::Egress,
     headers::{self, Field}, http1_head::RequestHead, http1_exchange::Refusal,
     body_copy::BodyCopy, owned_stream::OwnedStream, journal_binding::JournalBinding,
-    submission::AuthorizedWrite, audit_receipt::Durability};
+    audit_receipt::Durability};
 
 verus! {
 fn equal(a: &[u8], b: &[u8]) -> (out: bool)
@@ -168,7 +168,7 @@ impl<'a> Context<'a> {
                 None => true,
             }
     }
-    pub fn authority(&self) -> (out: &AuthorizedRequest<'a>) requires self.valid(), ensures *out == self.authority_value(), { &self.authority }
+    pub fn authority(&self) -> (out: &AuthorizedRequest<'a>) requires self.valid(), ensures *out == self.authority_value(), out.valid(), { &self.authority }
     pub fn destination(&self) -> (out: Option<&'a Parts>)
         requires self.valid(), ensures match out { Some(d) => self.destination_value() == Some(*d), None => self.destination_value().is_none() },
     { match &self.provider { Some(p) => Some(p.destination), None => None } }
@@ -184,18 +184,19 @@ impl<'a> Context<'a> {
             == Some((time, self.authority_value().binding().selector, self.destination_value().unwrap().text@)),
     { match &self.provider { Some(p) => crate::exchange_lifecycle::start_record(&self.authority, &p.resolved, time), None => None } }
 
-    pub fn write_bytes<'s>(&self, copy: &mut BodyCopy, stream: &'s mut OwnedStream, journal: &JournalBinding) -> (out: Option<(AuthorizedWrite, &'s [u8])>)
+    pub fn write_bytes<'s>(&self, copy: &mut BodyCopy, stream: &'s mut OwnedStream, journal: &JournalBinding) -> (out: Option<crate::body_copy::Delivery<'s>>)
         requires self.valid(), old(copy).valid(old(stream)), old(copy).audited(),
         ensures final(copy).valid(final(stream)), final(copy).same_copy(old(copy)), final(copy).accepted() == old(copy).accepted(),
             final(stream).key() == old(stream).key(),
             match out {
-                Some((write, bytes)) => final(copy).writing() && write.ticket() == final(copy).ticket()
-                    && write.delivers(final(stream), &self.authority_value(), journal, old(copy).direction(), bytes@)
-                    && self.authority_value().grants(write.route()) && bytes@.len() > 0
-                    && write.route() == self.authority_value().binding()
-                    && (self.destination_value().is_some() ==> write.route().origin < self.config().destinations().len()
-                        && self.destination_value() == Some(self.config().destinations()[write.route().origin as int])
-                        && self.credential_value() == Some(self.config().credentials()[write.route().credential as int])),
+                Some(delivery) => final(copy).writing() && delivery.write_value().ticket() == final(copy).ticket()
+                    && delivery.write_value().delivers(final(stream), &self.authority_value(), journal, old(copy).direction(), delivery.bytes_value())
+                    && delivery.permits(&self.authority_value(), old(copy).direction())
+                    && self.authority_value().grants(delivery.write_value().route()) && delivery.bytes_value().len() > 0
+                    && delivery.write_value().route() == self.authority_value().binding()
+                    && (self.destination_value().is_some() ==> delivery.write_value().route().origin < self.config().destinations().len()
+                        && self.destination_value() == Some(self.config().destinations()[delivery.write_value().route().origin as int])
+                        && self.credential_value() == Some(self.config().credentials()[delivery.write_value().route().credential as int])),
                 None => final(copy).failure() == Some(crate::body_copy::Failure::InvalidState),
             },
     {
