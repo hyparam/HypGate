@@ -19,6 +19,7 @@ pub open spec fn connection(before: Seq<Step>, after: Seq<Step>, obstacles_befor
     &&& after.len() > before.len()
     &&& after == before + driver::observations(out.trace@)
     &&& driver::run(out.trace@) == Some(out.progress@)
+    &&& driver::authorized_progress(out.progress@)
     &&& driver::client_writes(out.trace@) == out.written@
     &&& out.outcome@.is_some() == out.progress@.admitted
     &&& (out.progress@.admitted ==> out.progress@.completion.is_some())
@@ -28,6 +29,16 @@ pub open spec fn connection(before: Seq<Step>, after: Seq<Step>, obstacles_befor
         && out.outcome@.unwrap().1 == transferred.0 && out.outcome@.unwrap().2 == transferred.1)
     &&& (obstacles_after == obstacles_before ==> succeeded(out) && out.progress@.forwarded && out.closed.recorded())
 }
+
+/// Success includes authorization for the observed inbound request, with the
+/// selected destination and credential from the same loaded configuration.
+pub proof fn successful_exchange_is_authorized(before: Seq<Step>, after: Seq<Step>,
+    obstacles_before: nat, obstacles_after: nat, transferred: (u64, u64), out: Driven)
+    requires connection(before, after, obstacles_before, obstacles_after, transferred, out), succeeded(out),
+    ensures out.progress@.prepared.is_some(),
+        out.progress@.incoming == Some(out.progress@.prepared.unwrap().2.input),
+        out.progress@.prepared.unwrap().2.binds(out.progress@.prepared.unwrap().0, out.progress@.prepared.unwrap().1),
+{}
 
 /// An admitted request cannot silently fail on a supported, successful execution.
 /// The obstacle counter cannot be incremented by the core: only a trait call

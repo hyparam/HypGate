@@ -91,6 +91,13 @@ impl<'a> PreparedRequest<'a> {
     }
     // Validate the configured binding before any DNS/TCP/TLS effect, then move
     // the only upstream head into the transport. It can be taken once.
+    /// Rebind to the exact head supplied by the production core driver. The
+    /// original prepared value remains the one-shot dispatch capability.
+    pub(crate) fn take_upstream_for(&mut self, input: &RequestHead) -> Result<UpstreamHead, HttpError> {
+        let _original = self.take_upstream()?;
+        let checked = gateway_core::request_context::CheckedHead::parse(input).map_err(HttpError::from)?;
+        self.routed.prepare_head(&checked).map_err(HttpError::from)
+    }
     pub(crate) fn take_upstream(&mut self) -> Result<UpstreamHead, HttpError> {
         self.upstream.take().ok_or(HttpError::BadRequest)
     }

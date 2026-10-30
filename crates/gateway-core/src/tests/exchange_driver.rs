@@ -14,7 +14,7 @@ use crate::resource::ResourceAdmission;
 
 fn field(name: &str, value: &str) -> Field { Field { name: name.as_bytes().to_vec(), value: value.as_bytes().to_vec(), sensitive: false } }
 fn post() -> RequestHead {
-    RequestHead { method: b"POST".to_vec(), target: b"/routes/7".to_vec(), fields: vec![field("host", "h"), field("content-length", "5")] }
+    RequestHead { method: b"POST".to_vec(), target: b"/routes/7".to_vec(), fields: vec![field("host", "h"), field("content-length", "5"), field("authorization", "Bearer token")] }
 }
 
 /// A finished body copy with no bytes, built on a real admitted stream.
@@ -82,9 +82,26 @@ impl Effects for Fake {
     fn now_ms(&mut self) -> u64 { 1_700_000_000_000 }
     fn audit_request_start(&mut self) -> bool { self.note("audit_request_start"); self.script.start_ok }
     fn bind_input(&mut self, framing: Framing) -> bool { self.note(&format!("bind_input {framing:?}")); true }
-    fn upstream_head(&mut self) -> Option<(Vec<u8>, Vec<Field>)> {
+    fn upstream_head(&mut self, input: &RequestHead) -> Option<crate::request_context::ProviderHead> {
         self.note("upstream_head");
-        Some((b"/v1/messages".to_vec(), vec![field("host", "api.example"), field("x-api-key", "k")]))
+        use crate::config_schema::{Root, IdentityInput, CredentialInput, CredentialKind, Limits, Logging};
+        struct Secret;
+        impl crate::config_build::Secrets for Secret {
+            fn get(&mut self, _: &[u8]) -> Option<Vec<u8>> { Some(b"k".to_vec()) }
+        }
+        let digest = crate::sha256::digest(b"token");
+        let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+        let config = crate::request_context::ProviderConfig::load(Root {
+            identities: vec![IdentityInput { tenant: 1, sha256: hex.into_bytes() }],
+            destinations: vec![b"https://api.example/v1/messages".to_vec()],
+            credentials: vec![CredentialInput { tenant: 1, kind: CredentialKind::ApiKey, env: b"KEY".to_vec() }],
+            grants: vec![Route { tenant: 1, selector: 7, origin: 0, credential: 0 }],
+            limits: Limits { requests: 1, chunk_bytes: 4 }, logging: Logging::Strict,
+            durability: crate::audit_receipt::Durability::Durable,
+        }, &mut Secret).ok()?;
+        let context = config.authorize(&digest, 7, 1)?;
+        let checked = crate::request_context::CheckedHead::parse(input).ok()?;
+        context.prepare(&checked).ok()
     }
     fn connect(&mut self) -> Result<(), ConnectFailure> {
         self.note("connect");
@@ -140,7 +157,7 @@ fn a_streamed_exchange_takes_the_audited_order_and_ends_with_the_last_chunk() {
     assert!(text.starts_with("HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\nconnection: close\r\ntransfer-encoding: chunked\r\n\r\n"), "{text}");
     assert!(text.ends_with("a\r\ndata: hi\n\n\r\n0\r\n\r\n"), "{text}");
     let upstream = String::from_utf8_lossy(&fake.upstream);
-    assert!(upstream.starts_with("POST /v1/messages HTTP/1.1\r\nhost: api.example\r\nx-api-key: k\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n"), "{upstream}");
+    assert!(upstream.starts_with("POST /v1/messages HTTP/1.1\r\nhost: api.example\r\nx-api-key: k\r\naccept-encoding: identity\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n"), "{upstream}");
     assert!(upstream.ends_with("5\r\nhello\r\n0\r\n\r\n"), "{upstream}");
 }
 

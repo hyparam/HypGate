@@ -278,3 +278,19 @@ fn sdk_paths_match_only_the_admitted_endpoint_and_release_rejected_capacity() {
     let mut wrong = headers(); set(&mut wrong, "authorization", "Bearer wrong");
     assert!(matches!(prep(&c, &wrong, "/routes/7/v1/responses"), Err(HttpError::Unauthorized)));
 }
+
+#[test]
+fn driver_dispatch_rechecks_the_actual_head_and_consumes_the_capability() {
+    let c = config();
+    let mut prepared = prep(&c, &headers(), "/routes/7").unwrap();
+    let wrong = head("POST", "/routes/8", headers());
+    assert!(matches!(prepared.take_upstream_for(&wrong), Err(HttpError::Unauthorized)));
+    assert!(prepared.take_upstream().is_err());
+    drop(prepared);
+    let mut prepared = prep(&c, &headers(), "/routes/7").unwrap();
+    let actual = head("POST", "/routes/7", headers());
+    let (path, fields) = prepared.take_upstream_for(&actual).unwrap().into_parts();
+    assert_eq!(path, b"/v1/responses");
+    assert_eq!(value_of(&fields, "host"), Some(&b"api.openai.com:8443"[..]));
+    assert!(prepared.take_upstream_for(&actual).is_err());
+}

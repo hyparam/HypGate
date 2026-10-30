@@ -12,7 +12,6 @@ use crate::{config::GatewayConfig, disk_log::DiskLog, http1, http_body, http_bou
     transport::{HttpsTransport, Session}, transfer::{AuditLog, LogRecord, TransferError}};
 use gateway_core::body_copy::BodyCopy;
 use gateway_core::exchange_driver::{self, Admit, Body, ConnectFailure, Effects, Event, Failure, FixedResponse, HeadRead, WriteScope};
-use gateway_core::headers::Field;
 use gateway_core::http1_exchange::{Refusal, refusal_status};
 use gateway_core::http1_framing::Framing;
 use gateway_core::http1_head::{RequestHead, StatusHead};
@@ -222,9 +221,8 @@ impl Effects for ConnectionEffects<'_> {
         let body = http1::BodyReader::new(reader, std::mem::take(&mut self.leftover), framing);
         match http.input(body) { Some(input) => { self.input = Some(input); true } None => false }
     }
-    fn upstream_head(&mut self) -> Option<(Vec<u8>, Vec<Field>)> {
-        let head = self.prepared.as_mut()?.take_upstream().ok()?;
-        Some(head.into_parts())
+    fn upstream_head(&mut self, input: &RequestHead) -> Option<gateway_core::request_context::ProviderHead> {
+        self.prepared.as_mut()?.take_upstream_for(input).ok()
     }
     fn connect(&mut self) -> Result<(), ConnectFailure> {
         let Some(prepared) = self.prepared.as_mut() else { return Err(ConnectFailure::Resolve); };

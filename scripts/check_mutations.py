@@ -23,6 +23,11 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ('exchange_driver.rs', 'context_driver_prepares_another_input', 'effects.upstream_head(input)', 'effects.upstream_head(&RequestHead { method: Vec::new(), target: Vec::new(), fields: Vec::new() })'),
+    ('exchange_driver.rs', 'context_driver_drops_authorization_check', '&& evidence.binds(path, fields) && p.incoming == Some(evidence.input)', '&& p.incoming == Some(evidence.input)'),
+    ('exchange_driver.rs', 'context_driver_unbinds_inbound_head', '&& p.incoming == Some(evidence.input) { Some(Progress', '{ Some(Progress'),
+    ('exchange_driver.rs', 'context_driver_forwards_without_provider_write', '!p.forwarded && p.upstream_head_written && record_allows_forward(p, status)', '!p.forwarded && record_allows_forward(p, status)'),
+
     ('request_context.rs', 'context_wrong_grant_selector', 'selector: r.selector, origin: r.origin', 'selector: 0, origin: r.origin'),
     ('request_context.rs', 'context_skip_selector_binding', 'self.authority.route().selector != checked.selector || ', 'false || '),
     ('request_context.rs', 'context_skip_token_binding', '!equal(self.digest.as_slice(), checked.digest.as_slice())', 'false'),
@@ -34,7 +39,7 @@ MUTATIONS = [
     ('request_context.rs', 'context_invent_body_failure', 'copy.write_bytes(stream, &self.authority, journal, route)', 'None'),
 
     ('exchange_driver.rs', 'end_to_end_discards_valid_request', '    let body_framing = match framing(&head.fields, true) {', '    if true { return d.close_without(effects); }\n    let body_framing = match framing(&head.fields, true) {'),
-    ('exchange_driver.rs', 'end_to_end_always_fails_exchange', '    match d.exchange(effects, &mut life, strict) {', '    match Err::<(), Fault>(Fault::Metadata) {'),
+    ('exchange_driver.rs', 'end_to_end_always_fails_exchange', '    match d.exchange(effects, &mut life, strict, &head) {', '    match Err::<(), Fault>(Fault::Metadata) {'),
     ('exchange_driver.rs', 'end_to_end_reports_failure_after_success', '        life.succeeded(&copy);', '        life.failed(Fault::Download);'),
     ('exchange_driver.rs', 'end_to_end_corrupts_completion', 'let recorded = effects.audit_completion(&payload);', 'let recorded = effects.audit_completion(&Vec::new());'),
     ('exchange_driver.rs', 'end_to_end_skips_response_after_upload', '        // Response heads until a final one; the machine classifies each.', '        if true { return Err(Fault::Http); }\n        // Response heads until a final one; the machine classifies each.'),
@@ -638,7 +643,7 @@ MUTATIONS = [
     ('exchange_driver.rs', 'driver_dispatches_without_start_record', '    if !started && strict {\n', '    if false {\n'),
     ('exchange_driver.rs', 'driver_skips_completion', '    d.complete(effects, life)\n}\n\n// ---- what an allowed trace guarantees', '    d.close_without(effects)\n}\n\n// ---- what an allowed trace guarantees'),
     ('exchange_driver.rs', 'driver_hands_unmachined_bytes', '                self.pending = Ghost(bytes@);\n                proof', '                self.pending = Ghost(bytes@.push(0u8));\n                proof'),
-    ('exchange_driver.rs', 'driver_spec_allows_forward_without_record', '        Step::Forward(status) => if !p.forwarded && record_allows_forward(p, status)', '        Step::Forward(status) => if !p.forwarded'),
+    ('exchange_driver.rs', 'driver_spec_allows_forward_without_record', '        Step::Forward(status) => if !p.forwarded && p.upstream_head_written && record_allows_forward(p, status)', '        Step::Forward(status) => if !p.forwarded'),
     ('exchange_driver.rs', 'driver_spec_allows_connect_before_record', '        Step::Connect(ok) => if record_allows_dispatch(p) && !p.connected', '        Step::Connect(ok) => if !p.connected'),
     ('http1_body.rs', 'body_length_never_completes', '                if self.remaining == 0 { self.mode = Mode::Done; }\n', ''),
     ('http1_body.rs', 'body_length_overruns_count', '                if self.remaining < n as u64 { n = self.remaining as usize; }\n', ''),
@@ -941,6 +946,11 @@ def check(workdir, filename, name, before, after):
     for modules in ([Path(filename).stem], []):
         result = subprocess.run(command(target, modules, mutation=True), capture_output=True, text=True)
         output = result.stdout + result.stderr
+        if result.returncode != 0 and not any(marker in output for marker in MARKERS) and "Resource limit (rlimit) exceeded" in output:
+            # Isolate each function from the accumulated solver context. A
+            # timeout still never counts as evidence that a defect was rejected.
+            result = subprocess.run(command(target, modules, mutation=True) + ["-V", "spinoff-all"], capture_output=True, text=True)
+            output = result.stdout + result.stderr
         if result.returncode != 0:
             if not any(marker in output for marker in MARKERS):
                 raise RuntimeError(f"{name}: expected a proof failure, got:\n{output}")
