@@ -383,7 +383,67 @@ fn str_at2(value: &Value, a: &[u8], b: &[u8]) -> (out: Option<Vec<u8>>)
 {
     match get2(value, a, b) { Some(v) => str_of(v), None => None }
 }
-fn is_text_kind(kind: &[u8]) -> bool {
+pub open spec fn text_kind(kind: Seq<u8>) -> bool {
+    kind == P_TEXT@ || kind == P_INPUT_TEXT@ || kind == P_OUTPUT_TEXT@
+}
+pub open spec fn line_join(a: Option<Seq<u8>>, b: Option<Seq<u8>>) -> Option<Seq<u8>> {
+    match b { None => a, Some(t) => Some(match a { None => t, Some(s) => s + seq![10u8] + t }) }
+}
+pub open spec fn block_text(block: Value) -> Option<Seq<u8>> {
+    let allowed = match semantics::field(block, P_TYPE@) { None => true, Some(Value::Str(s)) => text_kind(s@), _ => false };
+    if allowed { string(semantics::field(block, P_TEXT@)) } else { None }
+}
+pub open spec fn block_texts(blocks: Seq<Value>) -> Option<Seq<u8>>
+    decreases blocks.len(),
+{ if blocks.len() == 0 { None } else { line_join(block_texts(blocks.drop_last()), block_text(blocks.last())) } }
+pub open spec fn content_text(value: Value) -> Option<Seq<u8>> {
+    match value { Value::Str(s) => Some(crate::utf8::sanitized(s@)), Value::Array(blocks) => block_texts(blocks@), _ => None }
+}
+pub open spec fn item_text(item: Value, inner: bool) -> Option<Seq<u8>> {
+    let field = if inner { nested(item, P_MESSAGE@, P_CONTENT@) } else { semantics::field(item, P_CONTENT@) };
+    match field { Some(v) => content_text(v), None => None }
+}
+pub open spec fn item_texts(items: Seq<Value>, inner: bool) -> Option<Seq<u8>>
+    decreases items.len(),
+{ if items.len() == 0 { None } else { line_join(item_texts(items.drop_last(), inner), item_text(items.last(), inner)) } }
+pub open spec fn or_empty(text: Option<Seq<u8>>) -> Seq<u8> { match text { Some(s) => s, None => Seq::empty() } }
+pub open spec fn json_response_text(value: Value) -> Seq<u8> {
+    if let Some(content) = semantics::field(value, P_CONTENT@) { or_empty(content_text(content)) }
+    else if let Some(Value::Array(items)) = semantics::field(value, P_OUTPUT@) { or_empty(item_texts(items@, false)) }
+    else if let Some(Value::Array(items)) = semantics::field(value, P_CHOICES@) { or_empty(item_texts(items@, true)) }
+    else { Seq::empty() }
+}
+pub open spec fn json_text_interpretation(bytes: Seq<u8>, text: Seq<u8>, usage: Option<Usage>, known: bool) -> bool {
+    (exists|value: Value| semantics::parsed(bytes, Some(value)) && text == json_response_text(value) && usage == accounting::observation(value) && !known)
+        || semantics::parsed(bytes, None)
+}
+
+/// JSON text survives through the output field, including the documented raw fallback.
+pub open spec fn json_row_text(bytes: Seq<u8>, row_text: Value, max: usize) -> bool {
+    semantics::parsed(bytes, None) || exists|value: Value| semantics::parsed(bytes, Some(value)) &&
+        capped_text(row_text, if json_response_text(value).len() == 0 && accounting::observation(value).is_none() && bytes.len() > 0 {
+            crate::utf8::sanitized(bytes)
+        } else { json_response_text(value) }, max)
+}
+proof fn json_text_reaches_row(bytes: Seq<u8>, source: Seq<u8>, usage: Option<Usage>, known: bool, row_text: Value, max: usize)
+    requires json_text_interpretation(bytes, source, usage, known),
+        capped_text(row_text, if !known && source.len() == 0 && usage.is_none() && bytes.len() > 0 {
+            crate::utf8::sanitized(bytes)
+        } else { source }, max),
+    ensures json_row_text(bytes, row_text, max),
+{
+    if !semantics::parsed(bytes, None) {
+        let value = choose|value: Value| semantics::parsed(bytes, Some(value)) && source == json_response_text(value)
+            && usage == accounting::observation(value) && !known;
+        assert(capped_text(row_text, if json_response_text(value).len() == 0 && accounting::observation(value).is_none() && bytes.len() > 0 {
+            crate::utf8::sanitized(bytes)
+        } else { json_response_text(value) }, max));
+    }
+}
+
+fn is_text_kind(kind: &[u8]) -> (out: bool)
+    ensures out == text_kind(kind@),
+{
     bytes_eq(kind, P_TEXT.as_slice()) || bytes_eq(kind, P_INPUT_TEXT.as_slice()) || bytes_eq(kind, P_OUTPUT_TEXT.as_slice())
 }
 
@@ -391,7 +451,8 @@ fn is_text_kind(kind: &[u8]) -> bool {
 /// joined by line feeds.
 #[verifier::loop_isolation(false)]
 fn text_of_content(content: &Value) -> (out: Option<Vec<u8>>)
-    ensures match out { Some(t) => crate::utf8::valid(t@), None => true },
+    ensures crate::s3_config::optional_bytes(out) == content_text(*content),
+        match out { Some(t) => crate::utf8::valid(t@), None => true },
 {
     match content {
         Value::Str(s) => Some(crate::utf8::sanitize(s.as_slice())),
@@ -401,11 +462,12 @@ fn text_of_content(content: &Value) -> (out: Option<Vec<u8>>)
             let mut k: usize = 0;
             proof { assert(crate::utf8::valid(joined@)); }
             while k < blocks.len()
-                invariant crate::utf8::valid(joined@),
+                invariant crate::utf8::valid(joined@), k <= blocks.len(), !any ==> joined@.len() == 0,
+                    (if any { Some(joined@) } else { None }) == block_texts(blocks@.take(k as int)),
                 decreases blocks.len() - k,
             {
                 let block = slice_index_get(blocks.as_slice(), k);
-                let is_text = match block.get(P_TYPE.as_slice()) {
+                let is_text = match semantics::get(block, P_TYPE.as_slice()) {
                     Some(kind) => match kind { Value::Str(s) => is_text_kind(s.as_slice()), _ => false },
                     None => true,
                 };
@@ -415,8 +477,13 @@ fn text_of_content(content: &Value) -> (out: Option<Vec<u8>>)
                         any = true;
                     }
                 }
+                proof {
+                    assert(blocks@.take(k as int + 1).drop_last() =~= blocks@.take(k as int));
+                    assert(blocks@.take(k as int + 1).last() == blocks@[k as int]);
+                }
                 k = k + 1;
             }
+            proof { assert(blocks@.take(k as int) =~= blocks@); }
             if any { Some(joined) } else { None }
         }
         _ => None,
@@ -499,38 +566,45 @@ fn usage_of(value: &Value) -> (out: Option<Usage>)
 /// The texts of `items[k].path` joined by line feeds.
 #[verifier::loop_isolation(false)]
 fn join_contents(items: &Vec<Value>, inner: bool) -> (out: Vec<u8>)
-    ensures crate::utf8::valid(out@),
+    ensures crate::utf8::valid(out@), out@ == or_empty(item_texts(items@, inner)),
 {
     let mut joined: Vec<u8> = Vec::new();
     let mut any = false;
     let mut k: usize = 0;
     proof { assert(crate::utf8::valid(joined@)); }
     while k < items.len()
-        invariant crate::utf8::valid(joined@),
+        invariant crate::utf8::valid(joined@), k <= items.len(),
+            joined@ == or_empty(item_texts(items@.take(k as int), inner)),
+            (if any { Some(joined@) } else { None }) == item_texts(items@.take(k as int), inner),
         decreases items.len() - k,
     {
         let item = slice_index_get(items.as_slice(), k);
-        let content = if inner { get2(item, P_MESSAGE.as_slice(), P_CONTENT.as_slice()) } else { item.get(P_CONTENT.as_slice()) };
+        let content = if inner { get2(item, P_MESSAGE.as_slice(), P_CONTENT.as_slice()) } else { semantics::get(item, P_CONTENT.as_slice()) };
         if let Some(c) = content {
             if let Some(t) = text_of_content(c) {
                 append_line(&mut joined, any, t.as_slice());
                 any = true;
             }
         }
+        proof {
+            assert(items@.take(k as int + 1).drop_last() =~= items@.take(k as int));
+            assert(items@.take(k as int + 1).last() == items@[k as int]);
+        }
         k = k + 1;
     }
+    proof { assert(items@.take(k as int) =~= items@); }
     joined
 }
 fn parse_json_response(value: &Value) -> (out: ParsedResponse)
-    ensures crate::utf8::valid(out.text@), match out.model { Some(t) => crate::utf8::valid(t@), None => true },
+    ensures out.text@ == json_response_text(*value), crate::utf8::valid(out.text@), match out.model { Some(t) => crate::utf8::valid(t@), None => true },
         !out.choices_known, out.usage == accounting::observation(*value), out.usage.is_some() == has_usage_object(*value), out.failed == semantics::failure(*value),
 {
     let model = str_at(value, P_MODEL.as_slice());
-    let text: Vec<u8> = if let Some(content) = value.get(P_CONTENT.as_slice()) {
+    let text: Vec<u8> = if let Some(content) = semantics::get(value, P_CONTENT.as_slice()) {
         match text_of_content(content) { Some(t) => t, None => Vec::new() }
-    } else if let Some(Value::Array(items)) = value.get(P_OUTPUT.as_slice()) {
+    } else if let Some(Value::Array(items)) = semantics::get(value, P_OUTPUT.as_slice()) {
         join_contents(items, false)
-    } else if let Some(Value::Array(choices)) = value.get(P_CHOICES.as_slice()) {
+    } else if let Some(Value::Array(choices)) = semantics::get(value, P_CHOICES.as_slice()) {
         join_contents(choices, true)
     } else {
         Vec::new()
@@ -656,6 +730,7 @@ fn parse_sse(bytes: &[u8]) -> (out: ParsedResponse)
 }
 fn parse_response(bytes: &[u8]) -> (out: (ParsedResponse, bool))
     ensures crate::utf8::valid(out.0.text@), match out.0.model { Some(t) => crate::utf8::valid(t@), None => true },
+        json_text_interpretation(bytes@, out.0.text@, out.0.usage, out.0.choices_known),
         semantics::interpretation(bytes@, out.0.failed), accounting::interpretation(bytes@, out.0.usage),
         choices::response_interpretation(bytes@, out.0.text@, out.0.choices_known),
 {
@@ -698,7 +773,7 @@ fn destination_parts(exchange: &Exchange) -> (Vec<u8>, Vec<u8>) {
 }
 /// A string of the sanitized `bytes` cut to `max`.
 fn truncated_text(bytes: &[u8], max: usize) -> (out: Value)
-    ensures is_text(out, max as int), values_valid(out), crate::json::well_formed(out),
+    ensures capped_text(out, crate::utf8::sanitized(bytes@), max), is_text(out, max as int), values_valid(out), crate::json::well_formed(out),
 {
     let clean = crate::utf8::sanitize(bytes);
     capped(clean.as_slice(), max)
@@ -826,6 +901,7 @@ fn hex_text(key: &[u8]) -> (out: Value)
 #[verifier::inline]
 pub open spec fn rows_match(out: Seq<Value>, session: Seq<u8>, exchange: Exchange, max_text: usize) -> bool {
     &&& (out.len() == 2)
+    &&& json_row_text(exchange.download@, value_at(out[1], 21), max_text)
     &&& (exists|usage: Option<Usage>| accounting::interpretation(exchange.download@, usage) && accounting::serialized(out[1], usage))
     &&& (exists|source: Seq<u8>, known: bool| choices::response_interpretation(exchange.download@, source, known)
             && (known ==> capped_text(value_at(out[1], 21), source, max_text)))
@@ -892,6 +968,7 @@ pub fn rows(session: &[u8; 16], exchange: &Exchange, max_text: usize) -> (out: V
     // Nothing recognizable parsed: ship the raw response text instead of nothing.
     let unparsed = !response.choices_known && response.text.len() == 0 && response.usage.is_none() && exchange.download.len() > 0;
     let assistant_text = if unparsed { truncated_text(exchange.download.as_slice(), max_text) } else { capped(response.text.as_slice(), max_text) };
+    proof { json_text_reaches_row(exchange.download@, response.text@, response.usage, response.choices_known, assistant_text, max_text); }
     push_member(&mut assistant, K_CONTENT_TEXT.as_slice(), assistant_text);
     let mut assistant_attributes: Vec<Member> = Vec::new();
     push_member(&mut assistant_attributes, K_GATEWAY.as_slice(), gateway_object(exchange, shared.exchange_id.as_slice(), shared.host.as_slice(), shared.path.as_slice(), status, outcome, sse));

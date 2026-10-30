@@ -23,6 +23,10 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ('projection.rs', 'projection_json_erases_response_text', 'ParsedResponse { text, choices_known: false, usage: usage_of(value), model, failed: semantics::failed(value) }', 'ParsedResponse { text: Vec::new(), choices_known: false, usage: usage_of(value), model, failed: semantics::failed(value) }'),
+    ('projection.rs', 'projection_json_drops_text_block', 'if is_text {', 'if false && is_text {'),
+    ('projection.rs', 'projection_json_drops_item_text', 'if let Some(t) = text_of_content(c) {', 'if let Some(t) = None::<Vec<u8>> {'),
+    ('projection.rs', 'projection_json_overrides_raw_fallback', 'if unparsed { truncated_text(exchange.download.as_slice(), max_text) }', 'if unparsed { truncated_text(b"", max_text) }'),
     ('shipping_driver.rs', 'projection_enqueue_discards_body', 'machine.enqueue(token, projected.body, projected.rows)', 'machine.enqueue(token, Vec::new(), projected.rows)'),
     ('shipping_driver.rs', 'projection_serializes_wrong_row', 'crate::json::write(&rows[1])', 'crate::json::write(&rows[0])'),
     ('shipping_driver.rs', 'projection_body_omits_assistant', 'crate::framing::append(&mut body, second.as_slice());', '// dropped assistant document'),

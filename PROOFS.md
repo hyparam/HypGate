@@ -8,9 +8,8 @@ acknowledged records after system failure; see the
 ## Overview
 
 The gateway is a small Rust program in two parts. `crates/gateway-core` holds
-every decision the gateway makes: who may send what where, which bytes are
-forwarded, what is written to the audit log, what is shipped to the cloud and
-when. Verus checks that crate against written contracts, so its functions
+the verified policy, protocol, audit, projection, and shipping state machines.
+The production drivers compose these machines and call runtime effect adapters. Verus checks that crate against written contracts, so its functions
 cannot panic, overflow, index out of bounds, or violate their stated
 postconditions when their stated preconditions hold. `crates/gateway-runtime`
 holds the plain Rust that touches the world: sockets, TLS, files, threads, clocks. It is
@@ -23,6 +22,43 @@ theorem to its source contracts, and the [end-to-end audit](docs/end-to-end-audi
 enumerates every effect site in the runtime that a premise relies on. Tests
 and deliberate proof mutations (`scripts/check_mutations.py`) show the
 contracts are not vacuous; they do not enlarge the formal scope.
+
+## Composition at production entry points
+
+The high-level claim is conditional refinement: the production core's calls
+and outputs satisfy its declared policy, serialization, and ordering contracts,
+provided the runtime effects implement their trait contracts faithfully. It is
+not an unconditional theorem that the entire executable is correct.
+
+- `config_build::build` ties credential provenance to the names actually passed
+  to the secret-store interface and the corresponding store values.
+  `Policy::validate` accepts exactly the policies satisfying
+  `configuration_valid`; accepting nothing cannot satisfy the contract.
+- `headers::forward_request` and `forward_response` preserve the complete
+  ordered projection of allowed, non-Connection-nominated fields. The request
+  also contains precisely the configured injected fields.
+- `exchange_driver::drive` binds its trace's observation projection to the
+  actual effect-call history suffix. Its ordering lemmas therefore constrain
+  the calls made by the executable driver, including metadata appends and
+  client writes. The prepared provider head determines the upstream head bytes;
+  the observed status determines the logged and forwarded status. The two
+  erased milestones describe internal forwarding and unhealthy-log skipping;
+  they do not stand in for external calls.
+- `serve_driver::serve` binds its entire trace to the actual effect-call
+  history suffix, composing acceptance, admission, drain, cancellation, and
+  log closure with the shutdown ordering lemmas.
+- `shipping_driver::project` calls the verified row builder and JSON writer.
+  `settle` proves that the queue entry contains both resulting documents and
+  their semantic row contracts. JSON response text, usage, error evidence,
+  capping, and raw fallback are carried through to that output boundary.
+
+Ghost state remains where it expresses a proved relationship with executable
+state or effect contracts. It is not evidence of an external effect by itself.
+Runtime implementations of those contracts, operating-system and storage
+behavior, network delivery, provider vocabulary, and cloud deduplication remain
+premises. In particular, the current request-based projection identities do not
+establish that separate emissions of an evicted request survive cloud deduplication;
+that identity/replay gap is not closed by the projection-to-queue theorem.
 
 Three guarantees follow. Each gives the claim, what is proved today, and the
 premises about the runtime that join the proof to the world.

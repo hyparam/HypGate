@@ -242,3 +242,5 @@ performs TLS, file operations, environment lookup, clock reads, and threading;
 those operations and AWS itself are not verified by Verus. See the
 [S3 destination guide](cloud-shipping.md#s3-destination) and the deliberate
 mutation checks in `scripts/check_mutations.py`.
+
+JSON response text is specified by `projection::{content_text,json_response_text}`: text blocks and message contents retain their order and separators, with top-level content taking precedence over output and choices. `json_row_text` composes depth-bounded JSON parsing, UTF-8 sanitization, text capping, and the raw fallback through the assistant row and `shipping_driver::projects` to enqueue. Provider field vocabulary remains an explicit protocol assumption.
