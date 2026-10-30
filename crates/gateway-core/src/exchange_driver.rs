@@ -1,6 +1,6 @@
 //! Verified driver for one inbound connection, from the request head to the
 //! completion record. The runtime supplies an `Effects` implementation with
-//! no decisions in it: it reads a head, moves bytes, opens the provider
+//! explicit adapter obligations: it reads a head, moves bytes, opens the provider
 //! connection, runs the two body copies, and appends records. This driver is
 //! what sequences those effects and what calls the verified machines, so the
 //! order the audit contract promises is checked here rather than promised by
@@ -42,62 +42,164 @@ pub enum Event { Failed(Fault) }
 #[derive(PartialEq, Eq, Structural, Clone, Copy, Debug)]
 pub enum WriteScope { Control, Exchange }
 
+/// A supported provider request, independent of whether the driver elects to handle it.
+pub open spec fn supported_request(head: RequestHead) -> bool {
+    head.method@ == crate::http1_exchange::post()
+        && !crate::http1_framing::framing_spec_refused(head.fields@)
+}
+/// A final provider response that can be forwarded within the configured wire limits.
+/// All admitted status codes, fields and reasons are quantified, not enumerated fixtures.
+pub open spec fn supported_response(head: StatusHead) -> bool {
+    200 <= head.status <= 599 && !crate::http1_framing::framing_spec_refused(head.fields@)
+        && crate::headers::within_limits(head.fields@)
+        && !crate::headers::bad_connection_element(head.fields@)
+        && !crate::headers::nominated(head.fields@, crate::headers::CONTENT_ENCODING@)
+        && forall|fields: Seq<Field>, reason: Seq<u8>| #[trigger] crate::headers::response_head_ok(head.fields@, fields)
+            && #[trigger] crate::http1_write::reason_ok(reason) && reason.len() <= 32 ==>
+            if head.status == 204 || head.status == 304 {
+                crate::http1_exchange::fixed_supported(head.status, reason, fields, 0)
+            } else { crate::http1_exchange::stream_supported(head.status, reason, fields) }
+}
+
+proof fn supported_response_fits(head: StatusHead, fields: Seq<Field>, reason: Seq<u8>)
+    requires supported_response(head), crate::headers::response_head_ok(head.fields@, fields),
+        crate::http1_write::reason_ok(reason), reason.len() <= 32,
+    ensures if head.status == 204 || head.status == 304 {
+        crate::http1_exchange::fixed_supported(head.status, reason, fields, 0)
+    } else { crate::http1_exchange::stream_supported(head.status, reason, fields) },
+{}
+
+/// An actual completion append encodes the reported result and transfer counts;
+/// the only alternative is an observed unhealthy logger and no recorded completion.
+pub open spec fn completed_as(events: Seq<Step>, result: (u8, u64, u64), recorded: bool) -> bool {
+    events.len() > 0 && match events.last() {
+        Step::Completion(payload, ok) => {
+            let decoded = crate::metadata::decoded_completion(payload);
+            ok == recorded && decoded.is_some() && (decoded.unwrap().1, decoded.unwrap().2, decoded.unwrap().3) == result
+        },
+        Step::LogHealthy(false) => !recorded,
+        _ => false,
+    }
+}
+
+/// Number of interim heads observed since the actual request-head read.
+/// This derives from effect history; it cannot be set by the driver.
+pub open spec fn interim_heads(events: Seq<Step>) -> nat
+    decreases events.len(),
+{
+    if events.len() == 0 { 0 } else { match events.last() {
+        Step::ReadHead(_) => 0,
+        Step::Status(status) => interim_heads(events.drop_last()) + (if status < 200 && status != 101 { 1nat } else { 0nat }),
+        _ => interim_heads(events.drop_last()),
+    } }
+}
+pub open spec fn supported_status(head: StatusHead, prior: Seq<Step>) -> bool {
+    supported_response(head) || (100 <= head.status < 200 && head.status != 101 && interim_heads(prior) < MAX_INTERIM_HEADS)
+}
+
 /// What the runtime does for the driver. Every method is trusted to perform
-/// exactly the effect named and report what happened; none decides anything.
+/// exactly the effect named and report what happened. Admission and body-copy
+/// identity remain adapter joins; the top-level contract does not prove those joins.
 pub trait Effects {
     /// Observable effect attempts. Runtime adapters must faithfully implement this boundary.
     spec fn events(&self) -> Seq<Step>;
-    fn read_head(&mut self) -> HeadRead
-        ensures final(self).events() == old(self).events();
-    fn write_client(&mut self, bytes: &Vec<u8>, scope: WriteScope) -> bool
-        ensures final(self).events() == old(self).events().push(Step::Client(bytes@, scope));
+    /// Count only witnessed failed operations or unsupported inputs. A driver cannot
+    /// invent a failure to excuse doing nothing: every update is specified below.
+    spec fn obstacles(&self) -> nat;
+    /// Counts returned by the actual upload/download body-copy machines.
+    spec fn transferred(&self) -> (u64, u64);
+    fn read_head(&mut self) -> (out: HeadRead)
+        ensures final(self).transferred() == (old(self).transferred()),
+            final(self).obstacles() == old(self).obstacles() + (if match out { HeadRead::Head(head) => supported_request(head), _ => false } { 0nat } else { 1nat }),
+            final(self).events() == old(self).events().push(Step::ReadHead(out is Head));
+    fn write_client(&mut self, bytes: &Vec<u8>, scope: WriteScope) -> (out: bool)
+        ensures final(self).transferred() == (old(self).transferred()),
+            final(self).obstacles() == old(self).obstacles() + (if out { 0nat } else { 1nat }),
+            final(self).events() == old(self).events().push(Step::Client(bytes@, scope));
     fn close_client(&mut self)
-        ensures final(self).events() == old(self).events();
-    fn endpoint(&mut self, target: &Vec<u8>) -> Option<FixedResponse>
-        ensures final(self).events() == old(self).events();
+        ensures final(self).transferred() == (old(self).transferred()),
+            final(self).obstacles() == old(self).obstacles(),
+            final(self).events() == old(self).events();
+    fn endpoint(&mut self, target: &Vec<u8>) -> (out: Option<FixedResponse>)
+        ensures final(self).transferred() == (old(self).transferred()),
+            final(self).obstacles() == old(self).obstacles(),
+            final(self).events() == old(self).events();
     fn acquire_worker(&mut self) -> (out: bool)
-        ensures final(self).events() == old(self).events().push(Step::Worker(out));
+        ensures final(self).transferred() == (old(self).transferred()),
+            final(self).obstacles() == old(self).obstacles() + (if out { 0nat } else { 1nat }),
+            final(self).events() == old(self).events().push(Step::Worker(out));
     fn admit(&mut self, head: &RequestHead) -> (out: Admit)
-        ensures final(self).events() == old(self).events().push(Step::Admit(out is Admitted));
+        ensures final(self).transferred() == (old(self).transferred()),
+            final(self).obstacles() == old(self).obstacles() + (if out is Admitted { 0nat } else { 1nat }),
+            final(self).events() == old(self).events().push(Step::Admit(out is Admitted));
     fn strict(&mut self) -> (out: bool)
-        ensures final(self).events() == old(self).events().push(Step::Strict(out));
+        ensures final(self).transferred() == (old(self).transferred()),
+            final(self).obstacles() == old(self).obstacles(),
+            final(self).events() == old(self).events().push(Step::Strict(out));
     fn log_healthy(&mut self) -> (out: bool)
-        ensures final(self).events() == old(self).events().push(Step::LogHealthy(out));
+        ensures final(self).transferred() == (old(self).transferred()),
+            final(self).obstacles() == old(self).obstacles() + (if out { 0nat } else { 1nat }),
+            final(self).events() == old(self).events().push(Step::LogHealthy(out));
     fn now_ms(&mut self) -> u64
-        ensures final(self).events() == old(self).events();
+        ensures final(self).transferred() == (old(self).transferred()),
+            final(self).obstacles() == old(self).obstacles(),
+            final(self).events() == old(self).events();
     fn audit_request_start(&mut self) -> (out: bool)
-        ensures final(self).events() == old(self).events().push(Step::RequestStart(out));
-    fn bind_input(&mut self, framing: Framing) -> bool
-        ensures final(self).events() == old(self).events();
+        ensures final(self).transferred() == (old(self).transferred()),
+            final(self).obstacles() == old(self).obstacles() + (if out { 0nat } else { 1nat }),
+            final(self).events() == old(self).events().push(Step::RequestStart(out));
+    fn bind_input(&mut self, framing: Framing) -> (out: bool)
+        ensures final(self).transferred() == (old(self).transferred()),
+            final(self).obstacles() == old(self).obstacles() + (if out { 0nat } else { 1nat }),
+            final(self).events() == old(self).events();
     /// Adapter returns the head bound by validated admission; the driver must use it verbatim.
     fn upstream_head(&mut self) -> (out: Option<(Vec<u8>, Vec<Field>)>)
-        ensures final(self).events() == match out {
+        ensures final(self).transferred() == (old(self).transferred()),
+            final(self).obstacles() == old(self).obstacles() + (if match out { Some((path, fields)) => crate::http1_exchange::request_supported(path@, fields@), None => false } { 0nat } else { 1nat }),
+            final(self).events() == match out {
             Some((path, fields)) => old(self).events().push(Step::Prepared(path@, fields@)), None => old(self).events() };
     fn connect(&mut self) -> (out: Result<(), ConnectFailure>)
-        ensures final(self).events() == old(self).events().push(Step::Connect(out.is_ok()));
-    fn write_upstream(&mut self, bytes: &Vec<u8>) -> bool
-        ensures final(self).events() == old(self).events().push(Step::UpstreamWrite(bytes@));
+        ensures final(self).transferred() == (old(self).transferred()),
+            final(self).obstacles() == old(self).obstacles() + (if out.is_ok() { 0nat } else { 1nat }),
+            final(self).events() == old(self).events().push(Step::Connect(out.is_ok()));
+    fn write_upstream(&mut self, bytes: &Vec<u8>) -> (out: bool)
+        ensures final(self).transferred() == (old(self).transferred()),
+            final(self).obstacles() == old(self).obstacles() + (if out { 0nat } else { 1nat }),
+            final(self).events() == old(self).events().push(Step::UpstreamWrite(bytes@));
     fn upload(&mut self, stream: ChunkStream) -> (out: (Result<BodyCopy, Failure>, ChunkStream))
-        ensures out.1.valid(), final(self).events() == old(self).events().push(Step::Uploaded(out.1.out()));
+        ensures final(self).transferred() == (match out.0 { Ok(copy) => (copy.accepted(), old(self).transferred().1), Err(_) => old(self).transferred() }),
+            final(self).obstacles() == old(self).obstacles() + (if match out.0 { Ok(copy) => copy.is_done() && !out.1.ended(), Err(_) => false } { 0nat } else { 1nat }),
+            out.1.valid(), final(self).events() == old(self).events().push(Step::Uploaded(out.1.out()));
     fn read_status_head(&mut self) -> (out: Result<StatusHead, Failure>)
-        ensures final(self).events() == match out {
+        ensures final(self).transferred() == (old(self).transferred()),
+            final(self).obstacles() == old(self).obstacles() + (if match out { Ok(head) => supported_status(head, old(self).events()), Err(_) => false } { 0nat } else { 1nat }),
+            final(self).events() == match out {
             Ok(head) => old(self).events().push(Step::Status(head.status)), Err(_) => old(self).events() };
     fn audit_response_head(&mut self, status: u16) -> (out: bool)
-        ensures final(self).events() == old(self).events().push(Step::ResponseHead(status, out));
+        ensures final(self).transferred() == (old(self).transferred()),
+            final(self).obstacles() == old(self).obstacles() + (if out { 0nat } else { 1nat }),
+            final(self).events() == old(self).events().push(Step::ResponseHead(status, out));
     fn download(&mut self, framing: Framing, body: Body) -> (out: (Result<BodyCopy, Failure>, Body))
-        ensures match out.1 { Body::Stream(stream) => stream.valid(), Body::Fixed => true },
+        ensures final(self).transferred() == (match out.0 { Ok(copy) => (old(self).transferred().0, copy.accepted()), Err(_) => old(self).transferred() }),
+            final(self).obstacles() == old(self).obstacles() + (if (match out.0 { Ok(copy) => copy.is_done(), Err(_) => false }) && (match body { Body::Fixed => out.1 is Fixed, Body::Stream(_) => match out.1 { Body::Stream(stream) => !stream.ended(), _ => false } }) { 0nat } else { 1nat }),
+            match out.1 { Body::Stream(stream) => stream.valid(), Body::Fixed => true },
             final(self).events() == match out.1 {
                 Body::Stream(stream) => old(self).events().push(Step::Streamed(stream.out())), Body::Fixed => old(self).events() };
     fn audit_completion(&mut self, payload: &Vec<u8>) -> (out: bool)
-        ensures final(self).events() == old(self).events().push(Step::Completion(out));
+        ensures final(self).transferred() == (old(self).transferred()),
+            final(self).obstacles() == old(self).obstacles() + (if out { 0nat } else { 1nat }),
+            final(self).events() == old(self).events().push(Step::Completion(payload@, out));
     fn observe(&mut self, event: Event)
-        ensures final(self).events() == old(self).events();
+        ensures final(self).transferred() == (old(self).transferred()),
+            final(self).obstacles() == old(self).obstacles(),
+            final(self).events() == old(self).events();
 }
 
 // ---- the allowed traces ------------------------------------------------------
 
 /// One step the driver took, as the trace records it.
 pub ghost enum Step {
+    ReadHead(bool),
     Prepared(Seq<u8>, Seq<Field>), Status(u16), Uploaded(Seq<u8>),
     /// Bytes the driver handed to the client.
     Client(Seq<u8>, WriteScope),
@@ -111,19 +213,20 @@ pub ghost enum Step {
     Forward(u16),
     LogHealthy(bool),
     /// The completion record, and whether it was appended.
-    Completion(bool),
+    Completion(Seq<u8>, bool),
     /// The completion record skipped because the logger was unhealthy.
     CompletionSkipped,
 }
 
 /// What the trace so far has established.
 pub ghost struct Progress {
+    pub read: bool,
     pub prepared: Option<(Seq<u8>, Seq<Field>)>, pub upstream_head_written: bool, pub last_status: Option<u16>,
     pub worker: bool, pub admitted: bool, pub strict: Option<bool>, pub started: Option<bool>, pub connected: bool,
     pub response_logged: Option<(u16, bool)>, pub forwarded: bool, pub log_healthy: Option<bool>, pub completion: Option<bool>,
 }
 pub open spec fn initial() -> Progress {
-    Progress { prepared: None, upstream_head_written: false, last_status: None, worker: false, admitted: false, strict: None, started: None, connected: false,
+    Progress { read: false, prepared: None, upstream_head_written: false, last_status: None, worker: false, admitted: false, strict: None, started: None, connected: false,
         response_logged: None, forwarded: false, log_healthy: None, completion: None }
 }
 /// Network effects may follow the request-start record: appended, or refused
@@ -160,6 +263,7 @@ proof fn observations_push(base: Seq<Step>, t: Seq<Step>, s: Step)
 /// The one step relation: which step may follow which progress.
 pub open spec fn step_ok(p: Progress, s: Step) -> Option<Progress> {
     match s {
+        Step::ReadHead(_) => if !p.read { Some(Progress { read: true, ..p }) } else { None },
         Step::Prepared(path, fields) => if p.admitted && p.prepared.is_none() && !p.connected { Some(Progress { prepared: Some((path, fields)), ..p }) } else { None },
         Step::Status(status) => if p.connected { Some(Progress { last_status: Some(status), ..p }) } else { None },
         Step::Uploaded(_) => if p.connected && p.upstream_head_written { Some(p) } else { None },
@@ -180,7 +284,7 @@ pub open spec fn step_ok(p: Progress, s: Step) -> Option<Progress> {
             { Some(Progress { response_logged: Some((status, ok)), ..p }) } else { None },
         Step::Forward(status) => if !p.forwarded && record_allows_forward(p, status) { Some(Progress { forwarded: true, ..p }) } else { None },
         Step::LogHealthy(b) => Some(Progress { log_healthy: Some(b), ..p }),
-        Step::Completion(ok) => if p.admitted && p.completion.is_none() { Some(Progress { completion: Some(ok), ..p }) } else { None },
+        Step::Completion(_, ok) => if p.admitted && p.completion.is_none() { Some(Progress { completion: Some(ok), ..p }) } else { None },
         Step::CompletionSkipped => if p.admitted && p.completion.is_none() && p.log_healthy == Some(false)
             { Some(Progress { completion: Some(false), ..p }) } else { None },
     }
@@ -221,11 +325,11 @@ proof fn lemma_writes_push(t: Seq<Step>, s: Step)
 struct Driver { base: Ghost<Seq<Step>>, trace: Ghost<Seq<Step>>, progress: Ghost<Progress>, connection: Connection, pending: Ghost<Seq<u8>>, streamed: Ghost<Seq<u8>> }
 
 /// The result: the worker's closing proof and the trace, for the theorems.
-pub struct Driven { pub closed: Closed, pub trace: Ghost<Seq<Step>>, pub progress: Ghost<Progress>, pub written: Ghost<Seq<u8>> }
+pub struct Driven { pub closed: Closed, pub trace: Ghost<Seq<Step>>, pub progress: Ghost<Progress>, pub written: Ghost<Seq<u8>>, pub outcome: Ghost<Option<(u8, u64, u64)>> }
 
 /// The reason phrase for a status the gateway writes itself.
 fn reason(status: u16) -> (out: Vec<u8>)
-    ensures crate::http1_write::reason_ok(out@),
+    ensures crate::http1_write::reason_ok(out@), out@.len() <= 32,
 {
     let text: &[u8] = match status {
         100 => b"Continue", 200 => b"OK", 201 => b"Created", 202 => b"Accepted", 204 => b"No Content", 304 => b"Not Modified",
@@ -237,7 +341,7 @@ fn reason(status: u16) -> (out: Vec<u8>)
     let mut out: Vec<u8> = Vec::new();
     let mut k: usize = 0;
     while k < text.len()
-        invariant k <= text.len(), out@.len() == k, forall|j: int| 0 <= j < k ==> out@[j] == text@[j] && crate::http1_head::is_value_byte(#[trigger] out@[j]),
+        invariant k <= text.len(), text.len() <= 32, out@.len() == k, forall|j: int| 0 <= j < k ==> out@[j] == text@[j] && crate::http1_head::is_value_byte(#[trigger] out@[j]),
         decreases text.len() - k,
     {
         let b = text[k];
@@ -248,7 +352,13 @@ fn reason(status: u16) -> (out: Vec<u8>)
     out
 }
 
-fn is_get(method: &Vec<u8>) -> bool { method.len() == 3 && method[0] == 71 && method[1] == 69 && method[2] == 84 }
+fn is_get(method: &Vec<u8>) -> (out: bool)
+    ensures out == (method@ == seq![71u8, 69u8, 84u8]),
+{
+    let out = method.len() == 3 && method[0] == 71 && method[1] == 69 && method[2] == 84;
+    proof { if out { assert(method@ =~= seq![71u8, 69u8, 84u8]); } }
+    out
+}
 
 /// The fault for a failed effect in a phase: what the runtime saw if it was
 /// the deadline, cancellation, or a strict-mode logging refusal, else the phase's own.
@@ -299,7 +409,11 @@ impl Driver {
     fn emit<E: Effects>(&mut self, effects: &mut E, bytes: Vec<u8>, scope: WriteScope) -> (ok: bool)
         requires old(self).inv(), old(self).bound(old(effects)), bytes@ == old(self).pending@,
             old(self).progress@.forwarded ==> scope == WriteScope::Exchange,
-        ensures final(self).settled(), final(self).bound(final(effects)), final(self).base@ == old(self).base@, final(self).progress@ == old(self).progress@, final(self).connection == old(self).connection,
+        ensures final(effects).events().len() >= old(effects).events().len(),
+            final(effects).transferred() == old(effects).transferred(),
+            final(effects).obstacles() >= old(effects).obstacles(),
+            final(effects).obstacles() == old(effects).obstacles() ==> ok,
+            final(self).settled(), final(self).bound(final(effects)), final(self).base@ == old(self).base@, final(self).progress@ == old(self).progress@, final(self).connection == old(self).connection,
             final(self).streamed@ == old(self).streamed@,
     {
         let ok = effects.write_client(&bytes, scope);
@@ -324,7 +438,10 @@ impl Driver {
     /// A complete fixed response, then the client's write side is closed.
     fn respond_fixed<E: Effects>(&mut self, effects: &mut E, status: u16, fields: Vec<Field>, body: &[u8])
         requires old(self).settled(), old(self).bound(old(effects)), !old(self).progress@.forwarded,
-        ensures final(self).settled(), final(self).bound(final(effects)), final(self).base@ == old(self).base@, final(self).progress@ == old(self).progress@,
+        ensures final(effects).events().len() >= old(effects).events().len(),
+            final(effects).transferred() == old(effects).transferred(),
+            final(effects).obstacles() >= old(effects).obstacles(),
+            final(self).settled(), final(self).bound(final(effects)), final(self).base@ == old(self).base@, final(self).progress@ == old(self).progress@,
     {
         let reason = reason(status);
         match self.connection.respond_fixed(status, reason.as_slice(), fields, body) {
@@ -340,7 +457,10 @@ impl Driver {
     /// A refusal or failure: the status alone.
     fn refuse<E: Effects>(&mut self, effects: &mut E, status: u16)
         requires old(self).settled(), old(self).bound(old(effects)), !old(self).progress@.forwarded,
-        ensures final(self).settled(), final(self).bound(final(effects)), final(self).base@ == old(self).base@, final(self).progress@ == old(self).progress@,
+        ensures final(effects).events().len() >= old(effects).events().len(),
+            final(effects).transferred() == old(effects).transferred(),
+            final(effects).obstacles() >= old(effects).obstacles(),
+            final(self).settled(), final(self).bound(final(effects)), final(self).base@ == old(self).base@, final(self).progress@ == old(self).progress@,
     {
         let empty: Vec<u8> = Vec::new();
         self.respond_fixed(effects, status, Vec::new(), empty.as_slice());
@@ -348,50 +468,69 @@ impl Driver {
 
     /// A connection that never reached admission closes without a lifecycle.
     fn close_without<E: Effects>(self, effects: &E) -> (out: Driven)
-        requires self.settled(), self.bound(effects), !self.progress@.admitted,
-        ensures effects.events() == self.base@ + observations(out.trace@),
+        requires effects.events().len() > self.base@.len(),
+            self.settled(), self.bound(effects), !self.progress@.admitted,
+        ensures effects.events().len() > self.base@.len(),
+            effects.events() == self.base@ + observations(out.trace@),
             run(out.trace@) == Some(out.progress@), client_writes(out.trace@) == out.written@,
-            out.progress@ == self.progress@, !out.closed.recorded(),
+            out.progress@ == self.progress@, !out.closed.recorded(), out.outcome@.is_none(),
     {
-        Driven { closed: Closed::without_request(), trace: self.trace, progress: self.progress, written: Ghost(self.connection.out() + self.streamed@) }
+        Driven { closed: Closed::without_request(), trace: self.trace, progress: self.progress, written: Ghost(self.connection.out() + self.streamed@), outcome: Ghost(None) }
     }
 
     /// Kind 4 for a finished exchange, unless the logger is already unhealthy;
     /// then the skip is recorded instead. The lifecycle closes with the truth.
     fn complete<E: Effects>(mut self, effects: &mut E, life: Lifecycle) -> (out: Driven)
         requires self.settled(), self.bound(old(effects)), self.progress@.admitted, self.progress@.completion.is_none(), life.valid(), life.terminal(),
-        ensures final(effects).events() == self.base@ + observations(out.trace@),
+        ensures final(effects).events().len() >= old(effects).events().len(),
+            final(effects).transferred() == old(effects).transferred(),
+            final(effects).obstacles() >= old(effects).obstacles(),
+            final(effects).events().len() > self.base@.len(),
+            final(effects).events() == self.base@ + observations(out.trace@),
+            completed_as(final(effects).events(), out.outcome@.unwrap(), out.closed.recorded()),
+            out.outcome@ == Some((life.outcome(), life.recorded_upload(), life.recorded_download())),
+            final(effects).obstacles() == old(effects).obstacles() ==> out.closed.recorded(),
             run(out.trace@) == Some(out.progress@), client_writes(out.trace@) == out.written@,
-            out.progress@.admitted, out.progress@.completion.is_some(),
+            out.progress@.admitted, out.progress@.completion.is_some(), out.progress@.forwarded == self.progress@.forwarded,
             out.closed.recorded() == (out.progress@.completion == Some(true)),
     {
         if !effects.log_healthy() {
             self.record(effects, Ghost(Step::LogHealthy(false)));
             self.record(effects, Ghost(Step::CompletionSkipped));
-            return Driven { closed: life.close(false), trace: self.trace, progress: self.progress, written: Ghost(self.connection.out() + self.streamed@) };
+            return Driven { closed: life.close(false), trace: self.trace, progress: self.progress, written: Ghost(self.connection.out() + self.streamed@), outcome: Ghost(Some((life.outcome(), life.recorded_upload(), life.recorded_download()))) };
         }
         self.record(effects, Ghost(Step::LogHealthy(true)));
-        let payload = life.completion(effects.now_ms());
+        let now = effects.now_ms();
+        let payload = life.completion(now);
         let recorded = effects.audit_completion(&payload);
-        self.record(effects, Ghost(Step::Completion(recorded)));
-        Driven { closed: life.close(recorded), trace: self.trace, progress: self.progress, written: Ghost(self.connection.out() + self.streamed@) }
+        self.record(effects, Ghost(Step::Completion(payload@, recorded)));
+        proof {
+            assert(crate::metadata::decoded_completion(payload@) == Some((now, life.outcome(), life.recorded_upload(), life.recorded_download())));
+            assert(exists|time: u64| crate::metadata::decoded_completion(payload@) == Some((time, life.outcome(), life.recorded_upload(), life.recorded_download())));
+            assert(effects.events().last() == Step::Completion(payload@, recorded));
+            assert(effects.events().len() > 0);
+            assert(completed_as(effects.events(), (life.outcome(), life.recorded_upload(), life.recorded_download()), recorded));
+        }
+        Driven { closed: life.close(recorded), trace: self.trace, progress: self.progress, written: Ghost(self.connection.out() + self.streamed@), outcome: Ghost(Some((life.outcome(), life.recorded_upload(), life.recorded_download()))) }
     }
 
-    /// The provider exchange: connect, upload, read the head, forward it, download.
-    /// On `Err` nothing further has been promised to the client beyond what the
-    /// connection machine already holds; the caller answers or aborts.
-    #[verifier::rlimit(30)]
-    fn exchange<E: Effects>(&mut self, effects: &mut E, life: &mut Lifecycle, strict: bool) -> (out: Result<(), Fault>)
-        requires old(self).settled(), old(self).bound(old(effects)), record_allows_dispatch(old(self).progress@), !old(self).progress@.connected,
-            old(self).progress@.response_logged.is_none(), !old(self).progress@.forwarded, old(self).progress@.completion.is_none(),
-            old(self).progress@.prepared.is_none(), old(self).progress@.admitted,
-            old(self).progress@.strict == Some(strict), old(self).connection.open(),
+    /// The request half of the exchange; its result is consumed by the response half.
+    #[verifier::rlimit(60)]
+    fn send_upload<E: Effects>(&mut self, effects: &mut E, life: &mut Lifecycle) -> (out: Result<(), Fault>)
+        requires old(self).settled(), old(self).bound(old(effects)), record_allows_dispatch(old(self).progress@),
+            !old(self).progress@.connected, old(self).progress@.prepared.is_none(), old(self).progress@.admitted, old(self).progress@.response_logged.is_none(),
             old(life).valid(), old(life).open(), !old(life).uploaded(),
         ensures final(self).settled(), final(self).bound(final(effects)), final(self).base@ == old(self).base@,
-            final(self).progress@.admitted == old(self).progress@.admitted,
-            final(self).progress@.completion.is_none(), final(life).valid(),
-            out.is_ok() ==> final(life).terminal() && final(self).connection.done(),
-            out.is_err() ==> final(life).open(),
+            final(self).connection == old(self).connection,
+            final(self).progress@ == (Progress { prepared: final(self).progress@.prepared,
+                connected: final(self).progress@.connected, upstream_head_written: final(self).progress@.upstream_head_written,
+                ..old(self).progress@ }),
+            final(effects).obstacles() >= old(effects).obstacles(), final(effects).events().len() >= old(effects).events().len(),
+            final(effects).transferred().1 == old(effects).transferred().1,
+            final(life).valid(), final(life).open(),
+            final(effects).obstacles() == old(effects).obstacles() ==> out.is_ok(),
+            out.is_ok() ==> final(life).uploaded() && final(self).progress@.connected
+                && final(life).upload() == final(effects).transferred().0,
     {
         let (path, fields) = match effects.upstream_head() { Some(head) => head, None => return Err(Fault::Metadata) };
         self.record(effects, Ghost(Step::Prepared(path@, fields@)));
@@ -421,10 +560,39 @@ impl Driver {
         if !written { return Err(Fault::Upload); }
         upstream.finish(stream);
         life.upload_finished(&copy);
+        Ok(())
+    }
+
+    /// The provider exchange: connect, upload, read the head, forward it, download.
+    /// On `Err` nothing further has been promised to the client beyond what the
+    /// connection machine already holds; the caller answers or aborts.
+    #[verifier::rlimit(100)]
+    fn exchange<E: Effects>(&mut self, effects: &mut E, life: &mut Lifecycle, strict: bool) -> (out: Result<(), Fault>)
+        requires old(self).settled(), old(self).bound(old(effects)), record_allows_dispatch(old(self).progress@), !old(self).progress@.connected,
+            old(self).progress@.response_logged.is_none(), !old(self).progress@.forwarded, old(self).progress@.completion.is_none(),
+            old(self).progress@.prepared.is_none(), old(self).progress@.admitted,
+            old(self).progress@.strict == Some(strict), old(self).connection.open(),
+            old(life).valid(), old(life).open(), !old(life).uploaded(),
+        ensures final(effects).events().len() >= old(effects).events().len(),
+            final(effects).obstacles() >= old(effects).obstacles(),
+            final(self).settled(), final(self).bound(final(effects)), final(self).base@ == old(self).base@,
+            final(self).progress@.admitted == old(self).progress@.admitted,
+            final(self).progress@.completion.is_none(), final(life).valid(),
+            final(effects).obstacles() == old(effects).obstacles() ==> out.is_ok(),
+            out.is_ok() ==> final(life).terminal() && final(life).outcome() == crate::metadata::OUTCOME_SUCCESS
+                && final(self).connection.done() && final(self).progress@.forwarded
+                && final(life).recorded_upload() == final(effects).transferred().0
+                && final(life).recorded_download() == final(effects).transferred().1,
+            out.is_err() ==> final(life).open(),
+    {
+        match self.send_upload(effects, life) { Ok(()) => {}, Err(fault) => return Err(fault) };
 
         // Response heads until a final one; the machine classifies each.
         let (status, fields, body_framing) = match final_head(self, effects) { Ok(head) => head, Err(fault) => return Err(fault) };
         if status < 200 { return Err(Fault::Metadata); }
+        let ghost provider_fields = fields@;
+        let ghost provider_head = StatusHead { status, fields };
+        proof { assert(effects.obstacles() == old(effects).obstacles() ==> supported_response(provider_head)); }
         let fields = match crate::headers::forward_response(&fields) { Ok(fields) => fields, Err(_) => return Err(Fault::Metadata) };
         // Kind 3 before the head reaches the client. Strict mode stops here on
         // a failed append; availability mode continues with a gap.
@@ -432,6 +600,15 @@ impl Driver {
         self.record(effects, Ghost(Step::ResponseHead(status, logged)));
         if !logged && strict { return Err(Fault::Log); }
         let reason = reason(status);
+        proof {
+            if effects.obstacles() == old(effects).obstacles() {
+                assert(crate::headers::response_head_ok(provider_fields, fields@));
+                supported_response_fits(provider_head, fields@, reason@);
+                assert(if status == 204 || status == 304 {
+                    crate::http1_exchange::fixed_supported(status, reason@, fields@, 0)
+                } else { crate::http1_exchange::stream_supported(status, reason@, fields@) });
+            }
+        }
         let (copied, body) = if status == 204 || status == 304 {
             // No body may follow: the fixed head is the whole response.
             match self.connection.respond_fixed(status, reason.as_slice(), fields, Vec::<u8>::new().as_slice()) {
@@ -490,17 +667,28 @@ pub const MAX_INTERIM_HEADS: u32 = 8;
 /// Reads at most `MAX_INTERIM_HEADS + 1` heads.
 fn final_head<E: Effects>(d: &mut Driver, effects: &mut E) -> (out: Result<(u16, Vec<Field>, Framing), Fault>)
     requires old(d).settled(), old(d).bound(old(effects)), old(d).progress@.connected,
-    ensures final(d).settled(), final(d).bound(final(effects)), final(d).base@ == old(d).base@,
+    ensures final(effects).events().len() >= old(effects).events().len(),
+        final(d).connection == old(d).connection,
+        final(effects).transferred() == old(effects).transferred(),
+        final(effects).obstacles() >= old(effects).obstacles(),
+        final(effects).obstacles() == old(effects).obstacles() ==> out.is_ok() && supported_response(StatusHead { status: out.unwrap().0, fields: out.unwrap().1 }),
+        final(d).settled(), final(d).bound(final(effects)), final(d).base@ == old(d).base@,
         final(d).progress@ == (Progress { last_status: final(d).progress@.last_status, ..old(d).progress@ }),
         out.is_ok() ==> final(d).progress@.last_status == Some(out.unwrap().0),
 {
     let mut interim: u32 = 0;
     loop
-        invariant interim <= MAX_INTERIM_HEADS, d.settled(), d.bound(effects), d.progress@.connected, d.base@ == old(d).base@,
+        invariant effects.events().len() >= old(effects).events().len(), d.connection == old(d).connection, effects.transferred() == old(effects).transferred(), effects.obstacles() >= old(effects).obstacles(),
+            interim_heads(effects.events()) == interim_heads(old(effects).events()) + interim, interim <= MAX_INTERIM_HEADS, d.settled(), d.bound(effects), d.progress@.connected, d.base@ == old(d).base@,
             d.progress@ == (Progress { last_status: d.progress@.last_status, ..old(d).progress@ }),
         decreases MAX_INTERIM_HEADS - interim,
     {
+        let ghost before = effects.events();
         let status_head = match effects.read_status_head() { Ok(head) => head, Err(failure) => return Err(fault_of(failure, Fault::Http)) };
+        proof {
+            assert(effects.events().drop_last() =~= before);
+            assert(interim_heads(effects.events()) == interim_heads(before) + (if status_head.status < 200 && status_head.status != 101 { 1nat } else { 0nat }));
+        }
         d.record(effects, Ghost(Step::Status(status_head.status)));
         match upstream_status(status_head.status, &status_head.fields) {
             UpstreamStatus::Interim => {
@@ -519,12 +707,44 @@ fn final_head<E: Effects>(d: &mut Driver, effects: &mut E) -> (out: Result<(u16,
 /// allows; an admitted exchange ends with a completion record or an explicit
 /// skip; and the closing proof says whether the record was appended.
 pub fn drive<E: Effects>(effects: &mut E) -> (out: Driven)
-    ensures final(effects).events() == old(effects).events() + observations(out.trace@), run(out.trace@) == Some(out.progress@), client_writes(out.trace@) == out.written@,
+    ensures crate::gateway_contract::connection(old(effects).events(), final(effects).events(), old(effects).obstacles(),
+            final(effects).obstacles(), final(effects).transferred(), out),
+        final(effects).obstacles() >= old(effects).obstacles(),
+        final(effects).obstacles() == old(effects).obstacles() ==> out.progress@.admitted && out.progress@.forwarded
+            && out.closed.recorded() && out.outcome@.is_some() && out.outcome@ == Some((crate::metadata::OUTCOME_SUCCESS, final(effects).transferred().0, final(effects).transferred().1)),
+        out.outcome@.is_some() ==> completed_as(final(effects).events(), out.outcome@.unwrap(), out.closed.recorded()),
+        final(effects).events() == old(effects).events() + observations(out.trace@), run(out.trace@) == Some(out.progress@), client_writes(out.trace@) == out.written@,
         out.progress@.admitted ==> out.progress@.completion.is_some(),
+        out.outcome@.is_some() == out.progress@.admitted,
+        out.outcome@.is_some() && out.outcome@.unwrap().0 == crate::metadata::OUTCOME_SUCCESS ==>
+            out.progress@.forwarded && out.outcome@.unwrap().1 == final(effects).transferred().0
+                && out.outcome@.unwrap().2 == final(effects).transferred().1,
+        out.closed.recorded() == (out.progress@.completion == Some(true)),
+{
+    drive_connection(effects)
+}
+
+/// Execute the production connection; separate this body from its public
+/// contract join so the solver checks each control-flow obligation once.
+#[verifier::rlimit(100)]
+fn drive_connection<E: Effects>(effects: &mut E) -> (out: Driven)
+    ensures final(effects).events().len() > old(effects).events().len(),
+        final(effects).obstacles() >= old(effects).obstacles(),
+        final(effects).obstacles() == old(effects).obstacles() ==> out.progress@.admitted && out.progress@.forwarded
+            && out.closed.recorded() && out.outcome@.is_some() && out.outcome@ == Some((crate::metadata::OUTCOME_SUCCESS, final(effects).transferred().0, final(effects).transferred().1)),
+        out.outcome@.is_some() ==> completed_as(final(effects).events(), out.outcome@.unwrap(), out.closed.recorded()),
+        final(effects).events() == old(effects).events() + observations(out.trace@), run(out.trace@) == Some(out.progress@), client_writes(out.trace@) == out.written@,
+        out.progress@.admitted ==> out.progress@.completion.is_some(),
+        out.outcome@.is_some() == out.progress@.admitted,
+        out.outcome@.is_some() && out.outcome@.unwrap().0 == crate::metadata::OUTCOME_SUCCESS ==>
+            out.progress@.forwarded && out.outcome@.unwrap().1 == final(effects).transferred().0
+                && out.outcome@.unwrap().2 == final(effects).transferred().1,
         out.closed.recorded() == (out.progress@.completion == Some(true)),
 {
     let mut d = Driver::new(effects);
-    let head = match effects.read_head() {
+    let read = effects.read_head();
+    d.record(effects, Ghost(Step::ReadHead(read is Head)));
+    let head = match read {
         HeadRead::Head(head) => head,
         HeadRead::TooLarge => { d.refuse(effects, refusal_status(Refusal::HeadTooLarge)); return d.close_without(effects); }
         HeadRead::Malformed => { d.refuse(effects, refusal_status(Refusal::Malformed)); return d.close_without(effects); }

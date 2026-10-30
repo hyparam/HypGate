@@ -23,6 +23,15 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ('exchange_driver.rs', 'end_to_end_discards_valid_request', '    let body_framing = match framing(&head.fields, true) {', '    if true { return d.close_without(effects); }\n    let body_framing = match framing(&head.fields, true) {'),
+    ('exchange_driver.rs', 'end_to_end_always_fails_exchange', '    match d.exchange(effects, &mut life, strict) {', '    match Err::<(), Fault>(Fault::Metadata) {'),
+    ('exchange_driver.rs', 'end_to_end_reports_failure_after_success', '        life.succeeded(&copy);', '        life.failed(Fault::Download);'),
+    ('exchange_driver.rs', 'end_to_end_corrupts_completion', 'let recorded = effects.audit_completion(&payload);', 'let recorded = effects.audit_completion(&Vec::new());'),
+    ('exchange_driver.rs', 'end_to_end_skips_response_after_upload', '        // Response heads until a final one; the machine classifies each.', '        if true { return Err(Fault::Http); }\n        // Response heads until a final one; the machine classifies each.'),
+    ('http1_exchange.rs', 'end_to_end_request_writer_rejects_everything', '        if self.sent_head { return None; }', '        if true { return None; }'),
+    ('http1_exchange.rs', 'end_to_end_response_writer_rejects_everything', '        if self.phase != Phase::Open || status < 200 || status > 599 || status == 204 || status == 304 { return None; }', '        if true { return None; }'),
+    ('headers.rs', 'end_to_end_response_projection_rejects_everything', '    let hop = match nominations(fields, false) {', '    if true { return Err(Rejection::BadRequest); }\n    let hop = match nominations(fields, false) {'),
+    ('exchange_driver.rs', 'end_to_end_success_premise_is_empty', '    200 <= head.status <= 599 && !crate::http1_framing::framing_spec_refused(head.fields@)', '    false && 200 <= head.status <= 599 && !crate::http1_framing::framing_spec_refused(head.fields@)'),
     ('projection.rs', 'projection_json_erases_response_text', 'ParsedResponse { text, choices_known: false, usage: usage_of(value), model, failed: semantics::failed(value) }', 'ParsedResponse { text: Vec::new(), choices_known: false, usage: usage_of(value), model, failed: semantics::failed(value) }'),
     ('projection.rs', 'projection_json_drops_text_block', 'if is_text {', 'if false && is_text {'),
     ('projection.rs', 'projection_json_drops_item_text', 'if let Some(t) = text_of_content(c) {', 'if let Some(t) = None::<Vec<u8>> {'),

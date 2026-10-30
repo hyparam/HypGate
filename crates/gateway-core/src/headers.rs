@@ -279,6 +279,12 @@ proof fn lemma_in_list_push(list: Seq<Vec<u8>>, name: Seq<u8>, x: Vec<u8>)
     assert(list.push(x)[j]@ == name);
 }
 
+/// An explicit malformed Connection element, including empty comma elements.
+pub open spec fn bad_connection_element(fields: Seq<Field>) -> bool {
+    exists|i: int, start: int, s: int, e: int, end: int| 0 <= i < fields.len()
+        && fields[i].name@ == CONNECTION@ && element_bounds(fields[i].value@, start, s, e, end)
+        && (s == e || exists|k: int| s <= k < e && !is_tchar(fields[i].value@[k]))
+}
 /// The names a Connection header nominates as hop-by-hop among the allowlisted
 /// names, lowercased and distinct. `None` when any element is empty or is not
 /// a header-name token. Every returned name is allowlisted and is one element
@@ -288,7 +294,7 @@ pub fn nominations(fields: &Vec<Field>, request: bool) -> (out: Option<Vec<Vec<u
     ensures match out {
         Some(hop) => (forall|k: int| 0 <= k < hop.len() ==> allowed(request, #[trigger] hop@[k]@)
             && nominated(fields@, hop@[k]@)) && complete(fields@, request, hop@),
-        None => true,
+        None => bad_connection_element(fields@),
     },
 {
     let mut hop: Vec<Vec<u8>> = Vec::new();
@@ -332,13 +338,24 @@ pub fn nominations(fields: &Vec<Field>, request: bool) -> (out: Option<Vec<Vec<u
                     invariant s <= e <= end <= value.len(), forall|k: int| e <= k < end ==> is_blank(#[trigger] value@[k]),
                     decreases e - s,
                 { e = e - 1; }
-                if s == e { return None; }
+                if s == e {
+                    proof { assert(element_bounds(value@, start as int, s as int, e as int, end as int));
+                        assert(bad_connection_element(fields@)); }
+                    return None;
+                }
                 let mut t: usize = s;
                 while t < e
-                    invariant s <= t <= e <= value.len(), forall|k: int| s <= k < t ==> is_tchar(#[trigger] value@[k]),
+                    invariant element_bounds(value@, start as int, s as int, e as int, end as int),
+                        i < fields.len(), fields@[i as int].name@ == CONNECTION@, fields@[i as int].value@ == value@,
+                        s <= t <= e <= value.len(), forall|k: int| s <= k < t ==> is_tchar(#[trigger] value@[k]),
                     decreases e - t,
                 {
-                    if !tchar(value[t]) { return None; }
+                    if !tchar(value[t]) {
+                        proof { assert(element_bounds(value@, start as int, s as int, e as int, end as int));
+                            assert(exists|k: int| s <= k < e && !is_tchar(value@[k]));
+                            assert(bad_connection_element(fields@)); }
+                        return None;
+                    }
                     t = t + 1;
                 }
                 let name = lowercase(vstd::slice::slice_subrange(value, s, e));
@@ -585,7 +602,7 @@ pub fn forward_response(fields: &Vec<Field>) -> (out: Result<Vec<Field>, Rejecti
     ensures match out {
         Ok(head) => response_head_ok(fields@, head@),
         Err(Rejection::TooLarge) => !within_limits(fields@),
-        Err(Rejection::BadRequest) => true,
+        Err(Rejection::BadRequest) => bad_connection_element(fields@) || nominated(fields@, CONTENT_ENCODING@),
     },
 {
     if !fits(fields) { return Err(Rejection::TooLarge); }

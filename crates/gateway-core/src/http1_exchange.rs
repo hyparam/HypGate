@@ -135,11 +135,12 @@ pub fn upstream_status(status: u16, fields: &Vec<Field>) -> (out: UpstreamStatus
 
 // ---- framing fields --------------------------------------------------------
 
-pub const CONNECTION: [u8; 10] = *b"connection";
-pub const CLOSE: [u8; 5] = *b"close";
-pub const TRANSFER_ENCODING: [u8; 17] = *b"transfer-encoding";
-pub const CHUNKED: [u8; 7] = *b"chunked";
-pub const CONTENT_LENGTH: [u8; 14] = *b"content-length";
+// Explicit arrays expose the fixed wire bytes to proofs in other modules.
+pub const CONNECTION: [u8; 10] = [99, 111, 110, 110, 101, 99, 116, 105, 111, 110];
+pub const CLOSE: [u8; 5] = [99, 108, 111, 115, 101];
+pub const TRANSFER_ENCODING: [u8; 17] = [116, 114, 97, 110, 115, 102, 101, 114, 45, 101, 110, 99, 111, 100, 105, 110, 103];
+pub const CHUNKED: [u8; 7] = [99, 104, 117, 110, 107, 101, 100];
+pub const CONTENT_LENGTH: [u8; 14] = [99, 111, 110, 116, 101, 110, 116, 45, 108, 101, 110, 103, 116, 104];
 pub open spec fn is_close(f: Field) -> bool { f.name@ == CONNECTION@ && f.value@ == CLOSE@ }
 pub open spec fn is_chunked(f: Field) -> bool { f.name@ == TRANSFER_ENCODING@ && f.value@ == CHUNKED@ }
 pub open spec fn is_length(f: Field, n: nat) -> bool { f.name@ == CONTENT_LENGTH@ && f.value@ == crate::inbound::decimal(n) }
@@ -309,6 +310,30 @@ pub open spec fn fixed_head_fields_ok(all: Seq<Field>, given: Seq<Field>, status
     } else { head_fields_ok(all, given, false, length) }
 }
 
+/// Supported writers must produce a head, not merely validate heads they happen to emit.
+pub open spec fn writable_response(status: u16, reason: Seq<u8>, all: Seq<Field>) -> bool {
+    crate::http1_write::fields_wire_ok(all) && all.len() <= MAX_FIELDS
+        && crate::http1_write::status_head_bytes(status, reason, all).len() <= MAX_BYTES
+}
+pub open spec fn fixed_supported(status: u16, reason: Seq<u8>, fields: Seq<Field>, length: nat) -> bool {
+    200 <= status <= 599 && crate::http1_write::reason_ok(reason)
+        && ((status == 204 || status == 304) ==> length == 0 && no_framing(fields))
+        && forall|all: Seq<Field>| fixed_head_fields_ok(all, fields, status, length) ==> writable_response(status, reason, all)
+}
+pub open spec fn stream_supported(status: u16, reason: Seq<u8>, fields: Seq<Field>) -> bool {
+    200 <= status <= 599 && status != 204 && status != 304 && crate::http1_write::reason_ok(reason)
+        && forall|all: Seq<Field>| head_fields_ok(all, fields, true, 0) ==> writable_response(status, reason, all)
+}
+pub open spec fn upstream_fields(all: Seq<Field>, given: Seq<Field>) -> bool {
+    all.len() == given.len() + 2 && all.take(given.len() as int) == given
+        && is_chunked(all[given.len() as int]) && is_close(all[given.len() as int + 1])
+}
+pub open spec fn request_supported(path: Seq<u8>, fields: Seq<Field>) -> bool {
+    crate::http1_write::target_ok(path) && forall|all: Seq<Field>| upstream_fields(all, fields) ==>
+        crate::http1_write::fields_wire_ok(all) && all.len() <= MAX_FIELDS
+            && crate::http1_write::request_head_bytes(post(), path, all).len() <= MAX_BYTES
+}
+
 /// What one connection has written: at most one response head, and after it
 /// either the fixed body it announced or a stream of chunks.
 pub struct Connection {
@@ -392,7 +417,7 @@ impl Connection {
                 && final(self).status() == status && fixed_head_fields_ok(final(self).head_fields(), fields@, status, body@.len())
                 && final(self).head() == crate::http1_write::status_head_bytes(status, reason@, final(self).head_fields())
                 && bytes@ == final(self).head() + body@ && final(self).out() == old(self).out() + bytes@,
-            None => final(self).open() == old(self).open() && final(self).out() == old(self).out(),
+            None => (!old(self).open() || !fixed_supported(status, reason@, fields@, body@.len())) && final(self).open() == old(self).open() && final(self).out() == old(self).out(),
         },
     {
         if self.phase != Phase::Open || status < 200 || status > 599 { return None; }
@@ -405,6 +430,14 @@ impl Connection {
         let mut all = fields;
         all.push(close_field());
         if status != 204 && status != 304 { all.push(length_field(body.len())); }
+        proof { assert(all@.take(given.len() as int) =~= given); if status == 204 || status == 304 {
+                assert(no_framing(given));
+                assert forall|i: int| 0 <= i < all.len() implies #[trigger] all@[i].name@ != CONTENT_LENGTH@ && all@[i].name@ != TRANSFER_ENCODING@ by {
+                    if i < given.len() { assert(all@[i] == given[i]); assert(given[i].name@ != CONTENT_LENGTH@ && given[i].name@ != TRANSFER_ENCODING@); } else { assert(is_close(all@[i])); assert(all@[i].name@.len() == 10); assert(CONTENT_LENGTH@.len() == 14); assert(TRANSFER_ENCODING@.len() == 17); }
+                }
+            }
+            assert(fixed_head_fields_ok(all@, given, status, body@.len()));
+            assert(fixed_supported(status, reason@, given, body@.len()) ==> writable_response(status, reason@, all@)); }
         if !wire_ok(&all) || all.len() > MAX_FIELDS { return None; }
         let mut bytes: Vec<u8> = Vec::new();
         write_status_head(status, reason, &all, &mut bytes);
@@ -442,7 +475,7 @@ impl Connection {
                 && final(self).head() == crate::http1_write::status_head_bytes(status, reason@, final(self).head_fields())
                 && pair.0@ == final(self).head() && final(self).out() == old(self).out() + pair.0@
                 && pair.1.valid() && !pair.1.ended() && pair.1.out() == Seq::<u8>::empty() && pair.1.body() == Seq::<u8>::empty(),
-            None => final(self).open() == old(self).open() && final(self).out() == old(self).out(),
+            None => (!old(self).open() || !stream_supported(status, reason@, fields@)) && final(self).open() == old(self).open() && final(self).out() == old(self).out(),
         },
     {
         if self.phase != Phase::Open || status < 200 || status > 599 || status == 204 || status == 304 { return None; }
@@ -451,6 +484,8 @@ impl Connection {
         let mut all = fields;
         all.push(close_field());
         all.push(chunked_field());
+        proof { assert(all@.take(given.len() as int) =~= given); assert(head_fields_ok(all@, given, true, 0));
+            assert(stream_supported(status, reason@, given) ==> writable_response(status, reason@, all@)); }
         if !wire_ok(&all) || all.len() > MAX_FIELDS { return None; }
         let mut bytes: Vec<u8> = Vec::new();
         write_status_head(status, reason, &all, &mut bytes);
@@ -545,7 +580,7 @@ impl Upstream {
                 && final(self).head() == crate::http1_write::request_head_bytes(post(), path@, final(self).head_fields())
                 && pair.0@ == final(self).head() && final(self).out() == old(self).out() + pair.0@
                 && pair.1.valid() && !pair.1.ended() && pair.1.out() == Seq::<u8>::empty() && pair.1.body() == Seq::<u8>::empty(),
-            None => final(self).sent() == old(self).sent() && final(self).out() == old(self).out(),
+            None => (old(self).sent() || !request_supported(path@, fields@)) && final(self).sent() == old(self).sent() && final(self).out() == old(self).out(),
         },
     {
         if self.sent_head { return None; }
@@ -554,6 +589,7 @@ impl Upstream {
         let mut all = fields;
         all.push(chunked_field());
         all.push(close_field());
+        proof { assert(all@.take(given.len() as int) =~= given); assert(upstream_fields(all@, given)); }
         if !wire_ok(&all) || all.len() > MAX_FIELDS { return None; }
         let mut bytes: Vec<u8> = Vec::new();
         let method = post_bytes();

@@ -23,12 +23,68 @@ enumerates every effect site in the runtime that a premise relies on. Tests
 and deliberate proof mutations (`scripts/check_mutations.py`) show the
 contracts are not vacuous; they do not enlarge the formal scope.
 
-## Composition at production entry points
+## End-to-end connection contract
 
-The high-level claim is conditional refinement: the production core's calls
-and outputs satisfy its declared policy, serialization, and ordering contracts,
-provided the runtime effects implement their trait contracts faithfully. It is
-not an unconditional theorem that the entire executable is correct.
+The system-level objective is: an authorized request is forwarded to its
+configured provider with faithful request and response bytes; its audit record
+reports what actually happened; and any enabled shipping preserves that evidence
+through recovery and remote deduplication. This objective is **not yet one proved
+whole-program theorem**. The following production connection contract is the
+checked portion, and the missing joins are listed below rather than assumed away.
+
+`gateway_contract::connection` is a postcondition of the actual
+`exchange_driver::drive` called by `server::ConnectionScope`. It combines:
+
+- **Positive progress:** a supported POST request, successful admission and I/O,
+  supported outgoing and provider heads, completed body copies, and successful
+  logging must lead to a forwarded exchange and a recorded successful completion.
+  Up to eight supported interim heads may precede the final response. Neither
+  silently ignoring the request nor arbitrarily returning failure satisfies this.
+- **Truthful success:** every success carries the upload and download counts
+  returned by the actual body-copy operations. Its completion append encodes that
+  same result. These are bytes accepted by the copy writer, not proof of remote
+  application consumption. A skipped completion requires an observed unhealthy logger.
+- **Safety and correspondence:** the actual effect history is the observation
+  projection of a legal driver execution; client writes match the connection
+  machine's output in order, and the existing audit-before-forwarding and
+  completion-uniqueness theorems apply to that execution.
+
+The `obstacles` measure is proof-only bookkeeping over actual effect results.
+Its increment is specified separately for every trait method: refused admission,
+failed operation, incomplete copy, or an input outside the independently stated
+support predicates. The driver has no operation that invents an increment.
+`unsuccessful_execution_has_observed_cause` proves that an unsuccessful execution
+must have such an observation. This is a necessary cause, not a proof of the exact
+fault classification or a guarantee that a failure was unavoidable.
+
+The support predicates concern framing, Connection syntax, status, wire validity,
+and finite head limits; they do not assume that a writer or forwarding function
+returns success. Completeness contracts on those functions establish that step.
+The non-vacuity theorems prove supported families of POST requests, outgoing paths,
+and every final status from 200 through 599. Mutations check the production entry
+point's positive obligation, false failure, corrupted completion, arbitrary writer
+refusal, and an empty success premise.
+
+This is a termination/progress theorem only when the external calls return.
+Thread scheduling, socket deadlines, disk completion, and truthful adapter results
+remain external premises. HTTP error statuses such as 500 can be successfully
+forwarded; a gateway transfer success does not assert provider/application success.
+
+## Remaining connections to the system objective
+
+| Connection | What is established | What is not established by the connection theorem |
+| --- | --- | --- |
+| Configuration to admission | Configuration provenance and policy authorization have core proofs | `Effects::admit` and the prepared route are joined by the Rust adapter; the top-level theorem does not derive admission from the original policy file |
+| Body sources and destinations | Body-copy capabilities prove authorization, audit gating, and accepted counts; the driver uses returned counts and stream frames | The adapter must bind the returned copy and stream to the correct request, source and socket; byte identity across that adapter is not a theorem of `connection` |
+| Completion to durable storage | Exact completion payload and append attempt, plus separate journal/receipt proofs | Runtime logger binding, syscall truth, and crash survival under the declared storage contract |
+| Journal to shipped evidence | Verified assembly/projection components and projection-to-enqueue composition | No global journal-to-cloud conservation theorem; request-based fragment IDs can still collide after eviction |
+| One exchange to the concurrent service | Separate shutdown ordering and resource-accounting proofs | A shared invariant spanning every task, cancellation, recovery and shipping is not yet proved |
+| Failed exchange to its precise reason | A non-success must have a witnessed obstacle | Exact failure classification and diagnostic fidelity are not part of this theorem |
+
+## Other production entry-point guarantees
+
+The following are additional component compositions. They remain useful, but
+listing them together does not close the missing connections above.
 
 - `config_build::build` ties credential provenance to the names actually passed
   to the secret-store interface and the corresponding store values.

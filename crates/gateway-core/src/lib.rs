@@ -25,6 +25,7 @@ pub mod http_message;
 pub mod http_connection;
 pub mod body_reader;
 pub mod exchange_driver;
+pub mod gateway_contract;
 pub mod serve_driver;
 
 // Streaming and audit journal.
