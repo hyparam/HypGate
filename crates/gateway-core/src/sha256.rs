@@ -181,6 +181,21 @@ fn k_exec(t: usize) -> (out: u32)
     else if t == 60 { 0x90befffa } else if t == 61 { 0xa4506ceb } else if t == 62 { 0xbef9a3f7 } else { 0xc67178f2 }
 }
 
+/// Preserve the complete prefix and append exactly the SHA-256 recurrence.
+/// Keeping this step modular also makes wrong-tap mutations refutable without
+/// solving the compression round invariant for a complete message block.
+fn extend_schedule(w: &mut Vec<u32>)
+    requires 16 <= old(w).len() < 64,
+    ensures final(w)@ == old(w)@.push(add(add(add(
+        small1(old(w)@[old(w).len() - 2]), old(w)@[old(w).len() - 7]),
+        small0(old(w)@[old(w).len() - 15])), old(w)@[old(w).len() - 16])),
+{
+        let t = w.len();
+        let s1 = rotr_exec(w[t - 2], 17) ^ rotr_exec(w[t - 2], 19) ^ (w[t - 2] >> 10);
+        let s0 = rotr_exec(w[t - 15], 7) ^ rotr_exec(w[t - 15], 18) ^ (w[t - 15] >> 3);
+        w.push(add_exec(add_exec(add_exec(s1, w[t - 7]), s0), w[t - 16]));
+}
+
 /// One block compressed into the hash value.
 fn compress_exec(s: Words, block: &[u8]) -> (out: Words)
     requires block.len() == 64,
@@ -201,9 +216,7 @@ fn compress_exec(s: Words, block: &[u8]) -> (out: Words)
         invariant 16 <= t <= 64, w@.len() == t, forall|j: int| 0 <= j < t ==> w@[j] == schedule(block@, j),
         decreases 64 - t,
     {
-        let s1 = rotr_exec(w[t - 2], 17) ^ rotr_exec(w[t - 2], 19) ^ (w[t - 2] >> 10);
-        let s0 = rotr_exec(w[t - 15], 7) ^ rotr_exec(w[t - 15], 18) ^ (w[t - 15] >> 3);
-        w.push(add_exec(add_exec(add_exec(s1, w[t - 7]), s0), w[t - 16]));
+        extend_schedule(&mut w);
         t = t + 1;
     }
     let mut r = s;
