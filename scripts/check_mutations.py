@@ -23,6 +23,10 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ('sink.rs', 'sink_fabricates_success_without_put', 'match sink.put(piece) {', 'match Put::Wrote(piece.len()) {'),
+    ('sink.rs', 'sink_sends_each_prefix_twice', 'match sink.put(piece) {', 'let _ = sink.put(piece); match sink.put(piece) {'),
+    ('sink.rs', 'sink_chunk_rebases_accepted_history', 'self.sent = Ghost(self.sent@ + written.sent@);', 'self.base = Ghost(self.sink.accepted()); self.sent = Ghost(self.sent@ + written.sent@);'),
+    ('sink.rs', 'sink_chunk_fabricates_framed_write', 'let bytes = self.stream.frame(data);\n        let written = write_all(&mut self.sink, &bytes);', 'let bytes = self.stream.frame(data);\n        let written = Written { result: Ok(()), sent: Ghost(bytes@) };'),
     ('body_driver.rs', 'body_conservation_changes_read_byte', 'let length = effects.read(buffer);', 'let length = effects.read(buffer); if buffer.len() > 0 { buffer[0] = 0; }'),
     ('body_driver.rs', 'body_conservation_shortens_read', 'copy.finish_read(owner, length);', 'copy.finish_read(owner, match length { Some(n) => Some(n / 2), None => None });'),
     ('body_driver.rs', 'body_conservation_replaces_read_with_eof', 'copy.finish_read(owner, length);', 'copy.finish_read(owner, Some(0));'),
