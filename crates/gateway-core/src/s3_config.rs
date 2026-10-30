@@ -52,6 +52,7 @@ pub fn load<S: Secrets>(s: &Shipping, parts: &Parts, secrets: &mut S) -> (out: R
         permitted_reads(*s, old(secrets).reads(), final(secrets).reads()),
         match out {
             Ok(Backend::HypAware(token)) => s.s3_region.len() == 0 && s.s3_access_key_env.len() == 0 && s.s3_session_token_env.len() == 0
+                && parts.path@ == seq![47u8]
                 && values::secret_ok(token@, 512) && old(secrets).values().contains_key(s.token_env@)
                 && token@ == old(secrets).values()[s.token_env@],
             Ok(Backend::S3(c)) => c.valid() && s.s3_region.len() > 0
@@ -64,6 +65,8 @@ pub fn load<S: Secrets>(s: &Shipping, parts: &Parts, secrets: &mut S) -> (out: R
         },
 {
     if s.s3_region.len() == 0 {
+        // HypAware endpoints are origin-relative; never silently discard a configured prefix.
+        if parts.path.len() != 1 || parts.path[0] != 47 { return Err(Error::Destination); }
         if s.s3_access_key_env.len() != 0 || s.s3_session_token_env.len() != 0 { return Err(Error::Credential); }
     } else {
         if !safe_exec(s.s3_region.as_slice(), false) || !safe_exec(parts.path.as_slice(), true)

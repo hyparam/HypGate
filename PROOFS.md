@@ -80,7 +80,8 @@ contains no other network destination.
   local credential activation, never a network enrollment request. Signature
   cryptographic security and S3 durability are external premises.
   `s3_config` proves which environment names are read and how credentials are
-  selected; `s3_delivery` proves UTC formatting, exact headers/body, and the
+  selected, and that HypAware configuration accepts only the root path while
+  S3 retains its configured prefix; `s3_delivery` proves UTC formatting, exact headers/body, and the
   network-effect call. `s3_driver` joins this to the existing driver and proves
   restore/capture decisions using the exact, injective `shipping_checkpoint`
   scope and verified JSON codec. `shipping_driver::deliver` proves S3 errors

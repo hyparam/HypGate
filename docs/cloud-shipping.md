@@ -66,7 +66,9 @@ Add to the root policy (all fields but the first three optional):
 ```
 
 - `server` is validated by the same strict `https://` rules as provider
-  destinations. It is the only network destination the shipper ever uses.
+  destinations. For HypAware, it must be an origin URL with no path or just `/`;
+  non-root paths are rejected at startup because API endpoints are origin-relative.
+  It is the only network destination the shipper ever uses.
 - `token_env` names the environment variable holding the operator token, like
   a provider credential: 1 to 512 visible ASCII bytes, never in JSON or argv.
   An org service-account token (`hsa_` prefix) is recommended: re-enrolling

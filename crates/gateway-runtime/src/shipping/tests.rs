@@ -442,6 +442,25 @@ fn shipping_section_is_optional_and_validated() {
     assert!(ShippingConfig::from_root_json(&shipping_json(443, &dir.0, json!({})), |_| Some("x".repeat(512))).is_ok());
 }
 
+#[test]
+fn hypaware_requires_an_origin_url_before_reading_credentials() {
+    let dir = TempDir::new();
+    for server in ["https://localhost", "https://localhost/"] {
+        let config = ShippingConfig::from_root_json(
+            &shipping_json(443, &dir.0, json!({"server": server})), |_| Some(TOKEN.into()))
+            .unwrap().unwrap();
+        assert_eq!(config.server.url(), "https://localhost/");
+    }
+    for path in ["/team", "/team/", "/v1/ingest/proxy", "/%2f", "/./"] {
+        let mut reads = 0;
+        let result = ShippingConfig::from_root_json(
+            &shipping_json(443, &dir.0, json!({"server": format!("https://localhost{path}")})),
+            |_| { reads += 1; Some(TOKEN.into()) });
+        assert_eq!(result.err(), Some(crate::config::ConfigError::Destination), "{path}");
+        assert_eq!(reads, 0, "invalid destination must fail before loading secrets");
+    }
+}
+
 // ---- state files -----------------------------------------------------------
 
 #[test]
