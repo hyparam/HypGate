@@ -23,6 +23,10 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ('shipping_driver.rs', 'projection_enqueue_discards_body', 'machine.enqueue(token, projected.body, projected.rows)', 'machine.enqueue(token, Vec::new(), projected.rows)'),
+    ('shipping_driver.rs', 'projection_serializes_wrong_row', 'crate::json::write(&rows[1])', 'crate::json::write(&rows[0])'),
+    ('shipping_driver.rs', 'projection_body_omits_assistant', 'crate::framing::append(&mut body, second.as_slice());', '// dropped assistant document'),
+    ('shipping_driver.rs', 'projection_miscounts_rows', 'Projected { body, rows: 2 }', 'Projected { body, rows: 1 }'),
     ('exchange_driver.rs', 'coverage_start_append_omitted', 'let started = effects.audit_request_start();', 'let started = true;'),
     ('exchange_driver.rs', 'coverage_response_append_omitted', 'let logged = effects.audit_response_head(status);', 'let logged = true;'),
     ('exchange_driver.rs', 'coverage_completion_append_omitted', 'let recorded = effects.audit_completion(&payload);', 'let recorded = true;'),

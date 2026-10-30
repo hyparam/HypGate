@@ -822,31 +822,44 @@ fn hex_text(key: &[u8]) -> (out: Value)
     text(encoded.as_slice())
 }
 
+/// The complete observable contract for the two projected rows.
+#[verifier::inline]
+pub open spec fn rows_match(out: Seq<Value>, session: Seq<u8>, exchange: Exchange, max_text: usize) -> bool {
+    &&& (out.len() == 2)
+    &&& (exists|usage: Option<Usage>| accounting::interpretation(exchange.download@, usage) && accounting::serialized(out[1], usage))
+    &&& (exists|source: Seq<u8>, known: bool| choices::response_interpretation(exchange.download@, source, known)
+            && (known ==> capped_text(value_at(out[1], 21), source, max_text)))
+    &&& (exists|failed: bool| semantics::interpretation(exchange.download@, failed)
+            && value_at(out[0], 16) == Value::Bool(semantics::exchange_error(exchange, failed))
+            && value_at(out[1], 16) == Value::Bool(semantics::exchange_error(exchange, failed)))
+    &&& (is_timestamp(value_at(out[0], 6), started_ms(exchange)))
+    &&& (is_timestamp(value_at(out[1], 6), started_ms(exchange)))
+    &&& (is_date(value_at(out[0], 14), started_ms(exchange)))
+    &&& (is_date(value_at(out[1], 14), started_ms(exchange)))
+    &&& (is_timestamp(value_at(out[0], 19), started_ms(exchange)))
+    &&& (is_timestamp(value_at(out[1], 19), finished_ms(exchange)))
+    &&& (crate::json::well_formed(out[0]) && crate::json::well_formed(out[1]))
+    &&& (values_valid(out[0]) && values_valid(out[1]))
+    &&& (keys_of(out[0]) == user_keys())
+    &&& (keys_of(out[1]) == assistant_keys())
+    &&& (is_text(value_at(out[0], 20), max_text as int))
+    &&& (is_text(value_at(out[1], 21), max_text as int))
+    &&& (is_number(value_at(out[0], 0), SCHEMA_VERSION as nat))
+    &&& (is_number(value_at(out[1], 0), SCHEMA_VERSION as nat))
+    &&& (is_number(value_at(out[0], 10), 0))
+    &&& (is_number(value_at(out[1], 10), 1))
+    &&& (is_hex_of(value_at(out[0], 9), crate::shipping_identity::message_key_encoding(session, exchange.request, 0)))
+    &&& (is_hex_of(value_at(out[1], 9), crate::shipping_identity::message_key_encoding(session, exchange.request, 1)))
+    &&& (is_hex_of(value_at(out[0], 11), crate::shipping_identity::part_key_encoding(session, exchange.request, 0, 0)))
+    &&& (is_hex_of(value_at(out[1], 11), crate::shipping_identity::part_key_encoding(session, exchange.request, 1, 0)))
+    &&& (is_hex_of(value_at(out[0], 15), crate::shipping_identity::exchange_key_encoding(session, exchange.request)))
+    &&& (is_hex_of(value_at(out[1], 15), crate::shipping_identity::exchange_key_encoding(session, exchange.request)))
+}
+
 /// Two rows per exchange. `max_text` caps each `content_text`.
 #[verifier::rlimit(100)]
 pub fn rows(session: &[u8; 16], exchange: &Exchange, max_text: usize) -> (out: Vec<Value>)
-    ensures out@.len() == 2,
-        exists|usage: Option<Usage>| accounting::interpretation(exchange.download@, usage) && accounting::serialized(out@[1], usage),
-        exists|source: Seq<u8>, known: bool| choices::response_interpretation(exchange.download@, source, known)
-            && (known ==> capped_text(value_at(out@[1], 21), source, max_text)),
-        exists|failed: bool| semantics::interpretation(exchange.download@, failed)
-            && value_at(out@[0], 16) == Value::Bool(semantics::exchange_error(*exchange, failed))
-            && value_at(out@[1], 16) == Value::Bool(semantics::exchange_error(*exchange, failed)),
-        is_timestamp(value_at(out@[0], 6), started_ms(*exchange)), is_timestamp(value_at(out@[1], 6), started_ms(*exchange)),
-        is_date(value_at(out@[0], 14), started_ms(*exchange)), is_date(value_at(out@[1], 14), started_ms(*exchange)),
-        is_timestamp(value_at(out@[0], 19), started_ms(*exchange)), is_timestamp(value_at(out@[1], 19), finished_ms(*exchange)),
-        crate::json::well_formed(out@[0]) && crate::json::well_formed(out@[1]),
-        values_valid(out@[0]) && values_valid(out@[1]),
-        keys_of(out@[0]) == user_keys(), keys_of(out@[1]) == assistant_keys(),
-        is_text(value_at(out@[0], 20), max_text as int), is_text(value_at(out@[1], 21), max_text as int),
-        is_number(value_at(out@[0], 0), SCHEMA_VERSION as nat), is_number(value_at(out@[1], 0), SCHEMA_VERSION as nat),
-        is_number(value_at(out@[0], 10), 0), is_number(value_at(out@[1], 10), 1),
-        is_hex_of(value_at(out@[0], 9), crate::shipping_identity::message_key_encoding(session@, exchange.request, 0)),
-        is_hex_of(value_at(out@[1], 9), crate::shipping_identity::message_key_encoding(session@, exchange.request, 1)),
-        is_hex_of(value_at(out@[0], 11), crate::shipping_identity::part_key_encoding(session@, exchange.request, 0, 0)),
-        is_hex_of(value_at(out@[1], 11), crate::shipping_identity::part_key_encoding(session@, exchange.request, 1, 0)),
-        is_hex_of(value_at(out@[0], 15), crate::shipping_identity::exchange_key_encoding(session@, exchange.request)),
-        is_hex_of(value_at(out@[1], 15), crate::shipping_identity::exchange_key_encoding(session@, exchange.request)),
+    ensures rows_match(out@, session@, *exchange, max_text),
 {
     let (host, path) = destination_parts(exchange);
     let request = parse_request(exchange.upload.as_slice());

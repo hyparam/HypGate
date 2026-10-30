@@ -7,10 +7,9 @@
 //! request workers; its only inputs are the log path, the server, the token,
 //! and a state directory, and its only outputs are metrics. Failure here never
 //! touches admission or readiness.
-use gateway_core::exchange_assembler::Exchange;
 use gateway_core::framing::Header;
 use gateway_core::shipper::{Credential, Machine, Outcome, Path as ShipPath, Reply as MachineReply, Request};
-use gateway_core::shipping_driver::{drive, Effects, Event, Halt, Mode, Projected, Read};
+use gateway_core::shipping_driver::{drive, Effects, Event, Halt, Mode, Read};
 use std::{io, path::PathBuf, sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}, mpsc}, time::{Duration, SystemTime}};
 use rustls::RootCertStore;
 use crate::disk_log::{SessionReader, ScanError};
@@ -261,14 +260,6 @@ impl Effects for Engine {
             Ok(None) | Err(ScanError::Incomplete) => Read::End,
             Err(_) => { self.metrics.read_failed.store(true, Ordering::Relaxed); Read::Failed }
         }
-    }
-
-    fn project(&mut self, exchange: &Exchange) -> Projected {
-        let session = self.session.unwrap_or([0; 16]);
-        let rows = gateway_core::projection::rows(&session, exchange, self.config.max_exchange_bytes);
-        let mut body = Vec::new();
-        for row in &rows { body.extend_from_slice(&crate::json_build::write(row)); body.push(b'\n'); }
-        Projected { body, rows: rows.len() }
     }
 
     /// Send the request the machine chose to the configured server.

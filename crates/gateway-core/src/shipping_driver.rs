@@ -1,6 +1,6 @@
 //! Verified driver for the shipper machine. The runtime supplies an `Effects`
-//! implementation with no decisions in it: a clock, a record source, a row
-//! projector, one request sender, sleeps, a checkpoint writer, and a metrics
+//! implementation with no decisions in it: a clock, a record source,
+//! one request sender, sleeps, a checkpoint writer, and a metrics
 //! sink. This loop is what calls the machine, so the machine's turn-taking
 //! (one reply per request, every emitted token projected and queued at once,
 //! checkpoints only from its own progress) is checked here rather than
@@ -16,6 +16,36 @@ pub enum Read { Record(Header, Vec<u8>), End, Failed }
 
 /// An exchange's NDJSON rows, each followed by a newline, and the row count.
 pub struct Projected { pub body: Vec<u8>, pub rows: usize }
+
+/// The queued body contains both projected JSON documents, each newline terminated.
+/// This relation retains every semantic property of `projection::rows`.
+pub open spec fn projects(body: Seq<u8>, session: Seq<u8>, exchange: Exchange, max_text: usize) -> bool {
+    exists|rows: Seq<crate::json::Value>, first: Seq<u8>, second: Seq<u8>|
+        crate::projection::rows_match(rows, session, exchange, max_text)
+        && crate::json::document(first, rows[0]) && crate::json::document(second, rows[1])
+        && body == first + seq![10u8] + second + seq![10u8]
+}
+
+/// Pure projection and serialization belong in the verified core, not an effect adapter.
+pub fn project(session: &[u8; 16], exchange: &Exchange, max_text: usize) -> (out: Projected)
+    ensures out.rows == 2, projects(out.body@, session@, *exchange, max_text),
+{
+    let rows = crate::projection::rows(session, exchange, max_text);
+    let first = match crate::json::write(&rows[0]) { Some(bytes) => bytes, None => { proof { assert(false); } Vec::new() } };
+    let second = match crate::json::write(&rows[1]) { Some(bytes) => bytes, None => { proof { assert(false); } Vec::new() } };
+    let ghost a = first@;
+    let ghost b = second@;
+    let mut body = first;
+    body.push(10);
+    crate::framing::append(&mut body, second.as_slice());
+    body.push(10);
+    proof {
+        assert(body@ =~= a + seq![10u8] + b + seq![10u8]);
+        assert(crate::projection::rows_match(rows@, session@, *exchange, max_text));
+        assert(projects(body@, session@, *exchange, max_text));
+    }
+    Projected { body, rows: 2 }
+}
 
 #[derive(PartialEq, Eq, Structural, Clone, Copy, Debug)]
 pub enum Event { RecordRead, ExchangeEmitted, Replied(Outcome), PoisonedUnsent, Stopped, Waiting }
@@ -37,7 +67,6 @@ pub trait Effects {
     fn stop_requested(&mut self) -> bool;
     fn now(&mut self) -> u64;
     fn read(&mut self) -> Read;
-    fn project(&mut self, exchange: &Exchange) -> Projected;
     fn send(&mut self, request: Request) -> (out: Reply)
         ensures old(self).is_s3() ==> crate::s3_delivery::reply_policy(request.path, out);
     /// False when a stop was requested during the wait.
@@ -66,10 +95,12 @@ fn settle<E: Effects>(machine: &mut Machine, effects: &mut E, token: crate::ship
         final(machine).awaiting() == old(machine).awaiting(), final(machine).same_credential(old(machine)),
         final(machine).at_end() == old(machine).at_end(), final(machine).read_failed() == old(machine).read_failed(),
         final(machine).open_count() == old(machine).open_count(),
+        projects(final(machine).history().last().body(), old(machine).session(), token.exchange_value(), old(machine).max_bytes() as usize),
+        final(machine).history().last().rows() == 2,
 {
     proof { old(machine).valid_bounds(); }
     effects.observe(Event::ExchangeEmitted, machine);
-    let projected = effects.project(token.exchange());
+    let projected = project(machine.session_id(), token.exchange(), machine.exchange_cap());
     match machine.enqueue(token, projected.body, projected.rows) {
         Ok(()) => {}
         Err(_) => { proof { assert(false); } }

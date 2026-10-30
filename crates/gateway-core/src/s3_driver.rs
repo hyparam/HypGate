@@ -1,8 +1,8 @@
 //! Verified join from S3 effects to the existing shipping driver and checkpoint machine.
 use vstd::prelude::*;
-use crate::{shipping_driver::{self, Effects, Read, Projected, Event, Mode, Halt},
+use crate::{shipping_driver::{self, Effects, Read, Event, Mode, Halt},
     s3_config::Config, s3_delivery::{self, Transport}, shipping_checkpoint::{self as checkpoint, Checkpoint},
-    shipper::{Machine, Request, Reply}, exchange_assembler::Exchange};
+    shipper::{Machine, Request, Reply}};
 
 verus! {
 /// Persistence remains an external effect. The executable codec and all selection/capture decisions are verified.
@@ -23,7 +23,6 @@ impl<'a, E: Effects + Transport + Store> Effects for Adapter<'a, E> {
     fn stop_requested(&mut self) -> bool { self.io.stop_requested() }
     fn now(&mut self) -> u64 { self.io.now() }
     fn read(&mut self) -> Read { self.io.read() }
-    fn project(&mut self, exchange: &Exchange) -> Projected { self.io.project(exchange) }
     fn send(&mut self, request: Request) -> (out: Reply) {
         let ms = self.io.milliseconds();
         s3_delivery::send(self.config, self.io, request, ms)
