@@ -13,10 +13,13 @@
 use crate::net::{read_uninterrupted, write_uninterrupted};
 use gateway_core::body_reader::{Fill, Read as BodyRead, Source};
 use gateway_core::headers::Field;
+#[cfg(test)]
 use gateway_core::http1_exchange::ChunkStream;
 use gateway_core::http1_framing::Framing;
 use gateway_core::http1_head::{RequestHead, StatusHead};
-use gateway_core::sink::{ChunkWriter, Put, Sink, WriteError};
+use gateway_core::sink::{Put, Sink, WriteError};
+#[cfg(test)]
+use gateway_core::sink::ChunkWriter;
 use std::io::{self, Read, Write};
 
 pub(crate) use gateway_core::body_reader::HeadError;
@@ -25,9 +28,9 @@ pub(crate) use gateway_core::body_reader::HeadError;
 /// bytes, one write takes a prefix of what is offered, or either reports the
 /// close or the failure. The last failure is kept so the drivers' callers
 /// can return it.
-struct Wire<R> { io: R, error: Option<io::Error> }
+pub(crate) struct Wire<R> { io: R, error: Option<io::Error> }
 impl<R> Wire<R> {
-    fn new(io: R) -> Self { Wire { io, error: None } }
+    pub(crate) fn new(io: R) -> Self { Wire { io, error: None } }
     /// The error for a driver's failure: the stored one, or the kind the outcome names.
     fn failure(&mut self, error: WriteError) -> io::Error {
         match error {
@@ -44,6 +47,9 @@ impl<W: Write> Sink for Wire<W> {
             Ok(n) => Put::Wrote(n.min(bytes.len())),
         }
     }
+}
+impl<W: Write> gateway_core::sink::FlushSink for Wire<W> {
+    fn flush(&mut self) -> bool { self.io.flush().is_ok() }
 }
 impl<R: Read> Source for Wire<R> {
     fn fill(&mut self, buffer: &mut Vec<u8>, max: usize) -> Fill {
@@ -101,7 +107,9 @@ impl<R: Read> Read for BodyReader<R> {
 /// `write` becomes one chunk and `finish` writes the last chunk and flushes.
 /// The underlying stream is not closed; the caller decides what happens to
 /// the connection, and takes the stream back to finish its machine.
+#[cfg(test)]
 pub(crate) struct ChunkedWriter<W> { driver: ChunkWriter<Wire<W>> }
+#[cfg(test)]
 impl<W: Write> ChunkedWriter<W> {
     pub(crate) fn new(io: W, stream: ChunkStream) -> Self { Self { driver: ChunkWriter::new(Wire::new(io), stream) } }
     /// The stream for the machine that issued it, ended only if `finish` completed, and the writer.
@@ -116,6 +124,7 @@ impl<W: Write> ChunkedWriter<W> {
         self.driver.sink.io.flush()
     }
 }
+#[cfg(test)]
 impl<W: Write> Write for ChunkedWriter<W> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         if self.driver.is_ended() || self.driver.has_failed() { return Err(io::ErrorKind::BrokenPipe.into()); }

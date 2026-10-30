@@ -228,6 +228,10 @@ impl ChunkStream {
     pub closed spec fn valid(&self) -> bool {
         if self.ended { crate::http1_chunked::chunked_ok(self.out@, self.body@) } else { crate::http1_chunked::chunks_ok(self.out@, self.body@) }
     }
+    pub proof fn framing_evidence(&self)
+        requires self.valid(), !self.ended(),
+        ensures crate::http1_chunked::chunks_ok(self.out(), self.body()),
+    {}
     pub fn new() -> (out: Self)
         ensures out.valid(), !out.ended(), out.out() == Seq::<u8>::empty(), out.body() == Seq::<u8>::empty(),
     { ChunkStream { ended: false, out: Ghost(Seq::empty()), body: Ghost(Seq::empty()) } }

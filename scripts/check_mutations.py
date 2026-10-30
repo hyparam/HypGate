@@ -23,6 +23,14 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ('framed_copy.rs', 'framed_copy_bypasses_wire_write', 'match self.writer.write(bytes)', 'match Ok::<(), crate::sink::WriteError>(())'),
+    ('framed_copy.rs', 'framed_copy_writes_other_payload', 'self.writer.write(bytes)', 'self.writer.write(&[0u8])'),
+    ('framed_copy.rs', 'framed_copy_reports_unaccepted_suffix', 'let ghost sent = adapter.writer.sent();', 'let ghost sent = adapter.writer.framed();'),
+    ('framed_copy.rs', 'framed_copy_substitutes_empty_stream', '(Framed { copied, stream, sent: Ghost(sent), rejection: None }, sink)', '(Framed { copied, stream: ChunkStream::new(), sent: Ghost(sent), rejection: None }, sink)'),
+    ('framed_copy.rs', 'framed_copy_erases_wire_evidence', 'wire: Some(self.sent()), ..c.summary()', 'wire: Some(Seq::empty()), ..c.summary()'),
+    ('exchange_driver.rs', 'framed_copy_erases_observed_upload', 'Step::Uploaded(transfer.sent(), summary)', 'Step::Uploaded(Seq::empty(), summary)'),
+    ('exchange_driver.rs', 'framed_copy_erases_observed_download', 'self.note_streamed(effects, Ghost(transfer.sent()), Ghost(summary));', 'self.note_streamed(effects, Ghost(Seq::empty()), Ghost(summary));'),
+
     ('body_reader.rs', 'reader_copy_repeats_first_byte', 'buffer[i] = self.buffer[start + i];', 'buffer[i] = self.buffer[start];'),
     ('body_reader.rs', 'reader_copy_ignores_decoder_offset', 'buffer[i] = self.buffer[start + i];', 'buffer[i] = self.buffer[i];'),
     ('body_reader.rs', 'reader_copy_skips_last_byte', 'while i < n\n', 'while i + 1 < n\n'),
@@ -45,7 +53,7 @@ MUTATIONS = [
     ('request_context.rs', 'body_binding_ignores_destination', '(Some(a), Some(b)) => equal(a.as_slice(), b.as_slice()),', '(Some(a), Some(b)) => true,'),
     ('exchange_driver.rs', 'body_binding_accepts_foreign_upload', '!copy.matches(&key, 0)', 'false'),
     ('exchange_driver.rs', 'body_binding_accepts_swapped_download', '!copy.matches(&key, 1)', 'false'),
-    ('exchange_driver.rs', 'body_binding_discards_upload_evidence', 'Step::Uploaded(stream.out(), copy_summary(uploaded))', 'Step::Uploaded(stream.out(), None)'),
+    ('exchange_driver.rs', 'body_binding_discards_upload_evidence', 'Step::Uploaded(transfer.sent(), summary)', 'Step::Uploaded(transfer.sent(), None)'),
     ('body_driver.rs', 'body_binding_writes_wrong_direction', 'effects.write(context, &delivery, direction)', 'effects.write(context, &delivery, 0)'),
 
     ('body_driver.rs', 'body_driver_invents_eof', 'effects.read(buffer)', 'Some(0usize)'),

@@ -54,6 +54,21 @@ pub proof fn successful_body_copies_are_bound(before: Seq<Step>, after: Seq<Step
         crate::body_driver::received(out.progress@.download.unwrap().calls) == crate::body_driver::written(out.progress@.download.unwrap().calls),
 {}
 
+/// Observed body frames encode exactly the bytes read for the authorized
+/// request. A fixed response has neither body data nor body wire bytes.
+pub proof fn successful_body_frames_are_exact(before: Seq<Step>, after: Seq<Step>,
+    obstacles_before: nat, obstacles_after: nat, transferred: (u64, u64), out: Driven)
+    requires connection(before, after, obstacles_before, obstacles_after, transferred, out), succeeded(out),
+    ensures crate::http1_chunked::chunks_ok(out.progress@.upload_wire,
+            crate::body_driver::received(out.progress@.upload.unwrap().calls)),
+        if out.progress@.download.unwrap().wire.is_some() {
+            crate::http1_chunked::chunks_ok(out.progress@.download_wire,
+                crate::body_driver::received(out.progress@.download.unwrap().calls))
+        } else {
+            out.progress@.download_wire.len() == 0 && crate::body_driver::received(out.progress@.download.unwrap().calls).len() == 0
+        },
+{}
+
 /// An admitted request cannot silently fail on a supported, successful execution.
 /// The obstacle counter cannot be incremented by the core: only a trait call
 /// witnessing its precisely specified failed result or unsupported input changes it.

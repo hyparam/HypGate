@@ -8,6 +8,7 @@
 use crate::{http1, http_body, http_boundary::PreparedRequest, net::{Cancel, Deadline, Tls},
     transfer::{AuditLog, Direction, TransferError}};
 use gateway_core::body_driver::Completed;
+use gateway_core::framed_copy::Framed;
 use gateway_core::request_context::TransferKey;
 use gateway_core::exchange_driver::{ConnectFailure, Failure};
 use gateway_core::http1_exchange::ChunkStream;
@@ -111,15 +112,16 @@ impl Session {
     }
     /// The request body as chunks of `stream`, through the worker's upload role.
     pub(crate) fn upload<R: Read, L: AuditLog>(&mut self, prepared: &mut PreparedRequest<'_>, key: &TransferKey, input: &mut R, log: &mut L,
-        http: &http_body::WorkerHttp, stream: ChunkStream) -> (Result<Completed, Failure>, ChunkStream)
+        http: &http_body::WorkerHttp, stream: ChunkStream) -> Framed
     {
-        let mut writer = match http.upload_writer(http1::ChunkedWriter::new(&mut self.tls, stream)) {
+        let mut writer = match http.upload_writer(&mut self.tls) {
             Ok(writer) => writer,
-            Err(writer) => { let (_, stream) = writer.into_parts(); return (Err(Failure::Io), stream); }
+            Err(_) => return Framed::failed(stream, Failure::Io),
         };
-        let copied = prepared.copy_body(key, input, &mut writer, log, Direction::Upload);
-        let (_, stream) = writer.into_inner().into_parts();
-        (copied.map_err(|error| self.transfer_failure(error)), stream)
+        let mut copied = crate::transfer::copy_body_framed(prepared.stream(), key, input, &mut writer, log, stream, Direction::Upload);
+        drop(writer);
+        if let Some(error) = copied.body_failure() { copied.reject(self.transfer_failure(error.into())); }
+        copied
     }
     pub(crate) fn read_status_head(&mut self) -> Result<StatusHead, Failure> {
         let leftover = std::mem::take(&mut self.leftover);
@@ -130,6 +132,24 @@ impl Session {
     }
     /// The response body, framed as given, copied to `sink` through the
     /// worker's output role. `Ok` only when the body was complete as framed.
+    #[allow(clippy::too_many_arguments)] // Each argument holds a distinct request, reader, writer or audit role.
+    pub(crate) fn download_framed<W: Write, L: AuditLog>(&mut self, prepared: &mut PreparedRequest<'_>, key: &TransferKey, log: &mut L,
+        http: &http_body::WorkerHttp, framing: Framing, sink: &mut W, stream: ChunkStream) -> Framed
+    {
+        let leftover = std::mem::take(&mut self.leftover);
+        let body = http1::BodyReader::new(&mut self.tls, leftover, framing);
+        let Some(mut reader) = http.output(body) else { return Framed::failed(stream, Failure::Io); };
+        let mut copied = crate::transfer::copy_body_framed(prepared.stream(), key, &mut reader, sink, log, stream, Direction::Download);
+        let complete = reader.body().is_complete();
+        drop(reader);
+        if let Some(error) = copied.body_failure() {
+            let error = TransferError::from(error);
+            if matches!(error, TransferError::Write | TransferError::WriteZero | TransferError::Flush) { self.cancel.delivery_failed(); }
+            copied.reject(self.transfer_failure(error));
+        } else if !complete { copied.reject(self.failure()); }
+        copied
+    }
+
     pub(crate) fn download<W: Write, L: AuditLog>(&mut self, prepared: &mut PreparedRequest<'_>, key: &TransferKey, log: &mut L,
         http: &http_body::WorkerHttp, framing: Framing, sink: &mut W) -> Result<Completed, Failure>
     {
@@ -182,7 +202,7 @@ pub(crate) mod exchange {
             let (path, fields, key) = upstream.into_dispatch();
             let (head, stream) = machine.request(&path, fields).ok_or(Fault::Metadata)?;
             if !session.write(&head) { return Err(fault(session.failure(), Fault::Http)); }
-            let (uploaded, mut stream) = session.upload(prepared, &key, input, log, http, stream);
+            let (uploaded, mut stream) = session.upload(prepared, &key, input, log, http, stream).into_parts();
             let upload = uploaded.map_err(|failure| fault(failure, Fault::Upload))?;
             let last = stream.end();
             if !session.write(&last) { return Err(fault(session.failure(), Fault::Upload)); }

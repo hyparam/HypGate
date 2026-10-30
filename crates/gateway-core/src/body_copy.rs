@@ -97,7 +97,7 @@ impl BodyCopy {
 
     pub proof fn state_evidence(&self, stream: &OwnedStream)
         requires self.valid(stream),
-        ensures stream.valid(), stream.state().valid(), self.direction() <= 1,
+        ensures stream.valid(), stream.state().valid(), self.counted(stream), self.direction() <= 1,
             (self.needs_read() || self.needs_flush() || self.is_done()) ==> stream.state().position() == stream.state().body().len(),
     { stream.payload_bound(); }
     pub proof fn stable_phases(&self)

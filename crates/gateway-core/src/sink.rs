@@ -32,6 +32,12 @@ pub trait Sink {
         };
 }
 
+/// A flush may fail, but cannot invent or remove accepted bytes.
+pub trait FlushSink: Sink {
+    fn flush(&mut self) -> (ok: bool)
+        ensures final(self).accepted() == old(self).accepted();
+}
+
 #[derive(PartialEq, Eq, Structural, Clone, Copy, Debug)]
 pub enum WriteError { Closed, Failed }
 
@@ -95,6 +101,13 @@ impl<S: Sink> ChunkWriter<S> {
         &&& self.sent@ == self.stream.out().subrange(0, self.sent@.len() as int)
         &&& !self.failed ==> self.sent@ == self.stream.out()
     }
+
+    pub proof fn wire_evidence(&self)
+        requires self.inv(),
+        ensures self.sent().is_prefix_of(self.framed()),
+            self.accepted() == self.base() + self.sent(),
+            !self.failed() ==> self.sent() == self.framed(),
+    {}
 
     pub fn new(sink: S, stream: ChunkStream) -> (out: Self)
         requires stream.valid(), stream.out() == Seq::<u8>::empty(),
@@ -163,6 +176,15 @@ impl<S: Sink> ChunkWriter<S> {
         ensures self.inv() ==> out.1.valid(), out.1.ended() == self.ended(), out.1.body() == self.body(), out.1.out() == self.framed(), out.0.accepted() == self.accepted(),
             self.inv() && !self.failed() ==> out.0.accepted() == self.base() + out.1.out(),
     { (self.sink, self.stream) }
+}
+
+impl<S: FlushSink> ChunkWriter<S> {
+    pub fn flush(&mut self) -> (ok: bool)
+        requires old(self).inv(),
+        ensures final(self).inv(), final(self).base() == old(self).base(),
+            final(self).sent() == old(self).sent(), final(self).body() == old(self).body(),
+            final(self).ended() == old(self).ended(), final(self).failed() == old(self).failed(),
+    { self.sink.flush() }
 }
 
 } // verus!

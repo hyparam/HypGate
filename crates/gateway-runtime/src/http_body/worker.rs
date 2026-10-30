@@ -51,6 +51,7 @@ pub(crate) struct Charged<W> {
 }
 impl<W> Charged<W> {
     /// The wrapped writer; the role is released here.
+    #[cfg(test)]
     pub(crate) fn into_inner(self) -> W { self.inner }
 }
 impl<W: Write> Write for Charged<W> {

@@ -8,9 +8,9 @@
 //! chunk-stream machines produce every byte. Blocking sockets throughout;
 //! deadlines are socket timeouts (`net::Timed`), and a client that leaves is
 //! noticed by a small watcher thread that cancels the exchange.
+use gateway_core::framed_copy::{Framed, Downloaded};
 use crate::{config::GatewayConfig, disk_log::DiskLog, http1, http_body, http_boundary, net::{Cancel, Deadline, Timed},
     transport::{HttpsTransport, Session}, transfer::{AuditLog, LogRecord, TransferError}};
-use gateway_core::body_driver::Completed;
 use gateway_core::request_context::TransferKey;
 use gateway_core::exchange_driver::{self, Admit, Body, ConnectFailure, Effects, Event, Failure, FixedResponse, HeadRead, WriteScope};
 use gateway_core::http1_exchange::{Refusal, refusal_status};
@@ -233,10 +233,10 @@ impl Effects for ConnectionEffects<'_> {
     fn write_upstream(&mut self, bytes: &Vec<u8>) -> bool {
         self.session.as_mut().is_some_and(|session| session.write(bytes))
     }
-    fn upload(&mut self, key: &TransferKey, stream: gateway_core::http1_exchange::ChunkStream) -> (Result<Completed, Failure>, gateway_core::http1_exchange::ChunkStream) {
+    fn upload(&mut self, key: &TransferKey, stream: gateway_core::http1_exchange::ChunkStream) -> Framed {
         let Self { session, prepared, input, log, http, .. } = self;
         let (Some(session), Some(prepared), Some(input), Some(http)) = (session.as_mut(), prepared.as_mut(), input.as_mut(), http.as_ref()) else {
-            return (Err(Failure::Io), stream);
+            return Framed::failed(stream, Failure::Io);
         };
         session.upload(prepared, key, input, log, http, stream)
     }
@@ -251,24 +251,22 @@ impl Effects for ConnectionEffects<'_> {
             Err(_) => false,
         }
     }
-    fn download(&mut self, key: &TransferKey, framing: Framing, body: Body) -> (Result<Completed, Failure>, Body) {
+    fn download(&mut self, key: &TransferKey, framing: Framing, body: Body) -> Downloaded {
         let Self { session, prepared, log, http, writer, exchange_deadline, .. } = self;
         let (Some(session), Some(prepared), Some(http)) = (session.as_mut(), prepared.as_mut(), http.as_ref()) else {
-            return (Err(Failure::Io), body);
+            return match body { Body::Fixed => Downloaded::Fixed(Err(Failure::Io)), Body::Stream(s) => Downloaded::Stream(Framed::failed(s, Failure::Io)) };
         };
         match body {
-            Body::Fixed => (session.download(prepared, key, log, http, framing, &mut NoBody), Body::Fixed),
+            Body::Fixed => Downloaded::Fixed(session.download(prepared, key, log, http, framing, &mut NoBody)),
             Body::Stream(stream) => {
                 // The chunks go to the client through the worker's response role.
-                let Some(deadline) = *exchange_deadline else { return (Err(Failure::Io), Body::Stream(stream)); };
+                let Some(deadline) = *exchange_deadline else { return Downloaded::Stream(Framed::failed(stream, Failure::Io)); };
                 let mut timed = Timed::new(writer.inner(), deadline);
-                let mut sink = match http.response_writer(http1::ChunkedWriter::new(&mut timed, stream)) {
+                let mut sink = match http.response_writer(&mut timed) {
                     Ok(sink) => sink,
-                    Err(sink) => { let (_, stream) = sink.into_parts(); return (Err(Failure::Io), Body::Stream(stream)); }
+                    Err(_) => return Downloaded::Stream(Framed::failed(stream, Failure::Io)),
                 };
-                let copied = session.download(prepared, key, log, http, framing, &mut sink);
-                let (_, stream) = sink.into_inner().into_parts();
-                (copied, Body::Stream(stream))
+                Downloaded::Stream(session.download_framed(prepared, key, log, http, framing, &mut sink, stream))
             }
         }
     }

@@ -15,6 +15,7 @@
 //! lemmas therefore apply to the calls made by `drive`, not a declared history.
 use vstd::prelude::*;
 use crate::body_driver::{Completed, CopySummary};
+use crate::framed_copy::{Framed, Downloaded};
 use crate::exchange_lifecycle::{Closed, Fault, Lifecycle};
 use crate::headers::Field;
 use crate::request_context::{ProviderHead, Evidence, TransferKey, TransferIdentity};
@@ -123,8 +124,8 @@ pub open spec fn copy_summary(out: Result<Completed, Failure>) -> Option<CopySum
 }
 
 /// What the runtime does for the driver. Every method is trusted to perform
-/// exactly the effect named and report what happened. Admission and body-copy
-/// identity remain adapter joins; the top-level contract does not prove those joins.
+/// exactly the effect named and report what happened. Physical source/socket
+/// selection and admission-registry association remain adapter obligations.
 pub trait Effects {
     /// Observable effect attempts. Runtime adapters must faithfully implement this boundary.
     spec fn events(&self) -> Seq<Step>;
@@ -195,11 +196,11 @@ pub trait Effects {
         ensures final(self).transferred() == (old(self).transferred()),
             final(self).obstacles() == old(self).obstacles() + (if out { 0nat } else { 1nat }),
             final(self).events() == old(self).events().push(Step::UpstreamWrite(bytes@));
-    fn upload(&mut self, key: &TransferKey, stream: ChunkStream) -> (out: (Result<Completed, Failure>, ChunkStream))
-        requires prepared_identity(self.events()) == Some(key.identity()),
-        ensures out.0.is_ok() ==> out.0.unwrap().valid(), final(self).transferred() == (match out.0 { Ok(copy) => (copy.accepted(), old(self).transferred().1), Err(_) => old(self).transferred() }),
-            final(self).obstacles() == old(self).obstacles() + (if match out.0 { Ok(copy) => copy.is_done() && copy.summary().matches(key.identity(), 0) && !out.1.ended(), Err(_) => false } { 0nat } else { 1nat }),
-            out.1.valid(), final(self).events() == old(self).events().push(Step::Uploaded(out.1.out(), copy_summary(out.0)));
+    fn upload(&mut self, key: &TransferKey, stream: ChunkStream) -> (out: Framed)
+        requires prepared_identity(self.events()) == Some(key.identity()), stream.valid(), !stream.ended(), stream.out().len() == 0, stream.body().len() == 0,
+        ensures out.valid(), final(self).transferred() == (match out.result() { Ok(copy) => (copy.accepted(), old(self).transferred().1), Err(_) => old(self).transferred() }),
+            final(self).obstacles() == old(self).obstacles() + (if match out.result() { Ok(copy) => copy.is_done() && copy.summary().matches(key.identity(), 0), Err(_) => false } { 0nat } else { 1nat }),
+            final(self).events() == old(self).events().push(Step::Uploaded(out.sent(), out.summary()));
     fn read_status_head(&mut self) -> (out: Result<StatusHead, Failure>)
         ensures final(self).transferred() == (old(self).transferred()),
             final(self).obstacles() == old(self).obstacles() + (if match out { Ok(head) => supported_status(head, old(self).events()), Err(_) => false } { 0nat } else { 1nat }),
@@ -209,13 +210,14 @@ pub trait Effects {
         ensures final(self).transferred() == (old(self).transferred()),
             final(self).obstacles() == old(self).obstacles() + (if out { 0nat } else { 1nat }),
             final(self).events() == old(self).events().push(Step::ResponseHead(status, out));
-    fn download(&mut self, key: &TransferKey, framing: Framing, body: Body) -> (out: (Result<Completed, Failure>, Body))
+    fn download(&mut self, key: &TransferKey, framing: Framing, body: Body) -> (out: Downloaded)
         requires prepared_identity(self.events()) == Some(key.identity()),
-        ensures out.0.is_ok() ==> out.0.unwrap().valid(), final(self).transferred() == (match out.0 { Ok(copy) => (old(self).transferred().0, copy.accepted()), Err(_) => old(self).transferred() }),
-            final(self).obstacles() == old(self).obstacles() + (if (match out.0 { Ok(copy) => copy.is_done() && copy.summary().matches(key.identity(), 1), Err(_) => false }) && (match body { Body::Fixed => out.1 is Fixed, Body::Stream(_) => match out.1 { Body::Stream(stream) => !stream.ended(), _ => false } }) { 0nat } else { 1nat }),
-            match out.1 { Body::Stream(stream) => stream.valid(), Body::Fixed => true },
-            final(self).events() == match out.1 {
-                Body::Stream(stream) => old(self).events().push(Step::Streamed(stream.out(), copy_summary(out.0))), Body::Fixed => old(self).events().push(Step::Streamed(Seq::empty(), copy_summary(out.0))) };
+            match body { Body::Fixed => true, Body::Stream(s) => s.valid() && !s.ended() && s.out().len() == 0 && s.body().len() == 0 },
+        ensures out.valid(), final(self).transferred() == (match out.result() { Ok(copy) => (old(self).transferred().0, copy.accepted()), Err(_) => old(self).transferred() }),
+            final(self).obstacles() == old(self).obstacles() + (if (match out.result() { Ok(copy) => copy.is_done() && copy.summary().matches(key.identity(), 1), Err(_) => false })
+                && out.streamed() == (body is Stream)
+                && (!out.streamed() ==> out.result().unwrap().accepted() == 0) { 0nat } else { 1nat }),
+            final(self).events() == old(self).events().push(Step::Streamed(out.sent(), out.summary()));
     fn audit_completion(&mut self, payload: &Vec<u8>) -> (out: bool)
         ensures final(self).transferred() == (old(self).transferred()),
             final(self).obstacles() == old(self).obstacles() + (if out { 0nat } else { 1nat }),
@@ -253,12 +255,13 @@ pub ghost enum Step {
 pub ghost struct Progress {
     pub read: bool, pub incoming: Option<RequestHead>,
     pub upload: Option<CopySummary>, pub download: Option<CopySummary>,
+    pub upload_wire: Seq<u8>, pub download_wire: Seq<u8>,
     pub prepared: Option<(Seq<u8>, Seq<Field>, Evidence)>, pub upstream_head_written: bool, pub last_status: Option<u16>,
     pub worker: bool, pub admitted: bool, pub strict: Option<bool>, pub started: Option<bool>, pub connected: bool,
     pub response_logged: Option<(u16, bool)>, pub forwarded: bool, pub log_healthy: Option<bool>, pub completion: Option<bool>,
 }
 pub open spec fn initial() -> Progress {
-    Progress { read: false, incoming: None, upload: None, download: None, prepared: None, upstream_head_written: false, last_status: None, worker: false, admitted: false, strict: None, started: None, connected: false,
+    Progress { upload_wire: Seq::empty(), download_wire: Seq::empty(), read: false, incoming: None, upload: None, download: None, prepared: None, upstream_head_written: false, last_status: None, worker: false, admitted: false, strict: None, started: None, connected: false,
         response_logged: None, forwarded: false, log_healthy: None, completion: None }
 }
 /// Network effects may follow the request-start record: appended, or refused
@@ -304,9 +307,9 @@ pub open spec fn step_ok(p: Progress, s: Step) -> Option<Progress> {
         Step::ReadHead(input) => if !p.read && p.prepared.is_none() { Some(Progress { read: true, incoming: input, ..p }) } else { None },
         Step::Prepared(path, fields, evidence) => if p.admitted && p.prepared.is_none() && !p.connected && evidence.binds(path, fields) && p.incoming == Some(evidence.input) { Some(Progress { prepared: Some((path, fields, evidence)), ..p }) } else { None },
         Step::Status(status) => if p.connected { Some(Progress { last_status: Some(status), ..p }) } else { None },
-        Step::Uploaded(_, copy) => if p.connected && p.upstream_head_written { Some(Progress { upload: copy, ..p }) } else { None },
+        Step::Uploaded(bytes, copy) => if p.connected && p.upstream_head_written { Some(Progress { upload: copy, upload_wire: bytes, ..p }) } else { None },
         Step::Client(_, scope) => if p.forwarded && scope != WriteScope::Exchange { None } else { Some(p) },
-        Step::Streamed(_, copy) => Some(Progress { download: copy, ..p }),
+        Step::Streamed(bytes, copy) => Some(Progress { download: copy, download_wire: bytes, ..p }),
         Step::Worker(ok) => if !p.worker && !p.admitted { Some(Progress { worker: ok, ..p }) } else { None },
         Step::Admit(ok) => if p.worker && !p.admitted && p.strict.is_none() { Some(Progress { admitted: ok, ..p }) } else { None },
         Step::Strict(b) => if p.admitted && p.strict.is_none() { Some(Progress { strict: Some(b), ..p }) } else { None },
@@ -341,6 +344,11 @@ pub open spec fn copies_match_counts(p: Progress, upload: u64, download: u64) ->
         && p.upload.unwrap().matches(p.prepared.unwrap().2.transfer_identity(), 0)
         && p.download.unwrap().matches(p.prepared.unwrap().2.transfer_identity(), 1)
         && p.upload.unwrap().accepted == upload && p.download.unwrap().accepted == download
+        && p.upload.unwrap().wire == Some(p.upload_wire)
+        && match p.download.unwrap().wire {
+            Some(wire) => wire == p.download_wire,
+            None => p.download_wire.len() == 0 && download == 0,
+        }
 }
 /// Authorization is retained through every subsequent failure and completion.
 pub open spec fn authorized_progress(p: Progress) -> bool {
@@ -505,12 +513,12 @@ impl Driver {
     fn note_streamed<E: Effects>(&mut self, effects: &E, Ghost(bytes): Ghost<Seq<u8>>, Ghost(summary): Ghost<Option<CopySummary>>)
         requires old(self).settled(), !old(self).connection.open(),
             effects.events() == (old(self).base@ + observations(old(self).trace@)).push(Step::Streamed(bytes, summary)),
-        ensures final(self).settled(), final(self).bound(effects), final(self).base@ == old(self).base@, final(self).progress@ == (Progress { download: summary, ..old(self).progress@ }), final(self).connection == old(self).connection,
+        ensures final(self).settled(), final(self).bound(effects), final(self).base@ == old(self).base@, final(self).progress@ == (Progress { download: summary, download_wire: bytes, ..old(self).progress@ }), final(self).connection == old(self).connection,
             final(self).streamed@ == old(self).streamed@ + bytes,
     {
         proof { observations_push(self.base@, self.trace@, Step::Streamed(bytes, summary)); lemma_run_push(self.trace@, Step::Streamed(bytes, summary)); lemma_writes_push(self.trace@, Step::Streamed(bytes, summary)); }
         self.trace = Ghost(self.trace@.push(Step::Streamed(bytes, summary)));
-        self.progress = Ghost(Progress { download: summary, ..self.progress@ });
+        self.progress = Ghost(Progress { download: summary, download_wire: bytes, ..self.progress@ });
         self.streamed = Ghost(self.streamed@ + bytes);
         proof { assert(self.connection.out() + self.streamed@ =~= client_writes(self.trace@) + self.pending@); }
     }
@@ -604,7 +612,7 @@ impl Driver {
             old(life).valid(), old(life).open(), !old(life).uploaded(),
         ensures final(self).settled(), final(self).bound(final(effects)), final(self).base@ == old(self).base@,
             final(self).connection == old(self).connection,
-            final(self).progress@ == (Progress { prepared: final(self).progress@.prepared, upload: final(self).progress@.upload,
+            final(self).progress@ == (Progress { prepared: final(self).progress@.prepared, upload: final(self).progress@.upload, upload_wire: final(self).progress@.upload_wire,
                 connected: final(self).progress@.connected, upstream_head_written: final(self).progress@.upstream_head_written,
                 ..old(self).progress@ }),
             final(effects).obstacles() >= old(effects).obstacles(), final(effects).events().len() >= old(effects).events().len(),
@@ -616,6 +624,7 @@ impl Driver {
                 && final(self).progress@.prepared.is_some()
                 && out.unwrap().identity() == final(self).progress@.prepared.unwrap().2.transfer_identity()
                 && final(self).progress@.upload.is_some()
+                && final(self).progress@.upload.unwrap().wire == Some(final(self).progress@.upload_wire)
                 && final(self).progress@.upload.unwrap().matches(out.unwrap().identity(), 0)
                 && final(self).progress@.upload.unwrap().accepted == final(life).upload(),
     {
@@ -639,8 +648,10 @@ impl Driver {
         let written = effects.write_upstream(&head);
         self.record(effects, Ghost(Step::UpstreamWrite(head@)));
         if !written { return Err(Fault::Http); }
-        let (uploaded, mut stream) = effects.upload(&key, stream);
-        self.record(effects, Ghost(Step::Uploaded(stream.out(), copy_summary(uploaded))));
+        let transfer = effects.upload(&key, stream);
+        let ghost summary = transfer.summary();
+        self.record(effects, Ghost(Step::Uploaded(transfer.sent(), summary)));
+        let (uploaded, mut stream) = transfer.into_parts();
         let copy = match uploaded { Ok(copy) => copy, Err(failure) => return Err(fault_of(failure, Fault::Upload)) };
         if !copy.is_finished() || !copy.matches(&key, 0) || stream.is_ended() { return Err(Fault::Upload); }
         let last = stream.end();
@@ -699,7 +710,7 @@ impl Driver {
                 } else { crate::http1_exchange::stream_supported(status, reason@, fields@) });
             }
         }
-        let (copied, body) = if status == 204 || status == 304 {
+        let transfer = if status == 204 || status == 304 {
             // No body may follow: the fixed head is the whole response.
             match self.connection.respond_fixed(status, reason.as_slice(), fields, Vec::<u8>::new().as_slice()) {
                 Some(bytes) => {
@@ -721,15 +732,13 @@ impl Driver {
             if !self.emit(effects, head, WriteScope::Exchange) { return Err(Fault::Client); }
             effects.download(&key, body_framing, Body::Stream(stream))
         };
-        // Whatever the stream framed, the effect handed to the client.
-        let body = match body {
-            Body::Stream(stream) => { self.note_streamed(effects, Ghost(stream.out()), Ghost(copy_summary(copied))); Body::Stream(stream) }
-            Body::Fixed => { self.note_streamed(effects, Ghost(Seq::empty()), Ghost(copy_summary(copied))); Body::Fixed },
-        };
+        let ghost summary = transfer.summary();
+        self.note_streamed(effects, Ghost(transfer.sent()), Ghost(summary));
+        let (copied, body) = transfer.into_parts();
         let copy = match copied { Ok(copy) => copy, Err(failure) => return Err(fault_of(failure, Fault::Download)) };
         if !copy.is_finished() || !copy.matches(&key, 1) { return Err(Fault::Download); }
         match body {
-            Body::Fixed => { if !self.connection.is_done() { return Err(Fault::Download); } }
+            Body::Fixed => { if copy.accepted_bytes() != 0 || !self.connection.is_done() { return Err(Fault::Download); } }
             Body::Stream(mut stream) => {
                 if stream.is_ended() || !self.connection.is_streaming() { return Err(Fault::Download); }
                 let last = stream.end();

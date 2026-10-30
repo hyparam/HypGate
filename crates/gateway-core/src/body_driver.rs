@@ -26,6 +26,22 @@ pub open spec fn written(calls: Seq<Call>) -> Seq<u8>
 {
     if calls.len() == 0 { Seq::empty() } else { written(calls.drop_last()) + written_bytes(calls.last()) }
 }
+pub open spec fn writes_succeeded(calls: Seq<Call>) -> bool {
+    forall|i: int| 0 <= i < calls.len() ==> match #[trigger] calls[i] {
+        Call::Write(_, count, _, _, _) => count.is_some(), _ => true,
+    }
+}
+pub proof fn append_bytes(calls: Seq<Call>, call: Call)
+    ensures written(calls.push(call)) == written(calls) + written_bytes(call),
+        writes_succeeded(calls.push(call)) == (writes_succeeded(calls) && match call { Call::Write(_, n, _, _, _) => n.is_some(), _ => true }),
+{
+    assert(calls.push(call).drop_last() =~= calls);
+    if writes_succeeded(calls.push(call)) {
+        assert forall|i: int| 0 <= i < calls.len() implies match #[trigger] calls[i] { Call::Write(_, n, _, _, _) => n.is_some(), _ => true } by {
+            assert(calls.push(call)[i] == calls[i]);
+        }
+    }
+}
 pub open spec fn accepted(calls: Seq<Call>) -> nat
     decreases calls.len(),
 {
@@ -62,30 +78,35 @@ proof fn append_call(before: Seq<Call>, trace: Seq<Call>, call: Call, request: u
 /// supplied slice, as required by Rust's Write contract. Receipt truth and
 /// physical reader/writer/journal selection remain adapter obligations.
 pub trait Effects {
+    spec fn valid(&self) -> bool;
+    open spec fn anchor(&self) -> Seq<u8> { Seq::empty() }
     spec fn calls(&self) -> Seq<Call>;
     fn read(&mut self, buffer: &mut [u8]) -> (out: Option<usize>)
-        ensures final(buffer)@.len() == old(buffer)@.len(),
+        requires old(self).valid(),
+        ensures final(self).anchor() == old(self).anchor(), final(self).valid(), final(buffer)@.len() == old(buffer)@.len(),
             out.is_some() ==> out.unwrap() <= old(buffer).len(),
             final(self).calls() == old(self).calls().push(Call::Read(match out { Some(n) => final(buffer)@.take(n as int), None => Seq::empty() }, out));
-    fn session(&self) -> u128;
+    fn session(&self) -> u128 requires self.valid();
     fn audit(&mut self, header: Header, bytes: &[u8]) -> (out: Option<AuditReceipt>)
-        requires crate::framing::valid(header), header.payload == bytes.len(),
-        ensures out.is_some() ==> out.unwrap().valid(),
+        requires old(self).valid(), crate::framing::valid(header), header.payload == bytes.len(),
+        ensures final(self).anchor() == old(self).anchor(), final(self).valid(), out.is_some() ==> out.unwrap().valid(),
             final(self).calls() == old(self).calls().push(Call::Audit(header, bytes@));
     fn write(&mut self, context: &Context, delivery: &Delivery, direction: u8) -> (out: Option<usize>)
-        requires context.valid(), delivery.permits(&context.authority_value(), direction),
-        ensures out.is_some() ==> out.unwrap() <= delivery.bytes_value().len(),
+        requires old(self).valid(), context.valid(), delivery.permits(&context.authority_value(), direction),
+        ensures final(self).anchor() == old(self).anchor(), final(self).valid(), out.is_some() ==> out.unwrap() <= delivery.bytes_value().len(),
             final(self).calls() == old(self).calls().push(Call::Write(delivery.bytes_value(), out, context.authority_value().request(), context.authority_value().binding(), direction));
     fn flush(&mut self) -> (out: bool)
-        ensures final(self).calls() == old(self).calls().push(Call::Flush(out));
+        requires old(self).valid(),
+        ensures final(self).anchor() == old(self).anchor(), final(self).valid(), final(self).calls() == old(self).calls().push(Call::Flush(out));
 }
 
 /// A completion can only be produced by this verified production loop.
-pub ghost struct CopySummary { pub identity: TransferIdentity, pub direction: u8, pub accepted: u64, pub calls: Seq<Call> }
+pub ghost struct CopySummary { pub identity: TransferIdentity, pub direction: u8, pub accepted: u64, pub calls: Seq<Call>, pub wire: Option<Seq<u8>> }
 impl CopySummary {
     pub open spec fn valid(&self) -> bool {
         self.direction <= 1 && belongs(self.calls, self.identity.request, self.identity.route, self.direction)
-            && accepted(self.calls) == self.accepted && received(self.calls) == written(self.calls)
+            && (self.wire.is_some() ==> crate::http1_chunked::chunks_ok(self.wire.unwrap(), received(self.calls)))
+            && self.accepted == written(self.calls).len() && writes_succeeded(self.calls) && accepted(self.calls) == self.accepted && received(self.calls) == written(self.calls)
     }
     pub open spec fn matches(&self, identity: TransferIdentity, direction: u8) -> bool {
         self.valid() && self.identity == identity && self.direction == direction
@@ -99,11 +120,14 @@ impl Completed {
     pub open spec fn route(&self) -> Route { self.identity().route }
     pub closed spec fn trace(&self) -> Seq<Call> { self.trace@ }
     pub open spec fn summary(&self) -> CopySummary {
-        CopySummary { identity: self.identity(), direction: self.copy().direction(), accepted: self.copy().accepted(), calls: self.trace() }
+        CopySummary { identity: self.identity(), direction: self.copy().direction(), accepted: self.copy().accepted(), calls: self.trace(), wire: None }
     }
     pub closed spec fn valid(&self) -> bool { self.copy.is_done() && self.summary().valid() }
     pub open spec fn accepted(&self) -> u64 { self.copy().accepted() }
     pub open spec fn is_done(&self) -> bool { self.copy().is_done() }
+    pub proof fn evidence(&self)
+        requires self.valid(), ensures self.summary().valid(), self.is_done(),
+    {}
     pub fn accepted_bytes(&self) -> (out: u64) ensures out == self.accepted(), { self.copy.accepted_bytes() }
     pub fn audit_gap(&self) -> bool { self.copy.audit_gap() }
     pub fn is_finished(&self) -> (out: bool) ensures out == self.is_done(), { self.copy.is_finished() }
@@ -126,8 +150,8 @@ impl Completed {
 #[verifier::rlimit(100)]
 pub fn copy<E: Effects>(context: &Context, expected: &TransferKey, owner: &mut OwnedStream, journal: &mut JournalBinding,
     effects: &mut E, direction: u8) -> (out: Result<Completed, Failure>)
-    requires context.valid(), old(owner).valid(),
-    ensures final(owner).valid(), final(owner).key() == old(owner).key(),
+    requires context.valid(), old(owner).valid(), old(effects).valid(),
+    ensures final(effects).anchor() == old(effects).anchor(), final(effects).valid(), final(owner).valid(), final(owner).key() == old(owner).key(),
         context.transfer_identity() != expected.identity() ==> final(effects).calls() == old(effects).calls()
             && match out { Err(failure) => failure == Failure::InvalidState, _ => false },
         match out {
@@ -152,12 +176,13 @@ pub fn copy<E: Effects>(context: &Context, expected: &TransferKey, owner: &mut O
     let ghost initial = owner.state().input();
     proof { authority.binding_tenant(); copy.state_evidence(owner); owner.state().data_partition(); }
     loop
-        invariant context.valid(), key.identity() == expected.identity(), key.identity() == context.transfer_identity(),
+        invariant copy.start() == initial.len(), effects.anchor() == old(effects).anchor(), effects.valid(), context.valid(), key.identity() == expected.identity(), key.identity() == context.transfer_identity(),
             key.identity().request == authority.request(), key.identity().route == authority.binding(), authority.valid(), authority.tenant() == authority.binding().tenant, *authority == context.authority_value(), copy.valid(owner), copy.direction() == direction,
             owner.key() == old(owner).key(), owner.key().id() == authority.request(),
             copy.needs_read() || copy.filled() || copy.audited() || copy.needs_flush() || copy.is_done() || copy.failure().is_some(),
             effects.calls() == base + trace, base == old(effects).calls(),
             belongs(trace, authority.request(), authority.binding(), direction),
+            copy.failure().is_none() ==> writes_succeeded(trace),
             copy.failure().is_none() ==> owner.state().input() == initial + received(trace)
                 && owner.state().completed() == initial + written(trace),
             copy.failure().is_none() ==> accepted(trace) == copy.accepted()

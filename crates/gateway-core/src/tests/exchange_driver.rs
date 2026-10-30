@@ -1,7 +1,7 @@
 //! Executable checks of the exchange driver against a scripted `Effects`.
 //! The proofs cover every trace the driver can take; these pin the concrete
 //! sequence of effects and bytes on the paths an operator sees.
-use crate::body_driver::Completed;
+use crate::framed_copy::{Framed, Downloaded};
 use crate::request_context::TransferKey;
 use crate::exchange_driver::*;
 use crate::exchange_lifecycle::Fault;
@@ -39,8 +39,11 @@ fn configured() -> crate::request_context::ProviderConfig {
 
 /// A real completed copy: the same verified driver that production uses reads,
 /// audits and writes the bytes whose framing this fake records.
-fn finished_copy(key: &TransferKey, direction: u8, input: &[u8], stream: Option<&mut crate::http1_exchange::ChunkStream>, output: &mut Vec<u8>, foreign: bool) -> Completed {
-    struct Primitive<'a> { input: &'a [u8], stream: Option<&'a mut crate::http1_exchange::ChunkStream>, output: &'a mut Vec<u8> }
+fn finished_copy(key: &TransferKey, direction: u8, input: &[u8], stream: Option<crate::http1_exchange::ChunkStream>, output: &mut Vec<u8>, foreign: bool) -> Downloaded {
+    finished_copy_with_limit(key, direction, input, stream, output, foreign, usize::MAX)
+}
+fn finished_copy_with_limit(key: &TransferKey, direction: u8, input: &[u8], stream: Option<crate::http1_exchange::ChunkStream>, output: &mut Vec<u8>, foreign: bool, limit: usize) -> Downloaded {
+    struct Primitive<'a> { input: &'a [u8] }
     impl crate::body_driver::Effects for Primitive<'_> {
         fn read(&mut self, buffer: &mut [u8]) -> Option<usize> {
             let n = buffer.len().min(self.input.len());
@@ -55,8 +58,7 @@ fn finished_copy(key: &TransferKey, direction: u8, input: &[u8], stream: Option<
         }
         fn write(&mut self, _: &crate::request_context::Context<'_>, delivery: &crate::body_copy::Delivery<'_>, _: u8) -> Option<usize> {
             let bytes = delivery.bytes();
-            let framed = self.stream.as_mut().unwrap().frame(bytes);
-            self.output.extend_from_slice(&framed); Some(bytes.len())
+            Some(bytes.len())
         }
         fn flush(&mut self) -> bool { true }
     }
@@ -67,8 +69,22 @@ fn finished_copy(key: &TransferKey, direction: u8, input: &[u8], stream: Option<
     let context = config.authorize(&crate::sha256::digest(b"token"), 7, lease.owner()).unwrap();
     let mut owner = OwnedStream::claim(&registry, lease, context.authority(), true).ok().unwrap();
     let own_key = context.transfer_key();
-    crate::body_driver::copy(&context, if foreign { &own_key } else { key }, &mut owner, &mut crate::journal_binding::JournalBinding::new(),
-        &mut Primitive { input, stream, output }, direction).ok().unwrap()
+    let key = if foreign { &own_key } else { key };
+    struct Socket<'a>(&'a mut Vec<u8>, usize);
+    impl crate::sink::Sink for Socket<'_> {
+        fn put(&mut self, bytes: &[u8]) -> crate::sink::Put {
+            if self.0.len() >= self.1 { return crate::sink::Put::Failed; }
+            let n = bytes.len().min(2).min(self.1 - self.0.len());
+            self.0.extend_from_slice(&bytes[..n]); crate::sink::Put::Wrote(n)
+        }
+    }
+    impl crate::sink::FlushSink for Socket<'_> { fn flush(&mut self) -> bool { true } }
+    match stream {
+        Some(stream) => Downloaded::Stream(crate::framed_copy::copy(&context, key, &mut owner, &mut crate::journal_binding::JournalBinding::new(),
+            Primitive { input }, Socket(output, limit), stream, direction).0),
+        None => Downloaded::Fixed(Ok(crate::body_driver::copy(&context, key, &mut owner, &mut crate::journal_binding::JournalBinding::new(),
+            &mut Primitive { input }, direction).ok().unwrap())),
+    }
 }
 
 /// What the scripted runtime should answer.
@@ -133,10 +149,11 @@ impl Effects for Fake {
         match self.script.connect { Some(failure) => Err(failure), None => Ok(()) }
     }
     fn write_upstream(&mut self, bytes: &Vec<u8>) -> bool { self.note("write_upstream"); self.upstream.extend_from_slice(bytes); true }
-    fn upload(&mut self, key: &TransferKey, mut stream: crate::http1_exchange::ChunkStream) -> (Result<Completed, Failure>, crate::http1_exchange::ChunkStream) {
+    fn upload(&mut self, key: &TransferKey, stream: crate::http1_exchange::ChunkStream) -> Framed {
         self.note("upload");
-        let copy = finished_copy(key, 0, b"hello", Some(&mut stream), &mut self.upstream, self.script.foreign_upload);
-        (Ok(copy), stream)
+        match finished_copy(key, 0, b"hello", Some(stream), &mut self.upstream, self.script.foreign_upload) {
+            Downloaded::Stream(f) => f, _ => unreachable!(),
+        }
     }
     fn read_status_head(&mut self) -> Result<StatusHead, Failure> {
         self.note("read_status_head");
@@ -144,16 +161,15 @@ impl Effects for Fake {
         Ok(self.script.statuses.remove(0))
     }
     fn audit_response_head(&mut self, status: u16) -> bool { self.note(&format!("audit_response_head {status}")); self.script.response_logged }
-    fn download(&mut self, key: &TransferKey, framing: Framing, body: Body) -> (Result<Completed, Failure>, Body) {
+    fn download(&mut self, key: &TransferKey, framing: Framing, body: Body) -> Downloaded {
         self.note(&format!("download {framing:?}"));
-        let (copy, body) = match body {
-            Body::Stream(mut stream) => {
-                let copy = finished_copy(key, if self.script.swapped_download { 0 } else { 1 }, b"data: hi\n\n", Some(&mut stream), &mut self.client, false);
-                (copy, Body::Stream(stream))
-            }
-            Body::Fixed => (finished_copy(key, 1, b"", None, &mut self.client, false), Body::Fixed),
+        let copied = match body {
+            Body::Stream(stream) => finished_copy(key, if self.script.swapped_download { 0 } else { 1 }, b"data: hi\n\n", Some(stream), &mut self.client, false),
+            Body::Fixed => finished_copy(key, 1, b"", None, &mut self.client, false),
         };
-        (if self.script.download_ok { Ok(copy) } else { Err(Failure::Io) }, body)
+        if self.script.download_ok { copied } else {
+            match copied { Downloaded::Stream(mut f) => { f.reject(Failure::Io); Downloaded::Stream(f) }, _ => Downloaded::Fixed(Err(Failure::Io)) }
+        }
     }
     fn audit_completion(&mut self, payload: &Vec<u8>) -> bool {
         self.note("audit_completion");
@@ -340,4 +356,24 @@ fn foreign_upload_and_swapped_download_cannot_report_success() {
     assert!(swapped.calls.contains(&format!("outcome {}", crate::metadata::OUTCOME_DOWNLOAD_FAILURE)));
     assert_eq!(swapped.counts, (0, 0));
     assert!(!swapped.client.ends_with(b"0\r\n\r\n"));
+}
+
+#[test]
+fn sealed_framed_copy_handles_every_wire_failure_offset() {
+    let config = configured();
+    let context = config.authorize(&crate::sha256::digest(b"token"), 7, 1).unwrap();
+    let key = context.transfer_key();
+    let expected = b"5\r\nhello\r\n";
+    for limit in 0..=expected.len() {
+        let mut wire = Vec::new();
+        let Downloaded::Stream(framed) = finished_copy_with_limit(&key, 0, b"hello", Some(crate::http1_exchange::ChunkStream::new()), &mut wire, false, limit) else { panic!("expected framed result") };
+        assert_eq!(wire, expected[..limit]);
+        assert_eq!(framed.body_failure().is_none(), limit == expected.len());
+        let (copy, stream) = framed.into_parts();
+        assert!(!stream.is_ended(), "only the connection driver writes the terminal chunk");
+        match copy {
+            Ok(copy) => assert_eq!(copy.accepted_bytes(), 5),
+            Err(failure) => assert_eq!(failure, Failure::Io),
+        }
+    }
 }

@@ -106,6 +106,24 @@ where R: Read, W: Write, L: AuditLog {
     Ok(completed)
 }
 
+/// The core owns framing and body-copy completion as one sealed result.
+pub(crate) fn copy_body_framed<R: Read, W: Write, L: AuditLog>(request: &mut Request<'_>,
+    key: &gateway_core::request_context::TransferKey, reader: &mut R, writer: &mut W, log: &mut L,
+    stream: gateway_core::http1_exchange::ChunkStream, direction: Direction) -> gateway_core::framed_copy::Framed
+{
+    let mut guard = CancelOnDrop { request, armed: true };
+    let Some((owner, context, journal)) = guard.request.copy_parts() else {
+        return gateway_core::framed_copy::Framed::failed(stream, gateway_core::exchange_driver::Failure::Io);
+    };
+    // The framed adapter uses only this object's read and audit primitives;
+    // its writer and flush are supplied by the owned ChunkWriter instead.
+    let mut unused = std::io::sink();
+    let (framed, _) = gateway_core::framed_copy::copy(context, key, owner, journal,
+        BodyEffects { reader, writer: &mut unused, log }, crate::http1::Wire::new(writer), stream, direction.id());
+    guard.armed = framed.body_failure().is_some();
+    framed
+}
+
 struct BodyEffects<'a, R, W, L> { reader: &'a mut R, writer: &'a mut W, log: &'a mut L }
 impl<R: Read, W: Write, L: AuditLog> gateway_core::body_driver::Effects for BodyEffects<'_, R, W, L> {
     fn read(&mut self, buffer: &mut [u8]) -> Option<usize> { read_uninterrupted(self.reader, buffer).ok() }
