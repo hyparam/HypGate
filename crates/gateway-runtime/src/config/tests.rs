@@ -160,3 +160,36 @@ fn configured_request_checks_real_logger_receipt_strength() {
         }
     }
 }
+
+#[test]
+fn transfer_key_mismatch_stops_before_any_body_effect() {
+    struct NoEffects;
+    impl std::io::Read for NoEffects {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> { panic!("read before identity check") }
+    }
+    impl std::io::Write for NoEffects {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> { panic!("write before identity check") }
+        fn flush(&mut self) -> std::io::Result<()> { panic!("flush before identity check") }
+    }
+    impl crate::transfer::AuditLog for NoEffects {
+        fn session_id(&self) -> u128 { panic!("journal selected before identity check") }
+        fn append(&mut self, _: crate::transfer::LogRecord<'_>) -> std::io::Result<crate::transfer::AuditReceipt> {
+            panic!("audit before identity check")
+        }
+    }
+    let first = load(&root()).unwrap();
+    let original = first.admit(b"test-gateway-token", 7).unwrap();
+    let key = original.request.context().transfer_key();
+    for change in 0..3 {
+        let mut other = root();
+        let token: &[u8] = if change == 1 { b"another-token" } else { b"test-gateway-token" };
+        if change == 0 { other["destinations"][0] = json!("https://another.example/v1/responses"); }
+        if change == 1 { other["identities"][0]["sha256"] = json!(crate::shipping::state::hex(&gateway_core::sha256::digest(token))); }
+        let config = load(&other).unwrap();
+        let _held = if change == 2 { Some(config.admit(token, 7).unwrap()) } else { None };
+        let mut request = config.admit(token, 7).unwrap();
+        let result = request.copy_body(&key, &mut NoEffects, &mut NoEffects, &mut NoEffects, crate::transfer::Direction::Upload);
+        assert_eq!(result.err(), Some(crate::transfer::TransferError::InvalidState));
+        assert!(request.request.is_closed());
+    }
+}

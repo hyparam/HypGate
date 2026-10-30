@@ -14,10 +14,10 @@
 //! forwarding/skip milestones. `run` specifies allowed traces; its ordering
 //! lemmas therefore apply to the calls made by `drive`, not a declared history.
 use vstd::prelude::*;
-use crate::body_copy::BodyCopy;
+use crate::body_driver::{Completed, CopySummary};
 use crate::exchange_lifecycle::{Closed, Fault, Lifecycle};
 use crate::headers::Field;
-use crate::request_context::{ProviderHead, Evidence};
+use crate::request_context::{ProviderHead, Evidence, TransferKey, TransferIdentity};
 use crate::http1_exchange::{ChunkStream, Connection, Refusal, Upstream, UpstreamStatus, failure_status, refusal_status, upstream_status, wants_continue};
 use crate::http1_framing::{Framing, framing};
 use crate::http1_head::{RequestHead, StatusHead};
@@ -110,6 +110,18 @@ pub open spec fn received_input(events: Seq<Step>) -> Option<RequestHead>
     } }
 }
 
+#[verifier::opaque]
+pub open spec fn prepared_identity(events: Seq<Step>) -> Option<TransferIdentity>
+    decreases events.len(),
+{
+    if events.len() == 0 { None } else { match events.last() {
+        Step::Prepared(_, _, evidence) => Some(evidence.transfer_identity()), _ => prepared_identity(events.drop_last()),
+    } }
+}
+pub open spec fn copy_summary(out: Result<Completed, Failure>) -> Option<CopySummary> {
+    match out { Ok(copy) => Some(copy.summary()), Err(_) => None }
+}
+
 /// What the runtime does for the driver. Every method is trusted to perform
 /// exactly the effect named and report what happened. Admission and body-copy
 /// identity remain adapter joins; the top-level contract does not prove those joins.
@@ -183,10 +195,11 @@ pub trait Effects {
         ensures final(self).transferred() == (old(self).transferred()),
             final(self).obstacles() == old(self).obstacles() + (if out { 0nat } else { 1nat }),
             final(self).events() == old(self).events().push(Step::UpstreamWrite(bytes@));
-    fn upload(&mut self, stream: ChunkStream) -> (out: (Result<BodyCopy, Failure>, ChunkStream))
-        ensures final(self).transferred() == (match out.0 { Ok(copy) => (copy.accepted(), old(self).transferred().1), Err(_) => old(self).transferred() }),
-            final(self).obstacles() == old(self).obstacles() + (if match out.0 { Ok(copy) => copy.is_done() && !out.1.ended(), Err(_) => false } { 0nat } else { 1nat }),
-            out.1.valid(), final(self).events() == old(self).events().push(Step::Uploaded(out.1.out()));
+    fn upload(&mut self, key: &TransferKey, stream: ChunkStream) -> (out: (Result<Completed, Failure>, ChunkStream))
+        requires prepared_identity(self.events()) == Some(key.identity()),
+        ensures out.0.is_ok() ==> out.0.unwrap().valid(), final(self).transferred() == (match out.0 { Ok(copy) => (copy.accepted(), old(self).transferred().1), Err(_) => old(self).transferred() }),
+            final(self).obstacles() == old(self).obstacles() + (if match out.0 { Ok(copy) => copy.is_done() && copy.summary().matches(key.identity(), 0) && !out.1.ended(), Err(_) => false } { 0nat } else { 1nat }),
+            out.1.valid(), final(self).events() == old(self).events().push(Step::Uploaded(out.1.out(), copy_summary(out.0)));
     fn read_status_head(&mut self) -> (out: Result<StatusHead, Failure>)
         ensures final(self).transferred() == (old(self).transferred()),
             final(self).obstacles() == old(self).obstacles() + (if match out { Ok(head) => supported_status(head, old(self).events()), Err(_) => false } { 0nat } else { 1nat }),
@@ -196,12 +209,13 @@ pub trait Effects {
         ensures final(self).transferred() == (old(self).transferred()),
             final(self).obstacles() == old(self).obstacles() + (if out { 0nat } else { 1nat }),
             final(self).events() == old(self).events().push(Step::ResponseHead(status, out));
-    fn download(&mut self, framing: Framing, body: Body) -> (out: (Result<BodyCopy, Failure>, Body))
-        ensures final(self).transferred() == (match out.0 { Ok(copy) => (old(self).transferred().0, copy.accepted()), Err(_) => old(self).transferred() }),
-            final(self).obstacles() == old(self).obstacles() + (if (match out.0 { Ok(copy) => copy.is_done(), Err(_) => false }) && (match body { Body::Fixed => out.1 is Fixed, Body::Stream(_) => match out.1 { Body::Stream(stream) => !stream.ended(), _ => false } }) { 0nat } else { 1nat }),
+    fn download(&mut self, key: &TransferKey, framing: Framing, body: Body) -> (out: (Result<Completed, Failure>, Body))
+        requires prepared_identity(self.events()) == Some(key.identity()),
+        ensures out.0.is_ok() ==> out.0.unwrap().valid(), final(self).transferred() == (match out.0 { Ok(copy) => (old(self).transferred().0, copy.accepted()), Err(_) => old(self).transferred() }),
+            final(self).obstacles() == old(self).obstacles() + (if (match out.0 { Ok(copy) => copy.is_done() && copy.summary().matches(key.identity(), 1), Err(_) => false }) && (match body { Body::Fixed => out.1 is Fixed, Body::Stream(_) => match out.1 { Body::Stream(stream) => !stream.ended(), _ => false } }) { 0nat } else { 1nat }),
             match out.1 { Body::Stream(stream) => stream.valid(), Body::Fixed => true },
             final(self).events() == match out.1 {
-                Body::Stream(stream) => old(self).events().push(Step::Streamed(stream.out())), Body::Fixed => old(self).events() };
+                Body::Stream(stream) => old(self).events().push(Step::Streamed(stream.out(), copy_summary(out.0))), Body::Fixed => old(self).events().push(Step::Streamed(Seq::empty(), copy_summary(out.0))) };
     fn audit_completion(&mut self, payload: &Vec<u8>) -> (out: bool)
         ensures final(self).transferred() == (old(self).transferred()),
             final(self).obstacles() == old(self).obstacles() + (if out { 0nat } else { 1nat }),
@@ -217,11 +231,11 @@ pub trait Effects {
 /// One step the driver took, as the trace records it.
 pub ghost enum Step {
     ReadHead(Option<RequestHead>),
-    Prepared(Seq<u8>, Seq<Field>, Evidence), Status(u16), Uploaded(Seq<u8>),
+    Prepared(Seq<u8>, Seq<Field>, Evidence), Status(u16), Uploaded(Seq<u8>, Option<CopySummary>),
     /// Bytes the driver handed to the client.
     Client(Seq<u8>, WriteScope),
     /// Bytes the download effect handed to the client: a chunk stream's frames.
-    Streamed(Seq<u8>),
+    Streamed(Seq<u8>, Option<CopySummary>),
     Worker(bool), Admit(bool), Strict(bool), RequestStart(bool), Connect(bool),
     UpstreamWrite(Seq<u8>),
     /// The response-head record for this status, and whether it was appended.
@@ -238,12 +252,13 @@ pub ghost enum Step {
 /// What the trace so far has established.
 pub ghost struct Progress {
     pub read: bool, pub incoming: Option<RequestHead>,
+    pub upload: Option<CopySummary>, pub download: Option<CopySummary>,
     pub prepared: Option<(Seq<u8>, Seq<Field>, Evidence)>, pub upstream_head_written: bool, pub last_status: Option<u16>,
     pub worker: bool, pub admitted: bool, pub strict: Option<bool>, pub started: Option<bool>, pub connected: bool,
     pub response_logged: Option<(u16, bool)>, pub forwarded: bool, pub log_healthy: Option<bool>, pub completion: Option<bool>,
 }
 pub open spec fn initial() -> Progress {
-    Progress { read: false, incoming: None, prepared: None, upstream_head_written: false, last_status: None, worker: false, admitted: false, strict: None, started: None, connected: false,
+    Progress { read: false, incoming: None, upload: None, download: None, prepared: None, upstream_head_written: false, last_status: None, worker: false, admitted: false, strict: None, started: None, connected: false,
         response_logged: None, forwarded: false, log_healthy: None, completion: None }
 }
 /// Network effects may follow the request-start record: appended, or refused
@@ -275,7 +290,8 @@ pub open spec fn observations(t: Seq<Step>) -> Seq<Step>
 proof fn observations_push(base: Seq<Step>, t: Seq<Step>, s: Step)
     ensures base + observations(t.push(s)) == observed_after(base + observations(t), s),
         received_input(base + observations(t.push(s))) == (match s { Step::ReadHead(input) => input, _ => received_input(base + observations(t)) }),
-{ reveal(received_input);
+        prepared_identity(base + observations(t.push(s))) == (match s { Step::Prepared(_, _, e) => Some(e.transfer_identity()), _ => prepared_identity(base + observations(t)) }),
+{ reveal(received_input); reveal(prepared_identity);
   assert(t.push(s).drop_last() =~= t);
   assert(base + observations(t.push(s)) =~= observed_after(base + observations(t), s));
   let events = base + observations(t);
@@ -288,9 +304,9 @@ pub open spec fn step_ok(p: Progress, s: Step) -> Option<Progress> {
         Step::ReadHead(input) => if !p.read && p.prepared.is_none() { Some(Progress { read: true, incoming: input, ..p }) } else { None },
         Step::Prepared(path, fields, evidence) => if p.admitted && p.prepared.is_none() && !p.connected && evidence.binds(path, fields) && p.incoming == Some(evidence.input) { Some(Progress { prepared: Some((path, fields, evidence)), ..p }) } else { None },
         Step::Status(status) => if p.connected { Some(Progress { last_status: Some(status), ..p }) } else { None },
-        Step::Uploaded(_) => if p.connected && p.upstream_head_written { Some(p) } else { None },
+        Step::Uploaded(_, copy) => if p.connected && p.upstream_head_written { Some(Progress { upload: copy, ..p }) } else { None },
         Step::Client(_, scope) => if p.forwarded && scope != WriteScope::Exchange { None } else { Some(p) },
-        Step::Streamed(_) => Some(p),
+        Step::Streamed(_, copy) => Some(Progress { download: copy, ..p }),
         Step::Worker(ok) => if !p.worker && !p.admitted { Some(Progress { worker: ok, ..p }) } else { None },
         Step::Admit(ok) => if p.worker && !p.admitted && p.strict.is_none() { Some(Progress { admitted: ok, ..p }) } else { None },
         Step::Strict(b) => if p.admitted && p.strict.is_none() { Some(Progress { strict: Some(b), ..p }) } else { None },
@@ -317,6 +333,14 @@ pub open spec fn run(trace: Seq<Step>) -> Option<Progress>
 {
     if trace.len() == 0 { Some(initial()) }
     else { match run(trace.drop_last()) { Some(p) => step_ok(p, trace.last()), None => None } }
+}
+/// Successful counts come from two completed primitive-effect histories for
+/// the exact identity selected by the provider head, in their proper directions.
+pub open spec fn copies_match_counts(p: Progress, upload: u64, download: u64) -> bool {
+    p.prepared.is_some() && p.upload.is_some() && p.download.is_some()
+        && p.upload.unwrap().matches(p.prepared.unwrap().2.transfer_identity(), 0)
+        && p.download.unwrap().matches(p.prepared.unwrap().2.transfer_identity(), 1)
+        && p.upload.unwrap().accepted == upload && p.download.unwrap().accepted == download
 }
 /// Authorization is retained through every subsequent failure and completion.
 pub open spec fn authorized_progress(p: Progress) -> bool {
@@ -356,7 +380,7 @@ pub open spec fn client_writes(trace: Seq<Step>) -> Seq<u8>
     if trace.len() == 0 { Seq::empty() }
     else { client_writes(trace.drop_last()) + written_by(trace.last()) }
 }
-pub open spec fn written_by(s: Step) -> Seq<u8> { match s { Step::Client(bytes, _) => bytes, Step::Streamed(bytes) => bytes, _ => Seq::empty() } }
+pub open spec fn written_by(s: Step) -> Seq<u8> { match s { Step::Client(bytes, _) => bytes, Step::Streamed(bytes, _) => bytes, _ => Seq::empty() } }
 
 proof fn lemma_run_push(t: Seq<Step>, s: Step)
     ensures run(t.push(s)) == (match run(t) { Some(p) => step_ok(p, s), None => None }),
@@ -428,6 +452,7 @@ fn connect_fault(failure: ConnectFailure) -> Fault {
 impl Driver {
     spec fn inv(&self) -> bool {
         run(self.trace@) == Some(self.progress@) && self.connection.valid()
+        && (self.progress@.prepared.is_some() ==> prepared_identity(self.base@ + observations(self.trace@)) == Some(self.progress@.prepared.unwrap().2.transfer_identity()))
         && (self.progress@.incoming.is_some() ==> received_input(self.base@ + observations(self.trace@)) == self.progress@.incoming)
         && self.connection.out() + self.streamed@ == client_writes(self.trace@) + self.pending@
         && (self.connection.open() ==> self.streamed@.len() == 0 && !self.progress@.forwarded)
@@ -477,14 +502,15 @@ impl Driver {
         ok
     }
     /// The download effect handed these stream frames to the client.
-    fn note_streamed<E: Effects>(&mut self, effects: &E, Ghost(bytes): Ghost<Seq<u8>>)
+    fn note_streamed<E: Effects>(&mut self, effects: &E, Ghost(bytes): Ghost<Seq<u8>>, Ghost(summary): Ghost<Option<CopySummary>>)
         requires old(self).settled(), !old(self).connection.open(),
-            effects.events() == (old(self).base@ + observations(old(self).trace@)).push(Step::Streamed(bytes)),
-        ensures final(self).settled(), final(self).bound(effects), final(self).base@ == old(self).base@, final(self).progress@ == old(self).progress@, final(self).connection == old(self).connection,
+            effects.events() == (old(self).base@ + observations(old(self).trace@)).push(Step::Streamed(bytes, summary)),
+        ensures final(self).settled(), final(self).bound(effects), final(self).base@ == old(self).base@, final(self).progress@ == (Progress { download: summary, ..old(self).progress@ }), final(self).connection == old(self).connection,
             final(self).streamed@ == old(self).streamed@ + bytes,
     {
-        proof { observations_push(self.base@, self.trace@, Step::Streamed(bytes)); lemma_run_push(self.trace@, Step::Streamed(bytes)); lemma_writes_push(self.trace@, Step::Streamed(bytes)); }
-        self.trace = Ghost(self.trace@.push(Step::Streamed(bytes)));
+        proof { observations_push(self.base@, self.trace@, Step::Streamed(bytes, summary)); lemma_run_push(self.trace@, Step::Streamed(bytes, summary)); lemma_writes_push(self.trace@, Step::Streamed(bytes, summary)); }
+        self.trace = Ghost(self.trace@.push(Step::Streamed(bytes, summary)));
+        self.progress = Ghost(Progress { download: summary, ..self.progress@ });
         self.streamed = Ghost(self.streamed@ + bytes);
         proof { assert(self.connection.out() + self.streamed@ =~= client_writes(self.trace@) + self.pending@); }
     }
@@ -536,6 +562,7 @@ impl Driver {
     /// then the skip is recorded instead. The lifecycle closes with the truth.
     fn complete<E: Effects>(mut self, effects: &mut E, life: Lifecycle) -> (out: Driven)
         requires self.settled(), self.bound(old(effects)), self.progress@.admitted, self.progress@.completion.is_none(), life.valid(), life.terminal(),
+            life.outcome() == crate::metadata::OUTCOME_SUCCESS ==> copies_match_counts(self.progress@, life.recorded_upload(), life.recorded_download()),
         ensures final(effects).events().len() >= old(effects).events().len(),
             final(effects).transferred() == old(effects).transferred(),
             final(effects).obstacles() >= old(effects).obstacles(),
@@ -543,6 +570,7 @@ impl Driver {
             final(effects).events() == self.base@ + observations(out.trace@),
             completed_as(final(effects).events(), out.outcome@.unwrap(), out.closed.recorded()),
             out.outcome@ == Some((life.outcome(), life.recorded_upload(), life.recorded_download())),
+            life.outcome() == crate::metadata::OUTCOME_SUCCESS ==> copies_match_counts(out.progress@, life.recorded_upload(), life.recorded_download()),
             final(effects).obstacles() == old(effects).obstacles() ==> out.closed.recorded(),
             run(out.trace@) == Some(out.progress@), client_writes(out.trace@) == out.written@,
             out.progress@.admitted, out.progress@.completion.is_some(), out.progress@.forwarded == self.progress@.forwarded,
@@ -570,13 +598,13 @@ impl Driver {
 
     /// The request half of the exchange; its result is consumed by the response half.
     #[verifier::rlimit(60)]
-    fn send_upload<E: Effects>(&mut self, effects: &mut E, life: &mut Lifecycle, input: &RequestHead) -> (out: Result<(), Fault>)
+    fn send_upload<E: Effects>(&mut self, effects: &mut E, life: &mut Lifecycle, input: &RequestHead) -> (out: Result<TransferKey, Fault>)
         requires old(self).progress@.incoming == Some(*input), old(self).settled(), old(self).bound(old(effects)), record_allows_dispatch(old(self).progress@),
             !old(self).progress@.connected, old(self).progress@.prepared.is_none(), old(self).progress@.admitted, old(self).progress@.response_logged.is_none(),
             old(life).valid(), old(life).open(), !old(life).uploaded(),
         ensures final(self).settled(), final(self).bound(final(effects)), final(self).base@ == old(self).base@,
             final(self).connection == old(self).connection,
-            final(self).progress@ == (Progress { prepared: final(self).progress@.prepared,
+            final(self).progress@ == (Progress { prepared: final(self).progress@.prepared, upload: final(self).progress@.upload,
                 connected: final(self).progress@.connected, upstream_head_written: final(self).progress@.upstream_head_written,
                 ..old(self).progress@ }),
             final(effects).obstacles() >= old(effects).obstacles(), final(effects).events().len() >= old(effects).events().len(),
@@ -584,14 +612,19 @@ impl Driver {
             final(life).valid(), final(life).open(),
             final(effects).obstacles() == old(effects).obstacles() ==> out.is_ok(),
             out.is_ok() ==> final(life).uploaded() && final(self).progress@.connected && final(self).progress@.upstream_head_written
-                && final(life).upload() == final(effects).transferred().0,
+                && final(life).upload() == final(effects).transferred().0
+                && final(self).progress@.prepared.is_some()
+                && out.unwrap().identity() == final(self).progress@.prepared.unwrap().2.transfer_identity()
+                && final(self).progress@.upload.is_some()
+                && final(self).progress@.upload.unwrap().matches(out.unwrap().identity(), 0)
+                && final(self).progress@.upload.unwrap().accepted == final(life).upload(),
     {
         let prepared = match effects.upstream_head(input) { Some(head) => head, None => return Err(Fault::Metadata) };
         let ghost evidence = prepared.evidence();
-        let (path, fields) = prepared.into_parts();
+        let (path, fields, key) = prepared.into_dispatch();
         self.record(effects, Ghost(Step::Prepared(path@, fields@, evidence)));
         match effects.connect() {
-            Ok(()) => self.record(effects, Ghost(Step::Connect(true))),
+            Ok(key) => self.record(effects, Ghost(Step::Connect(true))),
             Err(failure) => { self.record(effects, Ghost(Step::Connect(false))); return Err(connect_fault(failure)); }
         }
         let mut upstream = Upstream::new();
@@ -606,17 +639,17 @@ impl Driver {
         let written = effects.write_upstream(&head);
         self.record(effects, Ghost(Step::UpstreamWrite(head@)));
         if !written { return Err(Fault::Http); }
-        let (uploaded, mut stream) = effects.upload(stream);
-        self.record(effects, Ghost(Step::Uploaded(stream.out())));
+        let (uploaded, mut stream) = effects.upload(&key, stream);
+        self.record(effects, Ghost(Step::Uploaded(stream.out(), copy_summary(uploaded))));
         let copy = match uploaded { Ok(copy) => copy, Err(failure) => return Err(fault_of(failure, Fault::Upload)) };
-        if !copy.is_finished() || stream.is_ended() { return Err(Fault::Upload); }
+        if !copy.is_finished() || !copy.matches(&key, 0) || stream.is_ended() { return Err(Fault::Upload); }
         let last = stream.end();
         let written = effects.write_upstream(&last);
         self.record(effects, Ghost(Step::UpstreamWrite(last@)));
         if !written { return Err(Fault::Upload); }
         upstream.finish(stream);
-        life.upload_finished(&copy);
-        Ok(())
+        life.upload_finished(copy.body_copy());
+        Ok(key)
     }
 
     /// The provider exchange: connect, upload, read the head, forward it, download.
@@ -638,10 +671,11 @@ impl Driver {
             out.is_ok() ==> final(life).terminal() && final(life).outcome() == crate::metadata::OUTCOME_SUCCESS
                 && final(self).connection.done() && final(self).progress@.forwarded
                 && final(life).recorded_upload() == final(effects).transferred().0
-                && final(life).recorded_download() == final(effects).transferred().1,
+                && final(life).recorded_download() == final(effects).transferred().1
+                && copies_match_counts(final(self).progress@, final(life).recorded_upload(), final(life).recorded_download()),
             out.is_err() ==> final(life).open(),
     {
-        match self.send_upload(effects, life, input) { Ok(()) => {}, Err(fault) => return Err(fault) };
+        let key = match self.send_upload(effects, life, input) { Ok(key) => key, Err(fault) => return Err(fault) };
 
         // Response heads until a final one; the machine classifies each.
         let (status, fields, body_framing) = match final_head(self, effects) { Ok(head) => head, Err(fault) => return Err(fault) };
@@ -676,7 +710,7 @@ impl Driver {
                 }
                 None => return Err(Fault::Metadata),
             }
-            effects.download(body_framing, Body::Fixed)
+            effects.download(&key, body_framing, Body::Fixed)
         } else {
             let (head, stream) = match self.connection.respond_stream(status, reason.as_slice(), fields) {
                 Some(pair) => pair, None => return Err(Fault::Metadata),
@@ -685,15 +719,15 @@ impl Driver {
             proof { assert(self.connection.out() + self.streamed@ =~= client_writes(self.trace@) + self.pending@); }
             self.record(effects, Ghost(Step::Forward(status)));
             if !self.emit(effects, head, WriteScope::Exchange) { return Err(Fault::Client); }
-            effects.download(body_framing, Body::Stream(stream))
+            effects.download(&key, body_framing, Body::Stream(stream))
         };
         // Whatever the stream framed, the effect handed to the client.
         let body = match body {
-            Body::Stream(stream) => { self.note_streamed(effects, Ghost(stream.out())); Body::Stream(stream) }
-            Body::Fixed => Body::Fixed,
+            Body::Stream(stream) => { self.note_streamed(effects, Ghost(stream.out()), Ghost(copy_summary(copied))); Body::Stream(stream) }
+            Body::Fixed => { self.note_streamed(effects, Ghost(Seq::empty()), Ghost(copy_summary(copied))); Body::Fixed },
         };
         let copy = match copied { Ok(copy) => copy, Err(failure) => return Err(fault_of(failure, Fault::Download)) };
-        if !copy.is_finished() { return Err(Fault::Download); }
+        if !copy.is_finished() || !copy.matches(&key, 1) { return Err(Fault::Download); }
         match body {
             Body::Fixed => { if !self.connection.is_done() { return Err(Fault::Download); } }
             Body::Stream(mut stream) => {
@@ -709,7 +743,7 @@ impl Driver {
                 if !delivered { return Err(Fault::Client); }
             }
         }
-        life.succeeded(&copy);
+        life.succeeded(copy.body_copy());
         effects.close_client();
         Ok(())
     }
@@ -773,7 +807,8 @@ pub fn drive<E: Effects>(effects: &mut E) -> (out: Driven)
         out.progress@.admitted ==> out.progress@.completion.is_some(),
         out.outcome@.is_some() == out.progress@.admitted,
         out.outcome@.is_some() && out.outcome@.unwrap().0 == crate::metadata::OUTCOME_SUCCESS ==>
-            out.progress@.forwarded && out.outcome@.unwrap().1 == final(effects).transferred().0
+            out.progress@.forwarded && copies_match_counts(out.progress@, out.outcome@.unwrap().1, out.outcome@.unwrap().2)
+                && out.outcome@.unwrap().1 == final(effects).transferred().0
                 && out.outcome@.unwrap().2 == final(effects).transferred().1,
         out.closed.recorded() == (out.progress@.completion == Some(true)),
 {
@@ -795,7 +830,8 @@ fn drive_connection<E: Effects>(effects: &mut E) -> (out: Driven)
         out.progress@.admitted ==> out.progress@.completion.is_some(),
         out.outcome@.is_some() == out.progress@.admitted,
         out.outcome@.is_some() && out.outcome@.unwrap().0 == crate::metadata::OUTCOME_SUCCESS ==>
-            out.progress@.forwarded && out.outcome@.unwrap().1 == final(effects).transferred().0
+            out.progress@.forwarded && copies_match_counts(out.progress@, out.outcome@.unwrap().1, out.outcome@.unwrap().2)
+                && out.outcome@.unwrap().1 == final(effects).transferred().0
                 && out.outcome@.unwrap().2 == final(effects).transferred().1,
         out.closed.recorded() == (out.progress@.completion == Some(true)),
 {

@@ -4,8 +4,10 @@
 use crate::admission::{CancelOnDrop, Request};
 use crate::net::{read_uninterrupted, write_uninterrupted};
 pub use gateway_core::audit_receipt::AuditReceipt;
-use gateway_core::{body_copy::{BodyCopy, Failure}};
+use gateway_core::{body_copy::Failure};
 use std::io::{self, Read, Write};
+#[cfg(test)]
+use gateway_core::body_copy::BodyCopy;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Direction { Upload, Download }
@@ -83,7 +85,8 @@ impl From<Failure> for TransferError {
 pub(crate) fn copy_body<R, W, L>(request: &mut Request<'_>, reader: &mut R,
     writer: &mut W, log: &mut L, direction: Direction) -> Result<BodyCopy, TransferError>
 where R: Read, W: Write, L: AuditLog {
-    copy_body_bound(request, reader, writer, log, direction)
+    let key = request.context().transfer_key();
+    copy_body_bound(request, &key, reader, writer, log, direction).map(|done| done.into_copy())
 }
 
 /// Copy one body under the verified `BodyCopy` machine. The machine names each
@@ -92,15 +95,15 @@ where R: Read, W: Write, L: AuditLog {
 /// counted. Successful EOF leaves the request usable for the next direction;
 /// errors or a panic close it. EOF/framing correctness belongs to the HTTP
 /// body adapter. No detached thread, transparent retry, or whole-body buffering.
-pub(crate) fn copy_body_bound<R, W, L>(request: &mut Request<'_>, reader: &mut R,
-    writer: &mut W, log: &mut L, direction: Direction) -> Result<BodyCopy, TransferError>
+pub(crate) fn copy_body_bound<R, W, L>(request: &mut Request<'_>, key: &gateway_core::request_context::TransferKey, reader: &mut R,
+    writer: &mut W, log: &mut L, direction: Direction) -> Result<gateway_core::body_driver::Completed, TransferError>
 where R: Read, W: Write, L: AuditLog {
     let mut guard = CancelOnDrop { request, armed: true };
     let (owner, context, journal) = guard.request.copy_parts().ok_or(TransferError::InvalidState)?;
-    let completed = gateway_core::body_driver::copy(context, owner, journal,
+    let completed = gateway_core::body_driver::copy(context, key, owner, journal,
         &mut BodyEffects { reader, writer, log }, direction.id()).map_err(TransferError::from)?;
     guard.armed = false;
-    Ok(completed.into_copy())
+    Ok(completed)
 }
 
 struct BodyEffects<'a, R, W, L> { reader: &'a mut R, writer: &'a mut W, log: &'a mut L }

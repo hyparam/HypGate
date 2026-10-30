@@ -139,10 +139,10 @@ impl<'a> RoutedRequest<'a> {
     pub(crate) fn prepare_head(&self, checked: &gateway_core::request_context::CheckedHead<'_>) -> Result<gateway_core::request_context::ProviderHead, gateway_core::http1_exchange::Refusal> {
         self.request.context().prepare(checked)
     }
-    pub(crate) fn copy_body<R, W, L>(&mut self, reader: &mut R, writer: &mut W, log: &mut L,
-        direction: crate::transfer::Direction) -> Result<gateway_core::body_copy::BodyCopy, crate::transfer::TransferError>
+    pub(crate) fn copy_body<R, W, L>(&mut self, key: &gateway_core::request_context::TransferKey, reader: &mut R, writer: &mut W, log: &mut L,
+        direction: crate::transfer::Direction) -> Result<gateway_core::body_driver::Completed, crate::transfer::TransferError>
     where R: std::io::Read, W: std::io::Write, L: crate::transfer::AuditLog {
-        crate::transfer::copy_body_bound(&mut self.request, reader, writer, log, direction)
+        crate::transfer::copy_body_bound(&mut self.request, key, reader, writer, log, direction)
     }
     pub(crate) fn stream(&mut self) -> &mut Request<'a> { &mut self.request }
     /// The verified parts of the resolved destination.

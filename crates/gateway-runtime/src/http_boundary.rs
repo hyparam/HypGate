@@ -51,10 +51,10 @@ pub struct PreparedRequest<'a> {
     upstream: Option<UpstreamHead>,
 }
 impl<'a> PreparedRequest<'a> {
-    pub(crate) fn copy_body<R, W, L>(&mut self, reader: &mut R, writer: &mut W, log: &mut L,
-        direction: crate::transfer::Direction) -> Result<gateway_core::body_copy::BodyCopy, crate::transfer::TransferError>
+    pub(crate) fn copy_body<R, W, L>(&mut self, key: &gateway_core::request_context::TransferKey, reader: &mut R, writer: &mut W, log: &mut L,
+        direction: crate::transfer::Direction) -> Result<gateway_core::body_driver::Completed, crate::transfer::TransferError>
     where R: std::io::Read, W: std::io::Write, L: crate::transfer::AuditLog {
-        self.routed.copy_body(reader, writer, log, direction)
+        self.routed.copy_body(key, reader, writer, log, direction)
     }
     /// The configured destination string exactly as the operator wrote it.
     #[cfg(test)]

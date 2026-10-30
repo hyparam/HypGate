@@ -25,7 +25,7 @@ pub open spec fn connection(before: Seq<Step>, after: Seq<Step>, obstacles_befor
     &&& (out.progress@.admitted ==> out.progress@.completion.is_some())
     &&& out.closed.recorded() == (out.progress@.completion == Some(true))
     &&& (out.outcome@.is_some() ==> driver::completed_as(after, out.outcome@.unwrap(), out.closed.recorded()))
-    &&& (succeeded(out) ==> out.progress@.forwarded
+    &&& (succeeded(out) ==> driver::copies_match_counts(out.progress@, transferred.0, transferred.1) && out.progress@.forwarded
         && out.outcome@.unwrap().1 == transferred.0 && out.outcome@.unwrap().2 == transferred.1)
     &&& (obstacles_after == obstacles_before ==> succeeded(out) && out.progress@.forwarded && out.closed.recorded())
 }
@@ -38,6 +38,16 @@ pub proof fn successful_exchange_is_authorized(before: Seq<Step>, after: Seq<Ste
     ensures out.progress@.prepared.is_some(),
         out.progress@.incoming == Some(out.progress@.prepared.unwrap().2.input),
         out.progress@.prepared.unwrap().2.binds(out.progress@.prepared.unwrap().0, out.progress@.prepared.unwrap().1),
+{}
+
+/// The completed upload and download belong to this provider request, not
+/// merely to some successful body copy with the same numerical byte count.
+pub proof fn successful_body_copies_are_bound(before: Seq<Step>, after: Seq<Step>,
+    obstacles_before: nat, obstacles_after: nat, transferred: (u64, u64), out: Driven)
+    requires connection(before, after, obstacles_before, obstacles_after, transferred, out), succeeded(out),
+    ensures driver::copies_match_counts(out.progress@, transferred.0, transferred.1),
+        crate::body_driver::accepted(out.progress@.upload.unwrap().calls) == transferred.0,
+        crate::body_driver::accepted(out.progress@.download.unwrap().calls) == transferred.1,
 {}
 
 /// An admitted request cannot silently fail on a supported, successful execution.

@@ -58,6 +58,13 @@ checked portion, and the missing joins are listed below rather than assumed away
   machine's output in order, and the existing audit-before-forwarding and
   completion-uniqueness theorems apply to that execution.
 
+`successful_body_copies_are_bound` additionally joins both successful copies to
+the provider head's request ID, tenant/route, token digest and concrete destination.
+The core checks that identity before body I/O and checks each returned sealed
+completion again, including its direction. The two completion counts equal the
+accepted writes in those copies' primitive-effect histories. A completed copy
+from another request, or an upload returned as a download, cannot justify success.
+
 The admission core also has positive contracts: a supported inbound head must
 parse, a recognized digest must authenticate, and a nonzero request ID with a
 configured matching grant must yield a context. A checked head matching that
@@ -93,7 +100,7 @@ forwarded; a gateway transfer success does not assert provider/application succe
 | Connection | What is established | What is not established by the connection theorem |
 | --- | --- | --- |
 | Configuration to admission | Production `ProviderConfig` owns policy and concrete tables; `Context::prepare` binds the checked inbound token and selector to that policy, selected destination, credential and projected headers. `Context::write_bytes` uses the same authority and resolved route. | The connection theorem carries this evidence for its observed input. Resource leases, selecting the active configuration, and using the same context for the socket and body effects remain runtime responsibilities |
-| Body sources and destinations | The production body-copy loop now runs in the verified core. Its primitive effect history binds writes/audits to one Context request, route and direction, gates each exact borrowed slice, and proves successful counts equal accepted primitive writes. The connection driver uses returned counts and stream frames | The adapter must bind the returned copy and stream to the correct request, source and socket; byte identity across that adapter is not a theorem of `connection` |
+| Body sources and destinations | The production body-copy loop now runs in the verified core. Its primitive effect history binds writes/audits to one Context request, route and direction, gates each exact borrowed slice, and proves successful counts equal accepted primitive writes. The connection driver uses returned counts and stream frames | Sealed completions and transfer keys bind successful copies to the head's semantic request identity and directions. Physical reader/socket selection, binding the returned HTTP framing stream to those primitive writes, and a global received-to-written byte-conservation theorem remain outstanding |
 | Completion to durable storage | Exact completion payload and append attempt, plus separate journal/receipt proofs | Runtime logger binding, syscall truth, and crash survival under the declared storage contract |
 | Journal to shipped evidence | Verified assembly/projection components and projection-to-enqueue composition | No global journal-to-cloud conservation theorem; request-based fragment IDs can still collide after eviction |
 | One exchange to the concurrent service | Separate shutdown ordering and resource-accounting proofs | A shared invariant spanning every task, cancellation, recovery and shipping is not yet proved |

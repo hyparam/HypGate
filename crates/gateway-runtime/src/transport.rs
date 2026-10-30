@@ -7,7 +7,8 @@
 //! every read and write. Nothing here decides what happens next.
 use crate::{http1, http_body, http_boundary::PreparedRequest, net::{Cancel, Deadline, Tls},
     transfer::{AuditLog, Direction, TransferError}};
-use gateway_core::body_copy::BodyCopy;
+use gateway_core::body_driver::Completed;
+use gateway_core::request_context::TransferKey;
 use gateway_core::exchange_driver::{ConnectFailure, Failure};
 use gateway_core::http1_exchange::ChunkStream;
 use gateway_core::http1_framing::Framing;
@@ -109,14 +110,14 @@ impl Session {
         http1::write_fully(&mut self.tls, bytes).and_then(|()| self.tls.flush()).is_ok()
     }
     /// The request body as chunks of `stream`, through the worker's upload role.
-    pub(crate) fn upload<R: Read, L: AuditLog>(&mut self, prepared: &mut PreparedRequest<'_>, input: &mut R, log: &mut L,
-        http: &http_body::WorkerHttp, stream: ChunkStream) -> (Result<BodyCopy, Failure>, ChunkStream)
+    pub(crate) fn upload<R: Read, L: AuditLog>(&mut self, prepared: &mut PreparedRequest<'_>, key: &TransferKey, input: &mut R, log: &mut L,
+        http: &http_body::WorkerHttp, stream: ChunkStream) -> (Result<Completed, Failure>, ChunkStream)
     {
         let mut writer = match http.upload_writer(http1::ChunkedWriter::new(&mut self.tls, stream)) {
             Ok(writer) => writer,
             Err(writer) => { let (_, stream) = writer.into_parts(); return (Err(Failure::Io), stream); }
         };
-        let copied = prepared.copy_body(input, &mut writer, log, Direction::Upload);
+        let copied = prepared.copy_body(key, input, &mut writer, log, Direction::Upload);
         let (_, stream) = writer.into_inner().into_parts();
         (copied.map_err(|error| self.transfer_failure(error)), stream)
     }
@@ -129,13 +130,13 @@ impl Session {
     }
     /// The response body, framed as given, copied to `sink` through the
     /// worker's output role. `Ok` only when the body was complete as framed.
-    pub(crate) fn download<W: Write, L: AuditLog>(&mut self, prepared: &mut PreparedRequest<'_>, log: &mut L,
-        http: &http_body::WorkerHttp, framing: Framing, sink: &mut W) -> Result<BodyCopy, Failure>
+    pub(crate) fn download<W: Write, L: AuditLog>(&mut self, prepared: &mut PreparedRequest<'_>, key: &TransferKey, log: &mut L,
+        http: &http_body::WorkerHttp, framing: Framing, sink: &mut W) -> Result<Completed, Failure>
     {
         let leftover = std::mem::take(&mut self.leftover);
         let body = http1::BodyReader::new(&mut self.tls, leftover, framing);
         let Some(mut reader) = http.output(body) else { return Err(Failure::Io); };
-        let copied = prepared.copy_body(&mut reader, sink, log, Direction::Download);
+        let copied = prepared.copy_body(key, &mut reader, sink, log, Direction::Download);
         let complete = reader.body().is_complete();
         drop(reader);
         // Failed delivery authorizes aborting the exchange without asserting
@@ -165,7 +166,7 @@ pub(crate) mod exchange {
         fn start(&mut self, status: u16, fields: Vec<Field>) -> io::Result<()>;
         fn finish(&mut self) -> io::Result<()> { Ok(()) }
     }
-    pub(crate) struct ExchangeStats { pub upload: BodyCopy, pub download: BodyCopy }
+    pub(crate) struct ExchangeStats { pub upload: Completed, pub download: Completed }
     fn fault(failure: Failure, phase: Fault) -> Fault {
         match failure { Failure::Cancelled => Fault::Cancelled, Failure::Timeout => Fault::Timeout, Failure::Log => Fault::Log, Failure::Io => phase }
     }
@@ -178,10 +179,10 @@ pub(crate) mod exchange {
                 ConnectFailure::Resolve | ConnectFailure::Tcp => Fault::Connect, ConnectFailure::Tls => Fault::Tls,
                 ConnectFailure::Timeout => Fault::Timeout, ConnectFailure::Cancelled => Fault::Cancelled })?;
             let mut machine = Upstream::new();
-            let (path, fields) = upstream.into_parts();
+            let (path, fields, key) = upstream.into_dispatch();
             let (head, stream) = machine.request(&path, fields).ok_or(Fault::Metadata)?;
             if !session.write(&head) { return Err(fault(session.failure(), Fault::Http)); }
-            let (uploaded, mut stream) = session.upload(prepared, input, log, http, stream);
+            let (uploaded, mut stream) = session.upload(prepared, &key, input, log, http, stream);
             let upload = uploaded.map_err(|failure| fault(failure, Fault::Upload))?;
             let last = stream.end();
             if !session.write(&last) { return Err(fault(session.failure(), Fault::Upload)); }
@@ -203,7 +204,7 @@ pub(crate) mod exchange {
                 Err(_) => return Err(Fault::Metadata),
             }
             output.start(status, fields).map_err(|_| Fault::Client)?;
-            let download = session.download(prepared, log, http, framing, output).map_err(|failure| fault(failure, Fault::Download))?;
+            let download = session.download(prepared, &key, log, http, framing, output).map_err(|failure| fault(failure, Fault::Download))?;
             output.finish().map_err(|_| Fault::Client)?;
             Ok(ExchangeStats { upload, download })
         }

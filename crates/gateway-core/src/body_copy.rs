@@ -107,6 +107,7 @@ impl BodyCopy {
         requires self.valid(stream), self.failure().is_some(),
         ensures stream.state().closed(),
     {}
+    pub fn direction_id(&self) -> (out: u8) ensures out == self.direction(), { self.direction }
     pub fn accepted_bytes(&self) -> (out: u64)
         ensures out == self.accepted(),
     { self.accepted }

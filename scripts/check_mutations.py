@@ -23,13 +23,22 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ('body_driver.rs', 'body_binding_skips_expected_key', 'if !key.same(expected)', 'if false && !key.same(expected)'),
+    ('request_context.rs', 'body_binding_ignores_request', 'self.request != other.request || self.route.tenant', 'false || self.route.tenant'),
+    ('request_context.rs', 'body_binding_ignores_token', '|| !equal(self.digest.as_slice(), other.digest.as_slice())', '|| false'),
+    ('request_context.rs', 'body_binding_ignores_destination', '(Some(a), Some(b)) => equal(a.as_slice(), b.as_slice()),', '(Some(a), Some(b)) => true,'),
+    ('exchange_driver.rs', 'body_binding_accepts_foreign_upload', '!copy.matches(&key, 0)', 'false'),
+    ('exchange_driver.rs', 'body_binding_accepts_swapped_download', '!copy.matches(&key, 1)', 'false'),
+    ('exchange_driver.rs', 'body_binding_discards_upload_evidence', 'Step::Uploaded(stream.out(), copy_summary(uploaded))', 'Step::Uploaded(stream.out(), None)'),
+    ('body_driver.rs', 'body_binding_writes_wrong_direction', 'effects.write(context, &delivery, direction)', 'effects.write(context, &delivery, 0)'),
+
     ('body_driver.rs', 'body_driver_invents_eof', 'effects.read(copy.read_buffer(owner))', 'Some(0usize)'),
     ('body_driver.rs', 'body_driver_skips_audit', 'effects.audit(header, bytes)', 'None::<AuditReceipt>'),
     ('body_driver.rs', 'body_driver_skips_write', 'effects.write(context, &delivery, direction)', 'Some(delivery.bytes().len())'),
     ('body_driver.rs', 'body_driver_skips_flush', 'effects.flush()', 'true'),
     ('body_driver.rs', 'body_driver_corrupts_accepted_count', 'copy.finish_write(owner, &write, count);', 'copy.finish_write(owner, &write, Some(1));'),
     ('body_driver.rs', 'body_driver_accepts_foreign_owner', 'if owner.owner_id() != authority.request_id()', 'if false && owner.owner_id() != authority.request_id()'),
-    ('body_driver.rs', 'body_driver_mislabels_request', 'request: authority.request_id(), route:', 'request: 0, route:'),
+    ('request_context.rs', 'body_driver_mislabels_request', 'TransferKey { request: self.authority.request_id(), route:', 'TransferKey { request: 0, route:'),
     ('body_driver.rs', 'body_driver_mislabels_direction', 'BodyCopy::begin(owner, direction)', 'BodyCopy::begin(owner, 0)'),
     ('body_copy.rs', 'body_driver_releases_empty_slice', 'Some(Delivery { write, bytes, owner:', 'Some(Delivery { write, bytes: &[], owner:'),
 
@@ -62,7 +71,7 @@ MUTATIONS = [
 
     ('exchange_driver.rs', 'end_to_end_discards_valid_request', '    let body_framing = match framing(&head.fields, true) {', '    if true { return d.close_without(effects); }\n    let body_framing = match framing(&head.fields, true) {'),
     ('exchange_driver.rs', 'end_to_end_always_fails_exchange', '    match d.exchange(effects, &mut life, strict, &head) {', '    match Err::<(), Fault>(Fault::Metadata) {'),
-    ('exchange_driver.rs', 'end_to_end_reports_failure_after_success', '        life.succeeded(&copy);', '        life.failed(Fault::Download);'),
+    ('exchange_driver.rs', 'end_to_end_reports_failure_after_success', '        life.succeeded(copy.body_copy());', '        life.failed(Fault::Download);'),
     ('exchange_driver.rs', 'end_to_end_corrupts_completion', 'let recorded = effects.audit_completion(&payload);', 'let recorded = effects.audit_completion(&Vec::new());'),
     ('exchange_driver.rs', 'end_to_end_skips_response_after_upload', '        // Response heads until a final one; the machine classifies each.', '        if true { return Err(Fault::Http); }\n        // Response heads until a final one; the machine classifies each.'),
     ('http1_exchange.rs', 'end_to_end_request_writer_rejects_everything', '        if self.sent_head { return None; }', '        if true { return None; }'),

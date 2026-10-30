@@ -25,6 +25,27 @@ fn equal(a: &[u8], b: &[u8]) -> (out: bool)
     true
 }
 
+/// Semantic identity shared by the provider head and both body copies. Include
+/// token digest and concrete destination, not only configuration-local indices.
+pub ghost struct TransferIdentity { pub request: u64, pub route: Route, pub digest: Seq<u8>, pub destination: Option<Seq<u8>> }
+pub struct TransferKey { request: u64, route: Route, digest: Vec<u8>, destination: Option<Vec<u8>> }
+impl TransferKey {
+    pub closed spec fn identity(&self) -> TransferIdentity {
+        TransferIdentity { request: self.request, route: self.route, digest: self.digest@,
+            destination: match self.destination { Some(d) => Some(d@), None => None } }
+    }
+    pub fn same(&self, other: &Self) -> (out: bool)
+        ensures out == (self.identity() == other.identity()),
+    {
+        if self.request != other.request || self.route.tenant != other.route.tenant || self.route.selector != other.route.selector
+            || self.route.origin != other.route.origin || self.route.credential != other.route.credential
+            || !equal(self.digest.as_slice(), other.digest.as_slice()) { return false; }
+        match (&self.destination, &other.destination) {
+            (Some(a), Some(b)) => equal(a.as_slice(), b.as_slice()), (None, None) => true, _ => false,
+        }
+    }
+}
+
 /// Own the policy and its concrete tables together. No runtime can replace a table
 /// after validation or combine the policy of one loaded configuration with another.
 pub struct ProviderConfig {
@@ -168,6 +189,22 @@ impl<'a> Context<'a> {
                 None => true,
             }
     }
+    pub closed spec fn transfer_identity(&self) -> TransferIdentity {
+        TransferIdentity { request: self.authority.request(), route: self.authority.binding(), digest: self.digest@,
+            destination: match self.provider { Some(p) => Some(p.destination.text@), None => None } }
+    }
+    pub fn transfer_key(&self) -> (out: TransferKey)
+        requires self.valid(), ensures out.identity() == self.transfer_identity(),
+    {
+        TransferKey { request: self.authority.request_id(), route: self.authority.route(),
+            digest: vstd::slice::slice_to_vec(self.digest.as_slice()),
+            destination: match &self.provider { Some(p) => Some(vstd::slice::slice_to_vec(p.destination.text.as_slice())), None => None } }
+    }
+    pub proof fn transfer_evidence(&self)
+        requires self.valid(),
+        ensures self.transfer_identity().request == self.authority_value().request(),
+            self.transfer_identity().route == self.authority_value().binding(),
+    {}
     pub fn authority(&self) -> (out: &AuthorizedRequest<'a>) requires self.valid(), ensures *out == self.authority_value(), out.valid(), { &self.authority }
     pub fn destination(&self) -> (out: Option<&'a Parts>)
         requires self.valid(), ensures match out { Some(d) => self.destination_value() == Some(*d), None => self.destination_value().is_none() },
@@ -240,7 +277,7 @@ impl<'a> Context<'a> {
         let evidence = Ghost(Evidence { input: *checked.head, policy: self.authority.policy(), request: self.authority.request(), route: self.authority.binding(),
             digest: self.digest@, endpoint: checked.end as int, destination: *p.destination, credential: *p.credential,
             config: *self.config });
-        Ok(ProviderHead { path, fields, evidence })
+        Ok(ProviderHead { path, fields, evidence, key: self.transfer_key() })
     }
 }
 
@@ -311,6 +348,9 @@ pub open spec fn bearer_digest(fields: Seq<Field>, digest: Seq<u8>) -> bool {
 pub ghost struct Evidence { pub input: RequestHead, pub policy: Policy, pub request: u64, pub route: Route,
     pub digest: Seq<u8>, pub endpoint: int, pub destination: Parts, pub credential: Credential, pub config: ProviderConfig }
 impl Evidence {
+    pub open spec fn transfer_identity(&self) -> TransferIdentity {
+        TransferIdentity { request: self.request, route: self.route, digest: self.digest, destination: Some(self.destination.text@) }
+    }
     pub open spec fn valid(&self) -> bool {
         self.config.valid() && self.policy == self.config.policy_value() && self.policy.valid() && self.request != 0
             && self.input.method@ == crate::http1_exchange::post() && bearer_digest(self.input.fields@, self.digest)
@@ -328,7 +368,7 @@ impl Evidence {
     }
 }
 /// A sealed, single-use outgoing head; callers cannot replace its path or fields.
-pub struct ProviderHead { path: Vec<u8>, fields: Vec<Field>, evidence: Ghost<Evidence> }
+pub struct ProviderHead { path: Vec<u8>, fields: Vec<Field>, evidence: Ghost<Evidence>, key: TransferKey }
 impl ProviderHead {
     pub closed spec fn evidence(&self) -> Evidence { self.evidence@ }
     pub open spec fn input(&self) -> RequestHead { self.evidence().input }
@@ -336,7 +376,12 @@ impl ProviderHead {
     pub open spec fn request(&self) -> u64 { self.evidence().request }
     pub closed spec fn path(&self) -> Seq<u8> { self.path@ }
     pub closed spec fn fields(&self) -> Seq<Field> { self.fields@ }
-    pub closed spec fn valid(&self) -> bool { self.evidence@.binds(self.path@, self.fields@) }
+    pub closed spec fn valid(&self) -> bool { self.evidence@.binds(self.path@, self.fields@) && self.key.identity() == self.evidence@.transfer_identity() }
+    pub fn into_dispatch(self) -> (out: (Vec<u8>, Vec<Field>, TransferKey))
+        requires self.valid(),
+        ensures self.evidence().binds(out.0@, out.1@), out.0@ == self.path(), out.1@ == self.fields(),
+            out.2.identity() == self.evidence().transfer_identity(),
+    { (self.path, self.fields, self.key) }
     pub fn into_parts(self) -> (out: (Vec<u8>, Vec<Field>))
         requires self.valid(), ensures self.evidence().binds(out.0@, out.1@), out.0@ == self.path(), out.1@ == self.fields(),
     { (self.path, self.fields) }

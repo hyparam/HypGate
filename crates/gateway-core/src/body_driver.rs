@@ -1,7 +1,7 @@
 //! Production body-copy loop. The adapter performs only primitive effects;
 //! ordering, authorization, receipt checks and successful byte counts live here.
 use vstd::prelude::*;
-use crate::{body_copy::{Action, BodyCopy, Failure, Delivery}, request_context::Context,
+use crate::{body_copy::{Action, BodyCopy, Failure, Delivery}, request_context::{Context, TransferIdentity, TransferKey},
     owned_stream::OwnedStream, journal_binding::JournalBinding,
     framing::Header, audit_receipt::AuditReceipt, policy::Route};
 
@@ -63,16 +63,38 @@ pub trait Effects {
 }
 
 /// A completion can only be produced by this verified production loop.
-pub struct Completed { copy: BodyCopy, request: u64, route: Route, trace: Ghost<Seq<Call>> }
+pub ghost struct CopySummary { pub identity: TransferIdentity, pub direction: u8, pub accepted: u64, pub calls: Seq<Call> }
+impl CopySummary {
+    pub open spec fn valid(&self) -> bool {
+        self.direction <= 1 && belongs(self.calls, self.identity.request, self.identity.route, self.direction)
+            && accepted(self.calls) == self.accepted
+    }
+    pub open spec fn matches(&self, identity: TransferIdentity, direction: u8) -> bool {
+        self.valid() && self.identity == identity && self.direction == direction
+    }
+}
+pub struct Completed { copy: BodyCopy, key: TransferKey, trace: Ghost<Seq<Call>> }
 impl Completed {
     pub closed spec fn copy(&self) -> BodyCopy { self.copy }
-    pub closed spec fn request(&self) -> u64 { self.request }
-    pub closed spec fn route(&self) -> Route { self.route }
+    pub closed spec fn identity(&self) -> TransferIdentity { self.key.identity() }
+    pub open spec fn request(&self) -> u64 { self.identity().request }
+    pub open spec fn route(&self) -> Route { self.identity().route }
     pub closed spec fn trace(&self) -> Seq<Call> { self.trace@ }
-    pub closed spec fn valid(&self) -> bool {
-        self.copy.is_done() && belongs(self.trace@, self.request, self.route, self.copy.direction())
-            && accepted(self.trace@) == self.copy.accepted()
+    pub open spec fn summary(&self) -> CopySummary {
+        CopySummary { identity: self.identity(), direction: self.copy().direction(), accepted: self.copy().accepted(), calls: self.trace() }
     }
+    pub closed spec fn valid(&self) -> bool { self.copy.is_done() && self.summary().valid() }
+    pub open spec fn accepted(&self) -> u64 { self.copy().accepted() }
+    pub open spec fn is_done(&self) -> bool { self.copy().is_done() }
+    pub fn accepted_bytes(&self) -> (out: u64) ensures out == self.accepted(), { self.copy.accepted_bytes() }
+    pub fn audit_gap(&self) -> bool { self.copy.audit_gap() }
+    pub fn is_finished(&self) -> (out: bool) ensures out == self.is_done(), { self.copy.is_finished() }
+    pub fn matches(&self, key: &TransferKey, direction: u8) -> (out: bool)
+        requires self.valid(), ensures out == self.summary().matches(key.identity(), direction),
+    { self.key.same(key) && self.copy.direction_id() == direction }
+    pub fn body_copy(&self) -> (out: &BodyCopy)
+        requires self.valid(), ensures *out == self.copy(), out.is_done(),
+    { &self.copy }
     pub fn into_copy(self) -> (out: BodyCopy)
         requires self.valid(), ensures out == self.copy(), out.is_done(),
     { self.copy }
@@ -83,12 +105,14 @@ impl Completed {
 /// effect count, under one request's authorization for the entire loop.
 #[verifier::exec_allows_no_decreases_clause]
 #[verifier::rlimit(100)]
-pub fn copy<E: Effects>(context: &Context, owner: &mut OwnedStream, journal: &mut JournalBinding,
+pub fn copy<E: Effects>(context: &Context, expected: &TransferKey, owner: &mut OwnedStream, journal: &mut JournalBinding,
     effects: &mut E, direction: u8) -> (out: Result<Completed, Failure>)
     requires context.valid(), old(owner).valid(),
     ensures final(owner).valid(), final(owner).key() == old(owner).key(),
+        context.transfer_identity() != expected.identity() ==> final(effects).calls() == old(effects).calls()
+            && match out { Err(failure) => failure == Failure::InvalidState, _ => false },
         match out {
-            Ok(done) => done.valid() && done.request() == context.authority_value().request()
+            Ok(done) => done.valid() && done.identity() == expected.identity() && done.identity() == context.transfer_identity() && done.request() == context.authority_value().request()
                 && done.route() == context.authority_value().binding() && done.copy().direction() == direction
                 && done.copy().valid(final(owner))
                 && final(effects).calls() == old(effects).calls() + done.trace()
@@ -96,7 +120,10 @@ pub fn copy<E: Effects>(context: &Context, owner: &mut OwnedStream, journal: &mu
             Err(_) => final(owner).state().closed(),
         },
 {
+    let key = context.transfer_key();
+    if !key.same(expected) { owner.cancel(); return Err(Failure::InvalidState); }
     let authority = context.authority();
+    proof { context.transfer_evidence(); }
     if owner.owner_id() != authority.request_id() { owner.cancel(); return Err(Failure::InvalidState); }
     let mut copy = match BodyCopy::begin(owner, direction) {
         Some(copy) => copy, None => { owner.cancel(); return Err(Failure::InvalidState); }
@@ -105,7 +132,8 @@ pub fn copy<E: Effects>(context: &Context, owner: &mut OwnedStream, journal: &mu
     let ghost mut trace = Seq::<Call>::empty();
     proof { authority.binding_tenant(); }
     loop
-        invariant context.valid(), authority.valid(), authority.tenant() == authority.binding().tenant, *authority == context.authority_value(), copy.valid(owner), copy.direction() == direction,
+        invariant context.valid(), key.identity() == expected.identity(), key.identity() == context.transfer_identity(),
+            key.identity().request == authority.request(), key.identity().route == authority.binding(), authority.valid(), authority.tenant() == authority.binding().tenant, *authority == context.authority_value(), copy.valid(owner), copy.direction() == direction,
             owner.key() == old(owner).key(), owner.key().id() == authority.request(),
             copy.needs_read() || copy.filled() || copy.audited() || copy.needs_flush() || copy.is_done() || copy.failure().is_some(),
             effects.calls() == base + trace, base == old(effects).calls(),
@@ -151,7 +179,7 @@ pub fn copy<E: Effects>(context: &Context, owner: &mut OwnedStream, journal: &mu
                 copy.finish_flush(owner, ok);
             }
             Action::Done => {
-                return Ok(Completed { copy, request: authority.request_id(), route: authority.route(), trace: Ghost(trace) });
+                return Ok(Completed { copy, key, trace: Ghost(trace) });
             }
             Action::Failed(failure) => { proof { copy.failure_closes(owner); } return Err(failure); },
         }

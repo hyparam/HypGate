@@ -10,7 +10,8 @@
 //! noticed by a small watcher thread that cancels the exchange.
 use crate::{config::GatewayConfig, disk_log::DiskLog, http1, http_body, http_boundary, net::{Cancel, Deadline, Timed},
     transport::{HttpsTransport, Session}, transfer::{AuditLog, LogRecord, TransferError}};
-use gateway_core::body_copy::BodyCopy;
+use gateway_core::body_driver::Completed;
+use gateway_core::request_context::TransferKey;
 use gateway_core::exchange_driver::{self, Admit, Body, ConnectFailure, Effects, Event, Failure, FixedResponse, HeadRead, WriteScope};
 use gateway_core::http1_exchange::{Refusal, refusal_status};
 use gateway_core::http1_framing::Framing;
@@ -232,12 +233,12 @@ impl Effects for ConnectionEffects<'_> {
     fn write_upstream(&mut self, bytes: &Vec<u8>) -> bool {
         self.session.as_mut().is_some_and(|session| session.write(bytes))
     }
-    fn upload(&mut self, stream: gateway_core::http1_exchange::ChunkStream) -> (Result<BodyCopy, Failure>, gateway_core::http1_exchange::ChunkStream) {
+    fn upload(&mut self, key: &TransferKey, stream: gateway_core::http1_exchange::ChunkStream) -> (Result<Completed, Failure>, gateway_core::http1_exchange::ChunkStream) {
         let Self { session, prepared, input, log, http, .. } = self;
         let (Some(session), Some(prepared), Some(input), Some(http)) = (session.as_mut(), prepared.as_mut(), input.as_mut(), http.as_ref()) else {
             return (Err(Failure::Io), stream);
         };
-        session.upload(prepared, input, log, http, stream)
+        session.upload(prepared, key, input, log, http, stream)
     }
     fn read_status_head(&mut self) -> Result<StatusHead, Failure> {
         match self.session.as_mut() { Some(session) => session.read_status_head(), None => Err(Failure::Io) }
@@ -250,13 +251,13 @@ impl Effects for ConnectionEffects<'_> {
             Err(_) => false,
         }
     }
-    fn download(&mut self, framing: Framing, body: Body) -> (Result<BodyCopy, Failure>, Body) {
+    fn download(&mut self, key: &TransferKey, framing: Framing, body: Body) -> (Result<Completed, Failure>, Body) {
         let Self { session, prepared, log, http, writer, exchange_deadline, .. } = self;
         let (Some(session), Some(prepared), Some(http)) = (session.as_mut(), prepared.as_mut(), http.as_ref()) else {
             return (Err(Failure::Io), body);
         };
         match body {
-            Body::Fixed => (session.download(prepared, log, http, framing, &mut NoBody), Body::Fixed),
+            Body::Fixed => (session.download(prepared, key, log, http, framing, &mut NoBody), Body::Fixed),
             Body::Stream(stream) => {
                 // The chunks go to the client through the worker's response role.
                 let Some(deadline) = *exchange_deadline else { return (Err(Failure::Io), Body::Stream(stream)); };
@@ -265,7 +266,7 @@ impl Effects for ConnectionEffects<'_> {
                     Ok(sink) => sink,
                     Err(sink) => { let (_, stream) = sink.into_parts(); return (Err(Failure::Io), Body::Stream(stream)); }
                 };
-                let copied = session.download(prepared, log, http, framing, &mut sink);
+                let copied = session.download(prepared, key, log, http, framing, &mut sink);
                 let (_, stream) = sink.into_inner().into_parts();
                 (copied, Body::Stream(stream))
             }
