@@ -18,7 +18,19 @@ verus! {
 
 /// The secret store as the assembly sees it: the bytes under a name, if any.
 pub trait Secrets {
-    fn get(&mut self, name: &[u8]) -> (out: Option<Vec<u8>>);
+    spec fn values(&self) -> Map<Seq<u8>, Seq<u8>>;
+    spec fn reads(&self) -> Seq<Seq<u8>>;
+    fn get(&mut self, name: &[u8]) -> (out: Option<Vec<u8>>)
+        ensures final(self).values() == old(self).values(),
+            final(self).reads() == old(self).reads().push(name@),
+            crate::s3_config::optional_bytes(out) ==
+                (if old(self).values().contains_key(name@) { Some(old(self).values()[name@]) } else { None });
+}
+pub open spec fn fetched_names(fetched: Seq<(Seq<u8>, Seq<u8>)>) -> Seq<Seq<u8>> {
+    fetched.map(|i: int, f: (Seq<u8>, Seq<u8>)| f.0)
+}
+pub open spec fn fetched_values(fetched: Seq<(Seq<u8>, Seq<u8>)>, values: Map<Seq<u8>, Seq<u8>>) -> bool {
+    forall|i: int| 0 <= i < fetched.len() ==> values.contains_key(#[trigger] fetched[i].0) && fetched[i].1 == values[fetched[i].0]
 }
 
 #[derive(PartialEq, Eq, Structural, Clone, Copy, Debug)]
@@ -150,13 +162,19 @@ fn tenants_of(inputs: &Vec<CredentialInput>) -> (out: Vec<u64>)
 
 /// The credentials, each from the secret fetched under its entry's name.
 fn build_credentials<S: Secrets>(inputs: &Vec<CredentialInput>, secrets: &mut S) -> (out: Option<(Vec<Credential>, Ghost<Seq<(Seq<u8>, Seq<u8>)>>)>)
-    ensures out is Some ==> credentials_match(inputs@, out.unwrap().1@, out.unwrap().0@),
+    ensures final(secrets).values() == old(secrets).values(),
+        out is Some ==> credentials_match(inputs@, out.unwrap().1@, out.unwrap().0@)
+            && final(secrets).reads() == old(secrets).reads() + fetched_names(out.unwrap().1@)
+            && fetched_values(out.unwrap().1@, old(secrets).values()),
 {
     let mut out: Vec<Credential> = Vec::new();
     let ghost mut fetched: Seq<(Seq<u8>, Seq<u8>)> = Seq::empty();
     let mut i: usize = 0;
     while i < inputs.len()
         invariant i <= inputs.len(), out@.len() == i, fetched.len() == i,
+            secrets.values() == old(secrets).values(),
+            secrets.reads() == old(secrets).reads() + fetched_names(fetched),
+            fetched_values(fetched, secrets.values()),
             forall|k: int| 0 <= k < i ==> #[trigger] out@[k].tenant == inputs@[k].tenant,
             forall|k: int| 0 <= k < i ==> #[trigger] out@[k].kind == inputs@[k].kind,
             forall|k: int| 0 <= k < i ==> #[trigger] out@[k].name@ == header_name(inputs@[k].kind),
@@ -170,7 +188,11 @@ fn build_credentials<S: Secrets>(inputs: &Vec<CredentialInput>, secrets: &mut S)
         let entry = &inputs[i];
         if !secret_name_ok_exec(entry.env.as_slice()) { return None; }
         let raw = match secrets.get(entry.env.as_slice()) { Some(raw) => raw, None => return None };
-        proof { fetched = fetched.push((entry.env@, raw@)); }
+        proof {
+            let before = fetched;
+            fetched = fetched.push((entry.env@, raw@));
+            assert(fetched_names(fetched) =~= fetched_names(before).push(entry.env@));
+        }
         if !secret_ok_exec(raw.as_slice(), MAX_CREDENTIAL_BYTES) { return None; }
         let value = credential_value_exec(entry.kind, raw.as_slice());
         let name = header_name_exec(entry.kind);
@@ -192,8 +214,10 @@ fn build_credentials<S: Secrets>(inputs: &Vec<CredentialInput>, secrets: &mut S)
 /// Assemble the configuration from the file's contents and the secret store.
 #[allow(non_shorthand_field_patterns)] // the macro expands the shorthand
 pub fn build<S: Secrets>(root: Root, candidate: Candidate, secrets: &mut S) -> (out: Result<Built, BuildError>)
-    ensures match out {
+    ensures final(secrets).values() == old(secrets).values(), match out {
         Ok(b) => {
+            &&& final(secrets).reads() == old(secrets).reads() + fetched_names(b.fetched@)
+            &&& fetched_values(b.fetched@, old(secrets).values())
             &&& 0 < root.limits.requests <= 65536 && 0 < root.limits.chunk_bytes <= 1048576
             &&& (root.limits.requests as int) * (root.limits.chunk_bytes as int) <= 134217728
             &&& b.limits == root.limits && b.logging == root.logging && b.durability == root.durability

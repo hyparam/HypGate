@@ -420,10 +420,40 @@ pub fn nominations(fields: &Vec<Field>, request: bool) -> (out: Option<Vec<Vec<u
     Some(hop)
 }
 
+/// Observable fields, excluding vector allocation identity.
+pub open spec fn field_view(f: Field) -> (Seq<u8>, Seq<u8>, bool) { (f.name@, f.value@, f.sensitive) }
+pub open spec fn views(fields: Seq<Field>) -> Seq<(Seq<u8>, Seq<u8>, bool)> {
+    fields.map(|i: int, f: Field| field_view(f))
+}
+pub open spec fn retained_prefix(fields: Seq<Field>, request: bool, n: int) -> Seq<(Seq<u8>, Seq<u8>, bool)>
+    decreases n,
+{
+    if n <= 0 || n > fields.len() { Seq::empty() }
+    else { retained_prefix(fields, request, n - 1) +
+        if allowed(request, fields[n - 1].name@) && !nominated(fields, fields[n - 1].name@) {
+            seq![field_view(fields[n - 1])]
+        } else { Seq::empty() } }
+}
+pub open spec fn retained(fields: Seq<Field>, request: bool) -> Seq<(Seq<u8>, Seq<u8>, bool)> {
+    retained_prefix(fields, request, fields.len() as int)
+}
+proof fn nomination_iff(fields: Seq<Field>, request: bool, hop: Seq<Vec<u8>>, name: Seq<u8>)
+    requires complete(fields, request, hop), allowed(request, name),
+        forall|k: int| 0 <= k < hop.len() ==> nominated(fields, #[trigger] hop[k]@),
+    ensures in_list(hop, name) == nominated(fields, name),
+{
+    if in_list(hop, name) {
+        let k = choose|k: int| 0 <= k < hop.len() && #[trigger] hop[k]@ == name;
+    }
+}
+
 /// The input fields whose names are allowlisted for this direction and not
 /// nominated hop-by-hop, in input order, each copied byte for byte.
+#[verifier::loop_isolation(false)]
 fn project(fields: &Vec<Field>, request: bool, hop: &Vec<Vec<u8>>) -> (out: Vec<Field>)
-    ensures forall|k: int| 0 <= k < out@.len() ==> allowed(request, #[trigger] out@[k].name@)
+    requires complete(fields@, request, hop@),
+        forall|k: int| 0 <= k < hop.len() ==> nominated(fields@, #[trigger] hop@[k]@),
+    ensures views(out@) == retained(fields@, request), forall|k: int| 0 <= k < out@.len() ==> allowed(request, #[trigger] out@[k].name@)
             && !in_list(hop@, out@[k].name@) && copied_from(fields@, out@[k]),
         out@.len() <= fields@.len(),
 {
@@ -431,24 +461,36 @@ fn project(fields: &Vec<Field>, request: bool, hop: &Vec<Vec<u8>>) -> (out: Vec<
     let mut i: usize = 0;
     while i < fields.len()
         invariant i <= fields.len(), out@.len() <= i,
+            views(out@) == retained_prefix(fields@, request, i as int),
             forall|k: int| 0 <= k < out@.len() ==> allowed(request, #[trigger] out@[k].name@)
                 && !in_list(hop@, out@[k].name@) && copied_from(fields@, out@[k]),
         decreases fields.len() - i,
     {
         let field = &fields[i];
+        let ghost before = out@;
+        proof {
+            if allowed(request, field.name@) { nomination_iff(fields@, request, hop@, field.name@); }
+        }
         if allowed_name(request, field.name.as_slice()) && !listed(hop, field.name.as_slice()) {
             let copy = Field { name: slice_to_vec(field.name.as_slice()), value: slice_to_vec(field.value.as_slice()), sensitive: field.sensitive };
             out.push(copy);
+            proof { assert(views(out@) =~= views(before).push(field_view(*field))); }
+        }
+        proof {
+            assert(views(fields@.take(i as int + 1)) =~= views(fields@.take(i as int)).push(field_view(*field)));
+            reveal(Seq::filter);
         }
         i = i + 1;
     }
+    proof { assert(fields@.take(fields.len() as int) =~= fields@); }
     out
 }
 
 /// Every checked fact about an outgoing request head.
 pub open spec fn request_head_ok(fields: Seq<Field>, out: Seq<Field>, host: Seq<u8>, credential_name: Seq<u8>, credential: Seq<u8>) -> bool {
-    // Nothing but allowlisted client headers and the three the gateway sets.
-    (forall|k: int| 0 <= k < out.len() ==> request_allowed(#[trigger] out[k].name@)
+    // Exactly the retained fields in order, followed by the three injected fields.
+    out.len() >= 3 && views(out).take(out.len() - 3) == retained(fields, true)
+    && (forall|k: int| 0 <= k < out.len() ==> request_allowed(#[trigger] out[k].name@)
         || out[k].name@ == HOST@ || out[k].name@ == credential_name || out[k].name@ == ACCEPT_ENCODING@)
     // Allowlisted fields are copies of input fields, and none was Connection-nominated.
     && (forall|k: int| 0 <= k < out.len() && request_allowed(#[trigger] out[k].name@) ==> copied_from(fields, out[k]) && !nominated(fields, out[k].name@))
@@ -519,6 +561,7 @@ pub fn forward_request(fields: &Vec<Field>, host: &[u8], credential_name: &[u8],
     head.push(Field { name: slice_to_vec(ACCEPT_ENCODING.as_slice()), value: slice_to_vec(IDENTITY.as_slice()), sensitive: false });
     proof {
         reveal(Seq::filter);
+        assert(views(head@).take(projected.len() as int) =~= views(projected));
         assert(head@.subrange(0, projected.len() as int) =~= projected);
         lemma_filter_push_three(projected, head@, HOST@, credential_name@, ACCEPT_ENCODING@);
     }
@@ -527,7 +570,7 @@ pub fn forward_request(fields: &Vec<Field>, host: &[u8], credential_name: &[u8],
 
 /// Every checked fact about a forwarded response head.
 pub open spec fn response_head_ok(fields: Seq<Field>, out: Seq<Field>) -> bool {
-    (forall|k: int| 0 <= k < out.len() ==> response_allowed(#[trigger] out[k].name@) && copied_from(fields, out[k])
+    views(out) == retained(fields, false) && (forall|k: int| 0 <= k < out.len() ==> response_allowed(#[trigger] out[k].name@) && copied_from(fields, out[k])
         && !nominated(fields, out[k].name@))
     && within_limits(fields) && !nominated(fields, CONTENT_ENCODING@)
     && out.len() <= fields.len()

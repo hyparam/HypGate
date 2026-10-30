@@ -76,20 +76,25 @@ fn tenant_known(identities: &Vec<Identity>, tenant: u64) -> (found: bool)
     false
 }
 
+#[verifier::inline]
+pub open spec fn configuration_valid(identities: Seq<Identity>, grants: Seq<Route>, routes: Seq<Route>, origin_count: nat, credential_tenants: Seq<u64>) -> bool {
+        (forall|i: int| 0 <= i < identities.len()
+            ==> #[trigger] identities[i].digest.len() == 32)
+        && (forall|i: int, j: int| 0 <= i < j < identities.len()
+            ==> identities[i].tenant != identities[j].tenant
+                && identities[i].digest@ != identities[j].digest@)
+        && (forall|i: int| 0 <= i < routes.len()
+            ==> allowed(#[trigger] routes[i], grants,
+                origin_count, credential_tenants)
+                && (exists|j: int| 0 <= j < identities.len() && identities[j].tenant == routes[i].tenant))
+        && (forall|i: int, j: int| 0 <= i < j < routes.len()
+            ==> routes[i].tenant != routes[j].tenant
+                || routes[i].selector != routes[j].selector)
+    }
+
 impl Policy {
     pub closed spec fn valid(&self) -> bool {
-        (forall|i: int| 0 <= i < self.identities.len()
-            ==> #[trigger] self.identities@[i].digest.len() == 32)
-        && (forall|i: int, j: int| 0 <= i < j < self.identities.len()
-            ==> self.identities@[i].tenant != self.identities@[j].tenant
-                && self.identities@[i].digest@ != self.identities@[j].digest@)
-        && (forall|i: int| 0 <= i < self.routes.len()
-            ==> allowed(#[trigger] self.routes@[i], self.grants@,
-                self.origin_count@, self.credential_tenants@)
-                && (exists|j: int| 0 <= j < self.identities.len() && self.identities@[j].tenant == self.routes@[i].tenant))
-        && (forall|i: int, j: int| 0 <= i < j < self.routes.len()
-            ==> self.routes@[i].tenant != self.routes@[j].tenant
-                || self.routes@[i].selector != self.routes@[j].selector)
+        configuration_valid(self.identities@, self.grants@, self.routes@, self.origin_count@, self.credential_tenants@)
     }
     pub closed spec fn roots(&self) -> Seq<Route> { self.grants@ }
     pub closed spec fn configured(&self) -> Seq<Route> { self.routes@ }
@@ -103,7 +108,7 @@ impl Policy {
             Some(p) => p.valid() && p.roots() == grants@ && p.configured() == routes@
                 && p.identities() == identities@ && p.origins() == origin_count
                 && p.credentials() == credential_tenants@,
-            None => true,
+            None => !configuration_valid(identities@, grants@, routes@, origin_count as nat, credential_tenants@),
         },
     {
         let mut i: usize = 0;

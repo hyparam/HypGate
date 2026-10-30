@@ -23,6 +23,9 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ('config_build.rs', 'coverage_wrong_secret_name', 'secrets.get(entry.env.as_slice())', 'secrets.get(b"UNRELATED_SECRET")'),
+    ('headers.rs', 'coverage_drop_allowed_headers', 'if allowed_name(request, field.name.as_slice()) && !listed(hop, field.name.as_slice()) {', 'if false && allowed_name(request, field.name.as_slice()) && !listed(hop, field.name.as_slice()) {'),
+    ('policy.rs', 'coverage_policy_always_rejects', '        let mut i: usize = 0;\n        while i < identities.len()', '        if true { return None; }\n        let mut i: usize = 0;\n        while i < identities.len()'),
     ("deadline.rs", "scope_budget_renews_descendant", "Self { root: self.root, end }", "Self { root: self.root, end: self.root }"),
     ("deadline.rs", "scope_budget_uses_ancestor_for_io", "{ run(io, self.end) }", "{ run(io, self.root) }"),
     ("scope.rs", "scope_budget_skips_cleanup", "    effects.cleanup();", "    // cleanup omitted"),
