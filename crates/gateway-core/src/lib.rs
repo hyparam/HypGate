@@ -5,6 +5,7 @@ use vstd::prelude::*;
 
 // Authorization and configuration.
 pub mod policy;
+pub mod request_context;
 pub mod resolved_route;
 pub mod egress;
 pub mod inbound;

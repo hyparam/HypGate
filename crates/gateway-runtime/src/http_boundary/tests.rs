@@ -205,12 +205,12 @@ fn maximum_configured_request_head_serializes_below_64_kib() {
     assert_eq!(input.len(), MAX_HEADER_VALUES);
     let mut prepared = prep(&config, &input, "/routes/7").unwrap();
     let upstream = prepared.take_upstream().unwrap();
-    let mut fields = upstream.fields;
+    let (path, mut fields) = upstream.into_parts();
     fields.push(field("transfer-encoding", "chunked"));
     fields.push(field("connection", "close"));
     assert!(gateway_core::http1_write::wire_ok(&fields));
     let mut head = Vec::new();
-    gateway_core::http1_write::write_request_head(b"POST", &upstream.path, &fields, &mut head);
+    gateway_core::http1_write::write_request_head(b"POST", &path, &fields, &mut head);
     assert!(head.len() > 48 * 1024 && head.len() <= 65536);
     assert!(head.starts_with(format!("POST /{} HTTP/1.1\r\n", "p".repeat(MAX_DESTINATION_BYTES - prefix.len())).as_bytes()));
     assert!(String::from_utf8(head).unwrap().contains(&format!("authorization: Bearer {}\r\n", "k".repeat(MAX_CREDENTIAL_BYTES))));
@@ -235,24 +235,30 @@ fn maximum_response_head_serializes_below_64_kib() {
 }
 
 #[test]
-fn dispatch_rejects_changed_path_credentials_or_host_and_cannot_repeat() {
+fn sealed_head_uses_configured_route_and_cannot_repeat() {
     let c = config();
-    for change in 0..3 {
-        let mut p = prep(&c, &headers(), "/routes/7").unwrap();
-        let upstream = p.upstream.as_mut().unwrap();
-        match change {
-            0 => upstream.path = b"/other".to_vec(),
-            1 => { upstream.fields.retain(|f| f.name != b"authorization"); upstream.fields.push(field("authorization", "Bearer other")); },
-            _ => { upstream.fields.retain(|f| f.name != b"host"); upstream.fields.push(field("host", "other.example")); },
-        }
-        assert!(p.take_upstream().is_err());
-        assert_eq!(p.destination_text(), "https://api.openai.com:8443/v1/responses");
-    }
     let mut p = prep(&c, &headers(), "/routes/7").unwrap();
-    let outgoing = p.take_upstream().unwrap();
-    assert_eq!(outgoing.path, b"/v1/responses");
-    assert_eq!(value_of(&outgoing.fields, "authorization"), Some(&b"Bearer secret-OPENAI"[..]));
+    let (path, fields) = p.take_upstream().unwrap().into_parts();
+    assert_eq!(path, b"/v1/responses");
+    assert_eq!(value_of(&fields, "authorization"), Some(&b"Bearer secret-OPENAI"[..]));
     assert!(p.take_upstream().is_err());
+}
+
+#[test]
+fn context_rejects_heads_with_another_selector_or_identity() {
+    use gateway_core::request_context::CheckedHead;
+    let c = config();
+    let routed = c.admit(b"gateway-token", 7).unwrap();
+    for (token, target) in [("gateway-token", "/routes/8"), ("other-token", "/routes/7")] {
+        let h = head("POST", target, vec![field("authorization", &format!("Bearer {token}"))]);
+        let checked = CheckedHead::parse(&h).ok().unwrap();
+        assert!(matches!(routed.prepare_head(&checked), Err(gateway_core::http1_exchange::Refusal::Unauthorized)));
+    }
+    let h = head("POST", "/routes/7/v1/messages", headers());
+    let checked = CheckedHead::parse(&h).ok().unwrap();
+    assert!(matches!(routed.prepare_head(&checked), Err(gateway_core::http1_exchange::Refusal::Malformed)));
+    drop(routed);
+    assert!(prep(&c, &headers(), "/routes/7").is_ok());
 }
 
 #[test]

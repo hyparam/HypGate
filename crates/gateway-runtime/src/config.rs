@@ -40,7 +40,6 @@ fn read_root(bytes: &[u8]) -> Result<schema::Root, ConfigError> {
     let value = json::parse(bytes).ok_or(ConfigError::Syntax)?;
     schema::read_root(&value).ok_or(ConfigError::Syntax)
 }
-pub(crate) use schema::Logging;
 
 /// The environment as the verified assembly's secret store. Names reach it
 /// only after the verified name rule, so they are ASCII.
@@ -54,6 +53,7 @@ impl<F: FnMut(&str) -> Option<String>> build::Secrets for Env<F> {
 
 // The verified assembly's credential: no Debug implementation, so neither
 // errors nor diagnostics can format a loaded value.
+#[cfg(test)]
 type Credential = build::Credential;
 
 // A destination is the verified `gateway_core::destination::Parts`: the text the
@@ -66,19 +66,16 @@ pub struct GatewayConfig {
     chunk_bytes: usize,
     durability: gateway_core::audit_receipt::Durability,
     admission: Admission,
-    destinations: Vec<Destination>,
-    credentials: Vec<Credential>,
 }
 
 /// The route and credential references come from the same immutable configuration
 /// that admitted the owned request. No caller-supplied URI or secret override.
 pub struct RoutedRequest<'a> {
     request: Request<'a>,
-    resolved: gateway_core::resolved_route::ResolvedRoute<'a, Destination, Credential>,
     // Read once from `resolved` for this request's authority at admission.
     destination: &'a Destination,
+    #[cfg(test)]
     credential: &'a Credential,
-    egress: gateway_core::egress::Egress<'a, Destination>,
 }
 
 /// The verified parts are visible ASCII, so this never fails for a destination
@@ -110,65 +107,61 @@ impl GatewayConfig {
     {
         if root.len() > MAX_CONFIG { return Err(ConfigError::Limits); }
         let root = read_root(root)?;
-        // Select every configured grant for the existing verified policy builder.
-        let candidate = schema::Candidate { routes: root.grants.iter().map(|route|
-            gateway_core::policy::Route { tenant: route.tenant, selector: route.selector,
-                origin: route.origin, credential: route.credential }).collect() };
-        // The verified assembly: identity, destination, and credential `i`
-        // come from entry `i`, with the secret fetched under that entry's
-        // name and formed into the header value by the verified rules.
-        let built = build::build(root, candidate, &mut Env(secret)).map_err(|e| match e {
+        let built = gateway_core::request_context::ProviderConfig::load(root, &mut Env(secret)).map_err(|e| match e {
             build::BuildError::Limits => ConfigError::Limits,
             build::BuildError::Identity => ConfigError::Identity,
             build::BuildError::Destination => ConfigError::Destination,
             build::BuildError::Credential => ConfigError::Credential,
             build::BuildError::Policy => ConfigError::Policy,
         })?;
-        Ok(Self { chunk_bytes: built.limits.chunk_bytes, durability: built.durability,
-            admission: Admission::with_durability(built.policy, built.limits.requests, built.limits.chunk_bytes, matches!(built.logging, Logging::Strict), built.durability),
-            destinations: built.destinations, credentials: built.credentials })
+        let chunk_bytes = built.limits().chunk_bytes;
+        let durability = built.durability();
+        Ok(Self { chunk_bytes, durability, admission: Admission::configured(built) })
     }
 
     pub fn admit(&self, token: &[u8], selector: u64) -> Result<RoutedRequest<'_>, AdmissionError> {
         if token.is_empty() || token.len() > 512 { return Err(AdmissionError::Unauthorized); }
         let digest = gateway_core::sha256::digest(token);
         let request = self.admission.admit(&digest, selector)?;
-        let resolved = gateway_core::resolved_route::ResolvedRoute::resolve(
-            request.authority(), &self.destinations, &self.credentials).ok_or(AdmissionError::Unavailable)?;
-        // Bound here, from the route just resolved for this authority, so the
-        // accessors below are plain field reads.
-        let (Some(destination), Some(credential), Some(egress)) = (
-            resolved.destination(request.authority()),
-            resolved.credential(request.authority()),
-            gateway_core::egress::Egress::provider(&resolved, request.authority()),
-        ) else { return Err(AdmissionError::Unavailable) };
-        Ok(RoutedRequest { request, resolved, destination, credential, egress })
+        Self::routed(request)
+    }
+    pub(crate) fn admit_checked(&self, checked: &gateway_core::request_context::CheckedHead<'_>) -> Result<RoutedRequest<'_>, AdmissionError> {
+        Self::routed(self.admission.admit(checked.digest(), checked.selector())?)
+    }
+    fn routed(request: Request<'_>) -> Result<RoutedRequest<'_>, AdmissionError> {
+        let destination = request.context().destination().ok_or(AdmissionError::Unavailable)?;
+        let _credential = request.context().credential().ok_or(AdmissionError::Unavailable)?;
+        Ok(RoutedRequest { request, destination, #[cfg(test)] credential: _credential })
     }
 }
 
 impl<'a> RoutedRequest<'a> {
+    pub(crate) fn prepare_head(&self, checked: &gateway_core::request_context::CheckedHead<'_>) -> Result<gateway_core::request_context::ProviderHead, gateway_core::http1_exchange::Refusal> {
+        self.request.context().prepare(checked)
+    }
     pub(crate) fn copy_body<R, W, L>(&mut self, reader: &mut R, writer: &mut W, log: &mut L,
         direction: crate::transfer::Direction) -> Result<gateway_core::body_copy::BodyCopy, crate::transfer::TransferError>
     where R: std::io::Read, W: std::io::Write, L: crate::transfer::AuditLog {
-        crate::transfer::copy_body_bound(&mut self.request, reader, writer, log, direction, Some(&self.resolved))
+        crate::transfer::copy_body_bound(&mut self.request, reader, writer, log, direction)
     }
     pub(crate) fn stream(&mut self) -> &mut Request<'a> { &mut self.request }
     /// The verified parts of the resolved destination.
     pub fn destination(&self) -> &Destination { self.destination }
     /// The permit a socket may be opened under: the verified core bound it to
     /// this request's resolved destination and route at admission.
-    pub(crate) fn egress(&self) -> &gateway_core::egress::Egress<'a, Destination> { &self.egress }
+    pub(crate) fn egress(&self) -> Option<&gateway_core::egress::Egress<'a, Destination>> { self.request.context().egress() }
     /// The configured destination string exactly as the operator wrote it.
     #[cfg(test)]
     pub fn destination_text(&self) -> &str { ascii(&self.destination.text) }
     /// The request-start record payload, built by the verified core from the
     /// authorized selector and the resolved destination's configured text.
     pub(crate) fn start_record(&self, time_ms: u64) -> Option<Vec<u8>> {
-        gateway_core::exchange_lifecycle::start_record(self.request.authority(), &self.resolved, time_ms)
+        self.request.context().start_record(time_ms)
     }
 
     // Only the trusted HTTP boundary may inject provider credentials. The
     // header name and value are the verified assembly's for this credential.
+    #[cfg(test)]
     pub(crate) fn credential_header(&self) -> (&[u8], &[u8]) {
         (&self.credential.name, &self.credential.value)
     }

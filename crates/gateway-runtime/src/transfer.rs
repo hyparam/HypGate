@@ -4,7 +4,7 @@
 use crate::admission::{CancelOnDrop, Request};
 use crate::net::{read_uninterrupted, write_uninterrupted};
 pub use gateway_core::audit_receipt::AuditReceipt;
-use gateway_core::{body_copy::{Action, BodyCopy, Failure}, resolved_route::ResolvedRoute};
+use gateway_core::{body_copy::{Action, BodyCopy, Failure}};
 use std::io::{self, Read, Write};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,7 +83,7 @@ impl From<Failure> for TransferError {
 pub(crate) fn copy_body<R, W, L>(request: &mut Request<'_>, reader: &mut R,
     writer: &mut W, log: &mut L, direction: Direction) -> Result<BodyCopy, TransferError>
 where R: Read, W: Write, L: AuditLog {
-    copy_body_bound::<_, _, _, (), ()>(request, reader, writer, log, direction, None)
+    copy_body_bound(request, reader, writer, log, direction)
 }
 
 /// Copy one body under the verified `BodyCopy` machine. The machine names each
@@ -92,8 +92,8 @@ where R: Read, W: Write, L: AuditLog {
 /// counted. Successful EOF leaves the request usable for the next direction;
 /// errors or a panic close it. EOF/framing correctness belongs to the HTTP
 /// body adapter. No detached thread, transparent retry, or whole-body buffering.
-pub(crate) fn copy_body_bound<R, W, L, D: Sync, C: Sync>(request: &mut Request<'_>, reader: &mut R,
-    writer: &mut W, log: &mut L, direction: Direction, route: Option<&ResolvedRoute<'_, D, C>>) -> Result<BodyCopy, TransferError>
+pub(crate) fn copy_body_bound<R, W, L>(request: &mut Request<'_>, reader: &mut R,
+    writer: &mut W, log: &mut L, direction: Direction) -> Result<BodyCopy, TransferError>
 where R: Read, W: Write, L: AuditLog {
     let mut guard = CancelOnDrop { request, armed: true };
     let owner = guard.request.owned().ok_or(TransferError::InvalidState)?;
@@ -118,8 +118,8 @@ where R: Read, W: Write, L: AuditLog {
                 }
             }
             Action::Write => {
-                let Some((stream, authority, journal)) = guard.request.parts() else { return Err(TransferError::InvalidState) };
-                if let Some((write, bytes)) = copy.write_bytes(stream, authority, journal, route) {
+                let Some((stream, context, journal)) = guard.request.copy_parts() else { return Err(TransferError::InvalidState) };
+                if let Some((write, bytes)) = context.write_bytes(&mut copy, stream, journal) {
                     let count = write_uninterrupted(writer, bytes).ok();
                     copy.finish_write(stream, &write, count);
                 }

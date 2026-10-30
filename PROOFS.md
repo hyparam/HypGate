@@ -74,7 +74,7 @@ forwarded; a gateway transfer success does not assert provider/application succe
 
 | Connection | What is established | What is not established by the connection theorem |
 | --- | --- | --- |
-| Configuration to admission | Configuration provenance and policy authorization have core proofs | `Effects::admit` and the prepared route are joined by the Rust adapter; the top-level theorem does not derive admission from the original policy file |
+| Configuration to admission | Production `ProviderConfig` owns policy and concrete tables; `Context::prepare` binds the checked inbound token and selector to that policy, selected destination, credential and projected headers. `Context::write_bytes` uses the same authority and resolved route. | Resource leases and association of an admitted context with the connection remain runtime responsibilities; the connection theorem does not yet carry this authorization evidence |
 | Body sources and destinations | Body-copy capabilities prove authorization, audit gating, and accepted counts; the driver uses returned counts and stream frames | The adapter must bind the returned copy and stream to the correct request, source and socket; byte identity across that adapter is not a theorem of `connection` |
 | Completion to durable storage | Exact completion payload and append attempt, plus separate journal/receipt proofs | Runtime logger binding, syscall truth, and crash survival under the declared storage contract |
 | Journal to shipped evidence | Verified assembly/projection components and projection-to-enqueue composition | No global journal-to-cloud conservation theorem; request-based fragment IDs can still collide after eviction |

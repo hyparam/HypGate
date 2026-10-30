@@ -23,6 +23,16 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ('request_context.rs', 'context_wrong_grant_selector', 'selector: r.selector, origin: r.origin', 'selector: 0, origin: r.origin'),
+    ('request_context.rs', 'context_skip_selector_binding', 'self.authority.route().selector != checked.selector || ', 'false || '),
+    ('request_context.rs', 'context_skip_token_binding', '!equal(self.digest.as_slice(), checked.digest.as_slice())', 'false'),
+    ('request_context.rs', 'context_skip_endpoint_binding', 'if !crate::inbound::matches_endpoint', 'if false && !crate::inbound::matches_endpoint'),
+    ('request_context.rs', 'context_replace_provider_path', 'slice_to_vec(p.destination.path.as_slice())', 'slice_to_vec(b"/wrong")'),
+    ('request_context.rs', 'context_replace_provider_credential', 'p.credential.value.as_slice())', 'b"wrong-secret")'),
+    ('request_context.rs', 'context_change_selected_destination', 'destination, credential, egress })', 'destination: &self.destinations[0], credential, egress })'),
+    ('request_context.rs', 'context_change_selected_credential', 'destination, credential, egress })', 'destination, credential: &self.credentials[0], egress })'),
+    ('request_context.rs', 'context_invent_body_failure', 'copy.write_bytes(stream, &self.authority, journal, route)', 'None'),
+
     ('exchange_driver.rs', 'end_to_end_discards_valid_request', '    let body_framing = match framing(&head.fields, true) {', '    if true { return d.close_without(effects); }\n    let body_framing = match framing(&head.fields, true) {'),
     ('exchange_driver.rs', 'end_to_end_always_fails_exchange', '    match d.exchange(effects, &mut life, strict) {', '    match Err::<(), Fault>(Fault::Metadata) {'),
     ('exchange_driver.rs', 'end_to_end_reports_failure_after_success', '        life.succeeded(&copy);', '        life.failed(Fault::Download);'),

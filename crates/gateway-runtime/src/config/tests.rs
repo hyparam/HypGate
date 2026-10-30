@@ -26,7 +26,7 @@ fn native_provider_endpoints_keep_their_own_credentials() {
     assert!(matches!(c.admit(b"test-gateway-token", 9), Err(AdmissionError::Unauthorized)));
     let one = c.admit(b"test-gateway-token", 7).unwrap();
     // The egress permit names exactly the resolved destination and its route.
-    let permit = one.egress();
+    let permit = one.egress().unwrap();
     assert_eq!(permit.target().text, one.destination_text().as_bytes());
     assert!(matches!(permit.kind(), gateway_core::egress::Origin::Provider { origin: 0, credential: 0, .. }));
     let two = c.admit(b"test-gateway-token", 8).unwrap();

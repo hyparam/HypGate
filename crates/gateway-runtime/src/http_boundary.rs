@@ -30,9 +30,19 @@ impl HttpError {
     pub fn status(&self) -> u16 { refusal_status(self.refusal()) }
 }
 
+impl From<Refusal> for HttpError {
+    fn from(value: Refusal) -> Self {
+        match value {
+            Refusal::Malformed => Self::BadRequest, Refusal::Unauthorized => Self::Unauthorized,
+            Refusal::MethodNotAllowed => Self::MethodNotAllowed, Refusal::HeadTooLarge => Self::HeadersTooLarge,
+            Refusal::Unavailable => Self::Unavailable,
+        }
+    }
+}
+
 /// The head the transport writes upstream: the resolved destination's
 /// origin-form path and the verified projection's fields.
-pub struct UpstreamHead { pub path: Vec<u8>, pub fields: Vec<Field> }
+pub type UpstreamHead = gateway_core::request_context::ProviderHead;
 
 /// Owns admission until the transport is finished, including response streaming.
 /// No public constructor, cloning, mutable headers, or raw-request extraction.
@@ -49,10 +59,10 @@ impl<'a> PreparedRequest<'a> {
     /// The configured destination string exactly as the operator wrote it.
     #[cfg(test)]
     pub fn destination_text(&self) -> &str { self.routed.destination_text() }
-    pub(crate) fn egress(&self) -> &gateway_core::egress::Egress<'_, gateway_core::destination::Parts> { self.routed.egress() }
+    pub(crate) fn egress(&self) -> Option<&gateway_core::egress::Egress<'_, gateway_core::destination::Parts>> { self.routed.egress() }
     pub(crate) fn stream(&mut self) -> &mut crate::admission::Request<'a> { self.routed.stream() }
     #[cfg(test)]
-    pub(crate) fn upstream_fields(&self) -> &[Field] { &self.upstream.as_ref().expect("upstream head present").fields }
+    pub(crate) fn upstream_fields(&self) -> &[Field] { self.upstream.as_ref().expect("upstream head present").fields_ref().as_slice() }
 
     /// Kind 2: the wall clock, the authorized route selector, and the configured
     /// text of the destination this request resolved to, built by the verified
@@ -82,15 +92,7 @@ impl<'a> PreparedRequest<'a> {
     // Validate the configured binding before any DNS/TCP/TLS effect, then move
     // the only upstream head into the transport. It can be taken once.
     pub(crate) fn take_upstream(&mut self) -> Result<UpstreamHead, HttpError> {
-        let head = self.upstream.take().ok_or(HttpError::BadRequest)?;
-        let destination = self.routed.destination();
-        let (name, credential) = self.routed.credential_header();
-        let value_of = |wanted: &[u8]| head.fields.iter().find(|f| f.name == wanted).map(|f| f.value.as_slice());
-        if head.path != destination.path || value_of(name) != Some(credential)
-            || value_of(b"host") != Some(destination.authority.as_slice()) {
-            return Err(HttpError::BadRequest);
-        }
-        Ok(head)
+        self.upstream.take().ok_or(HttpError::BadRequest)
     }
 }
 
@@ -105,41 +107,17 @@ fn rejected(rejection: Rejection) -> HttpError {
     match rejection { Rejection::TooLarge => HttpError::HeadersTooLarge, Rejection::BadRequest => HttpError::BadRequest }
 }
 
-/// The gateway token: exactly one Authorization field holding a well-formed
-/// bearer, parsed by the verified `inbound::bearer`.
-fn bearer(fields: &Vec<Field>) -> Result<Vec<u8>, HttpError> {
-    gateway_core::inbound::bearer(fields).ok_or(HttpError::Unauthorized)
-}
-
 /// Prepare a POST request after authenticating gateway Authorization. The head
 /// came from the verified parser, so its limits already hold; the body stays
 /// opaque. Client credential, Host, framing and proxy headers are discarded.
 pub fn prepare<'a>(config: &'a GatewayConfig, head: &RequestHead) -> Result<PreparedRequest<'a>, HttpError> {
-    if head.method != b"POST" { return Err(HttpError::MethodNotAllowed); }
-    let fields = &head.fields;
-    if !headers::fits(fields) { return Err(HttpError::HeadersTooLarge); }
-    // The verified prefix selects a route; an SDK suffix must match that
-    // route's fixed endpoint after admission. It never overrides a destination.
-    let (route, endpoint_start) = gateway_core::inbound::route_target(&head.target)
-        .ok_or(HttpError::BadRequest)?;
-    let token = bearer(fields)?;
-    // Every verified header rule runs before a request slot is taken, so a
-    // rejected head never consumes capacity.
-    headers::check_request(fields).map_err(rejected)?;
-    let routed = config.admit(&token, route).map_err(|error| match error {
+    let checked = gateway_core::request_context::CheckedHead::parse(head).map_err(HttpError::from)?;
+    let routed = config.admit_checked(&checked).map_err(|error| match error {
         AdmissionError::Unauthorized => HttpError::Unauthorized,
         AdmissionError::AtCapacity | AdmissionError::Unavailable => HttpError::Unavailable,
     })?;
-    if !gateway_core::inbound::matches_endpoint(&head.target, endpoint_start, &routed.destination().path) {
-        return Err(HttpError::BadRequest);
-    }
-    // The verified projection: allowlisted client headers, Host from the
-    // resolved destination, the resolved credential exactly once, and
-    // `Accept-Encoding: identity` so the provider sends opaque bytes.
-    let (name, value) = routed.credential_header();
-    let outgoing = headers::forward_request(fields, &routed.destination().authority, name, value).map_err(rejected)?;
-    let path = routed.destination().path.clone();
-    Ok(PreparedRequest { routed, upstream: Some(UpstreamHead { path, fields: outgoing }) })
+    let upstream = routed.prepare_head(&checked).map_err(HttpError::from)?;
+    Ok(PreparedRequest { routed, upstream: Some(upstream) })
 }
 
 /// Preserve upstream status separately. A 3xx is returned to the client, never

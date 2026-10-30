@@ -68,7 +68,7 @@ impl HttpsTransport {
     /// never from the request. `cancel` can end the session from another thread.
     pub(crate) fn connect(&self, prepared: &mut PreparedRequest<'_>, cancel: &Cancel, deadline: Deadline) -> Result<Session, ConnectFailure> {
         let (host, port) = {
-            let permit = prepared.egress();
+            let permit = prepared.egress().ok_or(ConnectFailure::Resolve)?;
             let target = permit.target();
             (std::str::from_utf8(&target.host).map_err(|_| ConnectFailure::Resolve)?.to_owned(), target.port)
         };
@@ -78,7 +78,7 @@ impl HttpsTransport {
             let reply = pending.wait(deadline.remaining().map_err(|_| ConnectFailure::Timeout)?)
                 .map_err(|e| if timed_out(&e) { ConnectFailure::Timeout } else { ConnectFailure::Resolve })?;
             let addresses = reply.adopt(prepared.stream()).map_err(|_| ConnectFailure::Resolve)?;
-            open_socket(prepared.egress(), addresses.as_slice(), &deadline)
+            open_socket(prepared.egress().ok_or(ConnectFailure::Resolve)?, addresses.as_slice(), &deadline)
                 .map_err(|e| if timed_out(&e) { ConnectFailure::Timeout } else { ConnectFailure::Tcp })?
         };
         // Cancellation shuts this socket down; the blocked operation then fails.
@@ -178,7 +178,8 @@ pub(crate) mod exchange {
                 ConnectFailure::Resolve | ConnectFailure::Tcp => Fault::Connect, ConnectFailure::Tls => Fault::Tls,
                 ConnectFailure::Timeout => Fault::Timeout, ConnectFailure::Cancelled => Fault::Cancelled })?;
             let mut machine = Upstream::new();
-            let (head, stream) = machine.request(&upstream.path, upstream.fields).ok_or(Fault::Metadata)?;
+            let (path, fields) = upstream.into_parts();
+            let (head, stream) = machine.request(&path, fields).ok_or(Fault::Metadata)?;
             if !session.write(&head) { return Err(fault(session.failure(), Fault::Http)); }
             let (uploaded, mut stream) = session.upload(prepared, input, log, http, stream);
             let upload = uploaded.map_err(|failure| fault(failure, Fault::Upload))?;

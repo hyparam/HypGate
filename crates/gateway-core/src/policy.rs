@@ -255,6 +255,19 @@ impl<'a> AuthorizedRequest<'a> {
         && self.binding().tenant == self.tenant
         && self.grants(self.binding())
     }
+    /// Expose the authenticated identity and grant without exposing representation.
+    pub proof fn authorization_evidence(&self)
+        requires self.valid(),
+        ensures self.request() != 0, self.policy().valid(), self.grants(self.binding()),
+            exists|i: int| 0 <= i < self.policy().identities().len()
+                && self.policy().identities()[i].tenant == self.binding().tenant
+                && self.policy().identities()[i].digest@ == self.proof_digest(),
+    {
+        let i = choose|i: int| 0 <= i < self.policy.identities.len()
+            && self.policy.identities@[i].tenant == self.tenant
+            && self.policy.identities@[i].digest@ == self.digest@;
+        assert(self.policy().identities()[i].tenant == self.binding().tenant);
+    }
     pub proof fn binding_tenant(&self)
         requires self.valid(),
         ensures self.binding().tenant == self.tenant(),

@@ -224,7 +224,7 @@ impl Effects for ConnectionEffects<'_> {
     }
     fn upstream_head(&mut self) -> Option<(Vec<u8>, Vec<Field>)> {
         let head = self.prepared.as_mut()?.take_upstream().ok()?;
-        Some((head.path, head.fields))
+        Some(head.into_parts())
     }
     fn connect(&mut self) -> Result<(), ConnectFailure> {
         let Some(prepared) = self.prepared.as_mut() else { return Err(ConnectFailure::Resolve); };
