@@ -99,6 +99,17 @@ pub open spec fn supported_status(head: StatusHead, prior: Seq<Step>) -> bool {
     supported_response(head) || (100 <= head.status < 200 && head.status != 101 && interim_heads(prior) < MAX_INTERIM_HEADS)
 }
 
+/// The actual latest inbound head, including failed reads. This is derived
+/// from observed calls, never supplied as an independent ghost history.
+#[verifier::opaque]
+pub open spec fn received_input(events: Seq<Step>) -> Option<RequestHead>
+    decreases events.len(),
+{
+    if events.len() == 0 { None } else { match events.last() {
+        Step::ReadHead(input) => input, _ => received_input(events.drop_last()),
+    } }
+}
+
 /// What the runtime does for the driver. Every method is trusted to perform
 /// exactly the effect named and report what happened. Admission and body-copy
 /// identity remain adapter joins; the top-level contract does not prove those joins.
@@ -131,6 +142,7 @@ pub trait Effects {
             final(self).obstacles() == old(self).obstacles() + (if out { 0nat } else { 1nat }),
             final(self).events() == old(self).events().push(Step::Worker(out));
     fn admit(&mut self, head: &RequestHead) -> (out: Admit)
+        requires received_input(self.events()) == Some(*head),
         ensures final(self).transferred() == (old(self).transferred()),
             final(self).obstacles() == old(self).obstacles() + (if out is Admitted { 0nat } else { 1nat }),
             final(self).events() == old(self).events().push(Step::Admit(out is Admitted));
@@ -157,6 +169,7 @@ pub trait Effects {
     /// The adapter prepares this input with its admitted core Context. It cannot
     /// construct ProviderHead itself; Context::prepare establishes this contract.
     fn upstream_head(&mut self, input: &RequestHead) -> (out: Option<ProviderHead>)
+        requires received_input(self.events()) == Some(*input),
         ensures final(self).transferred() == old(self).transferred(),
             out.is_some() ==> out.unwrap().valid() && out.unwrap().input() == *input,
             final(self).obstacles() == old(self).obstacles() + (if match out { Some(head) => crate::http1_exchange::request_supported(head.path(), head.fields()), None => false } { 0nat } else { 1nat }),
@@ -261,8 +274,13 @@ pub open spec fn observations(t: Seq<Step>) -> Seq<Step>
 { if t.len() == 0 { Seq::empty() } else { observations(t.drop_last()) + visible(t.last()) } }
 proof fn observations_push(base: Seq<Step>, t: Seq<Step>, s: Step)
     ensures base + observations(t.push(s)) == observed_after(base + observations(t), s),
-{ assert(t.push(s).drop_last() =~= t);
-  assert(base + observations(t.push(s)) =~= observed_after(base + observations(t), s)); }
+        received_input(base + observations(t.push(s))) == (match s { Step::ReadHead(input) => input, _ => received_input(base + observations(t)) }),
+{ reveal(received_input);
+  assert(t.push(s).drop_last() =~= t);
+  assert(base + observations(t.push(s)) =~= observed_after(base + observations(t), s));
+  let events = base + observations(t);
+  assert(events.push(s).drop_last() =~= events);
+}
 
 /// The one step relation: which step may follow which progress.
 pub open spec fn step_ok(p: Progress, s: Step) -> Option<Progress> {
@@ -410,6 +428,7 @@ fn connect_fault(failure: ConnectFailure) -> Fault {
 impl Driver {
     spec fn inv(&self) -> bool {
         run(self.trace@) == Some(self.progress@) && self.connection.valid()
+        && (self.progress@.incoming.is_some() ==> received_input(self.base@ + observations(self.trace@)) == self.progress@.incoming)
         && self.connection.out() + self.streamed@ == client_writes(self.trace@) + self.pending@
         && (self.connection.open() ==> self.streamed@.len() == 0 && !self.progress@.forwarded)
     }

@@ -23,6 +23,18 @@ VERUS = os.environ.get("VERUS", "verus")
 GUARD = """if !self.pending || t.owner != self.owner || t.generation != self.generation
             || count > self.offered - self.sent"""
 MUTATIONS = [
+    ('exchange_driver.rs', 'context_driver_admits_another_input', 'effects.admit(&head)', 'effects.admit(&RequestHead { method: Vec::new(), target: Vec::new(), fields: Vec::new() })'),
+    ('exchange_driver.rs', 'context_driver_forgets_observed_input', 'Step::ReadHead(input) => input, _ => received_input(events.drop_last()),', 'Step::ReadHead(input) => None, _ => received_input(events.drop_last()),'),
+
+    ('request_context.rs', 'context_progress_rejects_identity', '} true }, None => false,', '} false }, None => false,'),
+    ('request_context.rs', 'context_progress_rejects_authorization', 'let identity = match self.policy.authenticate(digest)', 'if true { return None; }\n        let identity = match self.policy.authenticate(digest)'),
+    ('policy.rs', 'context_progress_rejects_granted_route', 'if request == 0 { return None; }', 'if true { return None; }'),
+    ('request_context.rs', 'context_progress_rejects_preparation', 'if self.authority.route().selector != checked.selector', 'if true { return Err(Refusal::Unavailable); }\n        if self.authority.route().selector != checked.selector'),
+    ('request_context.rs', 'context_progress_rejects_supported_head', 'if head.method.len() != 4', 'if true { return Err(Refusal::Malformed); }\n        if head.method.len() != 4'),
+    ('headers.rs', 'context_progress_rejects_supported_headers', 'let hop = match nominations(fields, true)', 'if true { return Err(Rejection::BadRequest); }\n    let hop = match nominations(fields, true)'),
+    ('headers.rs', 'context_progress_rejects_header_projection', 'let hop = match check_request(fields)', 'if true { return Err(Rejection::BadRequest); }\n    let hop = match check_request(fields)'),
+    ('request_context.rs', 'context_progress_empty_input_family', 'pub open spec fn supported_input(head: RequestHead) -> bool {\n    head.method@', 'pub open spec fn supported_input(head: RequestHead) -> bool {\n    false && head.method@'),
+
     ('exchange_driver.rs', 'context_driver_prepares_another_input', 'effects.upstream_head(input)', 'effects.upstream_head(&RequestHead { method: Vec::new(), target: Vec::new(), fields: Vec::new() })'),
     ('exchange_driver.rs', 'context_driver_drops_authorization_check', '&& evidence.binds(path, fields) && p.incoming == Some(evidence.input)', '&& p.incoming == Some(evidence.input)'),
     ('exchange_driver.rs', 'context_driver_unbinds_inbound_head', '&& p.incoming == Some(evidence.input) { Some(Progress', '{ Some(Progress'),
@@ -949,7 +961,7 @@ def check(workdir, filename, name, before, after):
         if result.returncode != 0 and not any(marker in output for marker in MARKERS) and "Resource limit (rlimit) exceeded" in output:
             # Isolate each function from the accumulated solver context. A
             # timeout still never counts as evidence that a defect was rejected.
-            result = subprocess.run(command(target, modules, mutation=True) + ["-V", "spinoff-all"], capture_output=True, text=True)
+            result = subprocess.run(command(target, modules, mutation=True) + ["-V", "spinoff-all", "--rlimit", "100"], capture_output=True, text=True)
             output = result.stdout + result.stderr
         if result.returncode != 0:
             if not any(marker in output for marker in MARKERS):
@@ -1073,7 +1085,14 @@ if __name__ == "__main__":
         mutations_started = time.monotonic()
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = [pool.submit(job) for job in jobs]
+            failures = []
             for completed, future in enumerate(as_completed(futures), 1):
-                print("\n".join(future.result()), flush=True)
+                try:
+                    print("\n".join(future.result()), flush=True)
+                except Exception as error:
+                    failures.append(str(error))
+                    print(str(error), flush=True)
                 print(f"Completed {completed}/{len(jobs)} mutation jobs in {time.monotonic() - mutations_started:.1f}s", flush=True)
+            if failures:
+                raise SystemExit(f"{len(failures)} mutation jobs failed; see diagnostics above")
     print(f"{len(MUTATIONS)} mutations rejected by proof ({len(batches)} batched runs, {len(singles)} single runs)", flush=True)

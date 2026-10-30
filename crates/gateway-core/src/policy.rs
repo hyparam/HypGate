@@ -204,19 +204,43 @@ impl<'a> Authenticated<'a> {
     }
     pub closed spec fn tenant(&self) -> u64 { self.tenant }
 
+    pub proof fn identity_evidence(&self)
+        requires self.valid(),
+        ensures exists|i: int| 0 <= i < self.policy().identities().len()
+            && self.policy().identities()[i].tenant == self.tenant()
+            && self.policy().identities()[i].digest@ == self.proof_digest(),
+    {
+        let i = choose|i: int| 0 <= i < self.policy.identities.len()
+            && self.policy.identities@[i].tenant == self.tenant
+            && self.policy.identities@[i].digest@ == self.digest@;
+        assert(self.policy().identities()[i].tenant == self.tenant());
+        assert(self.policy().identities()[i].digest@ == self.proof_digest());
+    }
+    pub proof fn matching_identity(&self, i: int)
+        requires self.valid(), 0 <= i < self.policy().identities().len(),
+            self.policy().identities()[i].digest@ == self.proof_digest(),
+        ensures self.policy().identities()[i].tenant == self.tenant(),
+    {
+        let j = choose|j: int| 0 <= j < self.policy.identities.len()
+            && self.policy.identities@[j].tenant == self.tenant
+            && self.policy.identities@[j].digest@ == self.digest@;
+        assert(i == j);
+    }
     pub fn authorize(&self, selector: u64, request: u64) -> (out: Option<AuthorizedRequest<'a>>)
         requires self.valid(),
         ensures match out {
             Some(a) => a.valid() && a.tenant() == self.tenant() && a.request() == request
                 && a.binding().selector == selector && a.policy() == self.policy()
                 && a.proof_digest() == self.proof_digest(),
-            None => true,
+            None => request == 0 || forall|i: int| 0 <= i < self.policy().configured().len()
+                ==> self.policy().configured()[i].tenant != self.tenant() || self.policy().configured()[i].selector != selector,
         },
     {
         if request == 0 { return None; }
         let mut i: usize = 0;
         while i < self.policy.routes.len()
             invariant self.valid(), request != 0, i <= self.policy.routes.len(),
+                forall|j: int| 0 <= j < i ==> self.policy.routes@[j].tenant != self.tenant || self.policy.routes@[j].selector != selector,
             decreases self.policy.routes.len() - i,
         {
             let r = &self.policy.routes[i];

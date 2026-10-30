@@ -88,20 +88,51 @@ impl ProviderConfig {
     pub fn limits(&self) -> (out: &Limits) ensures *out == self.limits_value(), { &self.limits }
     pub fn strict(&self) -> (out: bool) ensures out == (self.logging_value() == Logging::Strict), { matches!(self.logging, Logging::Strict) }
     pub fn durability(&self) -> (out: Durability) ensures out == self.durability_value(), { self.durability }
-    pub fn recognizes(&self, digest: &[u8]) -> bool
+    pub open spec fn permits(&self, digest: Seq<u8>, selector: u64, request: u64) -> bool {
+        request != 0 && exists|i: int, j: int| 0 <= i < self.policy_value().identities().len()
+            && 0 <= j < self.policy_value().configured().len()
+            && self.policy_value().identities()[i].digest@ == digest
+            && self.policy_value().identities()[i].tenant == self.policy_value().configured()[j].tenant
+            && self.policy_value().configured()[j].selector == selector
+    }
+    pub fn recognizes(&self, digest: &[u8]) -> (out: bool)
         requires self.valid(),
-    { self.policy.authenticate(digest).is_some() }
+        ensures out == (exists|i: int| 0 <= i < self.policy_value().identities().len() && self.policy_value().identities()[i].digest@ == digest@),
+    {
+        match self.policy.authenticate(digest) {
+            Some(identity) => { proof {
+                identity.identity_evidence();
+                let i = choose|i: int| 0 <= i < identity.policy().identities().len()
+                    && identity.policy().identities()[i].tenant == identity.tenant()
+                    && identity.policy().identities()[i].digest@ == identity.proof_digest();
+                assert(self.policy_value().identities()[i].digest@ == digest@);
+            } true }, None => false,
+        }
+    }
 
     pub fn authorize<'a>(&'a self, digest: &[u8], selector: u64, request: u64) -> (out: Option<Context<'a>>)
         requires self.valid(),
-        ensures match out {
+        ensures self.permits(digest@, selector, request) ==> out.is_some(),
+            match out {
             Some(ctx) => ctx.valid() && ctx.config() == *self && ctx.digest() == digest@
                 && ctx.authority_value().request() == request && ctx.authority_value().binding().selector == selector,
             None => true,
         },
     {
         let identity = match self.policy.authenticate(digest) { Some(a) => a, None => return None };
+        proof {
+            if self.permits(digest@, selector, request) {
+                let (i, j) = choose|i: int, j: int| 0 <= i < self.policy.identities().len()
+                    && 0 <= j < self.policy.configured().len()
+                    && self.policy.identities()[i].digest@ == digest@
+                    && self.policy.identities()[i].tenant == self.policy.configured()[j].tenant
+                    && self.policy.configured()[j].selector == selector;
+                identity.matching_identity(i);
+                assert(self.policy.configured()[j].tenant == identity.tenant());
+            }
+        }
         let authority = match identity.authorize(selector, request) { Some(a) => a, None => return None };
+        proof { authority.authorization_evidence(); }
         let provider = if self.destinations.len() == 0 { None } else {
             let resolved = match ResolvedRoute::resolve(&authority, &self.destinations, &self.credentials) { Some(r) => r, None => return None };
             let destination = match resolved.destination(&authority) { Some(d) => d, None => return None };
@@ -173,9 +204,19 @@ impl<'a> Context<'a> {
         copy.write_bytes(stream, &self.authority, journal, route)
     }
 
+    /// A supported checked head for this selected provider cannot be refused.
+    pub open spec fn can_prepare(&self, checked: &CheckedHead) -> bool {
+        checked.valid() && self.destination_value().is_some()
+            && self.authority_value().binding().selector == checked.selector_value() && self.digest() == checked.digest_value()
+            && (checked.endpoint_value() == checked.input().target.len()
+                || checked.input().target@.subrange(checked.endpoint_value(), checked.input().target.len() as int) == self.destination_value().unwrap().path@)
+            && !headers::bad_connection_element(checked.input().fields@)
+    }
+
     pub fn prepare(&self, checked: &CheckedHead) -> (out: Result<ProviderHead, Refusal>)
         requires self.valid(), checked.valid(),
-        ensures match out { Ok(head) => head.valid() && head.input() == checked.input() && head.policy() == self.config().policy_value()
+        ensures self.can_prepare(checked) ==> out.is_ok(),
+            match out { Ok(head) => head.valid() && head.input() == checked.input() && head.policy() == self.config().policy_value()
             && head.request() == self.authority_value().request(), Err(_) => true },
     {
         if self.authority.route().selector != checked.selector || !equal(self.digest.as_slice(), checked.digest.as_slice()) { return Err(Refusal::Unauthorized); }
@@ -210,6 +251,7 @@ pub struct CheckedHead<'a> { head: &'a RequestHead, digest: Vec<u8>, selector: u
 impl<'a> CheckedHead<'a> {
     pub closed spec fn input(&self) -> RequestHead { *self.head }
     pub closed spec fn digest_value(&self) -> Seq<u8> { self.digest@ }
+    pub closed spec fn endpoint_value(&self) -> int { self.end as int }
     pub closed spec fn selector_value(&self) -> u64 { self.selector }
     pub closed spec fn valid(&self) -> bool {
         self.head.method@ == crate::http1_exchange::post() && headers::request_input_ok(self.head.fields@)
@@ -219,7 +261,8 @@ impl<'a> CheckedHead<'a> {
     pub fn digest(&self) -> (out: &[u8]) ensures out@ == self.digest_value(), { self.digest.as_slice() }
     pub fn selector(&self) -> (out: u64) ensures out == self.selector_value(), { self.selector }
     pub fn parse(head: &'a RequestHead) -> (out: Result<Self, Refusal>)
-        ensures match out { Ok(c) => c.valid() && c.input() == *head, Err(_) => true },
+        ensures supported_input(*head) ==> out.is_ok(),
+            match out { Ok(c) => c.valid() && c.input() == *head, Err(_) => true },
     {
         if head.method.len() != 4 || head.method[0] != 80 || head.method[1] != 79 || head.method[2] != 83 || head.method[3] != 84 { return Err(Refusal::MethodNotAllowed); }
         proof { assert(head.method@ =~= crate::http1_exchange::post()); }
@@ -232,6 +275,31 @@ impl<'a> CheckedHead<'a> {
         proof { assert(bearer_digest(head.fields@, digest@)); }
         Ok(Self { head, digest, selector, end })
     }
+}
+/// Independent input criteria: canonical route syntax, one bounded bearer,
+/// and supported request headers. Parsing may not reject this family.
+pub open spec fn supported_input(head: RequestHead) -> bool {
+    head.method@ == crate::http1_exchange::post() && headers::request_input_ok(head.fields@)
+        && !headers::bad_connection_element(head.fields@)
+        && (exists|selector: u64, end: int| crate::inbound::sdk_target(head.target@, selector, end))
+        && headers::count_named(head.fields@, headers::AUTHORIZATION@) == 1
+        && (forall|i: int| 0 <= i < head.fields.len() && head.fields@[i].name@ == headers::AUTHORIZATION@
+            ==> crate::inbound::bearer_token(head.fields@[i].value@).is_some()
+                && 0 < crate::inbound::bearer_token(head.fields@[i].value@).unwrap().len() <= 512)
+}
+/// Non-vacuity: an auth-only POST to any canonical selector path is supported
+/// for every well-formed bounded bearer value, independently of parser success.
+pub proof fn bearer_post_is_supported(head: RequestHead, selector: u64, end: int, token: Seq<u8>)
+    requires head.method@ == crate::http1_exchange::post(),
+        crate::inbound::sdk_target(head.target@, selector, end),
+        head.fields.len() == 1, head.fields@[0].name@ == headers::AUTHORIZATION@,
+        head.fields@[0].value.len() <= 519,
+        crate::inbound::bearer_token(head.fields@[0].value@) == Some(token), 0 < token.len() <= 512,
+    ensures supported_input(head),
+{
+    reveal(Seq::filter);
+    reveal_with_fuel(headers::names_total, 2);
+    assert(head.fields@ =~= seq![head.fields@[0]]);
 }
 pub open spec fn bearer_digest(fields: Seq<Field>, digest: Seq<u8>) -> bool {
     headers::count_named(fields, headers::AUTHORIZATION@) == 1 && exists|i: int, token: Seq<u8>| 0 <= i < fields.len()

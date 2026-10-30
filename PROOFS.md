@@ -50,11 +50,22 @@ checked portion, and the missing joins are listed below rather than assumed away
   exact forwarded header projection. `provider_head_has_authority` ties the
   first upstream write to that header's HTTP serialization. The runtime cannot
   construct the sealed header; its adapter calls `Context::prepare` on the
-  driver's supplied input and consumes the dispatch capability once.
+  driver's supplied input and consumes the dispatch capability once. Admission
+  and preparation require that input to equal the latest observed read, even
+  when refusing it; substituting an invalid request cannot excuse failure.
 - **Safety and correspondence:** the actual effect history is the observation
   projection of a legal driver execution; client writes match the connection
   machine's output in order, and the existing audit-before-forwarding and
   completion-uniqueness theorems apply to that execution.
+
+The admission core also has positive contracts: a supported inbound head must
+parse, a recognized digest must authenticate, and a nonzero request ID with a
+configured matching grant must yield a context. A checked head matching that
+context's token, selector and endpoint, with supported Connection syntax, must
+produce provider headers. The auth-only POST family establishes that the input
+predicate is not empty. Mutations that reject all inputs at each stage must fail
+verification. These claims start with a successfully loaded configuration and do
+not establish resource availability or completeness of configuration loading.
 
 The `obstacles` measure is proof-only bookkeeping over actual effect results.
 Its increment is specified separately for every trait method: refused admission,

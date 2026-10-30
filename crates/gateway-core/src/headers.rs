@@ -538,7 +538,7 @@ pub fn check_request(fields: &Vec<Field>) -> (out: Result<Vec<Vec<u8>>, Rejectio
         Ok(hop) => request_input_ok(fields@) && complete(fields@, true, hop@)
             && forall|k: int| 0 <= k < hop.len() ==> request_allowed(#[trigger] hop@[k]@) && nominated(fields@, hop@[k]@),
         Err(Rejection::TooLarge) => !within_limits(fields@),
-        Err(Rejection::BadRequest) => true,
+        Err(Rejection::BadRequest) => !request_input_ok(fields@) || bad_connection_element(fields@),
     },
 {
     if !fits(fields) { return Err(Rejection::TooLarge); }
@@ -560,7 +560,7 @@ pub fn forward_request(fields: &Vec<Field>, host: &[u8], credential_name: &[u8],
     ensures match out {
         Ok(head) => request_head_ok(fields@, head@, host@, credential_name@, credential@),
         Err(Rejection::TooLarge) => !within_limits(fields@),
-        Err(Rejection::BadRequest) => true,
+        Err(Rejection::BadRequest) => !request_input_ok(fields@) || bad_connection_element(fields@),
     },
 {
     let hop = match check_request(fields) { Ok(hop) => hop, Err(rejection) => return Err(rejection) };
