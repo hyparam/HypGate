@@ -3,6 +3,8 @@
     clippy::unimplemented, clippy::indexing_slicing, clippy::arithmetic_side_effects))]
 #![deny(unsafe_code)]
 mod cli;
+#[allow(unsafe_code)]
+mod fd_limit;
 mod scan;
 #[allow(unsafe_code)]
 mod signal;
@@ -91,6 +93,12 @@ fn serve(
             .map_err(|_| "invalid shipping configuration or missing token")?;
         (config, shipping)
     }; // Source JSON buffers are startup scratch, not server-lifetime storage.
+    // Before the log exists, so a refusal leaves nothing behind.
+    let descriptors = fd_limit::needed(CONNECTION_LIMIT).ok_or("descriptor budget overflow")?;
+    if let Err(e) = fd_limit::ensure(descriptors) {
+        eprintln!("hypgate: {e}; raise it with `ulimit -n {descriptors}` or the service manager's file limit");
+        return Err("open-file limit too low for the connection limit");
+    }
     let transport =
         HttpsTransport::new(UPSTREAM_TIMEOUT).map_err(|_| "cannot initialize transport")?;
     // Metadata records need room for an 8192-byte destination even when the

@@ -1,12 +1,12 @@
 //! Termination signals end the gateway through the cooperative drain instead
-//! of the kernel's default action. This is the executable's one C binding and
-//! its only `unsafe`: `signal(2)` installs a handler that does nothing but
+//! of the kernel's default action. This is one of the executable's two C
+//! bindings (fd_limit.rs is the other) and their only `unsafe`: `signal(2)` installs a handler that does nothing but
 //! `write(2)` one byte to a socket pair, which is async-signal-safe, and a
 //! thread reading the other end triggers `Shutdown`. Nothing is decided
 //! here; the drain that follows is `server::serve`'s (docs/shutdown-proof.md).
 //! A second signal during the drain is absorbed, the drain is bounded, and
-//! SIGKILL stays available. `scripts/check_effect_sites.sh` pins this file as
-//! the only place the runtime says `unsafe`.
+//! SIGKILL stays available. `scripts/check_effect_sites.sh` pins this file and
+//! fd_limit.rs as the only places the runtime says `unsafe`.
 use std::io::{self, Read};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
@@ -38,7 +38,7 @@ extern "C" fn on_signal(_signum: i32) {
 
 /// Run `then` on its own thread when SIGTERM or SIGINT first arrives. Call
 /// once, before serving; later signals are absorbed.
-// Effect site: the executable's one C binding, installing the termination
+// Effect site: one of the executable's two C bindings, installing the termination
 // signal handlers that make SIGTERM and SIGINT a cooperative drain.
 pub(crate) fn on_termination(then: impl FnOnce() + Send + 'static) -> io::Result<()> {
     let (mut reader, writer) = UnixStream::pair()?;

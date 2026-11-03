@@ -38,11 +38,12 @@ if ! grep -rn --include='*.rs' -B3 '#\[allow(clippy::disallowed_methods)\]' crat
   exit 1
 fi
 
-# The executable's one C binding: the termination signal handlers in
-# signal.rs are the only `unsafe` in the runtime, and the library forbids it.
-unsafe_files=$(grep -rlE --include='*.rs' 'unsafe[^_]' crates/gateway-runtime/src | sort)
-if [ "$unsafe_files" != "crates/gateway-runtime/src/signal.rs" ]; then
-  echo "unsafe appears outside signal.rs: $unsafe_files" >&2
+# The executable's two C bindings: the termination signal handlers in
+# signal.rs and the open-file limit in fd_limit.rs are the only `unsafe` in
+# the runtime, and the library forbids it.
+unsafe_files=$(grep -rlE --include='*.rs' 'unsafe[^_]' crates/gateway-runtime/src | sort | tr '\n' ' ')
+if [ "$unsafe_files" != "crates/gateway-runtime/src/fd_limit.rs crates/gateway-runtime/src/signal.rs " ]; then
+  echo "unsafe appears outside fd_limit.rs and signal.rs: $unsafe_files" >&2
   exit 1
 fi
 if ! grep -q '^#!\[forbid(unsafe_code)\]' crates/gateway-runtime/src/lib.rs; then

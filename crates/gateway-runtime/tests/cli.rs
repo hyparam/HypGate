@@ -204,3 +204,45 @@ fn scan_follows_rotated_segments_and_identifies_physical_offsets() {
     assert_eq!(rows[3]["records"], 3);
     assert_eq!(rows[3]["status"], "complete");
 }
+
+const MINIMAL_ROOT: &[u8] = br#"{"identities":[],"destinations":[],"credentials":[],"grants":[],"limits":{"requests":1,"chunk_bytes":4},"logging":"strict"}"#;
+
+/// Run the gateway under a shell `ulimit` prefix.
+fn under_ulimit(limit: &str, root: &std::path::Path, log: &std::path::Path) -> Command {
+    let mut command = Command::new("/bin/sh");
+    command.arg("-c").arg(format!("ulimit {limit} && exec \"$0\" \"$1\" \"$2\" 127.0.0.1:0"))
+        .arg(env!("CARGO_BIN_EXE_hypgate")).arg(root).arg(log);
+    command
+}
+
+#[test]
+fn a_low_soft_open_file_limit_is_raised_so_idle_connections_cannot_exhaust_descriptors() {
+    let dir = TempDir::new("hypgate-nofile");
+    let root = dir.0.join("config.json"); let log = dir.0.join("audit.log");
+    fs::write(&root, MINIMAL_ROOT).unwrap();
+    // Soft limit only: 100 idle connections hold about 400 descriptors, more than 256.
+    let mut child = Process(under_ulimit("-Sn 256", &root, &log).stderr(Stdio::piped()).spawn().unwrap());
+    let mut startup = String::new();
+    BufReader::new(child.0.stderr.take().unwrap()).read_line(&mut startup).unwrap();
+    let address = startup.trim().strip_prefix("hypgate listening on ").expect("server startup message").to_owned();
+    let idle: Vec<TcpStream> = (0..100).map(|_| TcpStream::connect(&address).unwrap()).collect();
+    std::thread::sleep(Duration::from_millis(300));
+    let mut socket = TcpStream::connect(&address).unwrap(); socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    socket.write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").unwrap();
+    let mut response = String::new(); socket.read_to_string(&mut response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response:?}");
+    drop(idle); drop(child); fs::remove_dir_all(&dir.0).unwrap();
+}
+
+#[test]
+fn a_hard_open_file_limit_below_the_connection_budget_refuses_to_start_before_creating_the_log() {
+    let dir = TempDir::new("hypgate-nofile-hard");
+    let root = dir.0.join("config.json"); let log = dir.0.join("audit.log");
+    fs::write(&root, MINIMAL_ROOT).unwrap();
+    let result = under_ulimit("-n 256", &root, &log).output().unwrap();
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("open-file limit too low for the connection limit"), "{stderr}");
+    assert!(!log.exists());
+    fs::remove_dir_all(&dir.0).unwrap();
+}
