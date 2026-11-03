@@ -6,7 +6,9 @@
 //! sequences those effects, so what the shutdown argument promises is checked
 //! here rather than promised by the runtime: a connection is served only
 //! after the flag was seen clear for it, nothing is accepted or served once
-//! the flag was seen set or accept failed, worker admission closes before any
+//! the flag was seen set or the listener failed, only those two end
+//! acceptance (a retryable or resource error never does, and a resource error
+//! is followed by a pause before the next accept), worker admission closes before any
 //! wait, in-flight exchanges are cancelled only after a drain window that did
 //! not drain, and the logger closes exactly once, after the drain succeeded or
 //! after the wait that follows cancellation. The effects themselves stay
@@ -18,9 +20,21 @@
 use vstd::prelude::*;
 
 verus! {
-/// What one blocking accept produced.
+/// What one blocking accept produced. The runtime sorts the operating
+/// system's errors into the three error kinds; the driver decides what each
+/// one does.
 #[derive(PartialEq, Eq, Structural, Clone, Copy, Debug)]
-pub enum Accepted { Connection, Interrupted, Failed }
+pub enum Accepted {
+    Connection,
+    /// Interrupted, or a pending connection that failed before it was
+    /// accepted: accept again at once.
+    Retry,
+    /// Out of descriptors, buffers, or memory, or an unrecognized error:
+    /// pause, then accept again.
+    Exhausted,
+    /// The listening socket itself is unusable: acceptance ends.
+    Failed,
+}
 /// Which wait: the drain window after acceptance stops, or the one after cancellation.
 #[derive(PartialEq, Eq, Structural, Clone, Copy, Debug)]
 pub enum Window { Drain, Cancel }
@@ -34,6 +48,10 @@ pub trait Effects {
         ensures final(self).events() == old(self).events().push(Step::Triggered(out));
     fn accept(&mut self) -> (out: Accepted)
         ensures final(self).events() == old(self).events().push(Step::Accept(out));
+    /// A bounded sleep after a resource error, so a full descriptor table
+    /// is not polled in a tight loop.
+    fn pause(&mut self)
+        ensures final(self).events() == old(self).events().push(Step::Paused);
     fn admit_connection(&mut self) -> (out: bool)
         ensures final(self).events() == old(self).events().push(Step::Admitted(out));
     fn serve_connection(&mut self)
@@ -59,6 +77,8 @@ pub ghost enum Step {
     /// The shutdown flag, as observed.
     Triggered(bool),
     Accept(Accepted),
+    /// The bounded sleep after a resource error.
+    Paused,
     /// Whether the accepted socket got a connection credit.
     Admitted(bool),
     Served,
@@ -72,12 +92,12 @@ pub ghost enum Step {
     CloseLog(bool),
 }
 
-/// Where the accepted socket stands.
-pub ghost enum Pending { Idle, Accepted, Checked(bool), Admitted }
+/// Where the accepted socket stands, or that a resource error awaits its pause.
+pub ghost enum Pending { Idle, Accepted, Checked(bool), Admitted, Backoff }
 
 /// What the trace so far has established.
 pub ghost struct Progress {
-    /// The flag was seen set, or accept failed: no more acceptance.
+    /// The flag was seen set, or the listener failed: no more acceptance.
     pub stop_seen: bool,
     /// The flag was seen clear with no socket pending: an accept may follow.
     pub checked: bool,
@@ -98,8 +118,10 @@ pub open spec fn step_ok(p: Progress, s: Step) -> Option<Progress> {
         } else { None },
         Step::Accept(a) => if p.checked && !p.stop_seen && p.pending is Idle {
             Some(Progress { checked: false, stop_seen: a == Accepted::Failed,
-                pending: if a == Accepted::Connection { Pending::Accepted } else { Pending::Idle }, ..p })
+                pending: if a == Accepted::Connection { Pending::Accepted }
+                    else if a == Accepted::Exhausted { Pending::Backoff } else { Pending::Idle }, ..p })
         } else { None },
+        Step::Paused => if p.pending is Backoff { Some(Progress { pending: Pending::Idle, ..p }) } else { None },
         Step::Admitted(ok) => if p.pending == Pending::Checked(false) {
             Some(Progress { pending: if ok { Pending::Admitted } else { Pending::Idle }, ..p })
         } else { None },
@@ -162,8 +184,9 @@ impl Driver {
 
     /// One accept round: read the flag, and if it is clear accept one
     /// connection, recheck the flag, and admit and serve it. `Some(ok)` when
-    /// accepting is over: the flag was seen set (`true`) or accept failed
-    /// (`false`). A round that first sees the flag set returns at once, and
+    /// accepting is over: the flag was seen set (`true`) or the listener
+    /// failed (`false`). A resource error pauses and the round ends with
+    /// `None`, as a retryable one does at once. A round that first sees the flag set returns at once, and
     /// every round records at least one step.
     fn accept_step<E: Effects>(&mut self, effects: &mut E) -> (out: Option<bool>)
         requires old(self).inv(), old(self).bound(old(effects)), old(self).progress@ == initial(),
@@ -180,7 +203,12 @@ impl Driver {
         self.record(effects, Ghost(Step::Accept(a)));
         match a {
             Accepted::Failed => Some(false),
-            Accepted::Interrupted => None,
+            Accepted::Retry => None,
+            Accepted::Exhausted => {
+                effects.pause();
+                self.record(effects, Ghost(Step::Paused));
+                None
+            }
             Accepted::Connection => {
                 let t = effects.triggered();
                 self.record(effects, Ghost(Step::Triggered(t)));
@@ -200,7 +228,7 @@ impl Driver {
         }
     }
 
-    /// Accept until the flag is seen set or accept fails. Every connection
+    /// Accept until the flag is seen set or the listener fails. Every connection
     /// served was accepted and then found the flag clear.
     ///
     /// This is a service loop: each round is the verified, terminating
@@ -225,7 +253,7 @@ impl Driver {
     }
 }
 
-/// Serve until shutdown is triggered or accept fails, then drain: stop
+/// Serve until shutdown is triggered or the listener fails, then drain: stop
 /// accepting, close worker admission, wait one window, cancel and wait once
 /// more if that did not drain, and close the logger.
 pub fn serve<E: Effects>(effects: &mut E) -> (out: Driven)
@@ -281,6 +309,7 @@ pub proof fn lemma_progress_reflects(t: Seq<Step>)
         (p.stop_seen ==> exists|j: int| 0 <= j < t.len() && (t[j] == Step::Triggered(true) || t[j] == Step::Accept(Accepted::Failed)))
         && (p.stop_seen ==> p.pending is Idle || p.pending == Pending::Checked(true))
         && (p.pending is Accepted ==> t.len() >= 1 && t.last() == Step::Accept(Accepted::Connection))
+        && (p.pending is Backoff ==> !p.stop_seen && !p.stopped && t.len() >= 1 && t.last() == Step::Accept(Accepted::Exhausted))
         && (forall|b: bool| p.pending == Pending::Checked(b) ==> t.len() >= 2 && t.last() == Step::Triggered(b)
             && t[t.len() - 2] == Step::Accept(Accepted::Connection))
         && (p.pending is Admitted ==> t.len() >= 3 && t.last() == Step::Admitted(true) && t[t.len() - 2] == Step::Triggered(false)
@@ -383,6 +412,31 @@ pub proof fn lemma_nothing_served_after_stop(t: Seq<Step>, i: int, j: int)
     assert(run(t.take(i + 1)).unwrap().stop_seen);
     lemma_monotone(before, i + 1);
     lemma_progress_reflects(before);
+}
+
+/// Only the flag or a failed listener ends acceptance: a retryable or
+/// resource error leaves the loop accepting, so a transient error such as a
+/// full descriptor table cannot take the gateway down.
+pub proof fn lemma_errors_keep_accepting(t: Seq<Step>, i: int)
+    requires run(t).is_some(), 0 <= i < t.len(), t[i] == Step::Accept(Accepted::Retry) || t[i] == Step::Accept(Accepted::Exhausted),
+    ensures !run(t.take(i + 1)).unwrap().stop_seen, !run(t.take(i + 1)).unwrap().stopped,
+{
+    lemma_prefix_runs(t, i + 1);
+    assert(t.take(i + 1).drop_last() =~= t.take(i));
+    lemma_prefix_runs(t, i);
+    lemma_progress_reflects(t.take(i));
+}
+
+/// A resource error is followed at once by the pause: the next step of any
+/// allowed trace after `Accept(Exhausted)` is `Paused`.
+pub proof fn lemma_pause_after_exhausted(t: Seq<Step>, i: int)
+    requires run(t).is_some(), 0 <= i, i + 1 < t.len(), t[i] == Step::Accept(Accepted::Exhausted),
+    ensures t[i + 1] == Step::Paused,
+{
+    lemma_prefix_runs(t, i + 2);
+    assert(t.take(i + 2).drop_last() =~= t.take(i + 1));
+    lemma_prefix_runs(t, i + 1);
+    lemma_progress_reflects(t.take(i + 1));
 }
 
 /// A served connection was accepted, then found the flag clear, then got a credit.

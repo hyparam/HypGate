@@ -21,6 +21,7 @@ impl Fake {
 impl Effects for Fake {
     fn triggered(&mut self) -> bool { let b = self.flags.pop().expect("scripted flag"); self.note(format!("triggered={b}")); b }
     fn accept(&mut self) -> Accepted { let a = self.accepts.pop().expect("scripted accept"); self.note(format!("accept={a:?}")); a }
+    fn pause(&mut self) { self.note("pause"); }
     fn admit_connection(&mut self) -> bool { let ok = self.admits.pop().expect("scripted admit"); self.note(format!("admit={ok}")); ok }
     fn serve_connection(&mut self) { self.note("serve"); }
     fn discard_connection(&mut self) { self.note("discard"); }
@@ -35,13 +36,13 @@ fn calls(fake: &Fake) -> Vec<&str> { fake.calls.iter().map(String::as_str).colle
 
 #[test]
 fn serves_each_accepted_connection_after_rechecking_the_flag_then_drains() {
-    let mut fake = Fake::new(&[false, false, false, false, false, true], &[Accepted::Connection, Accepted::Interrupted, Accepted::Connection],
+    let mut fake = Fake::new(&[false, false, false, false, false, true], &[Accepted::Connection, Accepted::Retry, Accepted::Connection],
         &[true, false], &[true], true);
     let driven = serve(&mut fake);
     assert!(driven.accept_ok && driven.log_ok);
     assert_eq!(calls(&fake), [
         "triggered=false", "accept=Connection", "triggered=false", "admit=true", "serve",
-        "triggered=false", "accept=Interrupted",
+        "triggered=false", "accept=Retry",
         "triggered=false", "accept=Connection", "triggered=false", "admit=false",
         "triggered=true", "stop", "close_workers", "wait(Drain)=true", "close_log",
     ]);
@@ -61,6 +62,20 @@ fn an_accept_failure_still_drains_and_is_reported() {
     let driven = serve(&mut fake);
     assert!(!driven.accept_ok && driven.log_ok);
     assert_eq!(calls(&fake), ["triggered=false", "accept=Failed", "stop", "close_workers", "wait(Drain)=true", "close_log"]);
+}
+
+#[test]
+fn resource_and_retryable_errors_keep_accepting() {
+    let mut fake = Fake::new(&[false, false, false, false, true], &[Accepted::Exhausted, Accepted::Retry, Accepted::Connection],
+        &[true], &[true], true);
+    let driven = serve(&mut fake);
+    assert!(driven.accept_ok);
+    assert_eq!(calls(&fake), [
+        "triggered=false", "accept=Exhausted", "pause",
+        "triggered=false", "accept=Retry",
+        "triggered=false", "accept=Connection", "triggered=false", "admit=true", "serve",
+        "triggered=true", "stop", "close_workers", "wait(Drain)=true", "close_log",
+    ]);
 }
 
 #[test]

@@ -97,6 +97,9 @@ are handled by the durability gate instead.
 
 `GET /metrics` exposes these gauges and counters, with no payloads or credentials:
 
+- `hypgate_accept_errors_total`: accept errors the gateway retried, such as
+  running out of file descriptors. Only a failure of the listening socket
+  itself stops the gateway; a climbing count means connections are waiting.
 - `hypgate_failed_exchanges_total`: transport errors returned to the worker,
   including exchanges cancelled by a client leaving or by shutdown.
 - `hypgate_audit_gap_requests_total`: availability-mode requests whose first log

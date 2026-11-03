@@ -24,7 +24,7 @@ trusted Rust and is not checked either way.
 | `shipping_driver::flush` | Each `Some` from `Machine::flush` evicts one open exchange; numbering, enqueueing, and settling leave the open count alone | Measure `open_count` |
 | `shipping_driver::pump` | Reads at most `PUMP_BATCH` (1024) records a round, so a stop request is seen within a bounded batch whatever the log holds | Batch cap, measure `PUMP_BATCH - count` |
 | `exchange_driver::final_head` | At most `MAX_INTERIM_HEADS` (8) interim heads; one more is `Fault::Http`, answered 502 | Cap, measure `MAX_INTERIM_HEADS - interim` |
-| `serve_driver::accept_loop` | Each round is `accept_step`, verified to terminate and to record at least one trace step; a round that sees the flag set ends the loop | Service loop: opt-out kept on a one-`match` loop |
+| `serve_driver::accept_loop` | Each round is `accept_step`, verified to terminate and to record at least one trace step; a round that sees the flag set or a failed listener ends the loop, and no other error does | Service loop: opt-out kept on a one-`match` loop |
 | `shipping_driver::drive` | Each round is `drive_step`, verified to terminate (its read and flush loops are measured); a round that sees `stop_requested` ends the loop | Service loop: opt-out kept on a one-`match` loop |
 
 Three of the closures changed behavior, each a cap that bounds a peer's

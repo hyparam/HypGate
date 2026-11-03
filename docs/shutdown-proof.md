@@ -35,7 +35,7 @@ of valid open admission, reopening on release, and forgotten release.
 
 `gateway-core/src/serve_driver.rs` sequences the accept loop and the drain.
 The runtime's `server::ServeEffects` performs each effect it names (read the
-flag, block on accept, take a connection credit, start the thread, drop the
+flag, block on accept, pause after a resource error, take a connection credit, start the thread, drop the
 listener, close worker admission, wait on the registries, cancel what is
 live, close the logger) and decides nothing. The driver keeps a ghost trace;
 `run` says which traces are allowed, and the lemmas read these off any
@@ -43,8 +43,15 @@ allowed trace:
 
 - A served connection was accepted, then found the flag clear, then got a
   credit, in that order and immediately before (`lemma_served_sequence`).
-- Once the flag was seen set or accept failed, nothing is accepted, admitted,
-  or served (`lemma_nothing_served_after_stop`).
+- Once the flag was seen set or the listener failed, nothing is accepted,
+  admitted, or served (`lemma_nothing_served_after_stop`).
+- Only those two end acceptance. A retryable error (an interrupt, or a
+  pending connection that failed) or a resource error (out of descriptors,
+  buffers, or memory) leaves the loop accepting (`lemma_errors_keep_accepting`),
+  and a resource error is followed at once by a bounded pause
+  (`lemma_pause_after_exhausted`). The runtime's `accept_error_kind` sorts the
+  operating system's errors into those kinds; only EBADF, EFAULT, EINVAL, and
+  ENOTSOCK count as a listener failure.
 - Cancellation follows a drain window that did not drain, after worker
   admission closed, after acceptance stopped (`lemma_cancel_after_failed_drain`).
 - The logger closes after worker admission closed and after the drain

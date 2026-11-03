@@ -59,6 +59,7 @@ server.rs:Drop::drop:join
 server.rs:ClientWatch::start:peek
 server.rs:ClientWatch::start:sleep
 server.rs:Effects::accept:accept
+server.rs:Effects::pause:sleep
 server.rs:wake_accept:connect
 server/connections.rs:ConnectionSlots::wait_drained:condvar-wait
 server/workers.rs:WorkerSlots::wait_drained:condvar-wait

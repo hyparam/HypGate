@@ -1113,3 +1113,16 @@ fn shipping_uploads_forwarded_exchanges_without_touching_readiness() {
 }
 
 mod lifetime;
+
+#[test]
+fn only_listener_errors_end_acceptance() {
+    let os = io::Error::from_raw_os_error;
+    // EMFILE, ENFILE, ENOMEM: pause and keep accepting.
+    for code in [24, 23, 12] { assert_eq!(accept_error_kind(&os(code)), Accepted::Exhausted, "errno {code}"); }
+    // EBADF, EFAULT, EINVAL: the listening socket is unusable.
+    for code in [9, 14, 22] { assert_eq!(accept_error_kind(&os(code)), Accepted::Failed, "errno {code}"); }
+    for kind in [io::ErrorKind::Interrupted, io::ErrorKind::ConnectionAborted, io::ErrorKind::WouldBlock] {
+        assert_eq!(accept_error_kind(&kind.into()), Accepted::Retry, "{kind:?}");
+    }
+    assert_eq!(accept_error_kind(&io::Error::other("unrecognized")), Accepted::Exhausted);
+}

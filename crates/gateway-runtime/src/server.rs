@@ -34,6 +34,9 @@ pub const CONNECTION_STACK_BYTES: usize = 512 * 1024;
 pub const WATCHER_STACK_BYTES: usize = 64 * 1024;
 /// How long shutdown waits for connections and workers before cancelling them.
 const DRAIN_WINDOW: Duration = Duration::from_secs(10);
+/// The sleep after a resource error from accept, so a full descriptor table
+/// is not polled in a tight loop. Shutdown waits at most this long more.
+const ACCEPT_PAUSE: Duration = Duration::from_millis(50);
 
 pub struct Gateway {
     config: Arc<GatewayConfig>,
@@ -46,6 +49,7 @@ pub struct Gateway {
     next_live: AtomicU64,
     audit_gaps: AtomicU64,
     failed_exchanges: AtomicU64,
+    accept_errors: AtomicU64,
     // Read-only view of the shipper thread's counters for `/metrics`. The
     // gateway never calls into the shipper and readiness never reads this.
     shipping: Option<Arc<crate::shipping::Metrics>>,
@@ -58,10 +62,12 @@ impl Gateway {
         shipping: Option<Arc<crate::shipping::Metrics>>) -> Arc<Self> {
         Arc::new(Self { worker_slots: WorkerSlots::new(config.request_limit()), config: Arc::new(config), transport, log,
             connection_slots: OnceLock::new(), live: Mutex::new(HashMap::new()), next_live: AtomicU64::new(1),
-            audit_gaps: AtomicU64::new(0), failed_exchanges: AtomicU64::new(0), shipping })
+            audit_gaps: AtomicU64::new(0), failed_exchanges: AtomicU64::new(0), accept_errors: AtomicU64::new(0), shipping })
     }
     pub fn audit_gaps(&self) -> u64 { self.audit_gaps.load(Ordering::Relaxed) }
     pub fn failed_exchanges(&self) -> u64 { self.failed_exchanges.load(Ordering::Relaxed) }
+    /// Accept errors the loop retried; a listener failure is not counted, it ends the loop.
+    pub fn accept_errors(&self) -> u64 { self.accept_errors.load(Ordering::Relaxed) }
 
     fn track(&self, cancel: &Cancel) -> u64 {
         let id = self.next_live.fetch_add(1, Ordering::Relaxed);
@@ -79,8 +85,8 @@ impl Gateway {
         match target {
             b"/metrics" => {
                 use std::fmt::Write as _;
-                let mut text = format!("hypgate_audit_gap_requests_total {}\nhypgate_failed_exchanges_total {}\nhypgate_audit_healthy {}\nhypgate_worker_admission_healthy {}\n",
-                    self.audit_gaps(), self.failed_exchanges(), u8::from(self.log.healthy()), u8::from(self.worker_slots.healthy()));
+                let mut text = format!("hypgate_audit_gap_requests_total {}\nhypgate_failed_exchanges_total {}\nhypgate_accept_errors_total {}\nhypgate_audit_healthy {}\nhypgate_worker_admission_healthy {}\n",
+                    self.audit_gaps(), self.failed_exchanges(), self.accept_errors(), u8::from(self.log.healthy()), u8::from(self.worker_slots.healthy()));
                 match self.config.usage() {
                     Some((active, limit)) => { let _ = write!(text, "hypgate_admission_healthy 1\nhypgate_requests_active {active}\nhypgate_requests_limit {limit}\n"); }
                     None => text.push_str("hypgate_admission_healthy 0\n"),
@@ -371,6 +377,32 @@ impl Shutdown {
     }
     fn attach(&self, address: SocketAddr) { if let Ok(mut slot) = self.address.lock() { *slot = Some(address); } }
 }
+/// Sorts an accept(2) error for the verified serve driver, which decides what
+/// each kind does. Only errors that say the listening socket itself is
+/// unusable end acceptance. Errors that belong to one pending connection are
+/// retried at once; Linux's accept(2) page asks callers to treat EPROTO,
+/// ENOPROTOOPT, EHOSTDOWN, ENONET, EHOSTUNREACH, EOPNOTSUPP, ENETDOWN, and
+/// ENETUNREACH like EAGAIN. Everything else, chiefly EMFILE, ENFILE, ENOBUFS,
+/// and ENOMEM, is a resource error and is retried after a pause.
+pub(crate) fn accept_error_kind(e: &io::Error) -> Accepted {
+    use io::ErrorKind as K;
+    #[cfg(target_os = "linux")]
+    const ERRNO: (&[i32], &[i32]) = (&[9, 14, 22, 88], &[71, 92, 112, 64, 95]);
+    #[cfg(not(target_os = "linux"))]
+    const ERRNO: (&[i32], &[i32]) = (&[9, 14, 22, 38], &[100, 42, 64, 102]);
+    let (listener, per_connection) = ERRNO;
+    match e.kind() {
+        K::Interrupted | K::WouldBlock | K::ConnectionAborted | K::ConnectionReset | K::TimedOut
+            | K::HostUnreachable | K::NetworkUnreachable | K::NetworkDown => return Accepted::Retry,
+        _ => {}
+    }
+    match e.raw_os_error() {
+        Some(code) if listener.contains(&code) => Accepted::Failed,
+        Some(code) if per_connection.contains(&code) => Accepted::Retry,
+        _ => Accepted::Exhausted,
+    }
+}
+
 // Effect site: a loopback connection to the gateway's own listener, which
 // returns the accept loop from its blocking accept so it can see the flag.
 #[allow(clippy::disallowed_methods)]
@@ -388,10 +420,15 @@ impl serve_driver::Effects for ServeEffects {
         let Some(listener) = self.listener.as_ref() else { return Accepted::Failed };
         match listener.accept() {
             Ok((socket, _)) => { self.accepted = Some(socket); Accepted::Connection }
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => Accepted::Interrupted,
-            Err(e) => { self.accept_error = Some(e); Accepted::Failed }
+            Err(e) => {
+                let kind = accept_error_kind(&e);
+                if kind == Accepted::Failed { self.accept_error = Some(e); }
+                else if e.kind() != io::ErrorKind::Interrupted { self.app.accept_errors.fetch_add(1, Ordering::Relaxed); }
+                kind
+            }
         }
     }
+    fn pause(&mut self) { std::thread::sleep(ACCEPT_PAUSE); }
     fn admit_connection(&mut self) -> bool {
         match self.slots.acquire() {
             Some(lease) => { self.lease = Some(lease); true }
