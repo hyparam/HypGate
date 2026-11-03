@@ -89,9 +89,11 @@ Anthropic and OpenAI routes:
 Each grant is an active route; there is no separate route file.
 
 `state_dir` must already exist and be private to the operator (mode 700). The
-shipper keeps two files there, both mode 600: `identity.json` with the
-server-issued gateway credential and a fingerprint of the operator token, and
-`checkpoint.json` with upload progress. The gateway id is the credential's
+shipper keeps its files there, all mode 600: `identity.json` with the
+server-issued gateway credential and a fingerprint of the operator token, a
+`checkpoint-<session>.json` with each log session's upload progress, and a
+`pending-<session>.json` claim for each session not yet fully shipped, which
+the next start uses to finish shipping a session a restart cut short. The gateway id is the credential's
 `sub` claim; you will want it for queries. The optional fields
 `max_open_exchanges`, `max_exchange_bytes`, and `poll_ms` are described in
 [cloud shipping](cloud-shipping.md#configuration).

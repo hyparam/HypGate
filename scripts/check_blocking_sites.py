@@ -72,6 +72,8 @@ shipping/lookup.rs:Lookup::resolve:channel-recv
 shipping/lookup.rs:Lookup::with:channel-recv
 shipping/state.rs:read_bounded:file-read
 shipping/state.rs:write_private:fsync
+shipping/state.rs:claim:fsync
+shipping/state.rs:Claim::release:fsync
 signal.rs:on_termination:signal-read
 transport.rs:open_socket:connect
 transport/resolver.rs:Resolver::resolve:resolve

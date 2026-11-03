@@ -53,8 +53,11 @@ redundancy needs another TLS-protected deployment boundary; the executable must
 remain loopback-bound. Shared upstream or storage failures can affect both instances.
 
 When shipping is configured, the state directory must persist across restarts
-so the enrollment and checkpoint are reused; a lost checkpoint re-sends the
-log and the server drops the repeated rows. SIGTERM gives the shipper a
+so the enrollment, checkpoints, and session claims are reused; a lost checkpoint
+re-sends that log and the server drops the repeated rows. Exchanges a stopped
+gateway had not shipped are shipped by the next start, and a primary and
+standby can share one state directory
+([restarts](cloud-shipping.md#restarts-and-unfinished-sessions)). SIGTERM gives the shipper a
 two-second window to finish; it does not wait longer for pending uploads.
 
 ## Clean-environment reproduction

@@ -78,13 +78,13 @@ fn s3_signed_put_retries_resumes_and_scopes_checkpoints_to_destination() {
     let metrics = ship("bucket/logs");
     assert_eq!(metrics.batches_acknowledged(), 1); assert_eq!(metrics.poisoned_batches(), 0);
     assert!(!state_dir.join("identity.json").exists());
-    let checkpoint = load_checkpoint(&state_dir).unwrap();
+    let checkpoint = load_checkpoint(&state_dir, &log.session()).unwrap();
     assert_eq!(checkpoint.resolved, 1); assert!(checkpoint.session.starts_with(b"s3-v2:"));
     assert_eq!(received.lock().unwrap().len(), 3);
     assert_eq!(ship("bucket/logs").batches_acknowledged(), 0);
     assert_eq!(received.lock().unwrap().len(), 3);
     // A lost checkpoint (including crash after accepted PUT) overwrites the same object.
-    std::fs::remove_file(state_dir.join("checkpoint.json")).unwrap();
+    std::fs::remove_file(super::checkpoint_path(&state_dir, &log.session())).unwrap();
     assert_eq!(ship("bucket/logs").batches_acknowledged(), 1);
     { let all = received.lock().unwrap(); assert_eq!(all.len(), 4); for item in &all[1..] { assert_eq!(item, &all[0]); } }
     assert_eq!(ship("bucket/other").batches_acknowledged(), 1);

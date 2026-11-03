@@ -75,8 +75,11 @@ Add to the root policy (all fields but the first three optional):
   with it returns the same server-side gateway, while a plain bootstrap token
   creates a new gateway row on every enrollment.
 - `state_dir` must exist and be private to the operator. The shipper writes
-  `identity.json` and `checkpoint.json` there, mode 0600, by temporary file
-  and rename. `identity.json` holds the server's gateway credential and a
+  `identity.json` and one `checkpoint-<session>.json` per log session there,
+  mode 0600, by temporary file and rename, plus a `pending-<session>.json`
+  claim for each session not yet fully shipped (see
+  [restarts](#restarts-and-unfinished-sessions)). A `checkpoint.json` from an
+  earlier version is still read for a session without its own file. `identity.json` holds the server's gateway credential and a
   SHA-256 fingerprint of the operator token, not the token. Checkpoint progress
   is bound to the server URL, token fingerprint, log session, and assembler
   limits. Changing any of these replays the log; legacy unscoped checkpoints
@@ -405,11 +408,41 @@ Live shipping and `hypgate ship CONFIG.json LOG` follow the numbered segments fr
 `LOG`. Rotation preserves the session ID, assembler, batch identities, and
 checkpoint sequence, so requests spanning files are assembled normally. The
 verified session recovery driver rechecks a sealed predecessor after discovering
-its successor, preserving records appended during the handoff. On restart
-the shipper reads the complete session from its original path and skips resolved
-exchanges using the existing checkpoint. Keep all segments in place until shipping
+its successor, preserving records appended during the handoff. A restarted
+or adopted session is read from its original path, and resolved exchanges are
+skipped using its checkpoint. Keep all segments in place until shipping
 and required replay finish; shipping an individual middle segment is not a
 replacement for shipping the complete session. No segments are deleted by shipping.
+
+## Restarts and unfinished sessions
+
+Each gateway start writes a new log, so a session can end with exchanges not
+yet acknowledged: the server was unreachable, or the process stopped before
+its queue emptied. Those exchanges are shipped by the next start.
+
+When a shipper starts on a session it writes `pending-<session>.json` in
+`state_dir`, naming the log's absolute path, and holds an exclusive lock on
+that file for as long as it runs. The claim is removed only once the session
+has been drained to the end. Before following its own log, a starting live
+shipper looks for claims whose lock is free, which means the process that
+held them has ended, and drains each of those logs in drain mode, oldest path
+first, releasing each claim when its log is drained. It then follows its own
+log. `hypgate_shipping_adopted_sessions_total` counts the sessions drained
+this way.
+
+A claim whose lock is held belongs to a live process and is left alone, so a
+primary and standby sharing one `state_dir` never ship the same session at
+once, and each session's checkpoint is its own file. `hypgate ship` takes the
+same claim: it refuses a session a live gateway is shipping, and releases the
+claim when it drains the log. A session that cannot be drained (its log was
+moved, or a record is corrupt) keeps its claim and is retried on each start;
+delete its `pending-` file once that log is handled by hand. Logs from before
+this version have no claim and are not adopted; ship them with `hypgate ship`.
+
+`hypgate_shipping_state_errors_total` counts failed writes of the identity, a
+checkpoint, or a claim. A failed write is not retried on its own; it costs a
+replay of acknowledged exchanges after the next restart, which the server
+deduplicates.
 
 Drain mode (`hypgate ship`) exits with an error if the session header cannot be
 opened or validated, or a record is corrupt or unreadable. Follow mode continues

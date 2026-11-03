@@ -14,6 +14,11 @@ impl Transport for Engine {
     }
 }
 impl Store for Engine {
-    fn load(&mut self) -> Option<Checkpoint> { state::load_checkpoint(&self.config.state_dir) }
-    fn save(&mut self, value: Checkpoint) -> bool { state::save_checkpoint(&self.config.state_dir, &value).is_ok() }
+    fn load(&mut self) -> Option<Checkpoint> { state::load_checkpoint(&self.config.state_dir, &self.session?) }
+    fn save(&mut self, value: Checkpoint) -> bool {
+        let Some(session) = self.session else { return false; };
+        let saved = state::save_checkpoint(&self.config.state_dir, &session, &value).is_ok();
+        if !saved { self.metrics.state_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
+        saved
+    }
 }

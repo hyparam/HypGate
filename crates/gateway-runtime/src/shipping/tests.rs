@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 use super::*;
 use super::config::ShippingConfig;
-use super::state::{base64url_encode, load_checkpoint, load_identity, save_checkpoint, save_identity};
+use super::state::{base64url_encode, checkpoint_path, load_checkpoint, load_identity, save_checkpoint, save_identity};
 use gateway_core::shipping_wire::jws_claims;
 use crate::disk_log::DiskLog;
 use crate::test_support::{self_signed, wait_until, TempDir};
@@ -242,8 +242,8 @@ fn shipping_resume(rotate: bool) {
     assert!(!std::fs::read_to_string(state_dir.join("identity.json")).unwrap().contains(TOKEN));
     #[cfg(unix)] { use std::os::unix::fs::PermissionsExt;
         assert_eq!(std::fs::metadata(state_dir.join("identity.json")).unwrap().permissions().mode() & 0o777, 0o600);
-        assert_eq!(std::fs::metadata(state_dir.join("checkpoint.json")).unwrap().permissions().mode() & 0o777, 0o600); }
-    let checkpoint = load_checkpoint(&state_dir).expect("checkpoint persisted");
+        assert_eq!(std::fs::metadata(checkpoint_path(&state_dir, &log.session())).unwrap().permissions().mode() & 0o777, 0o600); }
+    let checkpoint = load_checkpoint(&state_dir, &log.session()).expect("checkpoint persisted");
     assert_eq!((checkpoint.resolved, checkpoint.poisoned), (2, 0));
     assert!(String::from_utf8(checkpoint.session).unwrap().starts_with("hypaware-v2:"));
 
@@ -282,7 +282,7 @@ fn shipping_resume(rotate: bool) {
     assert_eq!(state.lock().unwrap().batches.len(), 3);
     assert_eq!(state.lock().unwrap().batches[2].1[0]["content_text"], "not json");
     assert_eq!(state.lock().unwrap().requests.iter().filter(|p| *p == BOOTSTRAP_PATH).count(), 1, "identity reused across restarts");
-    std::fs::remove_file(state_dir.join("checkpoint.json")).unwrap();
+    std::fs::remove_file(checkpoint_path(&state_dir, &log.session())).unwrap();
     let shipper = Shipper::spawn_with_roots(shipping_config(port, &state_dir, json!({})), log_path.clone(), Some(roots)).unwrap();
     let metrics = shipper.metrics();
     assert!(wait_until(Duration::from_secs(10), || metrics.batches_acknowledged() == 1));
@@ -312,6 +312,7 @@ fn ships_many_exchanges_in_bounded_batches_with_drain_mode() {
     log.append(LogRecord { tenant: 1, request: 21, chunk: 0, kind: RecordKind::RequestStart, bytes: &start }).unwrap();
     log.append(LogRecord { tenant: 1, request: 22, chunk: 0, kind: RecordKind::RequestStart, bytes: &start }).unwrap();
     log.append(LogRecord { tenant: 1, request: 22, chunk: 1, kind: RecordKind::Upload, bytes: b"partial" }).unwrap();
+    let session = log.session();
     drop(log);
     let mut config = shipping_config(port, &state_dir, json!({"max_exchange_bytes": 1048576}));
     config.poll_ms = 100;
@@ -332,7 +333,7 @@ fn ships_many_exchanges_in_bounded_batches_with_drain_mode() {
     assert!(rows.iter().all(|r| r["attributes"]["gateway"]["truncated"] == false));
     let part_ids: HashSet<_> = rows.iter().map(|r| r["part_id"].as_str().unwrap()).collect();
     assert_eq!(part_ids.len(), 44);
-    assert_eq!(load_checkpoint(&state_dir).unwrap().resolved, 22);
+    assert_eq!(load_checkpoint(&state_dir, &session).unwrap().resolved, 22);
 }
 
 #[test]
@@ -369,7 +370,7 @@ fn recovers_from_rejected_tokens_throttling_and_poison_and_stops_on_revocation()
         assert_eq!(requests.len(), 4);
         assert!(!requests.iter().any(|id| *id == hex(&gateway_core::shipping_identity::exchange_key(&log.session(), 1))));
     }
-    assert_eq!(load_checkpoint(&state_dir).unwrap().poisoned, 1);
+    assert_eq!(load_checkpoint(&state_dir, &log.session()).unwrap().poisoned, 1);
     // Revocation stops the shipper for good; later exchanges stay unshipped.
     state.lock().unwrap().ingest_script.push_back((403, "service_token_revoked", None));
     write_exchange(&mut log, 4, "https://api.anthropic.com/v1/messages", b"{}", 200, &[b"{}"], 0);
@@ -470,11 +471,16 @@ fn state_files_round_trip_and_jwt_claims_are_read_without_verification() {
     save_identity(&dir.0, &identity).unwrap();
     assert_eq!(load_identity(&dir.0).unwrap(), identity);
     let checkpoint = Checkpoint { session: "00".repeat(16).into_bytes(), resolved: 5, poisoned: 1, max_open_exchanges: 64, max_exchange_bytes: 4096 };
-    save_checkpoint(&dir.0, &checkpoint).unwrap();
-    assert_eq!(load_checkpoint(&dir.0).unwrap(), checkpoint);
-    assert!(!dir.0.join("identity.json.tmp").exists());
-    std::fs::write(dir.0.join("checkpoint.json"), b"not json").unwrap();
-    assert!(load_checkpoint(&dir.0).is_none());
+    let session = [7u8; 16];
+    save_checkpoint(&dir.0, &session, &checkpoint).unwrap();
+    assert_eq!(load_checkpoint(&dir.0, &session).unwrap(), checkpoint);
+    assert!(load_checkpoint(&dir.0, &[8u8; 16]).is_none(), "another session has no checkpoint");
+    assert!(!dir.0.join(format!("identity.json.tmp.{}", std::process::id())).exists());
+    std::fs::write(checkpoint_path(&dir.0, &session), b"not json").unwrap();
+    assert!(load_checkpoint(&dir.0, &session).is_none());
+    // A session without its own file falls back to the single checkpoint of earlier versions.
+    std::fs::write(dir.0.join("checkpoint.json"), crate::json_build::write(&gateway_core::shipping_checkpoint::value(&checkpoint))).unwrap();
+    assert_eq!(load_checkpoint(&dir.0, &[8u8; 16]).unwrap(), checkpoint);
     assert!(load_identity(&dir.0.join("missing")).is_none());
     // The verified reader is what the shipper enrolls with; the fixture's tokens are read as expected.
     let claims = jws_claims(fake_jwt("gw-0123456789abcdef", 1_800_000_000, 1).as_bytes()).unwrap();
@@ -576,7 +582,7 @@ fn checkpoint_is_scoped_to_server_and_token_and_legacy_progress_is_replayed() {
     log.shutdown(Duration::from_secs(2)).unwrap();
     let (port_a, roots_a, a, _a) = fake_server(TOKEN);
     // A legacy checkpoint cannot establish which destination acknowledged it.
-    save_checkpoint(&state_dir, &Checkpoint { session: hex(&session).into_bytes(), resolved: 1, poisoned: 0,
+    save_checkpoint(&state_dir, &session, &Checkpoint { session: hex(&session).into_bytes(), resolved: 1, poisoned: 0,
         max_open_exchanges: 64, max_exchange_bytes: 4096 }).unwrap();
     let config = || shipping_config(port_a, &state_dir, json!({"max_open_exchanges":64,"max_exchange_bytes":4096}));
     ship_to_end_with_roots(config(), path.clone(), Some(roots_a.clone())).unwrap();
@@ -595,7 +601,7 @@ fn checkpoint_is_scoped_to_server_and_token_and_legacy_progress_is_replayed() {
         json!({"max_open_exchanges":64,"max_exchange_bytes":4096})), |_| Some(next_token.into())).unwrap().unwrap();
     assert_eq!(ship_to_end_with_roots(changed, path, Some(roots_b)).unwrap().batches_acknowledged(), 1);
     assert_eq!(b.lock().unwrap().batches.len(), 1);
-    assert!(!std::fs::read_to_string(state_dir.join("checkpoint.json")).unwrap().contains(next_token));
+    assert!(!std::fs::read_to_string(checkpoint_path(&state_dir, &session)).unwrap().contains(next_token));
 }
 
 
@@ -622,7 +628,8 @@ fn drain_returns_errors_for_corrupt_records_and_unreadable_session_headers() {
         let flag = stop.clone();
         let (tx, rx) = mpsc::channel();
         let task = thread::spawn(move || {
-            tx.send(Engine::new(config, path, Some(roots), flag, Arc::new(Metrics::default())).run(Mode::Drain)).unwrap();
+            let result = Engine::new(config, Some(roots), flag, Arc::new(Metrics::default())).and_then(|mut engine| engine.run(path, None, Mode::Drain));
+            tx.send(result).unwrap();
         });
         let result = rx.recv_timeout(Duration::from_secs(2));
         // Stop and join even if this regresses, rather than leaking a stuck test worker.
@@ -653,6 +660,68 @@ fn short_lived_tokens_ship_multiple_batches_without_refresh_starvation() {
     let state = state.lock().unwrap();
     assert_eq!(state.issued, 3, "one bootstrap and one refresh per subsequent batch");
     assert_eq!(state.batches.len(), 3);
-    let checkpoint = load_checkpoint(&state_dir).unwrap();
+    let checkpoint = load_checkpoint(&state_dir, &log.session()).unwrap();
     assert_eq!((checkpoint.resolved, checkpoint.poisoned), (3, 0));
+}
+
+#[test]
+fn claims_are_skipped_while_held_and_adopted_once_their_process_lets_go() {
+    let dir = TempDir::new();
+    let (a, b) = ([1u8; 16], [2u8; 16]);
+    let held = state::claim(&dir.0, &a, std::path::Path::new("/logs/a.log")).unwrap();
+    assert!(matches!(state::claim(&dir.0, &a, std::path::Path::new("/logs/a.log")), Err(state::ClaimError::Busy)));
+    assert!(state::abandoned(&dir.0).is_empty(), "a held claim belongs to a live shipper");
+    drop(held);
+    drop(state::claim(&dir.0, &b, std::path::Path::new("/logs/b.log")).unwrap());
+    let found = state::abandoned(&dir.0);
+    let summary: Vec<_> = found.iter().map(|(_, session, log)| (*session, log.clone())).collect();
+    assert_eq!(summary, [(a, "/logs/a.log".into()), (b, "/logs/b.log".into())]);
+    #[cfg(unix)] { use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(dir.0.join(format!("pending-{}.json", hex(&a)))).unwrap().permissions().mode() & 0o777, 0o600); }
+    for (claim, _, _) in found { claim.release().unwrap(); }
+    assert!(state::abandoned(&dir.0).is_empty());
+    assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 0, "released claims leave nothing behind");
+}
+
+#[test]
+fn a_restart_on_a_new_log_ships_what_the_previous_session_left_unshipped() {
+    let dir = TempDir::new(); let state_dir = dir.0.join("state"); std::fs::create_dir(&state_dir).unwrap();
+    // The first run cannot reach its server, then stops with both exchanges unshipped.
+    let unreachable = { let listener = TcpListener::bind("127.0.0.1:0").unwrap(); listener.local_addr().unwrap().port() };
+    let (_, roots, _) = { let (port, roots, state, server) = fake_server(TOKEN); drop(server); (port, roots, state) };
+    let first_path = dir.0.join("session-1.log");
+    let mut first = DiskLog::create(&first_path, 4, Duration::from_secs(2)).unwrap();
+    write_exchange(&mut first, 1, "https://api.anthropic.com/v1/messages", ANTHROPIC_REQUEST.as_bytes(), 200, &[ANTHROPIC_RESPONSE.as_bytes()], 0);
+    write_exchange(&mut first, 2, "https://api.anthropic.com/v1/messages", ANTHROPIC_REQUEST.as_bytes(), 200, &[ANTHROPIC_RESPONSE.as_bytes()], 0);
+    let shipper = Shipper::spawn_with_roots(shipping_config(unreachable, &state_dir, json!({})), first_path.clone(), Some(roots)).unwrap();
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(shipper.metrics().batches_acknowledged(), 0);
+    shipper.shutdown(Duration::from_secs(5)).unwrap();
+    first.shutdown(Duration::from_secs(2)).unwrap();
+    let first_claim = state_dir.join(format!("pending-{}.json", hex(&first.session())));
+    assert!(first_claim.exists(), "an unfinished session keeps its claim");
+
+    // The restart writes a new log; its shipper drains the first session, then follows its own.
+    let (port, roots, server_state, _server) = fake_server(TOKEN);
+    let second_path = dir.0.join("session-2.log");
+    let mut second = DiskLog::create(&second_path, 4, Duration::from_secs(2)).unwrap();
+    write_exchange(&mut second, 1, "https://api.openai.com/v1/responses", br#"{"model":"gpt-5","input":"ping"}"#, 200, &[b"pong"], 0);
+    let shipper = Shipper::spawn_with_roots(shipping_config(port, &state_dir, json!({})), second_path.clone(), Some(roots.clone())).unwrap();
+    let metrics = shipper.metrics();
+    assert!(wait_until(Duration::from_secs(20), || metrics.adopted_sessions() == 1 && metrics.batches_acknowledged() >= 2),
+        "adopted {} acked {}", metrics.adopted_sessions(), metrics.batches_acknowledged());
+    assert!(!first_claim.exists(), "a drained session's claim is released");
+    assert_eq!(load_checkpoint(&state_dir, &first.session()).unwrap().resolved, 2);
+    // While this shipper runs, `hypgate ship` on its session is refused rather than shipping it twice.
+    let refused = ship_to_end_with_roots(shipping_config(port, &state_dir, json!({})), second_path.clone(), Some(roots));
+    assert_eq!(refused.err(), Some("shipping stopped: another process is shipping this session"));
+    shipper.shutdown(Duration::from_secs(5)).unwrap();
+    let fake = server_state.lock().unwrap();
+    let mut exchanges: Vec<_> = fake.batches.iter().flat_map(|b| b.1.iter())
+        .map(|row| row["attributes"]["gateway"]["exchange_id"].as_str().unwrap().to_owned()).collect();
+    exchanges.dedup();
+    let expected: Vec<_> = [(first.session(), 1), (first.session(), 2), (second.session(), 1)].iter()
+        .map(|(session, request)| hex(&gateway_core::shipping_identity::exchange_key(session, *request))).collect();
+    assert_eq!(exchanges, expected, "the first session ships before the second, each exchange once");
+    assert_eq!(metrics.state_errors(), 0);
 }

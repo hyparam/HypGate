@@ -37,6 +37,7 @@ pub struct Metrics {
     enrolled: AtomicBool, stopped: AtomicBool, read_failed: AtomicBool, panicked: AtomicBool,
     records_read: AtomicU64, exchanges_emitted: AtomicU64, lag: AtomicU64,
     batches_acknowledged: AtomicU64, last_acknowledged_ms: AtomicU64, poisoned_batches: AtomicU64,
+    state_errors: AtomicU64, adopted_sessions: AtomicU64,
 }
 impl Metrics {
     pub fn stopped(&self) -> bool { self.stopped.load(Ordering::Relaxed) }
@@ -47,15 +48,21 @@ impl Metrics {
     pub fn poisoned_batches(&self) -> u64 { self.poisoned_batches.load(Ordering::Relaxed) }
     pub fn lag(&self) -> u64 { self.lag.load(Ordering::Relaxed) }
     pub fn records_read(&self) -> u64 { self.records_read.load(Ordering::Relaxed) }
+    /// Failed writes of the identity, a checkpoint, or a session claim.
+    pub fn state_errors(&self) -> u64 { self.state_errors.load(Ordering::Relaxed) }
+    /// Sessions left by an earlier process that this shipper drained to the end.
+    pub fn adopted_sessions(&self) -> u64 { self.adopted_sessions.load(Ordering::Relaxed) }
     /// Prometheus text lines; `enabled` is 1 whenever a shipper exists.
     pub fn render(&self, out: &mut String) {
         use std::fmt::Write as _;
         let _ = write!(out, "hypgate_shipping_enabled 1\nhypgate_shipping_enrolled {}\nhypgate_shipping_stopped {}\nhypgate_shipping_log_read_failed {}\n\
             hypgate_shipping_records_read_total {}\nhypgate_shipping_exchanges_emitted_total {}\nhypgate_shipping_lag_exchanges {}\n\
-            hypgate_shipping_batches_acknowledged_total {}\nhypgate_shipping_last_acknowledged_unix_ms {}\nhypgate_shipping_poisoned_batches_total {}\n",
+            hypgate_shipping_batches_acknowledged_total {}\nhypgate_shipping_last_acknowledged_unix_ms {}\nhypgate_shipping_poisoned_batches_total {}\n\
+            hypgate_shipping_state_errors_total {}\nhypgate_shipping_adopted_sessions_total {}\n",
             u8::from(self.enrolled()), u8::from(self.stopped()), u8::from(self.read_failed.load(Ordering::Relaxed)),
             self.records_read(), self.exchanges_emitted.load(Ordering::Relaxed), self.lag(),
-            self.batches_acknowledged(), self.last_acknowledged_ms.load(Ordering::Relaxed), self.poisoned_batches());
+            self.batches_acknowledged(), self.last_acknowledged_ms.load(Ordering::Relaxed), self.poisoned_batches(),
+            self.state_errors(), self.adopted_sessions());
     }
 }
 
@@ -66,7 +73,7 @@ impl Shipper {
     pub fn spawn(config: ShippingConfig, log_path: PathBuf) -> io::Result<Self> { Self::spawn_with_roots(config, log_path, None) }
     pub fn spawn_with_roots(config: ShippingConfig, log_path: PathBuf, roots: Option<RootCertStore>) -> io::Result<Self> {
         Self::spawn_thread(move |stop, metrics| {
-            let result = Engine::new(config, log_path, roots, stop, metrics.clone()).run(Mode::Follow);
+            let result = follow(config, log_path, roots, stop, metrics.clone());
             if result.is_err() { metrics.stopped.store(true, Ordering::Relaxed); }
         })
     }
@@ -109,15 +116,65 @@ impl Shipper {
 }
 impl Drop for Shipper { fn drop(&mut self) { self.stop.store(true, Ordering::Relaxed); } }
 
+const REVOKED: &str = "shipping stopped: token revoked or account disabled";
+
+/// Claim the session in the log at `log_path`, recording its absolute path.
+/// `Ok(None)` when the log has no readable header yet or the claim cannot be
+/// written (counted as a state error); `Err` when another live process holds it.
+fn claim_session(config: &ShippingConfig, log_path: &std::path::Path, metrics: &Metrics) -> Result<Option<state::Claim>, &'static str> {
+    let Ok(reader) = SessionReader::open(log_path) else { return Ok(None); };
+    let absolute = std::fs::canonicalize(log_path).unwrap_or_else(|_| log_path.to_path_buf());
+    match state::claim(&config.state_dir, &reader.session(), &absolute) {
+        Ok(claim) => Ok(Some(claim)),
+        Err(state::ClaimError::Busy) => Err("shipping stopped: another process is shipping this session"),
+        Err(state::ClaimError::Io(_)) => { metrics.state_errors.fetch_add(1, Ordering::Relaxed); Ok(None) }
+    }
+}
+
+/// Drain every session an ended process left claimed, oldest log path
+/// first, releasing each claim once its log is drained. A session that cannot
+/// be drained keeps its claim for a later start. `Err` only on revocation.
+fn adopt(engine: &mut Engine) -> Result<(), &'static str> {
+    for (claim, session, log) in state::abandoned(&engine.config.state_dir) {
+        if engine.stop_requested() { return Ok(()); }
+        match engine.run(log, Some(session), Mode::Drain) {
+            Ok(Halt::Drained) => {
+                if claim.release().is_err() { engine.metrics.state_errors.fetch_add(1, Ordering::Relaxed); }
+                engine.metrics.adopted_sessions.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(_) => return Ok(()),
+            Err(REVOKED) => return Err(REVOKED),
+            Err(_) => {}
+        }
+    }
+    Ok(())
+}
+
+/// The live shipper: claim this process's session, drain what earlier
+/// processes left, then follow this session's log until stopped. The claim
+/// is never released here: an unfinished session is adopted on a later start.
+fn follow(config: ShippingConfig, log_path: PathBuf, roots: Option<RootCertStore>, stop: Arc<AtomicBool>, metrics: Arc<Metrics>) -> Result<(), &'static str> {
+    let _claim = claim_session(&config, &log_path, &metrics)?;
+    let mut engine = Engine::new(config, roots, stop, metrics)?;
+    adopt(&mut engine)?;
+    engine.run(log_path, None, Mode::Follow).map(|_| ())
+}
+
 /// Ship a finished log on the current thread until every exchange is resolved
 /// or the enrollment is stopped for good. Used by `hypgate ship`. Blocks the
-/// calling thread and enters no runtime.
+/// calling thread and enters no runtime. The session is claimed while it
+/// ships, so a live gateway does not adopt it at the same time, and its claim
+/// is released once it is drained.
 pub fn ship_to_end(config: ShippingConfig, log_path: PathBuf) -> Result<Metrics, &'static str> { ship_to_end_with_roots(config, log_path, None) }
 pub fn ship_to_end_with_roots(config: ShippingConfig, log_path: PathBuf, roots: Option<RootCertStore>) -> Result<Metrics, &'static str> {
     let metrics = Arc::new(Metrics::default());
     let stop = Arc::new(AtomicBool::new(false));
-    let result = Engine::new(config, log_path, roots, stop, metrics.clone()).run(Mode::Drain);
-    result.map(|_| Arc::try_unwrap(metrics).unwrap_or_default())
+    let claim = claim_session(&config, &log_path, &metrics)?;
+    let halt = Engine::new(config, roots, stop, metrics.clone())?.run(log_path, None, Mode::Drain)?;
+    if let (Halt::Drained, Some(claim)) = (halt, claim) {
+        if claim.release().is_err() { metrics.state_errors.fetch_add(1, Ordering::Relaxed); }
+    }
+    Ok(Arc::try_unwrap(metrics).unwrap_or_default())
 }
 
 /// The runtime half of the shipper: the effects the verified driver asks
@@ -127,11 +184,12 @@ pub fn ship_to_end_with_roots(config: ShippingConfig, log_path: PathBuf, roots: 
 struct Engine {
     config: ShippingConfig,
     log_path: PathBuf,
-    roots: Option<RootCertStore>,
     stop: Arc<AtomicBool>,
     metrics: Arc<Metrics>,
     client: Option<Client>,
     session: Option<[u8; 16]>,
+    /// For an adopted claim: the session its log must still hold.
+    expected: Option<[u8; 16]>,
     reader: Option<SessionReader>,
     /// The credential parsed from the last enrollment reply, kept for the identity file.
     issued: Option<Issued>,
@@ -155,8 +213,12 @@ fn parse_credential(body: &[u8]) -> Option<Issued> {
 }
 
 impl Engine {
-    fn new(config: ShippingConfig, log_path: PathBuf, roots: Option<RootCertStore>, stop: Arc<AtomicBool>, metrics: Arc<Metrics>) -> Self {
-        Engine { config, log_path, roots, stop, metrics, client: None, session: None, reader: None, issued: None }
+    fn new(config: ShippingConfig, roots: Option<RootCertStore>, stop: Arc<AtomicBool>, metrics: Arc<Metrics>) -> Result<Self, &'static str> {
+        let client = match roots {
+            Some(roots) => Client::with_roots(roots, &config.server, REQUEST_DEADLINE),
+            None => Client::new(&config.server, REQUEST_DEADLINE),
+        }.map_err(|_| "cannot initialize shipping client")?;
+        Ok(Engine { config, log_path: PathBuf::new(), stop, metrics, client: Some(client), session: None, expected: None, reader: None, issued: None })
     }
 
     /// Sleep in short slices so a stop request is honored promptly. False when stopping.
@@ -171,32 +233,35 @@ impl Engine {
         !self.stop.load(Ordering::Relaxed)
     }
 
-    fn run(mut self, mode: Mode) -> Result<(), &'static str> {
-        let client = match self.roots.take() {
-            Some(roots) => Client::with_roots(roots, &self.config.server, REQUEST_DEADLINE),
-            None => Client::new(&self.config.server, REQUEST_DEADLINE),
-        }.map_err(|_| "cannot initialize shipping client")?;
-        self.client = Some(client);
+    /// Ship one session's log in `mode`. The engine, its client, and its
+    /// configuration are reused from one session to the next.
+    fn run(&mut self, log_path: PathBuf, expected: Option<[u8; 16]>, mode: Mode) -> Result<Halt, &'static str> {
+        self.log_path = log_path;
+        self.expected = expected;
+        self.session = None;
+        self.reader = None;
         loop {
-            if self.stop_requested() { return Ok(()); }
+            if self.stop_requested() { return Ok(Halt::StopRequested); }
             match self.open_session() {
                 Some(session) => {
                     let halt = if let Some(config) = self.config.s3.take() {
                         let (open, bytes) = (self.config.max_open_exchanges, self.config.max_exchange_bytes);
-                        gateway_core::s3_driver::run(&config, &mut self, session, open, bytes, mode)
+                        let halt = gateway_core::s3_driver::run(&config, self, session, open, bytes, mode);
+                        self.config.s3 = Some(config);
+                        halt
                     } else {
                         let mut machine = self.hypaware_machine(session);
-                        drive(&mut machine, &mut self, mode)
+                        drive(&mut machine, self, mode)
                     };
                     return match halt {
                         Halt::ReadFailed => Err("shipping stopped: cannot read audit log"),
-                        Halt::Revoked => Err("shipping stopped: token revoked or account disabled"),
-                        Halt::StopRequested | Halt::Drained => Ok(()),
+                        Halt::Revoked => Err(REVOKED),
+                        Halt::StopRequested | Halt::Drained => Ok(halt),
                     };
                 }
                 None => {
                     if mode == Mode::Drain { return Err("shipping stopped: cannot open or validate audit log"); }
-                    if !self.idle() { return Ok(()); }
+                    if !self.idle() { return Ok(Halt::StopRequested); }
                 }
             }
         }
@@ -210,6 +275,8 @@ impl Engine {
             Err(_) => { self.metrics.read_failed.store(true, Ordering::Relaxed); return None; }
         };
         let session = reader.session();
+        // An adopted claim whose path now holds another session is not shipped.
+        if self.expected.is_some_and(|expected| expected != session) { self.metrics.read_failed.store(true, Ordering::Relaxed); return None; }
         self.session = Some(session);
         self.reader = Some(reader);
         Some(session)
@@ -224,7 +291,7 @@ impl Engine {
     }
 
     fn hypaware_machine(&mut self, session: [u8; 16]) -> Machine {
-        let checkpoint = state::load_checkpoint(&self.config.state_dir);
+        let checkpoint = state::load_checkpoint(&self.config.state_dir, &session);
         let (resolved, poisoned) = gateway_core::shipping_checkpoint::select(&checkpoint,
             &self.checkpoint_identity(&session), self.config.max_open_exchanges, self.config.max_exchange_bytes);
         let mut machine = Machine::new(self.config.token().to_vec(), session, self.config.max_open_exchanges,
@@ -240,9 +307,10 @@ impl Engine {
     }
 
     fn save_identity(&self, issued: &Issued) {
-        let _ = state::save_identity(&self.config.state_dir, &Identity { jwt: issued.jwt.clone(), expires_at: issued.expires_at,
+        let saved = state::save_identity(&self.config.state_dir, &Identity { jwt: issued.jwt.clone(), expires_at: issued.expires_at,
             gateway_id: issued.gateway_id.clone(), server: self.config.server.url().to_owned(),
             token_fingerprint: state::fingerprint(self.config.token()) });
+        if saved.is_err() { self.metrics.state_errors.fetch_add(1, Ordering::Relaxed); }
     }
 }
 
@@ -281,8 +349,9 @@ impl Effects for Engine {
 
     fn checkpoint(&mut self, _machine: &Machine, resolved: u64, poisoned: u64) {
         let Some(session) = self.session else { return; };
-        let _ = state::save_checkpoint(&self.config.state_dir, &Checkpoint { session: self.checkpoint_identity(&session), resolved, poisoned,
+        let saved = state::save_checkpoint(&self.config.state_dir, &session, &Checkpoint { session: self.checkpoint_identity(&session), resolved, poisoned,
             max_open_exchanges: self.config.max_open_exchanges, max_exchange_bytes: self.config.max_exchange_bytes });
+        if saved.is_err() { self.metrics.state_errors.fetch_add(1, Ordering::Relaxed); }
     }
 
     fn observe(&mut self, event: Event, machine: &Machine) {
