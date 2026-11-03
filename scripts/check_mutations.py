@@ -701,7 +701,8 @@ MUTATIONS = [
     ('exchange_driver.rs', 'driver_spec_allows_forward_without_record', '        Step::Forward(status) => if !p.forwarded && p.upstream_head_written && record_allows_forward(p, status)', '        Step::Forward(status) => if !p.forwarded'),
     ('exchange_driver.rs', 'driver_spec_allows_connect_before_record', '        Step::Connect(ok) => if record_allows_dispatch(p) && !p.connected', '        Step::Connect(ok) => if !p.connected'),
     ('http1_body.rs', 'body_length_never_completes', '                if self.remaining == 0 { self.mode = Mode::Done; }\n', ''),
-    ('http1_body.rs', 'body_length_overruns_count', '                if self.remaining < n as u64 { n = self.remaining as usize; }\n', ''),
+    # Saturate rather than underflow, so the overrun must be refuted by step_ok, not the overflow check.
+    ('http1_body.rs', 'body_length_overruns_count', 'if self.remaining < n as u64 { n = self.remaining as usize; }\n                self.remaining = self.remaining - n as u64;', 'self.remaining = if self.remaining < n as u64 { 0 } else { self.remaining - n as u64 };'),
     ('http1_body.rs', 'body_data_ignores_room', '                let mut n = input.len();\n                if room < n { n = room; }\n', '                let mut n = input.len();\n'),
     ('http1_body.rs', 'body_close_completes_a_short_body', '            _ => { self.mode = Mode::Failed; false }', '            _ => { self.mode = Mode::Done; true }'),
     ('http1_body.rs', 'body_empty_length_waits_for_bytes', '            Framing::Length(n) => if n == 0 { (Mode::Done, 0) } else { (Mode::Length, n) },', '            Framing::Length(n) => (Mode::Length, n),'),
@@ -852,12 +853,14 @@ MUTATIONS = [
 ]
 
 # CI runs one job per group. Groups follow the sections of lib.rs, with
-# streaming and the audit journal split apart to keep the jobs comparable.
+# streaming and the audit journal split apart, and the exchange and serve
+# drivers apart from the HTTP codecs, to keep the jobs comparable.
 GROUPS = {
     "config": ["policy", "request_context", "resolved_route", "egress", "inbound", "destination",
                "headers", "health", "config_schema", "config_values"],
     "http": ["http1_head", "http1_write", "http1_framing", "http1_chunked", "http1_exchange", "http1_body",
-             "http_message", "http_connection", "body_reader", "exchange_driver", "gateway_contract", "serve_driver"],
+             "http_message", "http_connection", "body_reader"],
+    "drivers": ["exchange_driver", "gateway_contract", "serve_driver"],
     "stream": ["stream", "owned_stream", "submission", "body_copy", "body_driver", "framed_copy",
                "exchange_lifecycle", "sink"],
     "journal": ["journal", "journal_binding", "audit_journal", "framing", "metadata", "recovery",

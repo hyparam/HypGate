@@ -85,7 +85,7 @@ jobs:
       fail-fast: false
       matrix:
         # Keep in step with GROUPS in scripts/check_mutations.py.
-        group: [config, http, stream, journal, capacity, shipping, codecs]
+        group: [config, http, drivers, stream, journal, capacity, shipping, codecs]
     env:
       MUTATION_GROUP: ${{ matrix.group }}
       VERUS_RELEASE: 0.2026.10.18.7d82994
