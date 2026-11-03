@@ -20,6 +20,18 @@ impl Drop for Interest { fn drop(&mut self) { self.0.store(false, Ordering::Rele
 
 pub(super) struct Lookup { submit: mpsc::SyncSender<Request> }
 
+/// Addresses the lookup returned for one host and port. The fields are
+/// private to this module, so other runtime code cannot build or extend the
+/// list, and the cloud socket connects only when the host and port match its
+/// permit's target.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct Resolved { host: String, port: u16, addresses: Vec<SocketAddr> }
+impl Resolved {
+    pub(super) fn for_target(&self, host: &str, port: u16) -> Option<&[SocketAddr]> {
+        (self.host == host && self.port == port).then_some(self.addresses.as_slice())
+    }
+}
+
 impl Lookup {
     // Effect site: the system resolver, for the host of the configured
     // shipping server, on the shipper's one lookup thread.
@@ -42,7 +54,11 @@ impl Lookup {
     }
     /// The addresses for `host`, within `timeout`. A literal IP needs no thread.
     /// `WouldBlock` means the lookup thread is still busy with an earlier request.
-    pub(super) fn resolve(&self, host: &str, port: u16, timeout: Duration) -> Answer {
+    pub(super) fn resolve(&self, host: &str, port: u16, timeout: Duration) -> io::Result<Resolved> {
+        let addresses = self.addresses(host, port, timeout)?;
+        Ok(Resolved { host: host.to_owned(), port, addresses })
+    }
+    fn addresses(&self, host: &str, port: u16, timeout: Duration) -> Answer {
         if let Ok(ip) = host.parse::<IpAddr>() { return Ok(vec![SocketAddr::new(ip, port)]); }
         let (reply, answer) = mpsc::channel();
         let wanted = Arc::new(AtomicBool::new(true));
@@ -73,8 +89,12 @@ mod tests {
     #[test]
     fn literal_addresses_resolve_without_the_thread() {
         let lookup = Lookup::with(|_, _| panic!("no lookup for a literal")).unwrap();
-        assert_eq!(lookup.resolve("127.0.0.1", 8443, Duration::ZERO).unwrap(), vec![SocketAddr::from(([127, 0, 0, 1], 8443))]);
-        assert_eq!(lookup.resolve("::1", 1, Duration::ZERO).unwrap().len(), 1);
+        assert_eq!(lookup.resolve("127.0.0.1", 8443, Duration::ZERO).unwrap().for_target("127.0.0.1", 8443).unwrap(),
+            [SocketAddr::from(([127, 0, 0, 1], 8443))]);
+        assert_eq!(lookup.resolve("::1", 1, Duration::ZERO).unwrap().for_target("::1", 1).unwrap().len(), 1);
+        let resolved = lookup.resolve("127.0.0.1", 8443, Duration::ZERO).unwrap();
+        assert!(resolved.for_target("127.0.0.2", 8443).is_none());
+        assert!(resolved.for_target("127.0.0.1", 8444).is_none());
     }
 
     #[test]
@@ -106,7 +126,7 @@ mod tests {
                 other => break other.unwrap(),
             }
         };
-        assert_eq!(answer, vec![SocketAddr::from(([10, 0, 0, 1], 4))]);
+        assert_eq!(answer.for_target("fresh", 4).unwrap(), [SocketAddr::from(([10, 0, 0, 1], 4))]);
         assert_eq!(calls.load(Ordering::SeqCst), 2, "the queued request whose requester left was not looked up");
     }
 }

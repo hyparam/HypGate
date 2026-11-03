@@ -10,12 +10,12 @@
 //! under the verified body reader within the cap. This module performs the
 //! connect and the handshake, and classifies a failure as the deadline or a fault.
 use super::config::ShippingServer;
-use super::lookup::Lookup;
+use super::lookup::{Lookup, Resolved};
 use gateway_core::egress::Egress;
 use gateway_core::http1_write::{wire_ok, write_request_head};
 use rustls::{ClientConfig, ClientConnection, RootCertStore, pki_types::ServerName};
 use crate::net::{Deadline, Tls};
-use std::{io, net::{SocketAddr, TcpStream}, sync::Arc, time::Duration};
+use std::{io, net::TcpStream, sync::Arc, time::Duration};
 
 pub const MAX_REPLY_BYTES: usize = 64 * 1024;
 
@@ -32,11 +32,13 @@ pub struct Client { config: Arc<ClientConfig>, server: ShippingServer, host: Str
 /// The error to report for a failed operation: the deadline if it passed, else `fault`.
 fn failure(tls: &Tls, fault: ClientError) -> ClientError { if tls.expired() { ClientError::Timeout } else { fault } }
 
-// Effect site: the only cloud socket, opened under a permit minted from the
-// configured shipping server and nothing else; the addresses come from
-// resolving that permit's host, and each connect is bounded by the request deadline.
+// The permit is minted from the configured shipping server and nothing else.
+// Effect site: the only cloud socket. It connects only to addresses the lookup
+// returned for the permit's host and port, each bounded by the request deadline.
 #[allow(clippy::disallowed_methods)]
-fn open_socket(_permit: &Egress<'_, ShippingServer>, addresses: &[SocketAddr], deadline: &Deadline) -> Result<TcpStream, ClientError> {
+fn open_socket(permit: &Egress<'_, ShippingServer>, resolved: &Resolved, deadline: &Deadline) -> Result<TcpStream, ClientError> {
+    let target = permit.target();
+    let addresses = resolved.for_target(target.host(), target.port()).ok_or(ClientError::Resolve)?;
     let mut failure = ClientError::Connect;
     for address in addresses {
         match TcpStream::connect_timeout(address, deadline.remaining().map_err(|_| ClientError::Timeout)?) {
@@ -64,7 +66,7 @@ impl Client {
     }
     /// The server's addresses, within the deadline. A lookup thread still busy
     /// from an earlier request is a `Resolve` error, not a wait.
-    fn resolve(&self, deadline: &Deadline) -> Result<Vec<SocketAddr>, ClientError> {
+    fn resolve(&self, deadline: &Deadline) -> Result<Resolved, ClientError> {
         let left = deadline.remaining().map_err(|_| ClientError::Timeout)?;
         self.lookup.resolve(self.server.host(), self.server.port(), left)
             .map_err(|e| if e.kind() == io::ErrorKind::TimedOut { ClientError::Timeout } else { ClientError::Resolve })
@@ -91,8 +93,8 @@ impl Client {
     pub fn request(&self, head: &[u8], body: &[u8]) -> Result<Reply, ClientError> {
         let deadline = Deadline::start(self.deadline).map_err(|_| ClientError::Timeout)?;
         let permit = Egress::cloud(&self.server);
-        let addresses = self.resolve(&deadline)?;
-        let tcp = open_socket(&permit, &addresses, &deadline)?;
+        let resolved = self.resolve(&deadline)?;
+        let tcp = open_socket(&permit, &resolved, &deadline)?;
         let server = ServerName::try_from(self.host.clone()).map_err(|_| ClientError::Tls)?;
         let connection = ClientConnection::new(self.config.clone(), server).map_err(|_| ClientError::Tls)?;
         let mut tls: Tls = Tls::new(connection, tcp, deadline);

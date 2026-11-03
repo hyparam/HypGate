@@ -222,6 +222,12 @@ contains no other network destination.
   is off. Every other call to connect, resolve, listen, write a file, or read
   a secret is denied by `clippy.toml`, and `scripts/check_effect_sites.sh`
   fails if the set of allowed sites changes.
+- Each socket site connects only to addresses its resolver returned for the
+  permit's own host and port, and refuses the connection otherwise. The
+  resolved-address type's fields are private to the resolver module, so the
+  rest of the runtime cannot build or extend the address list. This is a Rust
+  type and privacy check in the unverified runtime; it does not cover an edit
+  inside a socket site itself, which only review of those audited sites catches.
 
 **Premises.** DNS, TLS, and the system resolver behave as specified (no
 IP-range policy, so not an SSRF theorem); the adapter's one socket read

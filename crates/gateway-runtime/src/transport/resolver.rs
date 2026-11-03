@@ -8,6 +8,18 @@ const WORKERS: usize = 4;
 const ADDRESSES: usize = 64;
 
 pub(super) struct Resolver { jobs: JobPool }
+
+/// Addresses the system resolver returned for one host and port. The fields
+/// are private to this module, so other runtime code cannot build or extend
+/// the list, and `open_socket` connects only when the host and port match its
+/// permit's target.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct Resolved { host: String, port: u16, addresses: Vec<SocketAddr> }
+impl Resolved {
+    pub(super) fn for_target(&self, host: &[u8], port: u16) -> Option<&[SocketAddr]> {
+        (self.host.as_bytes() == host && self.port == port).then_some(self.addresses.as_slice())
+    }
+}
 impl Resolver {
     pub(super) fn new() -> io::Result<Self> { Self::with_limit(LOOKUPS) }
     fn with_limit(limit: usize) -> io::Result<Self> {
@@ -15,20 +27,22 @@ impl Resolver {
     }
     // Effect site: the system resolver, for the host of a provider permit.
     #[allow(clippy::disallowed_methods)]
-    pub(super) fn resolve(&self, host: String, port: u16) -> io::Result<Pending<Vec<SocketAddr>>> {
-        if let Ok(ip) = host.parse::<IpAddr>() { return Ok(Pending::direct(vec![SocketAddr::new(ip, port)])); }
+    pub(super) fn resolve(&self, host: String, port: u16) -> io::Result<Pending<Resolved>> {
+        if let Ok(ip) = host.parse::<IpAddr>() {
+            return Ok(Pending::direct(Resolved { addresses: vec![SocketAddr::new(ip, port)], host, port }));
+        }
         self.resolve_with(host, port, |host, port| {
             // The system resolver can allocate before returning its iterator.
             // Detach a bounded result instead of reusing that iterator's backing.
             bounded_addresses((host, port).to_socket_addrs()?)
         })
     }
-    fn resolve_with<F>(&self, host: String, port: u16, lookup: F) -> io::Result<Pending<Vec<SocketAddr>>>
+    fn resolve_with<F>(&self, host: String, port: u16, lookup: F) -> io::Result<Pending<Resolved>>
         where F: FnOnce(&str, u16) -> io::Result<Vec<SocketAddr>> + Send + 'static,
     {
         self.jobs.submit(move |send| {
             if send.is_closed() { return None; } // skip work nobody waits for
-            Some(lookup(&host, port))
+            Some(lookup(&host, port).map(|addresses| Resolved { host, port, addresses }))
         })
     }
 }
@@ -85,14 +99,14 @@ mod tests {
         }
         assert_eq!(calls.load(Ordering::SeqCst), 4);
         assert_eq!(resolver.jobs.slots.lock().unwrap().usage(), (5, 5));
-        assert_eq!(resolver.resolve("::1".into(), 8443).unwrap().wait(Duration::ZERO).unwrap().into_inner_for_test(),
-            vec!["[::1]:8443".parse::<SocketAddr>().unwrap()]);
+        let literal = resolver.resolve("::1".into(), 8443).unwrap().wait(Duration::ZERO).unwrap().into_inner_for_test();
+        assert_eq!(literal.for_target(b"::1", 8443).unwrap(), ["[::1]:8443".parse::<SocketAddr>().unwrap()]);
         drop(release);
         wait_idle(&resolver);
         assert_eq!(calls.load(Ordering::SeqCst), 4); // the queued lookup nobody waited for was skipped
-        assert_eq!(resolver.resolve_with("later.example".into(), 8443, |_, port|
-            Ok(vec![SocketAddr::from(([127, 0, 0, 1], port))])).unwrap().wait(Duration::from_secs(2)).unwrap().into_inner_for_test(),
-            vec!["127.0.0.1:8443".parse::<SocketAddr>().unwrap()]);
+        let later = resolver.resolve_with("later.example".into(), 8443, |_, port|
+            Ok(vec![SocketAddr::from(([127, 0, 0, 1], port))])).unwrap().wait(Duration::from_secs(2)).unwrap().into_inner_for_test();
+        assert_eq!(later.for_target(b"later.example", 8443).unwrap(), ["127.0.0.1:8443".parse::<SocketAddr>().unwrap()]);
     }
 
     #[test]
@@ -102,7 +116,18 @@ mod tests {
         assert!(pending.wait(Duration::from_secs(2)).is_err());
         wait_idle(&resolver);
         assert_eq!(resolver.resolve_with("later.example".into(), 443, |_, _|
-            Ok(vec!["127.0.0.1:443".parse().unwrap()])).unwrap().wait(Duration::from_secs(2)).unwrap().into_inner_for_test().len(), 1);
+            Ok(vec!["127.0.0.1:443".parse().unwrap()])).unwrap().wait(Duration::from_secs(2)).unwrap().into_inner_for_test()
+            .for_target(b"later.example", 443).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn addresses_are_released_only_for_the_host_and_port_they_were_resolved_for() {
+        let resolver = Resolver::with_limit(1).unwrap();
+        let resolved = resolver.resolve_with("api.example".into(), 443, |_, _|
+            Ok(vec!["127.0.0.1:443".parse().unwrap()])).unwrap().wait(Duration::from_secs(2)).unwrap().into_inner_for_test();
+        assert_eq!(resolved.for_target(b"api.example", 443).unwrap().len(), 1);
+        assert!(resolved.for_target(b"evil.example", 443).is_none());
+        assert!(resolved.for_target(b"api.example", 444).is_none());
     }
 
     #[test]

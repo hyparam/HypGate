@@ -15,7 +15,7 @@ use gateway_core::http1_exchange::ChunkStream;
 use gateway_core::http1_framing::Framing;
 use gateway_core::http1_head::StatusHead;
 use rustls::{ClientConfig, ClientConnection, RootCertStore, pki_types::ServerName};
-use std::{io::{self, Read, Write}, net::{SocketAddr, TcpStream}, sync::Arc, time::Duration};
+use std::{io::{self, Read, Write}, net::TcpStream, sync::Arc, time::Duration};
 
 // Application-data buffering only; handshake/control traffic and record overhead
 // have separate rustls limits. See docs/dependency-resources.md.
@@ -26,13 +26,15 @@ const TLS_SESSION_CACHE: usize = 256;
 
 mod resolver;
 
-// Effect site: the only provider socket, opened under a permit the verified
-// core minted for this request's resolved destination; the addresses come
-// from resolving that permit's host, and each connect has the exchange deadline.
+// The permit is minted by the verified core for this request's resolved destination.
+// Effect site: the only provider socket. It connects only to addresses the resolver
+// looked up for the permit's host and port, each under the exchange deadline.
 #[allow(clippy::disallowed_methods)]
-fn open_socket(_permit: &gateway_core::egress::Egress<'_, gateway_core::destination::Parts>, addresses: &[SocketAddr], deadline: &Deadline)
+fn open_socket(permit: &gateway_core::egress::Egress<'_, gateway_core::destination::Parts>, resolved: &resolver::Resolved, deadline: &Deadline)
     -> io::Result<TcpStream>
 {
+    let target = permit.target();
+    let addresses = resolved.for_target(&target.host, target.port).ok_or(io::ErrorKind::PermissionDenied)?;
     let mut failure = io::Error::from(io::ErrorKind::NotConnected);
     for address in addresses {
         match TcpStream::connect_timeout(address, deadline.remaining()?) {
@@ -79,8 +81,8 @@ impl HttpsTransport {
             let pending = self.resolver.resolve(host, port).map_err(|_| ConnectFailure::Resolve)?;
             let reply = pending.wait(deadline.remaining().map_err(|_| ConnectFailure::Timeout)?)
                 .map_err(|e| if timed_out(&e) { ConnectFailure::Timeout } else { ConnectFailure::Resolve })?;
-            let addresses = reply.adopt(prepared.stream()).map_err(|_| ConnectFailure::Resolve)?;
-            open_socket(prepared.egress().ok_or(ConnectFailure::Resolve)?, addresses.as_slice(), &deadline)
+            let resolved = reply.adopt(prepared.stream()).map_err(|_| ConnectFailure::Resolve)?;
+            open_socket(prepared.egress().ok_or(ConnectFailure::Resolve)?, &resolved, &deadline)
                 .map_err(|e| if timed_out(&e) { ConnectFailure::Timeout } else { ConnectFailure::Tcp })?
         };
         // Cancellation shuts this socket down; the blocked operation then fails.
