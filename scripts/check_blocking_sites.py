@@ -45,7 +45,7 @@ credited_job.rs:Pending::wait:channel-recv
 disk_log.rs:DiskLog::shutdown:join
 disk_log.rs:DiskLog::shutdown:sleep
 disk_log.rs:DurableWrite::sync:fsync
-disk_log.rs:AuditLog::append:channel-recv
+disk_log.rs:DiskLog::append_until:channel-recv
 disk_log.rs:Source::read_exact:file-read
 disk_log/queue.rs:Queue::enqueue:condvar-wait
 disk_log/queue.rs:Queue::recv:condvar-wait
@@ -55,7 +55,7 @@ disk_log/rotation.rs:SegmentIo::sync:fsync
 main.rs:bounded_file:file-read
 net.rs:Io::perform:socket-op
 net.rs:Tls::handshake:handshake
-server.rs:ClientWatch::finish:join
+server.rs:Drop::drop:join
 server.rs:ClientWatch::start:peek
 server.rs:ClientWatch::start:sleep
 server.rs:Effects::accept:accept

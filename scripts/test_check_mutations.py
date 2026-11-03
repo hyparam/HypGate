@@ -78,6 +78,47 @@ class BatchTests(unittest.TestCase):
         self.assertEqual(reports, ["first: individual", "second: individual"])
         self.assertEqual(single.call_count, 2)
 
+    def test_invalid_batches_do_not_run_the_solver(self):
+        mutated = dict(self.mutated)
+        mutated[("Function", "extra")] = ("Function", "spec", "body", "Exec")
+        def apply(work, name, mutations):
+            log = work / name / "vir" / "crate-simple.vir"
+            log.parent.mkdir(parents=True)
+            log.touch()
+            return work / name / "src", True
+        with patch.object(runner, "apply", side_effect=apply), \
+             patch.object(runner, "parse_vir", return_value=(mutated, self.spans)), \
+             patch.object(runner.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout="", stderr="")) as process, \
+             patch.object(runner, "check", return_value="individual"):
+            runner.check_batch(self.work, self.baseline, 0, self.batch)
+        self.assertTrue(process.call_args_list)
+        for call in process.call_args_list:
+            self.assertIn("--no-verify", call.args[0])
+            self.assertIn("--build-sst", call.args[0])
+
+    def test_new_external_item_is_isolated_and_remainder_rechecked(self):
+        extra = ("Function", "external::pop")
+        mutated = dict(self.mutated)
+        mutated[extra] = ("Function", "new spec", "", "Exec")
+        mutated[self.keys[0]] = ("Function", "same spec", "calls external::pop", "Exec")
+        remainder = dict(self.baseline)
+        remainder[self.keys[1]] = self.mutated[self.keys[1]]
+        parses = iter([(mutated, self.spans), (remainder, self.spans)])
+        def apply(work, name, mutations):
+            log = work / name / "vir" / "crate-simple.vir"
+            log.parent.mkdir(parents=True)
+            log.touch()
+            return work / name / "src", True
+        with patch.object(runner, "apply", side_effect=apply), \
+             patch.object(runner, "parse_vir", side_effect=lambda _: next(parses)), \
+             patch.object(runner.subprocess, "run", return_value=SimpleNamespace(
+                 returncode=1, stdout="error: assertion failed\n --> test.rs:22:1\n", stderr="")) as process, \
+             patch.object(runner, "check", return_value="first: individual") as single:
+            reports = runner.check_batch(self.work, self.baseline, 0, self.batch)
+        self.assertEqual(reports, ["first: individual", "second: rejected by proof"])
+        self.assertEqual(single.call_count, 1)
+        self.assertEqual(["--no-verify" in c.args[0] for c in process.call_args_list], [True, True, False])
+
     def test_specification_change_cannot_be_accepted_as_body_only(self):
         mutated = dict(self.mutated)
         mutated[self.keys[0]] = ("Function", "different spec", "mutated", "Exec")

@@ -24,8 +24,20 @@ fn memory_child() {
     let stop = directory.join("stop");
     let shutdown = Shutdown::new();
     let signal = shutdown.clone();
+    let observed = app.clone();
+    let control = directory.clone();
     std::thread::spawn(move || {
-        while !stop.exists() { std::thread::sleep(Duration::from_millis(20)); }
+        let mut wave = 0;
+        while !stop.exists() {
+            if control.join(format!("drain-{wave}")).exists() {
+                assert!(wait_until(Duration::from_secs(10), || {
+                    observed.config.usage() == Some((0, CLIENTS)) && workers_idle(&observed)
+                }), "memory workload wave did not drain");
+                std::fs::write(control.join(format!("settled-{wave}")), b"settled").unwrap();
+                wave += 1;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
         signal.trigger();
     });
     serve(listener, app.clone(), 128, Duration::from_secs(65), &shutdown).unwrap();
@@ -116,7 +128,7 @@ fn workload(availability: bool, waves: usize) {
         for connection in connections { connection.join().unwrap(); }
     });
     let mut settled = Vec::new();
-    for _ in 0..waves {
+    for wave in 0..waves {
         let clients: Vec<_> = (0..CLIENTS).map(|_| std::thread::spawn(move || {
             let mut response = send(port, "/routes/7", "gateway", "POST");
             assert_eq!(response.status, 200);
@@ -128,7 +140,13 @@ fn workload(availability: bool, waves: usize) {
             assert_eq!(received, RESPONSE);
         })).collect();
         for client in clients { client.join().unwrap(); }
-        std::thread::sleep(Duration::from_millis(100));
+        // Receiving the last byte does not mean audit completion and worker
+        // cleanup have returned admission credit. Synchronize with the child
+        // before sampling settled memory or submitting another full wave.
+        std::fs::write(dir.0.join(format!("drain-{wave}")), b"drain").unwrap();
+        assert!(wait_until(Duration::from_secs(15), || {
+            dir.0.join(format!("settled-{wave}")).exists()
+        }), "gateway child did not acknowledge wave cleanup");
         settled.push(memory(pid).0);
     }
     provider.join().unwrap();

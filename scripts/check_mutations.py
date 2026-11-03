@@ -1022,8 +1022,10 @@ def check_batch(workdir, baseline, index, batch, attempt=0):
     target, clean = apply(workdir, name, [(m[0], m[2], m[3]) for m, _ in batch])
     modules = sorted({Path(m[0]).stem for m, _ in batch})
     log_dir = workdir / name / "vir"
-    result = subprocess.run(command(target, modules, log_dir, lifetime=False, mutation=True), capture_output=True, text=True)
-    output = result.stdout + result.stderr
+    # Establish independence before spending solver time. Invalid batches used
+    # to prove whole modules at every level of their recursive split tree.
+    args = command(target, modules, log_dir, lifetime=False, mutation=True)
+    subprocess.run(args + ["--no-verify", "--build-sst"], capture_output=True, text=True)
     expected = {key: m for m, key in batch}
     reason = None
     if not clean:
@@ -1031,6 +1033,21 @@ def check_batch(workdir, baseline, index, batch, attempt=0):
     elif not (log_dir / "crate-simple.vir").exists():
         reason = "no VIR log"
     elif (local := local_changes(baseline, (parsed := parse_vir(log_dir / "crate-simple.vir"))[0])) is None:
+        # A body can introduce a previously unused external function (e.g.
+        # Vec::pop). Separate the bodies referring to changed items, then
+        # recheck the remaining crate in full: this is only a partition hint,
+        # never permission to ignore an added or removed specification.
+        items, _spans = parsed
+        different = baseline.keys() ^ items.keys()
+        candidates = {key for key in expected if any(
+            item[0] in ("Function", "Datatype") and any(
+                item[1] in source[key][2] for source in (baseline, items) if key in source
+            ) for item in different
+        )}
+        if candidates and len(candidates) < len(batch):
+            print(f"{name}: isolating {len(candidates)} mutations referencing changed items before verification", flush=True)
+            rest = [(m, key) for m, key in batch if key not in candidates]
+            return [check(workdir, *expected[key]) for key in sorted(candidates)] + check_batch(workdir, baseline, f"{index}-items", rest)
         reason = "the set of items differs"
     else:
         items, spans = parsed
@@ -1046,6 +1063,8 @@ def check_batch(workdir, baseline, index, batch, attempt=0):
         elif changed != set(expected):
             reason = f"changed bodies do not match the mutated functions: {sorted(k[1] for k in changed ^ set(expected))}"
         else:
+            result = subprocess.run(args, capture_output=True, text=True)
+            output = result.stdout + result.stderr
             refuted = set()
             for message, locations in error_blocks(output):
                 if not locations:
