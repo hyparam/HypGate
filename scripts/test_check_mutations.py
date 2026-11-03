@@ -1,5 +1,6 @@
 """Regression checks for batching proof failures without losing mutation coverage."""
 from pathlib import Path
+import re
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -14,6 +15,12 @@ class MutationSourceTests(unittest.TestCase):
             with self.subTest(mutation=name):
                 source = (runner.SOURCE / filename).read_text()
                 self.assertEqual(source.count(before), 1)
+
+    def test_groups_partition_the_crate_modules(self):
+        lib = (runner.SOURCE / "lib.rs").read_text()
+        modules = re.findall(r"^pub mod (\w+);", lib, re.M)
+        grouped = [module for group in runner.GROUPS.values() for module in group]
+        self.assertEqual(sorted(grouped), sorted(modules))
 
 
 class BatchTests(unittest.TestCase):

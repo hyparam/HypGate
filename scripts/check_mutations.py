@@ -851,6 +851,32 @@ MUTATIONS = [
     ("client_exchange.rs", "client_truncated_body_as_reply", "Read::Truncated | Read::Malformed | Read::Failed => return Exchanged { result: Err(ClientFault::Body), sent: Ghost(sent) },", "Read::Truncated | Read::Malformed | Read::Failed => return Exchanged { result: Ok(Reply { head: read.head, body: out }), sent: Ghost(sent) },"),
 ]
 
+# CI runs one job per group. Groups follow the sections of lib.rs, with
+# streaming and the audit journal split apart to keep the jobs comparable.
+GROUPS = {
+    "config": ["policy", "request_context", "resolved_route", "egress", "inbound", "destination",
+               "headers", "health", "config_schema", "config_values"],
+    "http": ["http1_head", "http1_write", "http1_framing", "http1_chunked", "http1_exchange", "http1_body",
+             "http_message", "http_connection", "body_reader", "exchange_driver", "gateway_contract", "serve_driver"],
+    "stream": ["stream", "owned_stream", "submission", "body_copy", "body_driver", "framed_copy",
+               "exchange_lifecycle", "sink"],
+    "journal": ["journal", "journal_binding", "audit_journal", "framing", "metadata", "recovery",
+                "audit_receipt", "batch_worker"],
+    "capacity": ["resource", "fixed_queue", "frame_queue", "disk_worker", "log_rotation", "segment_protocol",
+                 "session_recovery", "snapshot", "drain", "task_credit", "mailbox", "read_buffer", "output_frame",
+                 "http_worker", "http_accounting", "lifecycle_composition", "buffer_accounting", "owned_accounting",
+                 "scope"],
+    "shipping": ["exchange_assembler", "shipping_identity", "batch_builder", "upload_cursor", "enrollment", "shipper",
+                 "shipping_progress", "shipping_driver", "shipping_wire", "client_exchange", "projection",
+                 "response_usage", "response_choices", "response_semantics", "sse"],
+    "codecs": ["json", "utf8", "calendar", "ipv6", "base64url", "sha256", "s3", "s3_config", "s3_delivery",
+               "s3_driver", "shipping_checkpoint", "config_build", "deadline", "cancellation"],
+}
+
+
+def group_of(filename):
+    return next(group for group, modules in GROUPS.items() if Path(filename).stem in modules)
+
 
 MARKERS = ["postcondition not satisfied", "precondition not satisfied", "requires not satisfied", "assertion failed", "invariant not satisfied", "possible arithmetic underflow/overflow"]
 LOG = ["--log", "vir-simple", "--log", "vir-option=no_span+no_type"]
@@ -1129,7 +1155,12 @@ def plan(baseline, baseline_spans):
 
 
 if __name__ == "__main__":
-    # Optional focused reruns after changing one proof module; default remains all.
+    # MUTATION_GROUP picks one GROUPS entry, as CI does; MUTATION_FILTER narrows
+    # further for focused reruns after changing one proof module. Default is all.
+    if group := os.environ.get("MUTATION_GROUP"):
+        if group not in GROUPS:
+            raise SystemExit(f"unknown mutation group {group!r}; expected one of {', '.join(GROUPS)}")
+        MUTATIONS = [m for m in MUTATIONS if group_of(m[0]) == group]
     if selected := os.environ.get("MUTATION_FILTER"):
         MUTATIONS = [m for m in MUTATIONS if selected in m[0] or selected in m[1]]
         if not MUTATIONS:
