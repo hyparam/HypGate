@@ -225,7 +225,10 @@ server's ledger acknowledges it without storing it again. Row identities are the
 differently after a restart repeats part ids the server deduplicates.
 
 Replies: 202 resolves the batch. 401 earns one refresh and a retry, then a
-re-enrollment. 403 with a revocation code stops the shipper. 400, 413, 415,
+re-enrollment; a new token does not earn another refresh until the server has
+accepted it on an upload, and re-enrolling after a token that was never
+accepted waits on the 30/60/120/300-second ladder, so a server that issues
+tokens but rejects uploads cannot drive a tight loop. 403 with a revocation code stops the shipper. 400, 413, 415,
 and 422 are poison: a multi-exchange batch is retried one exchange at a time
 until the bad exchange is isolated, poisoned, counted, and skipped. 429 and
 503 wait for `Retry-After` (1 to 300 seconds) or a 30/60/120/300-second

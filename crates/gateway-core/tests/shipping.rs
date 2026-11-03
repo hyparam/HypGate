@@ -167,6 +167,10 @@ fn enrollment_gates_uploads_and_stops_for_good() {
     assert!(e.needs_bootstrap());
     assert!(e.enrolled(2_000_000, 100));
     assert_eq!(e.rejected(), Recovery::Refresh);
+    assert!(e.enrolled(2_000_000, 100));
+    assert_eq!(e.rejected(), Recovery::Bootstrap, "a refreshed token does not re-arm the refresh");
+    assert!(e.enrolled(2_000_000, 100));
+    assert_eq!(e.rejected(), Recovery::Refresh);
     e.uploaded();
     assert_eq!(e.rejected(), Recovery::Refresh); // a success re-arms the single refresh
     e.refresh_rejected();
@@ -286,11 +290,19 @@ fn machine_isolates_then_poisons_rejected_exchanges_refreshes_once_and_stops_on_
     assert_eq!(m.reply(50, credential_reply(b"jwt-new", 60 + 21 * DAY)), Outcome::Enrolled);
     let r = send(&mut m, 50);
     assert_eq!((r.path, r.bearer.as_deref()), (Path::Ingest, Some(&b"jwt-new"[..])));
-    assert_eq!(m.reply(50, ok_reply(401)), Outcome::Nothing, "a fresh credential earns one refresh again");
+    assert_eq!(m.reply(50, ok_reply(401)), Outcome::Unenrolled, "a new token does not re-arm the refresh; re-enroll");
+    assert!(!m.is_enrolled(50));
+    assert!(matches!(m.next(50), Action::Sleep(30)), "re-enrollment after repeated rejection backs off");
+    let r = send(&mut m, 50);
+    assert_eq!(r.path, Path::Bootstrap);
+    assert_eq!(m.reply(50, credential_reply(b"jwt-3", 60 + 21 * DAY)), Outcome::Enrolled);
+    let r = send(&mut m, 50);
+    assert_eq!(r.path, Path::Ingest);
+    assert_eq!(m.reply(50, ok_reply(401)), Outcome::Nothing, "a re-enrollment earns one refresh");
     let r = send(&mut m, 50);
     assert_eq!(r.path, Path::Refresh);
     assert_eq!(m.reply(50, ok_reply(401)), Outcome::Unenrolled, "a rejected refresh means bootstrap");
-    assert!(!m.is_enrolled(50));
+    assert!(matches!(m.next(50), Action::Sleep(60)), "a token never accepted backs off, growing until an upload is");
     let r = send(&mut m, 50);
     assert_eq!(r.path, Path::Bootstrap);
     assert_eq!(m.reply(50, Reply { status: 403, retry_after: None, revocation: true, credential: None }), Outcome::Revoked);

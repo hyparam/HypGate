@@ -55,25 +55,33 @@ impl Enrollment {
         }
     }
 
+    /// The current token was rejected on its first upload: it has been
+    /// refreshed after a rejection and no upload has been accepted since.
+    pub fn rejected_unused(&self) -> (out: bool)
+        ensures out == (self.refreshed() && self.fresh()),
+    { self.refreshed_after_rejection && self.fresh }
+
     pub fn needs_bootstrap(&self) -> (out: bool)
         ensures out == (self.state() == State::Unenrolled),
     { matches!(self.state, State::Unenrolled) }
 
     /// A token from bootstrap or refresh. Already-expired tokens are refused and
-    /// leave the state unchanged. Stopped is absorbing.
+    /// leave the state unchanged. Stopped is absorbing. A new token does not
+    /// re-arm the refresh after a rejection: only an accepted upload does, so a
+    /// server that issues tokens but rejects uploads leads to a re-enrollment.
     pub fn enrolled(&mut self, expires_at: u64, now: u64) -> (ok: bool)
         ensures ok == (!old(self).stopped() && now < expires_at),
-            ok ==> final(self).state() == (State::Enrolled { expires_at }) && !final(self).refreshed() && final(self).fresh(),
+            ok ==> final(self).state() == (State::Enrolled { expires_at }) && final(self).refreshed() == old(self).refreshed() && final(self).fresh(),
             !ok ==> *final(self) == *old(self),
     {
         if matches!(self.state, State::Stopped) || now >= expires_at { return false; }
         self.state = State::Enrolled { expires_at };
         self.fresh = true;
-        self.refreshed_after_rejection = false;
         true
     }
 
-    /// An upload was accepted: a later rejection may try one refresh again.
+    /// The server accepted the token on an upload (it acknowledged, judged, or
+    /// rate-limited the batch): a later rejection may try one refresh again.
     pub fn uploaded(&mut self)
         ensures final(self).state() == old(self).state(), !final(self).refreshed(), !final(self).fresh(),
     { self.refreshed_after_rejection = false; self.fresh = false; }

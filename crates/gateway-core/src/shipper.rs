@@ -884,6 +884,7 @@ impl Machine {
                 self.enrollment.uploaded();
                 self.throttle_attempt = 0;
                 self.transport_attempt = 0;
+                self.enroll_attempt = 0;
                 self.isolate = false;
                 proof {
                     assert(self.queue@ =~= self.history@.subrange((self.cursor.resolved() - self.skip) as int, self.history@.len() as int));
@@ -894,7 +895,9 @@ impl Machine {
                 self.cursor.abandon();
                 match self.enrollment.rejected() {
                     Recovery::Refresh => { self.force_refresh = true; Outcome::Nothing }
-                    Recovery::Bootstrap => { self.jwt = None; self.force_refresh = false; Outcome::Unenrolled }
+                    // Tokens keep being issued but uploads keep being rejected:
+                    // re-enroll after a backoff that only an accepted upload resets.
+                    Recovery::Bootstrap => { self.jwt = None; self.force_refresh = false; self.enroll_backoff(); Outcome::Unenrolled }
                     Recovery::Stop => Outcome::Nothing,
                 }
             }
@@ -904,6 +907,8 @@ impl Machine {
                 else { Outcome::Deferred(self.throttle(None)) }
             }
             400 | 413 | 415 | 422 => {
+                // The server authenticated the token before judging the batch.
+                self.enrollment.uploaded();
                 if count > 1 {
                     self.cursor.abandon();
                     self.isolate = true;
@@ -919,7 +924,13 @@ impl Machine {
                     Outcome::Poisoned
                 }
             }
-            429 | 503 => { self.cursor.abandon(); Outcome::Deferred(self.throttle(reply.retry_after)) }
+            429 => {
+                // Ingest rate limits apply to an authenticated token.
+                self.enrollment.uploaded();
+                self.cursor.abandon();
+                Outcome::Deferred(self.throttle(reply.retry_after))
+            }
+            503 => { self.cursor.abandon(); Outcome::Deferred(self.throttle(reply.retry_after)) }
             _ => { self.cursor.abandon(); Outcome::Deferred(self.transport_failure()) }
         }
     }
@@ -958,7 +969,6 @@ impl Machine {
                 Some(credential) => {
                     if self.enrollment.enrolled(credential.expires_at, now) {
                         self.jwt = Some(credential.jwt);
-                        self.enroll_attempt = 0;
                         self.delay = 0;
                         self.force_refresh = false;
                         Outcome::Enrolled
@@ -972,9 +982,15 @@ impl Machine {
             401 | 400 | 403 => {
                 if bootstrap { Outcome::Deferred(self.enroll_backoff()) }
                 else {
+                    // A rejected refresh re-enrolls at once, unless the rejected
+                    // token never had an upload accepted: then back off first, so a
+                    // server that issues tokens it then rejects cannot drive a tight
+                    // bootstrap loop.
+                    let after_rejection = self.enrollment.rejected_unused();
                     self.enrollment.refresh_rejected();
                     self.jwt = None;
                     self.force_refresh = false;
+                    if after_rejection { self.enroll_backoff(); }
                     Outcome::Unenrolled
                 }
             }
