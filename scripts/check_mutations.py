@@ -874,6 +874,14 @@ GROUPS = {
 }
 
 
+# Spec mutations that their own module still verifies under, with the module
+# whose proof rejects them, so the runner need not verify the whole crate.
+CAUGHT_BY = {
+    "end_to_end_success_premise_is_empty": "gateway_contract",
+    "chunked_framing_step_need_not_spend_budget": "http1_body",
+}
+
+
 def group_of(filename):
     return next(group for group, modules in GROUPS.items() if Path(filename).stem in modules)
 
@@ -1026,9 +1034,13 @@ def check(workdir, filename, name, before, after):
     The mutated module is checked alone first. A proof failure there is a failure
     of the whole crate too, so only a module that still verifies on its own falls
     back to verifying every module, which catches defects refuted by a caller.
+    A mutation listed in CAUGHT_BY checks its known caller module next, which
+    spares the whole-crate run; the whole crate stays the last resort.
     """
     target, _clean = apply(workdir, name, [(filename, before, after)])
-    for modules in ([Path(filename).stem], []):
+    own = [Path(filename).stem]
+    attempts = [own] + ([own + [CAUGHT_BY[name]]] if name in CAUGHT_BY else []) + [[]]
+    for modules in attempts:
         result = subprocess.run(command(target, modules, mutation=True), capture_output=True, text=True)
         output = result.stdout + result.stderr
         if result.returncode != 0 and not any(marker in output for marker in MARKERS) and "Resource limit (rlimit) exceeded" in output:
@@ -1039,7 +1051,7 @@ def check(workdir, filename, name, before, after):
         if result.returncode != 0:
             if not any(marker in output for marker in MARKERS):
                 raise RuntimeError(f"{name}: expected a proof failure, got:\n{output}")
-            return f"{name}: rejected by proof" + ("" if modules else " outside its module")
+            return f"{name}: rejected by proof" + ("" if modules == own else " outside its module")
     raise RuntimeError(f"{name}: expected a proof failure, got:\n{output}")
 
 
@@ -1174,8 +1186,10 @@ if __name__ == "__main__":
         print(f"Production core verified in {time.monotonic() - started:.1f}s", flush=True)
         baseline, baseline_spans = parse_vir(workdir / "baseline" / "crate-simple.vir")
         batches, singles = plan(baseline, baseline_spans)
-        jobs = [lambda i=i, b=b: check_batch(workdir, baseline, i, b) for i, b in enumerate(batches)]
-        jobs += [lambda m=m: [check(workdir, *m)] for m in singles]
+        # Single runs verify a whole module on one thread and are the slowest
+        # jobs, so they start first and the batches fill in around them.
+        jobs = [lambda m=m: [check(workdir, *m)] for m in singles]
+        jobs += [lambda i=i, b=b: check_batch(workdir, baseline, i, b) for i, b in enumerate(batches)]
         # Each job verifies its own copy, so the independent runs share the machine.
         workers = os.cpu_count() or 1
         print(f"Checking {len(MUTATIONS)} mutations in {len(batches)} batches and {len(singles)} single runs with {workers} workers...", flush=True)

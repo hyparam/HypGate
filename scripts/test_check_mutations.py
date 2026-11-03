@@ -16,6 +16,13 @@ class MutationSourceTests(unittest.TestCase):
                 source = (runner.SOURCE / filename).read_text()
                 self.assertEqual(source.count(before), 1)
 
+    def test_caught_by_names_real_mutations_and_modules(self):
+        names = {name for _filename, name, _before, _after in runner.MUTATIONS}
+        for name, module in runner.CAUGHT_BY.items():
+            with self.subTest(mutation=name):
+                self.assertIn(name, names)
+                self.assertTrue((runner.SOURCE / f"{module}.rs").exists())
+
     def test_groups_partition_the_crate_modules(self):
         lib = (runner.SOURCE / "lib.rs").read_text()
         modules = re.findall(r"^pub mod (\w+);", lib, re.M)
