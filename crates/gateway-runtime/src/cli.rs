@@ -11,7 +11,8 @@ Usage:
   hypgate --help
   hypgate --version
 
-The listen address must be loopback. NEW_LOG must not exist.
+The listen address must be loopback. NEW_LOG must not exist, or must be a
+directory, which gets a fresh session-<seconds>-<pid>.log on every start.
 Logs rotate at 128 MiB or 24 hours by default, on the next record.
 Numbered segments append .000001, .000002, etc. to NEW_LOG; none are deleted.
 scan and ship follow numbered segments from the original LOG path.

@@ -18,8 +18,8 @@ use gateway_runtime::{
 use std::{
     io::{self, Read, Write},
     net::{SocketAddr, TcpListener},
-    path::Path,
-    time::Duration,
+    path::{Path, PathBuf},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 const CONNECTION_LIMIT: usize = 128;
@@ -40,6 +40,18 @@ fn secret(name: &str) -> Option<String> {
 #[allow(clippy::disallowed_methods)]
 fn bind(address: SocketAddr) -> io::Result<TcpListener> {
     TcpListener::bind(address)
+}
+
+/// The audit log path for this start. A directory gets a fresh
+/// `session-<unix seconds>-<pid>.log` inside it, so a service manager can
+/// restart the gateway with the same arguments; any other path is used as
+/// given and must not exist. Either way the log is created new, never
+/// reopened. The flag says whether the name was generated.
+fn session_log_path(argument: &str) -> Result<(PathBuf, bool), &'static str> {
+    let path = Path::new(argument);
+    if !path.is_dir() { return Ok((path.to_path_buf(), false)); }
+    let seconds = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|_| "system clock is before 1970")?.as_secs();
+    Ok((path.join(format!("session-{seconds}-{}.log", std::process::id())), true))
 }
 
 fn bounded_file(path: &str) -> io::Result<Vec<u8>> {
@@ -99,6 +111,7 @@ fn serve(
         eprintln!("hypgate: {e}; raise it with `ulimit -n {descriptors}` or the service manager's file limit");
         return Err("open-file limit too low for the connection limit");
     }
+    let (log_path, generated) = session_log_path(log_path)?;
     let transport =
         HttpsTransport::new(UPSTREAM_TIMEOUT).map_err(|_| "cannot initialize transport")?;
     // Metadata records need room for an 8192-byte destination even when the
@@ -107,7 +120,7 @@ fn serve(
         .chunk_bytes()
         .max(gateway_core::metadata::MAX_PAYLOAD);
     let log = DiskLog::create_rotating_with_durability(
-        Path::new(log_path),
+        &log_path,
         AUDIT_QUEUE_CAPACITY,
         AUDIT_TIMEOUT,
         payload_limit,
@@ -121,7 +134,7 @@ fn serve(
         .map(|s| (s.max_open_exchanges, s.max_exchange_bytes));
     let shipper = match shipping {
         Some(shipping) => Some(
-            Shipper::spawn(shipping, Path::new(log_path).to_path_buf())
+            Shipper::spawn(shipping, log_path.clone())
                 .map_err(|_| "cannot start shipping thread")?,
         ),
         None => None,
@@ -133,6 +146,10 @@ fn serve(
             .local_addr()
             .map_err(|_| "cannot read listen address")?
     );
+    if generated {
+        // Informational only: a closed stderr must not stop the server.
+        let _ = writeln!(io::stderr().lock(), "hypgate audit log {}", log_path.display());
+    }
     let budget = gateway_runtime::budget::compose(gateway_runtime::budget::Limits {
         requests: config.request_limit(),
         chunk_bytes: config.chunk_bytes(),

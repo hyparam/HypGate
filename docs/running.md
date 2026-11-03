@@ -9,7 +9,11 @@ guarantees, receipt proofs, and remaining startup/rotation syncs.
 Build with the pinned Rust toolchain: `cargo build --locked --bin hypgate`.
 Run `target/debug/hypgate CONFIG.json NEW_LOG [127.0.0.1:8080]`.
 The log path must not exist; its parent directory must already exist and be private
-to the operator. Configuration and secret-loading failures prevent startup.
+to the operator. Alternatively pass an existing private directory: each start
+then creates a fresh `session-<unix seconds>-<pid>.log` inside it and prints
+`hypgate audit log PATH` after the listening line, so a service manager can
+restart the gateway with unchanged arguments. The log is always created new;
+an old session is never reopened. Configuration and secret-loading failures prevent startup.
 
 The executable binds loopback only. Remote clients need a trusted TLS reverse proxy
 on the same host; do not expose the cleartext connection to an untrusted network.
@@ -154,7 +158,8 @@ guarantee; exit status 0 indicates a successful drain.
 
 SIGKILL or a crash ends in-flight exchanges abruptly. Recovery preserves synced
 records under the [storage contract](storage-crash-contract.md), tolerates torn
-tails, and never replays a generation. Restart with a new log filename.
+tails, and never replays a generation. Restart with a new log filename, or pass a
+log directory so every start gets one.
 
 Embedders trigger `server::Shutdown` for each listener. Shutdown permanently
 closes shared worker admission; restarting requires a fresh `Gateway`. See the

@@ -79,7 +79,8 @@ target/release/hypgate config.json logs/session-001.log
 The server listens on `127.0.0.1:8080`; check it with
 `curl --fail http://127.0.0.1:8080/healthz`. Send native provider requests to
 `POST /routes/7` with `Authorization: Bearer <gateway-token>` and the provider's
-normal headers and JSON body. Use a **new log filename on every start**; logs
+normal headers and JSON body. Use a **new log filename on every start**, or pass
+a log directory to get one generated; logs
 contain request and response bodies. Remote access needs a
 [TLS reverse proxy](docs/deployment.md). See [running the gateway](docs/running.md)
 for provider configuration, scanning logs, and shutdown behavior.

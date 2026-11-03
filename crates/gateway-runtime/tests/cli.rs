@@ -246,3 +246,34 @@ fn a_hard_open_file_limit_below_the_connection_budget_refuses_to_start_before_cr
     assert!(!log.exists());
     fs::remove_dir_all(&dir.0).unwrap();
 }
+
+#[test]
+fn a_log_directory_gets_a_fresh_session_file_so_the_same_command_restarts() {
+    let dir = TempDir::new("hypgate-logdir");
+    let root = dir.0.join("config.json"); let logs = dir.0.join("logs");
+    fs::write(&root, MINIMAL_ROOT).unwrap(); fs::create_dir(&logs).unwrap();
+    let mut seen = Vec::new();
+    for _ in 0..2 {
+        let mut child = Process(Command::new(env!("CARGO_BIN_EXE_hypgate"))
+            .args([root.as_os_str(), logs.as_os_str()]).arg("127.0.0.1:0")
+            .stderr(Stdio::piped()).spawn().unwrap());
+        let mut stderr = BufReader::new(child.0.stderr.take().unwrap());
+        let (mut listening, mut log) = (String::new(), String::new());
+        stderr.read_line(&mut listening).unwrap(); stderr.read_line(&mut log).unwrap();
+        assert!(listening.starts_with("hypgate listening on "), "{listening:?}");
+        let path = std::path::PathBuf::from(log.trim().strip_prefix("hypgate audit log ").expect("log path line"));
+        assert_eq!(path.parent(), Some(logs.as_path()));
+        let name = path.file_name().unwrap().to_str().unwrap().to_owned();
+        assert!(name.starts_with("session-") && name.ends_with(".log"), "{name}");
+        assert!(path.exists());
+        assert!(Command::new("kill").args(["-TERM", &child.0.id().to_string()]).status().unwrap().success());
+        assert!(child.0.wait().unwrap().success());
+        seen.push(path);
+    }
+    assert_ne!(seen[0], seen[1]);
+    for path in &seen {
+        let scan = Command::new(env!("CARGO_BIN_EXE_hypgate")).arg("scan").arg(path).output().unwrap();
+        assert!(scan.status.success(), "{}", String::from_utf8_lossy(&scan.stderr));
+    }
+    fs::remove_dir_all(&dir.0).unwrap();
+}

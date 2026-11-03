@@ -41,7 +41,8 @@ completion records, then the logger and shipper close and the process exits
 with status 0. SIGKILL, or a crash, ends in-flight exchanges abruptly. Every
 acknowledged log record remains durable under the [storage contract](storage-crash-contract.md),
 but abrupt termination can leave a partial tail. Preserve the old log and use the
-read-only scan command. Every restart needs a new log path; never append to an
+read-only scan command. Every restart needs a new log path (pass a log directory
+to have one generated); never append to an
 old session or truncate it to make startup succeed. The cooperative drain API is
 available to embedders; see [shutdown](running.md#shutdown).
 

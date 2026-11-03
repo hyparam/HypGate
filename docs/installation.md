@@ -21,7 +21,8 @@ fetch updates or execute a downloaded installer.
 
 Follow [running the gateway](running.md) to create the configuration file, supply
 provider credentials, and choose a fresh audit filename. For an upgrade, drain
-the running process, install the new version, and start with a new log file.
+the running process, install the new version, and start with a new log file
+(or the same log directory).
 Replacing the executable does not restart an existing process.
 
 ## Runtime container
@@ -37,7 +38,8 @@ docker run --rm hypgate --version
 The image runs as UID/GID 10001. Mount configuration read-only and readable by
 that UID, provide credentials
 through your deployment's secret mechanism, and mount a private writable log
-directory owned by that UID. Each start needs a new log filename. The image
+directory owned by that UID. Each start needs a new log filename; passing the
+directory itself generates one. The image
 contains the binary and license; retention runs on the host against closed logs.
 
 HypGate binds loopback inside the container. Publishing a Docker port does not
