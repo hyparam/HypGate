@@ -19,7 +19,7 @@ the MIT license under `~/.local`. No root access is needed. Use
 Run the installer from the version or commit you intend to deploy; it does not
 fetch updates or execute a downloaded installer.
 
-Follow [running the gateway](running.md) to create policy and route files, supply
+Follow [running the gateway](running.md) to create the configuration file, supply
 provider credentials, and choose a fresh audit filename. For an upgrade, drain
 the running process, install the new version, and start with a new log file.
 Replacing the executable does not restart an existing process.

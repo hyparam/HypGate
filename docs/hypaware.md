@@ -81,19 +81,12 @@ Anthropic and OpenAI routes:
   "shipping": {
     "server": "https://api.hypaware.ai",
     "token_env": "HYPAWARE_TOKEN",
-    "state_dir": "/var/lib/hypgate/shipping"
+    "state_dir": "state"
   }
 }
 ```
 
-The route file selects both grants:
-
-```json
-{"routes": [
-  {"tenant": 1, "selector": 1, "origin": 0, "credential": 0},
-  {"tenant": 1, "selector": 2, "origin": 1, "credential": 1}
-]}
-```
+Each grant is an active route; there is no separate route file.
 
 `state_dir` must already exist and be private to the operator (mode 700). The
 shipper keeps two files there, both mode 600: `identity.json` with the
