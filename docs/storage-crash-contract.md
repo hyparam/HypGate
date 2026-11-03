@@ -24,7 +24,7 @@ complete-write recording, sync recording, and acknowledgment: valid events canno
 be arbitrarily refused by the state machine. This does not guarantee syscall
 success, worker scheduling, or correspondence between journal and stream tickets.
 
-These are assumptions, not Verus-verified filesystem properties. The prototype uses
+These are assumptions rather than Verus-verified filesystem properties. HypGate uses
 Unix file permissions and directory syncing. Software crash validation is
 complete for the tested ext4/QEMU configuration described below. Physical storage
 durability is a deployment assumption: the filesystem, mount/storage

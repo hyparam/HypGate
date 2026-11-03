@@ -11,8 +11,7 @@ appends to an existing path. On Unix the requested mode is 0600. Startup writes 
 versioned file header with a random 128-bit session identifier, calls `sync_all`,
 and syncs the parent directory before starting the worker. The parent directory
 must already exist and be operator-controlled. Startup itself is synchronous.
-Directory syncing makes the current implementation a Unix-oriented prototype;
-supported deployment filesystems and their crash guarantees still need validation.
+Directory syncing ties the current implementation to Unix, and supported deployment filesystems and their crash guarantees still need validation.
 
 ## Audit durability policy
 

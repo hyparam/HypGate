@@ -185,7 +185,7 @@ provider connection, availability-mode forwarding with unchanged authorization,
 audit-gap reporting, metrics, and rejection of a second request while the only slot
 is occupied. Logger I/O failures are tested at the disk adapter. See [contributing](../CONTRIBUTING.md) for validation commands.
 
-This is a runnable prototype, not a production-ready or wholly verified gateway.
+Only the gateway core is formally verified.
 Stress, failure-mode, and load commands are in the [benchmark guide](benchmarks.md). Resource and crash-recovery proofs are conditional
 on the assumptions in [resource composition](resource-composition.md) and the
 [storage contract](storage-crash-contract.md). Log retention and rotation and

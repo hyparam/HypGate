@@ -2,66 +2,68 @@
 
 HypGate is a small LLM gateway with a machine-checked core. It forwards request
 bodies to your provider unchanged, streams responses back, writes every
-exchange to an audit log on disk, and optionally ships that log to
-[HypAware](https://hypaware.ai) for analysis or an S3 bucket. No provider API translation, no
-plugins, no other network destinations.
+exchange to an audit log on disk, and can ship that log to
+[HypAware](https://hypaware.ai) for analysis or to an S3 bucket. It doesn't
+translate between provider APIs, load plugins, or talk to any other network
+destination.
 
 ![HypGate forwards requests and responses between an AI client and provider, records exchanges in a local audit log, and optionally ships logs to HypAware Cloud.](docs/images/hypgate-flow.png)
 
 The gateway's decision-making core is proved correct with
 [Verus](https://github.com/verus-lang/verus). The network and disk adapters
-around it are tested and audited.
+around it are tested and audited, but not proved.
 
 ## Three guarantees
 
 ### 1. Data only goes where you configured
 
-Requests go to your configured provider using your configured credential.
-Audit logs stay on disk unless you enable shipping to HypAware or S3.
-There are no other network destinations.
+Requests go to your configured provider with your configured credential, and
+audit logs stay on disk unless you turn on shipping to HypAware or S3. There
+are no other network destinations.
 
 ### 2. Faithful forwarding and audit records
 
-Request and response bodies pass through byte for byte, in order, including
+Request and response bodies pass through byte for byte and in order, including
 streaming responses. The gateway filters headers and supplies the provider
-credential. Audit records tie the forwarded bytes and request outcome to the
-authenticated tenant and request.
+credential. Each audit record ties the forwarded bytes and the request outcome
+to the authenticated tenant and request.
 
-In **strict mode**, each byte is logged before it is forwarded. By default,
-logging also waits for disk sync. Set root configuration `"durability": "buffered"`
-to wait only for writes: acknowledged records can then be lost on a system crash
-or power loss. `"durability": "durable"` is the default.
-In durable mode, up to 16 queued audit records share a sync, with no timer delay to fill a batch.
-If logging fails, the request fails instead of going unrecorded. Availability
-mode keeps forwarding after a log failure and counts unrecorded requests as gaps.
+In **strict mode**, each byte is logged before it is forwarded, and if logging
+fails the request fails instead of going unrecorded. Availability mode keeps
+forwarding after a log failure and counts those unrecorded requests as gaps.
 Provider errors, timeouts, and truncated streams are reported as failures.
+
+The root `durability` setting controls how long logging waits. The default,
+`"durable"`, waits for disk sync, and up to 16 queued audit records share one
+sync with no timer delay to fill a batch. `"buffered"` waits only for the
+write, so acknowledged records can be lost on a system crash or power loss.
 
 ### 3. Core safety and crash recovery
 
 Under its stated preconditions, the verified core cannot panic, overflow, or
-read out of bounds. The surrounding runtime is lint-checked to reject common
+read out of bounds. The runtime around it is lint-checked to reject common
 panic sources and unchecked arithmetic in production code. Allocation failures
-and failures inside dependencies remain outside that guarantee.
+and failures inside dependencies are outside that guarantee.
 
 After a crash, the gateway recovers complete log records without rewriting or
-truncating the log. Synced records survive provided your storage stack honors
-successful sync calls.
+truncating the log. Synced records survive as long as your storage stack
+honors successful sync calls.
 
-HypAware shipping retries unconfirmed batches with stable identities so the
-server stores each exchange once. S3 retries overwrite the same object;
-consumers can deduplicate overlapping batches by row identity. Shipping runs
-separately from request handling, so a shipping failure does not stop serving.
+Shipping runs separately from request handling, so a shipping failure doesn't
+stop serving. HypAware shipping retries unconfirmed batches with stable
+identities, so the server stores each exchange once. S3 retries overwrite the
+same object, and consumers can deduplicate overlapping batches by row identity.
 
-These guarantees have a defined scope: the verified core relies on the runtime
-adapters, TLS, the OS, storage, and the destination server behaving as specified.
-[PROOFS.md](PROOFS.md) documents the exact contracts and assumptions.
+The verified core relies on the runtime adapters, TLS, the OS, storage, and the
+destination server behaving as specified. [PROOFS.md](PROOFS.md) lists the
+exact contracts and assumptions.
 
 ## Status
 
-HypGate is a runnable prototype. Live OpenAI and Anthropic requests, including
-streaming responses, have been tested through the gateway with HypAware shipping.
-Crash recovery has been tested with process failures and guest power cuts;
-physical storage durability remains a deployment assumption.
+We've sent live OpenAI and Anthropic requests through HypGate, including
+streaming responses, with HypAware shipping turned on.
+Crash recovery has been tested with process failures and guest power cuts, and
+physical storage durability is still a deployment assumption.
 
 ## Run it
 

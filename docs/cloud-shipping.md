@@ -132,7 +132,7 @@ end in `/`; a path-style endpoint can include `/bucket/prefix/`. Prefixes suppor
 ASCII letters, digits, hyphens, underscores and slashes, up to 1024 bytes; spaces,
 dots, percent escapes and queries are rejected. The region and access key use
 the same character set without slashes. The secret access key is `token_env`
-(1–512 visible ASCII bytes); a session token can be up to 16 KiB.
+(1 to 512 visible ASCII bytes); a session token can be up to 16 KiB.
 
 Each upload is an AWS Signature Version 4 PUT with `host`, `x-amz-date`,
 `x-amz-content-sha256`, and, when present, `x-amz-security-token` signed. The
