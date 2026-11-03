@@ -2,7 +2,7 @@
 
 The [HAProxy example](../deploy/haproxy.cfg) terminates TLS on port 8443 and routes
 to a primary gateway on loopback port 8081 and a standby on 8082. Both gateways
-need the same intended authorization policy but separate new audit files. Start
+need the same intended authorization policy but separate log directories. Start
 them using [the runtime instructions](running.md), with different listen ports.
 Provision an operator-managed certificate/private-key PEM, set `HYPGATE_TLS_PEM`
 to its path, validate with `haproxy -c -f deploy/haproxy.cfg`, then start HAProxy
@@ -41,8 +41,8 @@ completion records, then the logger and shipper close and the process exits
 with status 0. SIGKILL, or a crash, ends in-flight exchanges abruptly. Every
 acknowledged log record remains durable under the [storage contract](storage-crash-contract.md),
 but abrupt termination can leave a partial tail. Preserve the old log and use the
-read-only scan command. Every restart needs a new log path (pass a log directory
-to have one generated); never append to an
+read-only scan command. Restart with the same log directory, which gives every
+start a new session log; never append to an
 old session or truncate it to make startup succeed. The cooperative drain API is
 available to embedders; see [shutdown](running.md#shutdown).
 

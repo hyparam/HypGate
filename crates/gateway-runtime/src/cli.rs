@@ -5,16 +5,17 @@ use gateway_runtime::disk_log::Rotation;
 pub(crate) const HELP: &str = "HypGate — an AI gateway with a verified audit core
 
 Usage:
-  hypgate CONFIG.json NEW_LOG [127.0.0.1:8080] [--log-max-bytes N] [--log-max-age-seconds N]
+  hypgate CONFIG.json LOG_DIR [127.0.0.1:8080] [--log-max-bytes N] [--log-max-age-seconds N]
   hypgate scan LOG
   hypgate ship CONFIG.json LOG
   hypgate --help
   hypgate --version
 
-The listen address must be loopback. NEW_LOG must not exist, or must be a
-directory, which gets a fresh session-<seconds>-<pid>.log on every start.
+The listen address must be loopback. Each start writes a new
+LOG_DIR/session-<seconds>-<pid>.log and points LOG_DIR/current.log at the
+file being written. A path that does not exist yet is used as the log itself.
 Logs rotate at 128 MiB or 24 hours by default, on the next record.
-Numbered segments append .000001, .000002, etc. to NEW_LOG; none are deleted.
+Numbered segments append .000001, .000002, etc. to the log; none are deleted.
 scan and ship follow numbered segments from the original LOG path.
 scan prints record metadata without body payloads or changes to the log.
 ship uploads a finished log using the configuration's shipping section.";
@@ -83,7 +84,7 @@ impl<'a> Command<'a> {
                     rotation,
                 })
             }
-            _ => Err("usage: hypgate CONFIG.json NEW_LOG [127.0.0.1:8080]; see --help"),
+            _ => Err("usage: hypgate CONFIG.json LOG_DIR [127.0.0.1:8080]; see --help"),
         }
     }
 }

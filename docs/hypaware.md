@@ -103,12 +103,12 @@ the next start uses to finish shipping a session a restart cut short. The gatewa
 ```sh
 export ANTHROPIC_API_KEY=... OPENAI_API_KEY=... HYPAWARE_TOKEN=...
 mkdir -m 700 logs state
-target/release/hypgate config.json logs/session-001.log
+target/release/hypgate config.json logs
 ```
 
 Startup fails with `invalid shipping configuration or missing token` when the
-variable named by `token_env` is empty or unset. Each start needs a new log
-filename.
+variable named by `token_env` is empty or unset. Each start writes a new
+session log in `logs` and prints its name; `logs/current.log` points at it.
 
 Send native provider requests to the selector you granted. The gateway swaps in
 the provider key and sets Host; everything else passes through unchanged:
@@ -135,7 +135,8 @@ Streaming (`"stream": true`) works the same way and is parsed for usage.
 
 Locally, `GET /metrics` reports `hypgate_shipping_enabled 1`,
 `hypgate_shipping_batches_acknowledged_total` climbing once per confirmed
-batch, and `hypgate_shipping_stopped 0`. `hypgate scan logs/session-001.log`
+batch, and `hypgate_shipping_stopped 0`. `hypgate scan logs/session-<…>.log`,
+with the session file name printed at startup,
 lists every record and ends with a summary whose status is `complete`.
 
 On the server, query the dataset as yourself with the HypAware CLI. Take the
@@ -164,7 +165,7 @@ without a `shipping` section, or to replay one after the state directory was
 lost, run the same loop on its own:
 
 ```sh
-HYPAWARE_TOKEN=... target/release/hypgate ship config.json logs/session-001.log
+HYPAWARE_TOKEN=... target/release/hypgate ship config.json logs/session-<…>.log
 ```
 
 It exits when every exchange is resolved. The server stores each exchange once

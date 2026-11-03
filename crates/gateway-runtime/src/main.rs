@@ -126,6 +126,8 @@ fn serve(
         payload_limit,
         rotation,
         config.durability(),
+        // In a log directory, `current.log` follows the segment being written.
+        generated.then(|| log_path.parent().map(|dir| dir.join("current.log"))).flatten(),
     )
     .map_err(|_| "cannot create and sync new audit log")?;
     // One extra thread that only ever reads this session’s segments.

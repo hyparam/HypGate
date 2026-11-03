@@ -156,7 +156,7 @@ fn help_and_version_succeed_without_loading_configuration() {
         let output = String::from_utf8(result.stdout).unwrap();
         if flag == "--help" || flag == "-h" {
             assert!(output.contains("hypgate scan LOG"));
-            assert!(output.contains("NEW_LOG must not exist"));
+            assert!(output.contains("LOG_DIR/current.log"));
         } else {
             assert_eq!(output.trim(), concat!("hypgate ", env!("CARGO_PKG_VERSION")));
         }
@@ -266,6 +266,7 @@ fn a_log_directory_gets_a_fresh_session_file_so_the_same_command_restarts() {
         let name = path.file_name().unwrap().to_str().unwrap().to_owned();
         assert!(name.starts_with("session-") && name.ends_with(".log"), "{name}");
         assert!(path.exists());
+        assert_eq!(fs::read_link(logs.join("current.log")).unwrap(), std::path::Path::new(&name), "current.log names this start's log");
         assert!(Command::new("kill").args(["-TERM", &child.0.id().to_string()]).status().unwrap().success());
         assert!(child.0.wait().unwrap().success());
         seen.push(path);

@@ -4,7 +4,7 @@ use crate::transfer::{AuditLog, Direction, LogRecord, RecordKind};
 use gateway_core::{audit_receipt::BatchJournal as Journal, audit_receipt::AuditReceipt};
 use gateway_core::framing::{Header, RecordBody, RecordFrame};
 use gateway_core::sha256;
-use std::{fs::File, io::{self, Read, Write}, path::Path,
+use std::{fs::File, io::{self, Read, Write}, path::{Path, PathBuf},
     sync::{Arc, Mutex, mpsc, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
 pub use gateway_core::audit_receipt::Durability;
 mod queue;
@@ -99,10 +99,12 @@ impl DiskLog {
     pub fn create_rotating(path: &Path, queue_capacity: usize, deadline: Duration,
         payload_limit: usize, rotation: Rotation) -> io::Result<Self>
     {
-        Self::create_rotating_with_durability(path, queue_capacity, deadline, payload_limit, rotation, Durability::Durable)
+        Self::create_rotating_with_durability(path, queue_capacity, deadline, payload_limit, rotation, Durability::Durable, None)
     }
+    /// With `current`, a symlink at that path is kept pointing at the segment
+    /// being written, replaced on every rotation. Updating it is best effort.
     pub fn create_rotating_with_durability(path: &Path, queue_capacity: usize, deadline: Duration,
-        payload_limit: usize, rotation: Rotation, durability: Durability) -> io::Result<Self>
+        payload_limit: usize, rotation: Rotation, durability: Durability, current: Option<PathBuf>) -> io::Result<Self>
     {
         rotation.validate()?;
         if payload_limit == 0 || payload_limit > MAX_RECORD_BYTES
@@ -112,7 +114,7 @@ impl DiskLog {
         }
         let mut session = [0u8; 16];
         getrandom::fill(&mut session).map_err(|_| io::ErrorKind::Other)?;
-        let file = rotation::RotatingFile::create(path, session, rotation)?;
+        let file = rotation::RotatingFile::create(path, session, rotation, current)?;
         let storage = gateway_core::log_rotation::RotatingStorage::new(file, u128::from_le_bytes(session), rotation.max_bytes);
         Self::start_storage_with_durability(storage, queue_capacity, deadline, session, payload_limit, durability)
     }

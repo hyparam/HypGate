@@ -7,13 +7,20 @@ receipts prove writes only; strict forwarding still checks those receipts. See
 guarantees, receipt proofs, and remaining startup/rotation syncs.
 
 Build with the pinned Rust toolchain: `cargo build --locked --bin hypgate`.
-Run `target/debug/hypgate CONFIG.json NEW_LOG [127.0.0.1:8080]`.
-The log path must not exist; its parent directory must already exist and be private
-to the operator. Alternatively pass an existing private directory: each start
-then creates a fresh `session-<unix seconds>-<pid>.log` inside it and prints
-`hypgate audit log PATH` after the listening line, so a service manager can
-restart the gateway with unchanged arguments. The log is always created new;
-an old session is never reopened. Configuration and secret-loading failures prevent startup.
+Run `target/debug/hypgate CONFIG.json LOG_DIR [127.0.0.1:8080]`. `LOG_DIR`
+must already exist and be private to the operator. Each start creates a fresh
+`session-<unix seconds>-<pid>.log` inside it, prints `hypgate audit log PATH`
+after the listening line, and points the symlink `LOG_DIR/current.log` at the
+file being written, moving it to each new segment on rotation, so
+`tail -F LOG_DIR/current.log` follows the live log across rotations and
+restarts. A service manager can restart the gateway with unchanged arguments.
+The log is always created new; an old session is never reopened. Give `scan`
+and `ship` the session's own file name, not `current.log`, since they follow
+numbered segments from the first one.
+
+For scripts and tests that want to choose the file name, pass a path that does
+not exist yet instead of a directory; its parent must exist and be private.
+That path is the log itself, and no `current.log` is kept. Configuration and secret-loading failures prevent startup.
 
 The executable binds loopback only. Remote clients need a trusted TLS reverse proxy
 on the same host; do not expose the cleartext connection to an untrusted network.
@@ -158,8 +165,8 @@ guarantee; exit status 0 indicates a successful drain.
 
 SIGKILL or a crash ends in-flight exchanges abruptly. Recovery preserves synced
 records under the [storage contract](storage-crash-contract.md), tolerates torn
-tails, and never replays a generation. Restart with a new log filename, or pass a
-log directory so every start gets one.
+tails, and never replays a generation. Restart with the same log directory; a
+single-file log path needs a new name on every start.
 
 Embedders trigger `server::Shutdown` for each listener. Shutdown permanently
 closes shared worker admission; restarting requires a fresh `Gateway`. See the

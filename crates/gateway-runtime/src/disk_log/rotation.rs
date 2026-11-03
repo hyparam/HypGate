@@ -56,16 +56,35 @@ pub(super) fn create_segment(path: &Path, session: &[u8; 16]) -> io::Result<File
     Ok(file)
 }
 
+/// Point the symlink `current` at `segment`, a file in the same directory, by
+/// renaming a fresh link over it, so a reader never finds it missing. Only
+/// ever a convenience for `tail -F`: the session's files are the record, and
+/// a failure here never affects logging.
+// Effect site: replaces the operator's `current.log` link in the log directory; never a log file.
+#[allow(clippy::disallowed_methods)]
+pub(super) fn point_current(current: &Path, segment: &Path) -> io::Result<()> {
+    let target = segment.file_name().ok_or(io::ErrorKind::InvalidInput)?;
+    let mut temporary = current.as_os_str().to_owned();
+    temporary.push(format!(".tmp.{}", std::process::id()));
+    let temporary = PathBuf::from(temporary);
+    let _ = std::fs::remove_file(&temporary);
+    std::os::unix::fs::symlink(target, &temporary)?;
+    std::fs::rename(&temporary, current)
+}
+
 pub(super) struct RotatingFile {
     file: File,
     base: PathBuf,
     opened: Instant,
     max_age: Duration,
+    /// The link to the segment being written, when the log lives in a directory of its own.
+    current: Option<PathBuf>,
 }
 impl RotatingFile {
-    pub(super) fn create(base: &Path, session: [u8; 16], rotation: Rotation) -> io::Result<Self> {
+    pub(super) fn create(base: &Path, session: [u8; 16], rotation: Rotation, current: Option<PathBuf>) -> io::Result<Self> {
         let file = create_segment(base, &session)?;
-        Ok(Self { file, base: base.to_path_buf(), opened: Instant::now(), max_age: rotation.max_age })
+        if let Some(current) = &current { let _ = point_current(current, base); }
+        Ok(Self { file, base: base.to_path_buf(), opened: Instant::now(), max_age: rotation.max_age, current })
     }
 }
 // Trusted effects only: the verified RotatingStorage decides whether to rotate,
@@ -74,8 +93,13 @@ impl gateway_core::log_rotation::SegmentIo for RotatingFile {
     fn expired(&self) -> bool { self.opened.elapsed() >= self.max_age }
     fn seal(&mut self) -> bool { self.file.sync_all().is_ok() }
     fn create_next(&mut self, session: u128, index: u64) -> bool {
-        match create_segment(&segment_path(&self.base, index), &session.to_le_bytes()) {
-            Ok(file) => { self.file = file; self.opened = Instant::now(); true }
+        let path = segment_path(&self.base, index);
+        match create_segment(&path, &session.to_le_bytes()) {
+            Ok(file) => {
+                self.file = file; self.opened = Instant::now();
+                if let Some(current) = &self.current { let _ = point_current(current, &path); }
+                true
+            }
             Err(_) => false,
         }
     }
@@ -185,6 +209,27 @@ mod tests {
     }
 
     #[test]
+    fn current_link_follows_each_new_segment() {
+        let dir = TempDir::new(); let path = dir.0.join("session-1.log"); let current = dir.0.join("current.log");
+        let rotation = Rotation { max_bytes: 56 + 2 * 68, max_age: WAIT };
+        let mut log = DiskLog::create_rotating_with_durability(&path, 2, WAIT, MAX_RECORD_BYTES, rotation,
+            crate::disk_log::Durability::Durable, Some(current.clone())).unwrap();
+        assert_eq!(std::fs::read_link(&current).unwrap(), Path::new("session-1.log"), "relative, so the directory can move");
+        for chunk in 1..=3 { log.append(record(chunk)).unwrap(); }
+        assert_eq!(std::fs::read_link(&current).unwrap(), Path::new("session-1.log.000001"));
+        assert_eq!(std::fs::read(&current).unwrap(), std::fs::read(segment_path(&path, 1)).unwrap());
+        log.shutdown(WAIT).unwrap();
+        // A later session in the same directory takes the link over.
+        let next = dir.0.join("session-2.log");
+        let log = DiskLog::create_rotating_with_durability(&next, 2, WAIT, MAX_RECORD_BYTES, rotation,
+            crate::disk_log::Durability::Durable, Some(current.clone())).unwrap();
+        assert_eq!(std::fs::read_link(&current).unwrap(), Path::new("session-2.log"));
+        log.shutdown(WAIT).unwrap();
+        let names: Vec<_> = std::fs::read_dir(&dir.0).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+        assert!(names.iter().all(|n| !n.contains(".tmp")), "no temporary link left: {names:?}");
+    }
+
+    #[test]
     fn stale_snapshot_recovers_late_predecessor_records_before_the_successor() {
         let dir = TempDir::new(); let path = dir.0.join("audit.log");
         let mut log = rotating(&path, 56 + 2 * 68);
@@ -214,7 +259,7 @@ mod tests {
     #[test]
     fn age_rotates_on_append_but_never_creates_empty_segments() {
         let dir = TempDir::new(); let path = dir.0.join("audit.log");
-        let mut file = RotatingFile::create(&path, [1; 16], Rotation::default()).unwrap();
+        let mut file = RotatingFile::create(&path, [1; 16], Rotation::default(), None).unwrap();
         file.opened = Instant::now() - Duration::from_secs(86401);
         use gateway_core::disk_worker::Storage;
         let mut storage = gateway_core::log_rotation::RotatingStorage::new(file, u128::from_le_bytes([1; 16]), 128);
