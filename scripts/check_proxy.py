@@ -128,11 +128,21 @@ def main():
                 assert response.status == 200 and response.read() == b'hello'
                 connection.close()
                 assert first.posts == 2 and standby.posts == 1
+                connection, response = request('POST', '/routes/7/v1/messages')
+                assert response.status == 200 and response.read() == b'hello'
+                connection.close()
+                assert standby.posts == 2, 'SDK suffix path not forwarded'
+                for path in ('/routes/x', '/routes/7x', '/routez/7/v1'):
+                    connection, response = request('POST', path)
+                    assert response.status == 404, (path, response.status)
+                    response.read()
+                    connection.close()
+                assert standby.posts == 2, 'non-route path forwarded'
                 connection, response = request('GET', '/metrics')
                 assert response.status == 404
                 response.read()
                 connection.close()
-                print('PASS: pre/post-header failures not replayed; new request uses ready standby; metrics not public')
+                print('PASS: pre/post-header failures not replayed; new request uses ready standby; SDK suffix paths forwarded; metrics not public')
     finally:
         if process is not None:
             process.terminate()

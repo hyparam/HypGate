@@ -53,8 +53,8 @@ remain loopback-bound. Shared upstream or storage failures can affect both insta
 
 When shipping is configured, the state directory must persist across restarts
 so the enrollment and checkpoint are reused; a lost checkpoint re-sends the
-log and the server drops the repeated rows. SIGTERM ends the shipper with the
-process; it does not wait for pending uploads.
+log and the server drops the repeated rows. SIGTERM gives the shipper a
+two-second window to finish; it does not wait longer for pending uploads.
 
 ## Clean-environment reproduction
 
@@ -132,8 +132,9 @@ OpenSSL installed. It creates temporary TLS material and local HTTP fixtures,
 validates the exact example with only ports and certificate path substituted,
 and checks that neither a truncated response nor a disconnect before headers is
 replayed. It then marks the primary
-unready and verifies that a new request reaches the standby. It also checks that
-metrics are not exposed publicly. No provider credentials or external API calls
+unready and verifies that a new request reaches the standby, that SDK suffix
+paths such as `/routes/7/v1/messages` are forwarded, and that non-route paths
+get 404. It also checks that metrics are not exposed publicly. No provider credentials or external API calls
 are used. Local validation used HAProxy 3.2.0 as a test tool, not a recommended
 production patch version. CI exercises the Ubuntu package and reports its version.
 
