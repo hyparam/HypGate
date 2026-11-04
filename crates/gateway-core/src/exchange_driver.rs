@@ -605,6 +605,7 @@ impl Driver {
     }
 
     /// The request half of the exchange; its result is consumed by the response half.
+    #[verifier::spinoff_prover]
     #[verifier::rlimit(60)]
     fn send_upload<E: Effects>(&mut self, effects: &mut E, life: &mut Lifecycle, input: &RequestHead) -> (out: Result<TransferKey, Fault>)
         requires old(self).progress@.incoming == Some(*input), old(self).settled(), old(self).bound(old(effects)), record_allows_dispatch(old(self).progress@),
@@ -666,6 +667,7 @@ impl Driver {
     /// The provider exchange: connect, upload, read the head, forward it, download.
     /// On `Err` nothing further has been promised to the client beyond what the
     /// connection machine already holds; the caller answers or aborts.
+    #[verifier::spinoff_prover]
     #[verifier::rlimit(100)]
     fn exchange<E: Effects>(&mut self, effects: &mut E, life: &mut Lifecycle, strict: bool, input: &RequestHead) -> (out: Result<(), Fault>)
         requires old(self).progress@.incoming == Some(*input), old(self).settled(), old(self).bound(old(effects)), record_allows_dispatch(old(self).progress@), !old(self).progress@.connected,
@@ -686,6 +688,7 @@ impl Driver {
                 && copies_match_counts(final(self).progress@, final(life).recorded_upload(), final(life).recorded_download()),
             out.is_err() ==> final(life).open(),
     {
+        hide(Seq::push_distributes_over_add);
         let key = match self.send_upload(effects, life, input) { Ok(key) => key, Err(fault) => return Err(fault) };
 
         // Response heads until a final one; the machine classifies each.
@@ -828,6 +831,7 @@ pub fn drive<E: Effects>(effects: &mut E) -> (out: Driven)
 
 /// Execute the production connection; separate this body from its public
 /// contract join so the solver checks each control-flow obligation once.
+#[verifier::spinoff_prover]
 #[verifier::rlimit(100)]
 fn drive_connection<E: Effects>(effects: &mut E) -> (out: Driven)
     ensures final(effects).events().len() > old(effects).events().len(),
@@ -844,6 +848,7 @@ fn drive_connection<E: Effects>(effects: &mut E) -> (out: Driven)
                 && out.outcome@.unwrap().2 == final(effects).transferred().1,
         out.closed.recorded() == (out.progress@.completion == Some(true)),
 {
+    hide(Seq::push_distributes_over_add);
     let mut d = Driver::new(effects);
     let read = effects.read_head();
     d.record(effects, Ghost(Step::ReadHead(read_input(read))));
